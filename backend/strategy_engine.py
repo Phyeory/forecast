@@ -1,8 +1,24 @@
 """
-Strategy Engine — Regime-detection state machine for PumpFun memecoin trading.
+Strategy Engine — Physics-inspired regime-detection state machine.
 
-Detects: TREND → EXHAUSTION → REVERSAL → CONTINUATION
-Uses:    EMA3/7, ROC, ATR, Signal S, Volume Profile with delta
+Models price dynamics as a Langevin particle:
+  dp = m·dt
+  dm = U'(p)·dt − γ·m·dt + σ·dW_t
+
+Detects four regimes:
+  TREND → EXHAUSTION → REVERSAL → CONTINUATION
+then enters at the earliest stable continuation phase.
+
+Observable proxies:
+  m  (momentum)       → ROC
+  m  (trend direction) → EMA(3–7) cross
+  γ  (damping)        → EMA spread contraction rate
+  σ  (noise)          → ATR
+  U(p) (potential)    → volume profile nodes
+  external force      → delta volume
+
+Core metric — Signal-to-Noise Ratio:
+  S = |ROC| / (ATR / price)
 """
 
 from __future__ import annotations
@@ -70,7 +86,12 @@ class VolumeBin:
 
 
 class VolumeProfile:
-    """Fixed-range volume profile built from trend-start to current price."""
+    """
+    Fixed-range volume profile built from trend start to current price.
+
+    Range spans from the local low to local high seen during the current trend.
+    A new profile is started each time a new trend begins.
+    """
 
     def __init__(self, num_bins: int = 20):
         self.num_bins = num_bins
@@ -92,6 +113,8 @@ class VolumeProfile:
         """Rebuild bin boundaries, preserving accumulated volume."""
         old_bins = self.bins[:]
         step = (self.range_high - self.range_low) / self.num_bins
+        if step <= 0:
+            return
         self.bins = []
         for i in range(self.num_bins):
             lo = self.range_low + i * step
@@ -100,7 +123,7 @@ class VolumeProfile:
             # Re-accumulate from old bins that overlap
             for ob in old_bins:
                 if ob.price_high > lo and ob.price_low < hi:
-                    overlap = (min(ob.price_high, hi) - max(ob.price_low, lo))
+                    overlap = min(ob.price_high, hi) - max(ob.price_low, lo)
                     ob_width = ob.price_high - ob.price_low
                     if ob_width > 0:
                         frac = overlap / ob_width
@@ -110,7 +133,7 @@ class VolumeProfile:
         self._total_volume = sum(b.total for b in self.bins)
 
     def _expand_range(self, price: float):
-        """Expand range if price moves outside."""
+        """Expand range if price moves outside current bounds."""
         changed = False
         if price < self.range_low:
             self.range_low = price * 0.95
@@ -155,7 +178,6 @@ class VolumeProfile:
         """Value area containing pct of total volume around POC."""
         if not self.bins or self._total_volume <= 0:
             return (0.0, 0.0)
-        # Find POC index
         poc_idx = max(range(len(self.bins)), key=lambda i: self.bins[i].total)
         target = self._total_volume * pct
         accumulated = self.bins[poc_idx].total
@@ -176,7 +198,12 @@ class VolumeProfile:
         return (self.bins[lo_idx].price_low, self.bins[hi_idx].price_high)
 
     def is_price_in_hvn(self, price: float, direction: Direction, top_n: int = 3) -> bool:
-        """Check if price is in a high volume node of a given direction."""
+        """
+        Check if price is in a high volume node of a given direction.
+        direction=UP  → HVN with positive delta (buy dominated)
+        direction=DOWN → HVN with negative delta (sell dominated)
+        direction=NONE → any HVN regardless of delta
+        """
         sorted_bins = sorted(self.bins, key=lambda b: b.total, reverse=True)
         for b in sorted_bins[:top_n]:
             if b.price_low <= price < b.price_high:
@@ -184,7 +211,6 @@ class VolumeProfile:
                     return True
                 if direction == Direction.DOWN and b.delta < 0:
                     return True
-                # For opposite direction check
                 if direction == Direction.NONE:
                     return True
         return False
@@ -209,6 +235,37 @@ class VolumeProfile:
                 return True
         return False
 
+    def hvn_at_top(self, direction: Direction, top_n: int = 3) -> bool:
+        """
+        Check if the highest HVN of the trend's direction is at the
+        leading edge (top for UP, bottom for DOWN).
+
+        This confirms the new trend has volume structure supporting it
+        at the frontier — the 'particle' has momentum into new territory.
+        """
+        if not self.bins:
+            return False
+
+        # Get top-N bins by total volume that have delta aligned with direction
+        sorted_bins = sorted(self.bins, key=lambda b: b.total, reverse=True)
+        aligned_hvns = []
+        for b in sorted_bins[:top_n]:
+            if direction == Direction.UP and b.delta > 0:
+                aligned_hvns.append(b)
+            elif direction == Direction.DOWN and b.delta < 0:
+                aligned_hvns.append(b)
+
+        if not aligned_hvns:
+            return False
+
+        # The highest-volume aligned bin should be in the leading half
+        best = aligned_hvns[0]
+        mid_price = (self.range_low + self.range_high) / 2.0
+        if direction == Direction.UP:
+            return best.mid >= mid_price
+        else:  # DOWN
+            return best.mid <= mid_price
+
     def cumulative_delta(self) -> float:
         """Net buy-sell delta across all bins."""
         return sum(b.delta for b in self.bins)
@@ -229,16 +286,39 @@ class VolumeProfile:
 
 class StrategyEngine:
     """
-    Stateful strategy engine. Call `update()` with each new candle close.
-    Returns a dict snapshot of all indicators, regime, and signals.
+    Stateful strategy engine implementing physics-inspired regime detection.
+
+    Models price as a Langevin particle:
+      dp = m·dt                              (price follows momentum)
+      dm = U'(p)·dt − γ·m·dt + σ·dW_t       (momentum evolves)
+
+    Continuation when:  m² ≫ γ·ΔU  (kinetic energy dominates potential)
+    Reversal when:      γ·m dominates (damping kills momentum — Kramers escape)
+
+    Call `update()` with each new trade/candle. Returns a dict snapshot.
     """
 
-    # Thresholds (from user's strategy spec)
-    S_TREND_ENTER     = 1.0   # S > 1 for trend
-    S_TREND_EXIT      = 1.0   # S < 1 for exhaustion
-    S_CONTINUATION    = 1.5   # S > 1.5 for continuation
-    ATR_REVERSAL_MULT = 1.2   # ATR > 1.2 × ATR_trend_start
-    DELTA_THRESHOLD   = 0.5   # minimum delta volume for reversal (SOL)
+    # ── Tuning constants (from spec) ────────────────────────────────────
+    #
+    # Signal strength S = |ROC| / relative_ATR
+    #   S < 0.8   → noise dominated
+    #   0.8–1.5   → unstable
+    #   S > 1.5   → strong directional momentum
+
+    S_NOISE_THRESHOLD      = 0.8   # below → noise dominated
+    S_TREND_ENTER          = 1.0   # S > 1.0 to enter TREND
+    S_EXHAUSTION           = 1.0   # S < 1.0 → exhaustion (γm > m_drive)
+    S_CONTINUATION         = 1.5   # S > 1.5 for continuation entry
+    S_EXIT                 = 1.0   # S < 1.0 → exit position
+    S_REVERSAL_FAIL        = 0.3   # reversal aborts if S collapses
+
+    ATR_REVERSAL_MULT      = 1.2   # ATR > 1.2 × ATR_trend_start
+    DELTA_THRESHOLD        = 0.5   # minimum delta volume for reversal
+
+    TRAIL_TRIGGER_PCT      = 0.05  # arm trailing stop at 5% profit
+    TRAIL_LOCK_PCT         = 0.05  # lock stop at entry + 5%
+
+    EXHAUSTION_EXIT_BARS   = 10    # exit after N bars in EXHAUSTION
 
     def __init__(
         self,
@@ -253,45 +333,57 @@ class StrategyEngine:
         self.roc_period = roc_period
         self.atr_period = atr_period
 
-        # EMA state
+        # ── EMA state ────────────────────────────────────────────────
         self._ema_fast: Optional[float] = None
         self._ema_slow: Optional[float] = None
         self._ema_fast_k = 2.0 / (ema_fast + 1)
         self._ema_slow_k = 2.0 / (ema_slow + 1)
 
-        # Price history for ROC
+        # ── Price history for ROC ────────────────────────────────────
         self._closes: deque[float] = deque(maxlen=max(roc_period + 2, 50))
 
-        # ATR state
+        # ── ATR state ────────────────────────────────────────────────
         self._atr: Optional[float] = None
         self._atr_k = 2.0 / (atr_period + 1)
         self._prev_close: Optional[float] = None
 
-        # Spread tracking
-        self._prev_spread: Optional[float] = None
+        # ── ROC tracking ─────────────────────────────────────────────
         self._prev_roc: Optional[float] = None
 
-        # Volume profile
+        # ── EMA spread tracking (γ damping proxy) ────────────────────
+        self._prev_ema_spread: Optional[float] = None
+
+        # ── Volume profile (one per trend) ───────────────────────────
         self.volume_profile = VolumeProfile(num_bins=vp_bins)
         self._vp_initialized = False
 
-        # Regime state
+        # ── Regime state ─────────────────────────────────────────────
         self.regime = Regime.IDLE
         self.direction = Direction.NONE
         self.trend_start_price: Optional[float] = None
         self.trend_start_atr: Optional[float] = None
         self.trend_start_delta: Optional[float] = None
 
-        # Signal output
+        # ── Saved value area from the OLD trend (for continuation check) ──
+        self._prev_value_area: tuple[float, float] = (0.0, 0.0)
+
+        # ── Signal output ────────────────────────────────────────────
         self.entry_signal = Signal.NONE
         self.exit_signal = Signal.NONE
         self._in_position = False
 
-        # Count bars
+        # ── Position tracking for exit rules ─────────────────────────
+        self._entry_price: Optional[float] = None
+        self._trailing_stop: Optional[float] = None
+        self._exhaustion_bars: int = 0
+
+        # ── Bar counter ──────────────────────────────────────────────
         self._bar_count = 0
 
-        # Reversal direction (the NEW direction after reversal)
+        # ── Reversal direction (the NEW direction after reversal) ────
         self._reversal_direction = Direction.NONE
+
+    # ── Indicator updates ────────────────────────────────────────────────
 
     def _update_ema(self, close: float):
         if self._ema_fast is None:
@@ -311,6 +403,7 @@ class StrategyEngine:
             self._atr = tr * self._atr_k + self._atr * (1 - self._atr_k)
 
     def _calc_roc(self) -> float:
+        """Rate of Change over roc_period bars."""
         if len(self._closes) <= self.roc_period:
             return 0.0
         prev = self._closes[-(self.roc_period + 1)]
@@ -320,9 +413,16 @@ class StrategyEngine:
         return (curr - prev) / prev
 
     def _calc_signal_s(self, roc: float) -> float:
+        """
+        Signal strength: S = |ROC| / relative_ATR
+
+        This is the trend signal-to-noise ratio from the spec.
+        S < 0.8  → noise dominated
+        0.8–1.5  → unstable
+        S > 1.5  → strong directional momentum
+        """
         if self._atr is None or self._atr <= 0:
             return 0.0
-        # Normalize: ROC is a ratio, ATR is absolute → use relative ATR
         last_close = self._closes[-1] if self._closes else 1.0
         if last_close <= 0:
             return 0.0
@@ -330,6 +430,8 @@ class StrategyEngine:
         if relative_atr <= 0:
             return 0.0
         return abs(roc) / relative_atr
+
+    # ── Main update ──────────────────────────────────────────────────────
 
     def update(
         self,
@@ -342,11 +444,11 @@ class StrategyEngine:
         timestamp: float = 0.0,
     ) -> dict:
         """
-        Feed one candle. Returns a state snapshot dict.
+        Feed one candle / trade tick. Returns a state snapshot dict.
         """
         self._bar_count += 1
 
-        # ── Indicators ──────────────────────────────────────────────────
+        # ── 1. Update indicators ─────────────────────────────────────
         self._update_ema(close)
         self._update_atr(high, low, close)
         self._closes.append(close)
@@ -354,11 +456,12 @@ class StrategyEngine:
         roc = self._calc_roc()
         signal_s = self._calc_signal_s(roc)
 
-        ema_spread = (self._ema_fast or 0) - (self._ema_slow or 0)
+        # EMA spread — proxy for momentum damping γ
+        ema_spread = (self._ema_fast or 0.0) - (self._ema_slow or 0.0)
         spread_expanding = False
         spread_shrinking = False
-        if self._prev_spread is not None:
-            spread_delta = abs(ema_spread) - abs(self._prev_spread)
+        if self._prev_ema_spread is not None:
+            spread_delta = abs(ema_spread) - abs(self._prev_ema_spread)
             spread_expanding = spread_delta > 0
             spread_shrinking = spread_delta < 0
 
@@ -366,7 +469,7 @@ class StrategyEngine:
         if self._prev_roc is not None:
             roc_decreasing = abs(roc) < abs(self._prev_roc)
 
-        # ── Volume Profile ──────────────────────────────────────────────
+        # ── 2. Volume Profile — accumulate within current trend ──────
         if not self._vp_initialized and close > 0:
             self.volume_profile.reset(close)
             self._vp_initialized = True
@@ -374,26 +477,59 @@ class StrategyEngine:
         if self._vp_initialized:
             self.volume_profile.add_volume(close, buy_volume, sell_volume)
 
-        # ── Regime Detection ────────────────────────────────────────────
+        # ── 3. Regime detection ──────────────────────────────────────
         self.entry_signal = Signal.NONE
         self.exit_signal = Signal.NONE
 
         warming_up = self._bar_count < max(self.ema_slow_n, self.roc_period) + 2
 
         if not warming_up:
-            self._detect_regime(close, roc, signal_s, ema_spread,
-                                spread_expanding, spread_shrinking, roc_decreasing)
+            self._detect_regime(
+                close, roc, signal_s, ema_spread,
+                spread_expanding, spread_shrinking, roc_decreasing,
+            )
 
-        # ── Exit check if in position ───────────────────────────────────
+        # ── 4. Record entry price on fresh entry signal ──────────────
+        if self.entry_signal != Signal.NONE:
+            self._entry_price = close
+            self._trailing_stop = None
+            self._exhaustion_bars = 0
+
+        # ── 5. Update trailing stop ──────────────────────────────────
+        if self._in_position and self._entry_price and self._entry_price > 0:
+            profit_pct = (
+                (close - self._entry_price) / self._entry_price
+                if self.direction == Direction.UP
+                else (self._entry_price - close) / self._entry_price
+            )
+            if profit_pct >= self.TRAIL_TRIGGER_PCT:
+                if self.direction == Direction.UP:
+                    lock_level = self._entry_price * (1 + self.TRAIL_LOCK_PCT)
+                    if self._trailing_stop is None or lock_level > self._trailing_stop:
+                        self._trailing_stop = lock_level
+                else:
+                    lock_level = self._entry_price * (1 - self.TRAIL_LOCK_PCT)
+                    if self._trailing_stop is None or lock_level < self._trailing_stop:
+                        self._trailing_stop = lock_level
+
+        # ── 6. Track exhaustion bars while in position ───────────────
+        if self._in_position and self.regime == Regime.EXHAUSTION:
+            self._exhaustion_bars += 1
+        elif self.regime != Regime.EXHAUSTION:
+            self._exhaustion_bars = 0
+
+        # ── 7. Check exit conditions if in position ──────────────────
         if self._in_position and not warming_up:
-            self._check_exit(close, signal_s, ema_spread, spread_shrinking)
+            self._check_exit(close, signal_s)
 
-        # ── Save state for next bar ─────────────────────────────────────
+        # ── 8. Save state for next bar ───────────────────────────────
         self._prev_close = close
-        self._prev_spread = ema_spread
         self._prev_roc = roc
+        self._prev_ema_spread = ema_spread
 
         return self._snapshot(close, roc, signal_s, ema_spread, spread_expanding)
+
+    # ── Regime state machine ─────────────────────────────────────────────
 
     def _detect_regime(
         self,
@@ -405,156 +541,293 @@ class StrategyEngine:
         spread_shrinking: bool,
         roc_decreasing: bool,
     ):
-        ema_up = (self._ema_fast or 0) > (self._ema_slow or 0)
-        ema_down = (self._ema_slow or 0) > (self._ema_fast or 0)
+        """
+        Regime state machine — faithful to the physics-based spec.
 
+        Observable proxies:
+          m  (momentum / velocity)  → ROC
+          m  (trend direction)      → EMA3 vs EMA7 cross
+          γ  (damping)              → EMA spread contraction/expansion rate
+          σ  (noise)                → ATR
+          U(p) (potential)          → volume profile nodes
+          external force            → delta volume
+
+        Continuation: m² ≫ γ·ΔU  →  S > 1.5, spread expanding
+        Reversal:     γ·m dominates →  S < 1, spread shrinking, ROC flips
+        """
+        ema_up   = (self._ema_fast or 0.0) > (self._ema_slow or 0.0)
+        ema_down = (self._ema_slow or 0.0) > (self._ema_fast or 0.0)
+
+        # ════════════════════════════════════════════════════════════════
+        # A. IDLE → TREND
+        #
+        # Trend begins when ALL THREE conditions are met:
+        #   1. EMA3 > EMA7 (uptrend) or EMA7 > EMA3 (downtrend)
+        #   2. EMA spread expanding: (EMA3 − EMA7)' > 0
+        #   3. Signal strength S > 1
+        #
+        # Record: starting ATR, starting cumulative delta, trend start price.
+        # Start a fresh volume profile anchored at trend start.
+        # ════════════════════════════════════════════════════════════════
         if self.regime == Regime.IDLE:
-            # A. Trend Detection
             if (ema_up or ema_down) and spread_expanding and signal_s > self.S_TREND_ENTER:
                 self.regime = Regime.TREND
                 self.direction = Direction.UP if ema_up else Direction.DOWN
                 self.trend_start_price = close
-                self.trend_start_atr = self._atr
+                self.trend_start_atr   = self._atr
                 self.trend_start_delta = self.volume_profile.cumulative_delta()
-                # Start new volume profile from trend start
+                # Save old value area before resetting (for continuation checks)
+                self._prev_value_area = self.volume_profile.value_area()
+                # Fresh volume profile for this trend
                 self.volume_profile.reset(close)
                 self._vp_initialized = True
 
+        # ════════════════════════════════════════════════════════════════
+        # B. TREND → EXHAUSTION
+        #
+        # Exhaustion occurs when momentum decays (γ·m > m_drive).
+        #
+        # Conditions (ALL required):
+        #   1. EMA spread shrinking
+        #   2. ROC decreasing
+        #   3. S < 1
+        #   4. Price entering low volume node
+        #
+        # Fast-reversal path: if EMA has already flipped to the opposite
+        # direction with structural confirmation → skip EXHAUSTION, go
+        # directly to REVERSAL.
+        # ════════════════════════════════════════════════════════════════
         elif self.regime == Regime.TREND:
-            # B. Trend Exhaustion Detection
-            if spread_shrinking and roc_decreasing and signal_s < self.S_TREND_EXIT:
-                in_low_vol = self.volume_profile.is_price_in_low_volume_node(close)
-                if in_low_vol or signal_s < 0.5:  # relaxed if S is very low
-                    self.regime = Regime.EXHAUSTION
-
-            # Also reset if direction flips without exhaustion
-            new_dir = Direction.UP if ema_up else Direction.DOWN
-            if new_dir != self.direction and new_dir != Direction.NONE:
-                # Quick direction flip → go to exhaustion
-                self.regime = Regime.EXHAUSTION
-
-        elif self.regime == Regime.EXHAUSTION:
-            # C. Reversal Confirmation
-            roc_crossed_zero = False
-            if self._prev_roc is not None:
-                if self.direction == Direction.UP and roc < 0:
-                    roc_crossed_zero = True
-                elif self.direction == Direction.DOWN and roc > 0:
-                    roc_crossed_zero = True
-
-            atr_spike = False
-            if self.trend_start_atr and self.trend_start_atr > 0 and self._atr:
-                atr_spike = self._atr > self.ATR_REVERSAL_MULT * self.trend_start_atr
-
-            # Check opposite delta
-            cum_delta = self.volume_profile.cumulative_delta()
-            strong_opposite_delta = False
-            if self.direction == Direction.UP and cum_delta < -self.DELTA_THRESHOLD:
-                strong_opposite_delta = True
-            elif self.direction == Direction.DOWN and cum_delta > self.DELTA_THRESHOLD:
-                strong_opposite_delta = True
-
+            new_dir      = Direction.UP if ema_up else Direction.DOWN
             opposite_dir = Direction.DOWN if self.direction == Direction.UP else Direction.UP
+
+            # Pre-compute reversal evidence for fast-reversal path
+            atr_spike = (
+                bool(self.trend_start_atr)
+                and self.trend_start_atr > 0
+                and bool(self._atr)
+                and self._atr > self.ATR_REVERSAL_MULT * self.trend_start_atr
+            )
+            cum_delta = self.volume_profile.cumulative_delta()
+            strong_opposite_delta = (
+                (self.direction == Direction.UP   and cum_delta < -self.DELTA_THRESHOLD)
+                or (self.direction == Direction.DOWN and cum_delta >  self.DELTA_THRESHOLD)
+            )
             in_opposite_hvn = self.volume_profile.is_price_in_hvn(close, opposite_dir)
 
-            # Need at least ROC cross + one other condition
-            if roc_crossed_zero and (atr_spike or strong_opposite_delta or in_opposite_hvn):
-                self.regime = Regime.REVERSAL
+            # ── Fast-reversal: EMA flipped + strong evidence ─────────
+            if (new_dir == opposite_dir
+                    and signal_s > self.S_TREND_ENTER
+                    and (atr_spike or strong_opposite_delta or in_opposite_hvn)):
+                self.regime              = Regime.REVERSAL
                 self._reversal_direction = opposite_dir
 
-            # Timeout — if exhaustion lasts too long without reversal, go back to IDLE
-            elif signal_s > self.S_TREND_ENTER and spread_expanding:
-                # Trend resumed
+            # ── EMA flipped but weak — treat as exhaustion ───────────
+            elif new_dir == opposite_dir:
+                self.regime = Regime.EXHAUSTION
+
+            # ── Slow exhaustion: all 4 conditions ────────────────────
+            elif (spread_shrinking
+                  and roc_decreasing
+                  and signal_s < self.S_EXHAUSTION
+                  and self.volume_profile.is_price_in_low_volume_node(close)):
+                self.regime = Regime.EXHAUSTION
+
+        # ════════════════════════════════════════════════════════════════
+        # C. EXHAUSTION → REVERSAL (Kramers escape event)
+        #
+        # Reversal occurs when momentum flips. ALL conditions:
+        #   1. ROC crosses zero
+        #   2. ATR spike: ATR > 1.2 × ATR_trend_start
+        #   3. Strong opposite delta: ΔV > threshold
+        #   4. Price enters HVN of opposite trend direction
+        #
+        # Can return to TREND if momentum genuinely resumes:
+        #   spread expanding + S > 1
+        # ════════════════════════════════════════════════════════════════
+        elif self.regime == Regime.EXHAUSTION:
+            # ── Check for trend resumption ───────────────────────────
+            if spread_expanding and signal_s > self.S_TREND_ENTER:
                 self.regime = Regime.TREND
+            else:
+                opposite_dir = Direction.DOWN if self.direction == Direction.UP else Direction.UP
 
+                # 1. ROC crosses zero
+                roc_crossed_zero = (
+                    (self.direction == Direction.UP   and roc < 0)
+                    or (self.direction == Direction.DOWN and roc > 0)
+                )
+                # Also check transition this bar
+                if self._prev_roc is not None and not roc_crossed_zero:
+                    roc_crossed_zero = (
+                        (self.direction == Direction.UP   and self._prev_roc >= 0 and roc < 0)
+                        or (self.direction == Direction.DOWN and self._prev_roc <= 0 and roc > 0)
+                    )
+
+                # 2. ATR spike
+                atr_spike = (
+                    bool(self.trend_start_atr)
+                    and self.trend_start_atr > 0
+                    and bool(self._atr)
+                    and self._atr > self.ATR_REVERSAL_MULT * self.trend_start_atr
+                )
+
+                # 3. Strong opposite delta
+                cum_delta = self.volume_profile.cumulative_delta()
+                strong_opposite_delta = (
+                    (self.direction == Direction.UP   and cum_delta < -self.DELTA_THRESHOLD)
+                    or (self.direction == Direction.DOWN and cum_delta >  self.DELTA_THRESHOLD)
+                )
+
+                # 4. Price in HVN of opposite direction
+                in_opposite_hvn = self.volume_profile.is_price_in_hvn(close, opposite_dir)
+
+                # ALL conditions required for Kramers escape
+                if roc_crossed_zero and atr_spike and strong_opposite_delta and in_opposite_hvn:
+                    self.regime              = Regime.REVERSAL
+                    self._reversal_direction = opposite_dir
+
+        # ════════════════════════════════════════════════════════════════
+        # D. REVERSAL → CONTINUATION
+        #
+        # Continuation = particle has escaped the previous potential well.
+        #
+        # ALL conditions required:
+        #   1. (Reversal already confirmed — implicit)
+        #   2. EMA cross occurs in new direction
+        #   3. S > 1.5
+        #   4. Delta volume aligned with new direction, HVN at top
+        #   5. Price outside previous value area
+        #   6. No major opposite HVN immediately ahead
+        #
+        # On confirmation: fire entry signal, reset anchors, → TREND.
+        # If S collapses → reversal failed → IDLE.
+        # ════════════════════════════════════════════════════════════════
         elif self.regime == Regime.REVERSAL:
-            # D. Continuation Confirmation
-            new_ema_up = (self._ema_fast or 0) > (self._ema_slow or 0)
-            new_dir = Direction.UP if new_ema_up else Direction.DOWN
+            new_ema_up = (self._ema_fast or 0.0) > (self._ema_slow or 0.0)
+            new_dir    = Direction.UP if new_ema_up else Direction.DOWN
 
+            # Condition 2: EMA cross confirms new direction
             ema_confirms = new_dir == self._reversal_direction
+
+            # Condition 3: S > 1.5
             strong_s = signal_s > self.S_CONTINUATION
 
-            # Delta aligned with new direction
+            # Condition 4: delta aligned + HVN of trend at top
             cum_delta = self.volume_profile.cumulative_delta()
-            delta_aligned = False
-            if self._reversal_direction == Direction.UP and cum_delta > 0:
-                delta_aligned = True
-            elif self._reversal_direction == Direction.DOWN and cum_delta < 0:
-                delta_aligned = True
+            delta_aligned = (
+                (self._reversal_direction == Direction.UP   and cum_delta > 0)
+                or (self._reversal_direction == Direction.DOWN and cum_delta < 0)
+            )
+            hvn_at_top = self.volume_profile.hvn_at_top(self._reversal_direction)
 
-            # Price outside prior value area
-            va_lo, va_hi = self.volume_profile.value_area()
-            price_outside_va = close < va_lo or close > va_hi
+            # Condition 5: price outside previous value area
+            va_lo, va_hi = self._prev_value_area
+            price_outside_va = (va_lo == 0.0 and va_hi == 0.0) or close < va_lo or close > va_hi
 
-            # No major opposite HVN ahead
+            # Condition 6: no major opposite HVN immediately ahead
             no_opposite_hvn = not self.volume_profile.has_opposite_hvn_ahead(
                 close, self._reversal_direction
             )
 
-            if ema_confirms and strong_s:
-                # Relaxed: need at least 2 of the other 3 conditions
-                other_conditions = sum([delta_aligned, price_outside_va, no_opposite_hvn])
-                if other_conditions >= 2:
-                    self.regime = Regime.CONTINUATION
-                    self.direction = self._reversal_direction
-                    # Fire entry signal
-                    if not self._in_position:
-                        self.entry_signal = Signal.BUY if self.direction == Direction.UP else Signal.SELL
-                        self._in_position = True
-                    # Reset for next cycle
-                    self.trend_start_price = close
-                    self.trend_start_atr = self._atr
-                    self.trend_start_delta = self.volume_profile.cumulative_delta()
-                    self.volume_profile.reset(close)
-                    self._vp_initialized = True
-                    # Move to TREND for the new direction
-                    self.regime = Regime.TREND
+            # ALL conditions must be satisfied
+            if (ema_confirms and strong_s
+                    and delta_aligned and hvn_at_top
+                    and price_outside_va and no_opposite_hvn):
+                # ── Continuation confirmed ───────────────────────────
+                self.regime    = Regime.CONTINUATION
+                self.direction = self._reversal_direction
 
-            # Reversal failed → back to IDLE
-            elif signal_s < 0.3:
-                self.regime = Regime.IDLE
-                self.direction = Direction.NONE
+                # Fire entry signal
+                if not self._in_position:
+                    self.entry_signal = (
+                        Signal.BUY if self.direction == Direction.UP else Signal.SELL
+                    )
+                    self._in_position = True
+
+                # Save old value area, reset anchors for the new trend leg
+                self._prev_value_area  = self.volume_profile.value_area()
+                self.trend_start_price = close
+                self.trend_start_atr   = self._atr
+                self.trend_start_delta = self.volume_profile.cumulative_delta()
+                self.volume_profile.reset(close)
+                self._vp_initialized = True
+
+                # Transition into TREND for the new direction
+                self.regime = Regime.TREND
+
+            # Reversal failed — S collapsed
+            elif signal_s < self.S_REVERSAL_FAIL:
+                self.regime              = Regime.IDLE
+                self.direction           = Direction.NONE
                 self._reversal_direction = Direction.NONE
 
-    def _check_exit(
-        self,
-        close: float,
-        signal_s: float,
-        ema_spread: float,
-        spread_shrinking: bool,
-    ):
-        reasons = []
+    # ── Exit rules ───────────────────────────────────────────────────────
 
-        # 1. Signal strength drops
-        if signal_s < self.S_TREND_EXIT:
-            reasons.append("S < 1")
+    def _check_exit(self, close: float, signal_s: float):
+        """
+        Exit Rules — any single condition triggers immediate exit:
 
-        # 2. Delta reverses
-        cum_delta = self.volume_profile.cumulative_delta()
-        if self.direction == Direction.UP and cum_delta < -self.DELTA_THRESHOLD:
-            reasons.append("delta_reversal")
-        elif self.direction == Direction.DOWN and cum_delta > self.DELTA_THRESHOLD:
-            reasons.append("delta_reversal")
+        1. Signal strength S < 1  (momentum lost)
+        2. Price enters low volume node of current trend (thin structure)
+        3. Price enters major HVN of opposite trend direction (resistance)
+        4. Trailing stop: profit ≥ 5% → lock stop at entry +5%
+        5. Prolonged exhaustion (≥ N bars in EXHAUSTION while in position)
+        6. Regime enters REVERSAL → immediate exit
+        """
+        exit_reason: Optional[str] = None
 
-        # 3. Price enters major volume node
-        if self.volume_profile.is_price_in_hvn(close, Direction.NONE):
-            reasons.append("major_volume_node")
+        # ── Rule 6: regime entered REVERSAL (highest priority) ───────
+        if self.regime == Regime.REVERSAL:
+            exit_reason = "reversal"
 
-        # 4. EMA spread collapses
-        if spread_shrinking and abs(ema_spread) < abs(self._prev_spread or 1e-18) * 0.3:
-            reasons.append("ema_collapse")
+        # ── Rule 4: trailing stop hit ────────────────────────────────
+        if exit_reason is None and self._trailing_stop is not None:
+            if self.direction == Direction.UP and close <= self._trailing_stop:
+                exit_reason = "trailing_stop"
+            elif self.direction == Direction.DOWN and close >= self._trailing_stop:
+                exit_reason = "trailing_stop"
 
-        # Need at least 2 exit conditions to avoid premature exits
-        if len(reasons) >= 2:
+        # ── Rule 1: signal strength drops S < 1 ─────────────────────
+        if exit_reason is None and signal_s < self.S_EXIT:
+            exit_reason = "signal_weak"
+
+        # ── Rule 2: price in LVN of current trend ───────────────────
+        if exit_reason is None:
+            if self.volume_profile.is_price_in_low_volume_node(close):
+                exit_reason = "lvn_current_trend"
+
+        # ── Rule 3: price in HVN of opposite trend ──────────────────
+        if exit_reason is None:
+            opposite_dir = Direction.DOWN if self.direction == Direction.UP else Direction.UP
+            if self.volume_profile.is_price_in_hvn(close, opposite_dir):
+                exit_reason = "hvn_opposite_trend"
+
+        # ── Rule 5: prolonged exhaustion / consolidation ─────────────
+        if exit_reason is None and self._exhaustion_bars >= self.EXHAUSTION_EXIT_BARS:
+            exit_reason = "exhaustion_consolidation"
+
+        # ── Fire exit ────────────────────────────────────────────────
+        if exit_reason is not None:
             self.exit_signal = Signal.SELL if self.direction == Direction.UP else Signal.BUY
             self._in_position = False
-            self.regime = Regime.IDLE
-            self.direction = Direction.NONE
+            self._entry_price = None
+            self._trailing_stop = None
+            self._exhaustion_bars = 0
+            # Only reset regime to IDLE when exit isn't already a recognised
+            # regime transition (REVERSAL manages its own state)
+            if self.regime not in (Regime.REVERSAL, Regime.EXHAUSTION):
+                self.regime = Regime.IDLE
+                self.direction = Direction.NONE
 
     def notify_trade_closed(self):
-        """Called by trade simulator when position is closed."""
+        """Called by trade simulator when position is closed externally."""
         self._in_position = False
+        self._entry_price = None
+        self._trailing_stop = None
+        self._exhaustion_bars = 0
+
+    # ── Snapshot ─────────────────────────────────────────────────────────
 
     def _snapshot(
         self,
@@ -567,7 +840,7 @@ class StrategyEngine:
         return {
             "ema3": round(self._ema_fast, 10) if self._ema_fast else 0,
             "ema7": round(self._ema_slow, 10) if self._ema_slow else 0,
-            "ema_spread": ema_spread,
+            "ema_spread": round(ema_spread, 10),
             "ema_spread_expanding": spread_expanding,
             "roc": round(roc, 6),
             "atr": round(self._atr, 10) if self._atr else 0,
@@ -578,6 +851,9 @@ class StrategyEngine:
             "entry_signal": self.entry_signal.value if self.entry_signal != Signal.NONE else None,
             "exit_signal": self.exit_signal.value if self.exit_signal != Signal.NONE else None,
             "in_position": self._in_position,
+            "entry_price": self._entry_price,
+            "trailing_stop": round(self._trailing_stop, 10) if self._trailing_stop else None,
+            "exhaustion_bars": self._exhaustion_bars,
             "volume_profile": self.volume_profile.to_dict(),
             "bar_count": self._bar_count,
             "warming_up": self._bar_count < max(self.ema_slow_n, self.roc_period) + 2,
