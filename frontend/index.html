@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>pump-chart · forward testing</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" />
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+<div id="app">
+
+  <header id="topbar">
+    <div id="logo">pump<span>chart</span></div>
+    <form id="address-form" onsubmit="return false">
+      <input id="mint-input" type="text" placeholder="Enter pump.fun token address…" autocomplete="off" spellcheck="false" />
+      <button id="load-btn" type="button">Load Chart</button>
+    </form>
+    <div id="tf-bar">
+      <button class="tf-btn"        data-tf="1s">1s</button>
+      <button class="tf-btn"        data-tf="5s">5s</button>
+      <button class="tf-btn"        data-tf="15s">15s</button>
+      <button class="tf-btn active" data-tf="1m">1m</button>
+      <button class="tf-btn"        data-tf="5m">5m</button>
+      <button class="tf-btn"        data-tf="15m">15m</button>
+      <button class="tf-btn"        data-tf="1h">1h</button>
+    </div>
+    <div id="conn-indicator">
+      <div id="dot" class="dot"></div>
+      <span id="conn-label">Idle</span>
+    </div>
+  </header>
+
+  <div id="token-bar" class="hidden">
+    <img id="token-logo" alt="" />
+    <span id="token-name">—</span>
+    <span id="token-symbol"></span>
+    <div style="width:1px;height:24px;background:var(--border)"></div>
+    <div id="ohlc-strip" class="ohlc-strip">
+      <span class="ohlc-item">O <span id="ohlc-open">—</span></span>
+      <span class="ohlc-item">H <span id="ohlc-high">—</span></span>
+      <span class="ohlc-item">L <span id="ohlc-low">—</span></span>
+      <span class="ohlc-item">C <span id="ohlc-close">—</span></span>
+    </div>
+    <div style="width:1px;height:24px;background:var(--border)"></div>
+    <span id="last-price">—</span>
+    <span id="price-change" class="price-change">—</span>
+    <div style="width:1px;height:24px;background:var(--border)"></div>
+    <div class="stat-item">
+      <span class="stat-label">Mkt Cap</span>
+      <span class="stat-value" id="stat-mcap">—</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">Session Vol</span>
+      <span class="stat-value" id="stat-vol">0 SOL</span>
+    </div>
+  </div>
+
+  <!-- Strategy Dashboard -->
+  <div id="strategy-bar" class="hidden">
+    <div class="strat-group">
+      <span class="strat-label">Regime</span>
+      <span id="strat-regime" class="regime-badge idle">IDLE</span>
+      <span id="strat-direction" class="strat-dir">—</span>
+    </div>
+    <div class="strat-sep"></div>
+    <div class="strat-group">
+      <span class="strat-label">S</span>
+      <span id="strat-signal-s" class="strat-value">—</span>
+    </div>
+    <div class="strat-group">
+      <span class="strat-label">ROC</span>
+      <span id="strat-roc" class="strat-value">—</span>
+    </div>
+    <div class="strat-group">
+      <span class="strat-label">ATR</span>
+      <span id="strat-atr" class="strat-value">—</span>
+    </div>
+    <div class="strat-sep"></div>
+    <div class="strat-group">
+      <span class="strat-label">Position</span>
+      <span id="strat-position" class="strat-value dim">None</span>
+    </div>
+    <div class="strat-group">
+      <span class="strat-label">Balance</span>
+      <span id="strat-balance" class="strat-value">1.000 SOL</span>
+    </div>
+    <div class="strat-group">
+      <span class="strat-label">PnL</span>
+      <span id="strat-pnl" class="strat-value">0.000</span>
+    </div>
+    <div class="strat-group">
+      <span class="strat-label">Trades</span>
+      <span id="strat-trades" class="strat-value">0</span>
+    </div>
+    <div class="strat-group">
+      <span class="strat-label">Win Rate</span>
+      <span id="strat-winrate" class="strat-value">—</span>
+    </div>
+    <div class="strat-sep"></div>
+    <div class="strat-group">
+      <span class="strat-label">Fees</span>
+      <span id="strat-fees" class="strat-value dim">0</span>
+    </div>
+    <div class="strat-group">
+      <span class="strat-label">Slippage</span>
+      <span id="strat-slippage" class="strat-value dim">0</span>
+    </div>
+  </div>
+
+  <div id="chart-wrapper">
+    <div id="chart"></div>
+    <div id="volume-profile-overlay"></div>
+    <div id="trade-feed"></div>
+    <div id="overlay">
+      <div id="overlay-icon">📈</div>
+      <div id="overlay-msg">Enter a pump.fun token address above to start.</div>
+    </div>
+  </div>
+
+</div>
+<script src="/static/js/app.js"></script>
+</body>
+</html>
