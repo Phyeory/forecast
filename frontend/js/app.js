@@ -1,5 +1,5 @@
 /* ──────────────────────────────────────────────────────────────────────────
-   pump-chart  ·  Forward-Testing UI
+   pump-chart  ·  Price Action Streaming Dashboard
    ────────────────────────────────────────────────────────────────────────── */
 
 const WS_BASE      = `ws://${location.host}/ws`;
@@ -9,7 +9,7 @@ const CANDLE_UP    = "#26a69a";
 const CANDLE_DOWN  = "#ef5350";
 const CANDLE_FLAT  = "#5a6071";
 
-let chart, candleSeries, volSeries, ema3Series, ema7Series, ws, reconnectTimer;
+let chart, candleSeries, volSeries, ws, reconnectTimer;
 let currentMint = "", currentTf = "1m";
 let reconnectMs = RECONNECT_MS;
 let openPrice = null, lastClose = null;
@@ -23,10 +23,6 @@ let chartBaseMcap = null;
 let chartCurrency = "USD";
 let liveMcapCandle = null;
 const LIVE_ONLY_MARKETCAP = true;
-
-// Strategy state
-let markers = [];
-let lastStrategy = null;
 
 const $ = id => document.getElementById(id);
 const mintInput   = $("mint-input");
@@ -50,22 +46,6 @@ const tradeFeed   = $("trade-feed");
 const overlay     = $("overlay");
 const overlayIcon = $("overlay-icon");
 const overlayMsg  = $("overlay-msg");
-
-// Strategy dashboard elements
-const strategyBar   = $("strategy-bar");
-const stratRegime   = $("strat-regime");
-const stratDir      = $("strat-direction");
-const stratSignalS  = $("strat-signal-s");
-const stratRoc      = $("strat-roc");
-const stratAtr      = $("strat-atr");
-const stratPosition = $("strat-position");
-const stratBalance  = $("strat-balance");
-const stratPnl      = $("strat-pnl");
-const stratTrades   = $("strat-trades");
-const stratWinrate  = $("strat-winrate");
-const stratFees     = $("strat-fees");
-const stratSlippage = $("strat-slippage");
-const vpOverlay     = $("volume-profile-overlay");
 
 /* ── Chart init ──────────────────────────────────────────────────────── */
 
@@ -91,26 +71,6 @@ function initChart() {
       minMove: 1,
       formatter: v => formatMcap(v),
     },
-  });
-
-  // EMA overlays
-  ema3Series = chart.addLineSeries({
-    color: "#00e5ff",
-    lineWidth: 1,
-    lineStyle: LightweightCharts.LineStyle.Solid,
-    priceFormat: { type: "custom", minMove: 1, formatter: v => formatMcap(v) },
-    crosshairMarkerVisible: false,
-    lastValueVisible: false,
-    priceLineVisible: false,
-  });
-  ema7Series = chart.addLineSeries({
-    color: "#ff9800",
-    lineWidth: 1,
-    lineStyle: LightweightCharts.LineStyle.Solid,
-    priceFormat: { type: "custom", minMove: 1, formatter: v => formatMcap(v) },
-    crosshairMarkerVisible: false,
-    lastValueVisible: false,
-    priceLineVisible: false,
   });
 
   volSeries = chart.addHistogramSeries({
@@ -299,143 +259,6 @@ function addTrade(trade) {
   while (tradeFeed.children.length > MAX_TRADES) tradeFeed.lastElementChild.remove();
 }
 
-/* ── Strategy Dashboard Updates ──────────────────────────────────────── */
-
-const REGIME_CLASSES = {
-  IDLE:         "regime-badge idle",
-  TREND:        "regime-badge trend",
-  EXHAUSTION:   "regime-badge exhaustion",
-  REVERSAL:     "regime-badge reversal",
-  CONTINUATION: "regime-badge continuation",
-};
-
-function updateStrategyDashboard(strat, simState, simTrade) {
-  if (!strat) return;
-  strategyBar.classList.remove("hidden");
-
-  // Regime badge
-  const regime = strat.regime || "IDLE";
-  stratRegime.textContent = regime;
-  stratRegime.className = REGIME_CLASSES[regime] || REGIME_CLASSES.IDLE;
-
-  // Direction
-  const dir = strat.regime_direction || "—";
-  stratDir.textContent = dir === "UP" ? "▲ UP" : dir === "DOWN" ? "▼ DOWN" : "—";
-  stratDir.className = "strat-dir " + (dir === "UP" ? "up" : dir === "DOWN" ? "down" : "");
-
-  // Indicator values
-  const s = strat.signal_s ?? 0;
-  stratSignalS.textContent = s.toFixed(2);
-  stratSignalS.className = "strat-value " + (s > 1.5 ? "strong" : s > 1 ? "moderate" : s > 0.8 ? "weak" : "noise");
-
-  stratRoc.textContent = ((strat.roc || 0) * 100).toFixed(2) + "%";
-  stratRoc.className = "strat-value " + ((strat.roc || 0) >= 0 ? "pos" : "neg");
-
-  const atrVal = strat.atr || 0;
-  stratAtr.textContent = atrVal > 0.001 ? atrVal.toFixed(6) : atrVal.toExponential(2);
-
-  // Sim state
-  if (simState) {
-    const pos = simState.position;
-    if (pos) {
-      stratPosition.textContent = `LONG @ ${pos.entry_price > 0.001 ? pos.entry_price.toFixed(6) : pos.entry_price.toExponential(2)}`;
-      stratPosition.className = "strat-value pos";
-    } else {
-      stratPosition.textContent = "None";
-      stratPosition.className = "strat-value dim";
-    }
-    stratBalance.textContent = simState.balance.toFixed(4) + " SOL";
-    const pnl = simState.total_pnl || 0;
-    stratPnl.textContent = (pnl >= 0 ? "+" : "") + pnl.toFixed(4) + " SOL";
-    stratPnl.className = "strat-value " + (pnl >= 0 ? "pos" : "neg");
-    stratTrades.textContent = simState.trade_count || 0;
-    stratWinrate.textContent = simState.trade_count > 0 ? (simState.win_rate * 100).toFixed(0) + "%" : "—";
-    stratFees.textContent = (simState.total_fees || 0).toFixed(5) + " SOL";
-    stratSlippage.textContent = (simState.total_slippage_cost || 0).toFixed(4) + " SOL";
-  }
-
-  lastStrategy = strat;
-}
-
-/* ── EMA Line Updates ────────────────────────────────────────────────── */
-
-function updateEmaLines(time, strat) {
-  if (!strat || !time) return;
-  if (strat.warming_up) return;
-
-  const ema3mcap = toMarketCapValue(strat.ema3);
-  const ema7mcap = toMarketCapValue(strat.ema7);
-
-  if (ema3mcap > 0) ema3Series.update({ time, value: ema3mcap });
-  if (ema7mcap > 0) ema7Series.update({ time, value: ema7mcap });
-}
-
-/* ── Buy/Sell Markers ────────────────────────────────────────────────── */
-
-function addSignalMarker(time, type, priceMcap) {
-  if (!time) return;
-  const isBuy = type === "BUY";
-  markers.push({
-    time,
-    position: isBuy ? "belowBar" : "aboveBar",
-    color: isBuy ? "#00e676" : "#ff1744",
-    shape: isBuy ? "arrowUp" : "arrowDown",
-    text: isBuy ? "BUY" : "SELL",
-    size: 2,
-  });
-  // Sort markers by time (required by lightweight-charts)
-  markers.sort((a, b) => a.time - b.time);
-  candleSeries.setMarkers(markers);
-}
-
-/* ── Volume Profile Overlay ──────────────────────────────────────────── */
-
-function renderVolumeProfile(vp, chartEl) {
-  if (!vp || !vp.bins || !vp.bins.length) {
-    vpOverlay.innerHTML = "";
-    return;
-  }
-
-  const maxVol = Math.max(...vp.bins.map(b => b.total));
-  if (maxVol <= 0) { vpOverlay.innerHTML = ""; return; }
-
-  const chartHeight = chartEl.clientHeight;
-  const prices = vp.bins.map(b => b.price);
-  const minP = Math.min(...prices);
-  const maxP = Math.max(...prices);
-  const range = maxP - minP || 1;
-
-  // Build bars
-  let html = "";
-  const barMaxWidth = 60; // px
-  const barHeight = Math.max(2, Math.floor(chartHeight * 0.7 / vp.bins.length));
-
-  for (const bin of vp.bins) {
-    const pct = bin.total / maxVol;
-    const width = Math.max(2, pct * barMaxWidth);
-    const yPct = 1 - (bin.price - minP) / range;
-    const top = 12 + yPct * (chartHeight * 0.7);
-    const delta = bin.delta || 0;
-    const color = delta > 0
-      ? `rgba(38,166,154,${0.3 + pct * 0.5})`
-      : `rgba(239,83,80,${0.3 + pct * 0.5})`;
-    const isPoc = Math.abs(bin.price - vp.poc) < range / vp.bins.length;
-    const border = isPoc ? "border-right:2px solid #ffd740;" : "";
-
-    html += `<div class="vp-bar" style="top:${top}px;width:${width}px;height:${barHeight}px;background:${color};${border}" title="Price: ${bin.price.toExponential(3)} Vol: ${bin.total.toFixed(3)}"></div>`;
-  }
-
-  // Value area lines
-  if (vp.value_area_low > 0 && vp.value_area_high > 0) {
-    const vaLowY = 12 + (1 - (vp.value_area_low - minP) / range) * (chartHeight * 0.7);
-    const vaHighY = 12 + (1 - (vp.value_area_high - minP) / range) * (chartHeight * 0.7);
-    html += `<div class="vp-va-line" style="top:${vaHighY}px"></div>`;
-    html += `<div class="vp-va-line" style="top:${vaLowY}px"></div>`;
-  }
-
-  vpOverlay.innerHTML = html;
-}
-
 /* ── WebSocket connection ────────────────────────────────────────────── */
 
 function connect(mint, timeframe) {
@@ -452,17 +275,10 @@ function connect(mint, timeframe) {
   lastCandleTime = null;
   lastCandleClose = null;
   liveMcapCandle = null;
-  markers = [];
-  lastStrategy = null;
-
   tokenBar.classList.add("hidden");
-  strategyBar.classList.add("hidden");
   tradeFeed.innerHTML = "";
-  vpOverlay.innerHTML = "";
-  if (candleSeries) { candleSeries.setData([]); candleSeries.setMarkers([]); }
+  if (candleSeries) { candleSeries.setData([]); }
   if (volSeries)    volSeries.setData([]);
-  if (ema3Series)   ema3Series.setData([]);
-  if (ema7Series)   ema7Series.setData([]);
   showOverlay("⏳", "Connecting…");
   setDot("connecting", "Connecting…");
 
@@ -520,7 +336,6 @@ function connect(mint, timeframe) {
       });
 
       tokenBar.classList.remove("hidden");
-      strategyBar.classList.remove("hidden");
     }
 
     else if (msg.type === "historical") {
@@ -593,45 +408,6 @@ function connect(mint, timeframe) {
         if (volEl) {
           const prev = parseFloat(volEl.textContent) || 0;
           volEl.textContent = (prev + msg.trade.sol_amount).toFixed(2) + " SOL";
-        }
-      }
-
-      // ── Strategy overlays ──────────────────────────────────────────
-      if (msg.strategy) {
-        updateStrategyDashboard(msg.strategy, msg.sim_state, msg.sim_trade);
-        updateEmaLines(msg.candle?.time, msg.strategy);
-
-        // Volume profile
-        if (msg.strategy.volume_profile) {
-          renderVolumeProfile(msg.strategy.volume_profile, $("chart"));
-        }
-
-        // Buy/Sell markers from sim trade
-        if (msg.sim_trade && !msg.sim_trade.error) {
-          addSignalMarker(
-            msg.candle?.time,
-            msg.sim_trade.action,
-            c.close
-          );
-
-          // Sim trade notification in trade feed
-          const stRow = document.createElement("div");
-          stRow.className = `trade-row sim-trade ${msg.sim_trade.action === "BUY" ? "buy" : "sell"}`;
-          const label = document.createElement("span");
-          label.className = `trade-type ${msg.sim_trade.action === "BUY" ? "buy" : "sell"}`;
-          label.textContent = "SIM " + msg.sim_trade.action;
-          const info = document.createElement("span");
-          info.className = "trade-sol";
-          if (msg.sim_trade.action === "BUY") {
-            info.textContent = (msg.sim_trade.amount_sol || 0).toFixed(3) + " SOL";
-          } else {
-            info.textContent = (msg.sim_trade.pnl >= 0 ? "+" : "") + (msg.sim_trade.pnl || 0).toFixed(4) + " SOL";
-          }
-          const stTime = document.createElement("span");
-          stTime.className = "trade-time";
-          stTime.textContent = new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"});
-          stRow.append(label, info, stTime);
-          tradeFeed.prepend(stRow);
         }
       }
 

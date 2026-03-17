@@ -76,144 +76,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .pos { color: var(--green); }
 .neg { color: var(--red); }
 
-/* ── Strategy Dashboard Bar ──────────────────────────────────────────── */
-
-#strategy-bar {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 6px 16px;
-  background: linear-gradient(180deg, #12141a 0%, #0d0f12 100%);
-  border-bottom: 1px solid var(--border);
-  font-size: 11px;
-  flex-shrink: 0;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-#strategy-bar::-webkit-scrollbar { display: none; }
-#strategy-bar.hidden { display: none; }
-
-.strat-group {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  white-space: nowrap;
-}
-.strat-label {
-  color: var(--muted);
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: .5px;
-  font-weight: 600;
-}
-.strat-value {
-  font-family: var(--mono);
-  font-weight: 600;
-  font-size: 11px;
-  color: var(--text);
-}
-.strat-value.dim { color: var(--muted); }
-.strat-value.pos { color: var(--green); }
-.strat-value.neg { color: var(--red); }
-.strat-value.strong { color: var(--cyan); }
-.strat-value.moderate { color: var(--gold); }
-.strat-value.weak { color: var(--orange); }
-.strat-value.noise { color: var(--muted); }
-
-.strat-dir {
-  font-family: var(--mono);
-  font-weight: 700;
-  font-size: 11px;
-  color: var(--muted);
-}
-.strat-dir.up { color: var(--green); }
-.strat-dir.down { color: var(--red); }
-
-.strat-sep {
-  width: 1px;
-  height: 20px;
-  background: var(--border);
-  flex-shrink: 0;
-}
-
-/* Regime badges */
-.regime-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 2px 8px;
-  border-radius: 3px;
-  font-family: var(--mono);
-  font-weight: 700;
-  font-size: 10px;
-  letter-spacing: .5px;
-  text-transform: uppercase;
-  min-width: 60px;
-  text-align: center;
-}
-.regime-badge.idle {
-  background: rgba(90, 96, 113, 0.2);
-  color: var(--muted);
-  border: 1px solid var(--border);
-}
-.regime-badge.trend {
-  background: rgba(88, 101, 242, 0.2);
-  color: var(--accent);
-  border: 1px solid rgba(88, 101, 242, 0.4);
-  animation: regimePulse 2s infinite;
-}
-.regime-badge.exhaustion {
-  background: rgba(255, 152, 0, 0.15);
-  color: var(--orange);
-  border: 1px solid rgba(255, 152, 0, 0.3);
-  animation: regimePulse 1.5s infinite;
-}
-.regime-badge.reversal {
-  background: rgba(239, 83, 80, 0.15);
-  color: var(--red);
-  border: 1px solid rgba(239, 83, 80, 0.3);
-  animation: regimePulse 1s infinite;
-}
-.regime-badge.continuation {
-  background: rgba(0, 229, 255, 0.15);
-  color: var(--cyan);
-  border: 1px solid rgba(0, 229, 255, 0.3);
-  animation: regimePulse 0.8s infinite;
-}
-@keyframes regimePulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.7; }
-}
-
 /* ── Chart area ──────────────────────────────────────────────────────── */
 
 #chart-wrapper { flex: 1; position: relative; overflow: hidden; }
 #chart { width: 100%; height: 100%; }
-
-/* Volume Profile Overlay */
-#volume-profile-overlay {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 70px;
-  height: 100%;
-  pointer-events: none;
-  z-index: 5;
-}
-.vp-bar {
-  position: absolute;
-  left: 0;
-  border-radius: 0 2px 2px 0;
-  transition: width 0.3s ease;
-}
-.vp-va-line {
-  position: absolute;
-  left: 0;
-  width: 70px;
-  height: 1px;
-  background: var(--gold);
-  opacity: 0.4;
-}
 
 /* Trade feed */
 #trade-feed { position: absolute; top: 8px; right: 8px; width: 220px; max-height: calc(100% - 16px); overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border) transparent; display: flex; flex-direction: column; gap: 3px; pointer-events: none; }
@@ -223,9 +89,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .trade-row { display: flex; justify-content: space-between; align-items: center; background: rgba(13,15,18,.82); backdrop-filter: blur(4px); border-radius: 4px; padding: 4px 8px; font-family: var(--mono); font-size: 11px; border-left: 2px solid transparent; animation: slideIn .12s ease; }
 .trade-row.buy  { border-color: var(--green); }
 .trade-row.sell { border-color: var(--red); }
-.trade-row.sim-trade { border-left-width: 3px; background: rgba(88, 101, 242, 0.15); }
-.trade-row.sim-trade.buy  { border-color: #00e676; background: rgba(0, 230, 118, 0.1); }
-.trade-row.sim-trade.sell { border-color: #ff1744; background: rgba(255, 23, 68, 0.1); }
 @keyframes slideIn { from { opacity: 0; transform: translateX(8px); } to { opacity: 1; transform: none; } }
 
 .trade-type { font-weight: 700; text-transform: uppercase; font-size: 10px; }

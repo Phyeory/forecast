@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>pump-chart · forward testing</title>
+  <title>pump-chart</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" />
   <link rel="stylesheet" href="/static/css/style.css" />
@@ -58,61 +58,8 @@
     </div>
   </div>
 
-  <!-- Strategy Dashboard -->
-  <div id="strategy-bar" class="hidden">
-    <div class="strat-group">
-      <span class="strat-label">Regime</span>
-      <span id="strat-regime" class="regime-badge idle">IDLE</span>
-      <span id="strat-direction" class="strat-dir">—</span>
-    </div>
-    <div class="strat-sep"></div>
-    <div class="strat-group">
-      <span class="strat-label">S</span>
-      <span id="strat-signal-s" class="strat-value">—</span>
-    </div>
-    <div class="strat-group">
-      <span class="strat-label">ROC</span>
-      <span id="strat-roc" class="strat-value">—</span>
-    </div>
-    <div class="strat-group">
-      <span class="strat-label">ATR</span>
-      <span id="strat-atr" class="strat-value">—</span>
-    </div>
-    <div class="strat-sep"></div>
-    <div class="strat-group">
-      <span class="strat-label">Position</span>
-      <span id="strat-position" class="strat-value dim">None</span>
-    </div>
-    <div class="strat-group">
-      <span class="strat-label">Balance</span>
-      <span id="strat-balance" class="strat-value">1.000 SOL</span>
-    </div>
-    <div class="strat-group">
-      <span class="strat-label">PnL</span>
-      <span id="strat-pnl" class="strat-value">0.000</span>
-    </div>
-    <div class="strat-group">
-      <span class="strat-label">Trades</span>
-      <span id="strat-trades" class="strat-value">0</span>
-    </div>
-    <div class="strat-group">
-      <span class="strat-label">Win Rate</span>
-      <span id="strat-winrate" class="strat-value">—</span>
-    </div>
-    <div class="strat-sep"></div>
-    <div class="strat-group">
-      <span class="strat-label">Fees</span>
-      <span id="strat-fees" class="strat-value dim">0</span>
-    </div>
-    <div class="strat-group">
-      <span class="strat-label">Slippage</span>
-      <span id="strat-slippage" class="strat-value dim">0</span>
-    </div>
-  </div>
-
   <div id="chart-wrapper">
     <div id="chart"></div>
-    <div id="volume-profile-overlay"></div>
     <div id="trade-feed"></div>
     <div id="overlay">
       <div id="overlay-icon">📈</div>

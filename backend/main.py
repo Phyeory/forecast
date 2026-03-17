@@ -11,8 +11,6 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from candle_aggregator import CandleAggregator, TIMEFRAME_SECONDS
 from pumpfun_client import DexScreenerPollClient, PumpFunWSClient, PumpSwapRPCClient, get_historical_candles, get_token_info, resolve_input, SUB_MINUTE_TFS
-from strategy_engine import StrategyEngine
-from trade_simulator import TradeSimulator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -78,8 +76,6 @@ async def chart_ws(
         logger.info(f"Live source PumpPortal  mint={real_mint[:8]}…")
         ws_client = PumpFunWSClient(real_mint)
     aggregator = CandleAggregator(timeframe)
-    strategy   = StrategyEngine()
-    simulator  = TradeSimulator(starting_balance=1.0)
     cancelled  = asyncio.Event()
 
     async def send(obj: dict) -> bool:
@@ -125,38 +121,6 @@ async def chart_ws(
                 "tx_hash":    trade["tx_hash"],
             }
 
-            # ── Strategy engine ──────────────────────────────────────
-            buy_vol = trade["sol_amount"] if trade.get("tx_type") == "buy" else 0.0
-            sell_vol = trade["sol_amount"] if trade.get("tx_type") == "sell" else 0.0
-            strat_state = strategy.update(
-                close=candle.close,
-                high=candle.high,
-                low=candle.low,
-                volume=candle.volume,
-                buy_volume=buy_vol,
-                sell_volume=sell_vol,
-                timestamp=trade["timestamp"],
-            )
-
-            # ── Trade simulator ──────────────────────────────────────
-            sim_trade = None
-            if strat_state.get("entry_signal"):
-                sim_trade = simulator.process_signal(
-                    strat_state["entry_signal"],
-                    trade["price"],
-                    trade["timestamp"],
-                    strat_state.get("bar_count", 0),
-                )
-            elif strat_state.get("exit_signal"):
-                sim_trade = simulator.process_signal(
-                    strat_state["exit_signal"],
-                    trade["price"],
-                    trade["timestamp"],
-                    strat_state.get("bar_count", 0),
-                )
-                if sim_trade and not sim_trade.get("error"):
-                    strategy.notify_trade_closed()
-
             ok = await send(
                 {
                     "type":           "candle",
@@ -165,9 +129,6 @@ async def chart_ws(
                     "market_cap_sol": trade.get("market_cap_sol", 0),
                     "market_cap_usd": trade.get("market_cap_usd", 0),
                     "trade":          trade_payload,
-                    "strategy":       strat_state,
-                    "sim_trade":      sim_trade,
-                    "sim_state":      simulator.snapshot(trade["price"]),
                 }
             )
             if not ok:
