@@ -254,12 +254,17 @@ function updateOhlc(candle) {
 function pushCandleWithContinuity(candle) {
   if (!candleSeries || !candle) return;
   if (lastCandleTime !== null && lastCandleClose !== null && candle.time > lastCandleTime + tfSeconds) {
-    for (let t = lastCandleTime + tfSeconds; t < candle.time; t += tfSeconds) {
-      const flat = { time: t, open: lastCandleClose, high: lastCandleClose, low: lastCandleClose, close: lastCandleClose, volume: 0 };
-      candleSeries.update(withCandleColors(flat, lastCandleClose));
-      updateOhlc(flat);
-      lastCandleTime = t;
-      lastCandleClose = flat.close;
+    const gapCandles = Math.floor((candle.time - lastCandleTime) / tfSeconds) - 1;
+    // Only fill small gaps (≤ 3 missed candles). Larger gaps = stale/flat period,
+    // just jump to avoid flooding the chart with ghost candles when data resumes.
+    if (gapCandles <= 3) {
+      for (let t = lastCandleTime + tfSeconds; t < candle.time; t += tfSeconds) {
+        const flat = { time: t, open: lastCandleClose, high: lastCandleClose, low: lastCandleClose, close: lastCandleClose, volume: 0 };
+        candleSeries.update(withCandleColors(flat, lastCandleClose));
+        updateOhlc(flat);
+        lastCandleTime = t;
+        lastCandleClose = flat.close;
+      }
     }
   }
   candleSeries.update(withCandleColors(candle, lastCandleClose));
@@ -337,10 +342,10 @@ function updateStrategyPanel(result) {
   if (indEl && result.indicators) {
     const ind = result.indicators;
     indEl.innerHTML = `
-      <div class="ind-row"><span class="ind-label" style="color:${EMA_FAST_COLOR}">EMA ${3}</span><span class="ind-val">${ind.ema_fast ? formatMcap(toMarketCapValue(ind.ema_fast)) : "—"}</span></div>
-      <div class="ind-row"><span class="ind-label" style="color:${EMA_SLOW_COLOR}">EMA ${7}</span><span class="ind-val">${ind.ema_slow ? formatMcap(toMarketCapValue(ind.ema_slow)) : "—"}</span></div>
-      <div class="ind-row"><span class="ind-label" style="color:${ATR_COLOR}">ATR 7</span><span class="ind-val">${ind.atr ? ind.atr.toExponential(3) : "—"}</span></div>
-      <div class="ind-row"><span class="ind-label" style="color:${ROC_COLOR}">ROC 3</span><span class="ind-val">${ind.roc ? ind.roc.toFixed(3) : "—"}</span></div>
+      <div class="ind-row"><span class="ind-label" style="color:${EMA_FAST_COLOR}">EMA ${5}</span><span class="ind-val">${ind.ema_fast ? formatMcap(toMarketCapValue(ind.ema_fast)) : "—"}</span></div>
+      <div class="ind-row"><span class="ind-label" style="color:${EMA_SLOW_COLOR}">EMA ${13}</span><span class="ind-val">${ind.ema_slow ? formatMcap(toMarketCapValue(ind.ema_slow)) : "—"}</span></div>
+      <div class="ind-row"><span class="ind-label" style="color:${ATR_COLOR}">ATR 10</span><span class="ind-val">${ind.atr ? ind.atr.toExponential(3) : "—"}</span></div>
+      <div class="ind-row"><span class="ind-label" style="color:${ROC_COLOR}">ROC 5</span><span class="ind-val">${ind.roc ? ind.roc.toFixed(3) : "—"}</span></div>
       <div class="ind-row"><span class="ind-label">Spread</span><span class="ind-val ${ind.spread_expanding ? "pos" : "neg"}">${ind.ema_spread ? ind.ema_spread.toExponential(3) : "—"} ${ind.spread_expanding ? "▲" : "▼"}</span></div>
     `;
   }

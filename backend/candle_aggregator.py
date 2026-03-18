@@ -55,15 +55,15 @@ class CandleAggregator:
             return self.current_candle, True
 
         if bucket != self.current_candle.time:
-            # Only open a new candle from a synthetic tick if the previous
-            # candle was confirmed — avoids ghost buckets between real trades.
-            if synthetic and not self.current_candle.confirmed:
-                # Just update close price on the existing candle instead
-                c = self.current_candle
-                if price > c.high: c.high = price
-                if price < c.low:  c.low  = price
-                c.close = price
-                return c, False
+            if synthetic:
+                # Synthetic tick in a new time bucket:
+                #   • price MOVED  → open new candle (real price change)
+                #   • price FLAT   → extend current candle (avoid ghost candles)
+                price_moved = abs(price - self.current_candle.close) > 1e-15
+                if not price_moved:
+                    c = self.current_candle
+                    c.close = price
+                    return c, False
 
             self.current_candle = Candle(
                 time=bucket, open=price, high=price, low=price, close=price,

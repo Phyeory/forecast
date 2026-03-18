@@ -142,12 +142,11 @@ async def chart_ws(
 
             is_synthetic = bool(trade.get("synthetic"))
 
-            # Always treat external trades as confirmed so the aggregator
-            # opens new time buckets normally. is_synthetic only controls
-            # whether we show the trade in the sidebar feed.
+            # Pass synthetic flag so aggregator skips ghost candles when price
+            # is flat, but still opens new candle buckets when price moves.
             candle, is_new = aggregator.process_trade(
                 trade["price"], trade["sol_amount"], trade["timestamp"],
-                synthetic=False,
+                synthetic=is_synthetic,
             )
 
             # Skip if price hasn't changed (dedup rapid-fire identical ticks)

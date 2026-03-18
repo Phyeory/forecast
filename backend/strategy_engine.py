@@ -204,15 +204,15 @@ class StrategyEngine:
 
     def __init__(
         self,
-        ema_fast: int = 3,
-        ema_slow: int = 7,
-        atr_period: int = 7,
-        roc_period: int = 3,
-        warmup: int = 10,
-        signal_strong: float = 1.5,
-        signal_weak: float = 1.0,
-        signal_noise: float = 0.8,
-        exhaustion_bars_limit: int = 10,
+        ema_fast: int = 5,
+        ema_slow: int = 13,
+        atr_period: int = 10,
+        roc_period: int = 5,
+        warmup: int = 20,
+        signal_strong: float = 2.5,
+        signal_weak: float = 1.5,
+        signal_noise: float = 1.0,
+        exhaustion_bars_limit: int = 7,
         delta_threshold: float = 0.3,
     ):
         self.ema_fast_p = ema_fast
@@ -370,7 +370,7 @@ class StrategyEngine:
 
         # ─── A. IDLE → TREND ──────────────────────────────────────────────
         if self.regime == Regime.IDLE:
-            if direction != Direction.NONE and self.spread_expanding and S > self.S_weak:
+            if direction != Direction.NONE and self.spread_expanding and S > self.S_strong:
                 self.regime = Regime.TREND
                 self.direction = direction
                 self.trend_start_price = c
@@ -433,7 +433,7 @@ class StrategyEngine:
             ]
             rev_met = sum(1 for x in rev_conds if x)
 
-            if rev_met >= 2 or direction_flipped:
+            if rev_met >= 3:
                 self.prev_direction = self.direction
                 self.direction = direction if direction != Direction.NONE else self.direction
                 self.regime = Regime.REVERSAL
@@ -459,7 +459,7 @@ class StrategyEngine:
             ]
             cont_met = sum(1 for x in cont_conds if x)
 
-            if cont_met >= 2 and ema_cross:
+            if cont_met >= 3 and ema_cross:
                 self.regime = Regime.CONTINUATION
                 self.direction = new_dir
                 # Fire BUY signal only for uptrends (long-only)
