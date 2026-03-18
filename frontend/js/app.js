@@ -1,5 +1,5 @@
 /* ──────────────────────────────────────────────────────────────────────────
-   pump-chart  ·  Price Action Streaming Dashboard
+   pump-chart  ·  Price Action + Strategy Dashboard
    ────────────────────────────────────────────────────────────────────────── */
 
 const WS_BASE      = `ws://${location.host}/ws`;
@@ -9,7 +9,25 @@ const CANDLE_UP    = "#26a69a";
 const CANDLE_DOWN  = "#ef5350";
 const CANDLE_FLAT  = "#5a6071";
 
+/* Colors for indicators */
+const EMA_FAST_COLOR  = "#00e5ff";  // Cyan
+const EMA_SLOW_COLOR  = "#ff9800";  // Orange
+const ATR_COLOR       = "#ef5350";  // Red
+const ROC_COLOR       = "#64b5f6";  // Light blue
+const ROC_SIGNAL_COLOR = "#ff9800"; // Orange for signal line
+
+/* Regime colors */
+const REGIME_COLORS = {
+  idle:         "#5a6071",
+  trend:        "#26a69a",
+  exhaustion:   "#ff9800",
+  reversal:     "#ef5350",
+  continuation: "#7c4dff",
+};
+
 let chart, candleSeries, volSeries, ws, reconnectTimer;
+let emaFastSeries, emaSlowSeries;  // EMA overlay lines
+let atrSeries, rocSeries;           // Sub-pane series
 let currentMint = "", currentTf = "1m";
 let reconnectMs = RECONNECT_MS;
 let openPrice = null, lastClose = null;
@@ -23,6 +41,13 @@ let chartBaseMcap = null;
 let chartCurrency = "USD";
 let liveMcapCandle = null;
 const LIVE_ONLY_MARKETCAP = true;
+
+/* Strategy state */
+let strategyResults = [];
+let volumeProfileOverlays = [];
+let markers = [];
+let lastRegime = "idle";
+let forwardTestStats = null;
 
 const $ = id => document.getElementById(id);
 const mintInput   = $("mint-input");
@@ -57,7 +82,7 @@ function initChart() {
     grid:        { vertLines: { color: "#1e2330" }, horzLines: { color: "#1e2330" } },
     crosshair:   { mode: LightweightCharts.CrosshairMode.Normal, vertLine: { color: "#5865f2", labelBackgroundColor: "#5865f2" }, horzLine: { color: "#5865f2", labelBackgroundColor: "#5865f2" } },
     timeScale:   { borderColor: "#1e2330", timeVisible: true, secondsVisible: true, rightBarStaysOnScroll: true, shiftVisibleRangeOnNewBar: true },
-    rightPriceScale: { borderColor: "#1e2330", scaleMargins: { top: 0.12, bottom: 0.12 } },
+    rightPriceScale: { borderColor: "#1e2330", scaleMargins: { top: 0.12, bottom: 0.28 } },
     handleScroll: { mouseWheel: true, pressedMouseMove: true },
     handleScale:  { mouseWheel: true, pinch: true },
   });
@@ -73,10 +98,30 @@ function initChart() {
     },
   });
 
+  /* EMA overlay lines */
+  emaFastSeries = chart.addLineSeries({
+    color: EMA_FAST_COLOR,
+    lineWidth: 1,
+    priceLineVisible: false,
+    lastValueVisible: false,
+    crosshairMarkerVisible: false,
+    priceFormat: { type: "custom", minMove: 1, formatter: v => formatMcap(v) },
+  });
+
+  emaSlowSeries = chart.addLineSeries({
+    color: EMA_SLOW_COLOR,
+    lineWidth: 1,
+    priceLineVisible: false,
+    lastValueVisible: false,
+    crosshairMarkerVisible: false,
+    priceFormat: { type: "custom", minMove: 1, formatter: v => formatMcap(v) },
+  });
+
+  /* Volume histogram */
   volSeries = chart.addHistogramSeries({
     color: "#5865f222", priceFormat: { type: "volume" }, priceScaleId: "volume",
   });
-  chart.priceScale("volume").applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+  chart.priceScale("volume").applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
 
   const ro = new ResizeObserver(() => {
     chart.applyOptions({ width: wrapper.clientWidth, height: wrapper.clientHeight });
@@ -259,6 +304,498 @@ function addTrade(trade) {
   while (tradeFeed.children.length > MAX_TRADES) tradeFeed.lastElementChild.remove();
 }
 
+/* ── Strategy rendering ──────────────────────────────────────────────── */
+
+function updateStrategyPanel(result) {
+  if (!result) return;
+
+  /* Regime badge */
+  const regimeEl = $("regime-badge");
+  if (regimeEl) {
+    regimeEl.textContent = result.regime.toUpperCase();
+    regimeEl.style.background = REGIME_COLORS[result.regime] || "#5a6071";
+    regimeEl.className = "regime-badge";
+  }
+
+  /* Direction */
+  const dirEl = $("direction-badge");
+  if (dirEl) {
+    dirEl.textContent = result.direction === "up" ? "▲ UP" : result.direction === "down" ? "▼ DOWN" : "— NONE";
+    dirEl.style.color = result.direction === "up" ? CANDLE_UP : result.direction === "down" ? CANDLE_DOWN : "#5a6071";
+  }
+
+  /* Signal strength (S) */
+  const sEl = $("signal-strength");
+  if (sEl && result.indicators) {
+    const s = result.indicators.signal_strength || 0;
+    sEl.textContent = s.toFixed(2);
+    sEl.style.color = s > 1.5 ? CANDLE_UP : s < 0.8 ? CANDLE_DOWN : "#ff9800";
+  }
+
+  /* Indicators */
+  const indEl = $("indicators-display");
+  if (indEl && result.indicators) {
+    const ind = result.indicators;
+    indEl.innerHTML = `
+      <div class="ind-row"><span class="ind-label" style="color:${EMA_FAST_COLOR}">EMA ${3}</span><span class="ind-val">${ind.ema_fast ? formatMcap(toMarketCapValue(ind.ema_fast)) : "—"}</span></div>
+      <div class="ind-row"><span class="ind-label" style="color:${EMA_SLOW_COLOR}">EMA ${7}</span><span class="ind-val">${ind.ema_slow ? formatMcap(toMarketCapValue(ind.ema_slow)) : "—"}</span></div>
+      <div class="ind-row"><span class="ind-label" style="color:${ATR_COLOR}">ATR 7</span><span class="ind-val">${ind.atr ? ind.atr.toExponential(3) : "—"}</span></div>
+      <div class="ind-row"><span class="ind-label" style="color:${ROC_COLOR}">ROC 3</span><span class="ind-val">${ind.roc ? ind.roc.toFixed(3) : "—"}</span></div>
+      <div class="ind-row"><span class="ind-label">Spread</span><span class="ind-val ${ind.spread_expanding ? "pos" : "neg"}">${ind.ema_spread ? ind.ema_spread.toExponential(3) : "—"} ${ind.spread_expanding ? "▲" : "▼"}</span></div>
+    `;
+  }
+
+  /* Forward test stats */
+  if (result.forward_test) {
+    const ft = result.forward_test;
+    const statsEl = $("ft-stats");
+    if (statsEl) {
+      const stats = ft.stats;
+      const pnlColor = ft.unrealized_pnl >= 0 ? "pos" : "neg";
+      const totalPnlColor = stats.total_pnl_sol >= 0 ? "pos" : "neg";
+      statsEl.innerHTML = `
+        <div class="ft-row"><span class="ft-label">Balance</span><span class="ft-val">${ft.balance.toFixed(4)} SOL</span></div>
+        <div class="ft-row"><span class="ft-label">Trades</span><span class="ft-val">${stats.total_trades}</span></div>
+        <div class="ft-row"><span class="ft-label">Win Rate</span><span class="ft-val">${stats.win_rate.toFixed(1)}%</span></div>
+        <div class="ft-row"><span class="ft-label">PnL</span><span class="ft-val ${totalPnlColor}">${stats.total_pnl_sol >= 0 ? "+" : ""}${stats.total_pnl_sol.toFixed(4)} SOL</span></div>
+        <div class="ft-row"><span class="ft-label">Fees Paid</span><span class="ft-val neg">${stats.total_fees_paid.toFixed(4)} SOL</span></div>
+        <div class="ft-row"><span class="ft-label">Max DD</span><span class="ft-val neg">${stats.max_drawdown_pct.toFixed(2)}%</span></div>
+        ${ft.current_trade ? `
+          <div class="ft-divider"></div>
+          <div class="ft-row"><span class="ft-label">Position</span><span class="ft-val">${ft.current_trade.direction.toUpperCase()}</span></div>
+          <div class="ft-row"><span class="ft-label">Unreal. PnL</span><span class="ft-val ${pnlColor}">${ft.unrealized_pnl >= 0 ? "+" : ""}${ft.unrealized_pnl.toFixed(4)} (${ft.unrealized_pnl_pct >= 0 ? "+" : ""}${ft.unrealized_pnl_pct.toFixed(2)}%)</span></div>
+        ` : ""}
+      `;
+    }
+  }
+}
+
+/* ── Volume Profile Canvas Overlay ───────────────────────────────────── */
+
+let vpCanvas = null;
+let vpCtx = null;
+
+function initVolumeProfileCanvas() {
+  const wrapper = $("chart");
+  // Remove existing canvas if any
+  const existing = wrapper.querySelector(".vp-canvas");
+  if (existing) existing.remove();
+
+  vpCanvas = document.createElement("canvas");
+  vpCanvas.className = "vp-canvas";
+  vpCanvas.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:5;";
+  wrapper.appendChild(vpCanvas);
+  vpCtx = vpCanvas.getContext("2d");
+
+  function resizeVP() {
+    const dpr = window.devicePixelRatio || 1;
+    vpCanvas.width = wrapper.clientWidth * dpr;
+    vpCanvas.height = wrapper.clientHeight * dpr;
+    vpCanvas.style.width = wrapper.clientWidth + "px";
+    vpCanvas.style.height = wrapper.clientHeight + "px";
+    vpCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    renderVolumeProfiles();
+  }
+
+  const ro = new ResizeObserver(resizeVP);
+  ro.observe(wrapper);
+  // Initial sizing
+  setTimeout(resizeVP, 50);
+}
+
+function renderVolumeProfiles() {
+  if (!vpCtx || !vpCanvas || !chart || !candleSeries) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const w = vpCanvas.width / dpr;
+  const h = vpCanvas.height / dpr;
+  vpCtx.clearRect(0, 0, w, h);
+
+  if (!strategyResults.length) return;
+
+  // Get the last strategy result's volume profiles
+  const lastResult = strategyResults[strategyResults.length - 1];
+  if (!lastResult || !lastResult.volume_profiles) return;
+
+  const profiles = lastResult.volume_profiles;
+  const ts = chart.timeScale();
+
+  for (const profile of profiles) {
+    if (!profile.bins || profile.bins.length === 0) continue;
+    if (!profile.start_time || !profile.end_time) continue;
+
+    // Convert times to x coordinates
+    const x1Coord = ts.timeToCoordinate(profile.start_time);
+    const x2Coord = ts.timeToCoordinate(profile.end_time);
+    if (x1Coord === null || x2Coord === null) continue;
+
+    const profileWidth = Math.max(Math.abs(x2Coord - x1Coord), 40);
+    const xStart = Math.min(x1Coord, x2Coord);
+
+    // Find max volume for scaling
+    const maxVol = Math.max(...profile.bins.map(b => b.total_volume), 0.001);
+
+    // Draw each bin as horizontal bar
+    for (const bin of profile.bins) {
+      if (bin.total_volume <= 0) continue;
+
+      const priceMid = (bin.price_low + bin.price_high) / 2;
+      const mcapLow = toMarketCapValue(bin.price_low);
+      const mcapHigh = toMarketCapValue(bin.price_high);
+
+      const yLow = candleSeries.priceToCoordinate(mcapLow);
+      const yHigh = candleSeries.priceToCoordinate(mcapHigh);
+      if (yLow === null || yHigh === null) continue;
+
+      const barHeight = Math.max(Math.abs(yHigh - yLow), 1);
+      const yTop = Math.min(yLow, yHigh);
+
+      // Buy volume (green bar from left)
+      const buyWidth = (bin.buy_volume / maxVol) * profileWidth * 0.9;
+      if (buyWidth > 0.5) {
+        vpCtx.fillStyle = "rgba(38, 166, 154, 0.35)";
+        vpCtx.fillRect(xStart, yTop, buyWidth, barHeight);
+        vpCtx.strokeStyle = "rgba(38, 166, 154, 0.6)";
+        vpCtx.lineWidth = 0.5;
+        vpCtx.strokeRect(xStart, yTop, buyWidth, barHeight);
+      }
+
+      // Sell volume (red bar from right edge of buy)
+      const sellWidth = (bin.sell_volume / maxVol) * profileWidth * 0.9;
+      if (sellWidth > 0.5) {
+        vpCtx.fillStyle = "rgba(239, 83, 80, 0.35)";
+        vpCtx.fillRect(xStart + buyWidth, yTop, sellWidth, barHeight);
+        vpCtx.strokeStyle = "rgba(239, 83, 80, 0.6)";
+        vpCtx.lineWidth = 0.5;
+        vpCtx.strokeRect(xStart + buyWidth, yTop, sellWidth, barHeight);
+      }
+    }
+
+    // Draw POC (Point of Control) line — highest volume bin
+    const pocBin = profile.bins.reduce((a, b) => (a.total_volume > b.total_volume ? a : b), profile.bins[0]);
+    if (pocBin && pocBin.total_volume > 0) {
+      const pocPrice = (pocBin.price_low + pocBin.price_high) / 2;
+      const pocMcap = toMarketCapValue(pocPrice);
+      const pocY = candleSeries.priceToCoordinate(pocMcap);
+      if (pocY !== null) {
+        vpCtx.strokeStyle = "rgba(255, 215, 64, 0.7)";
+        vpCtx.lineWidth = 1;
+        vpCtx.setLineDash([4, 4]);
+        vpCtx.beginPath();
+        vpCtx.moveTo(xStart, pocY);
+        vpCtx.lineTo(xStart + profileWidth, pocY);
+        vpCtx.stroke();
+        vpCtx.setLineDash([]);
+      }
+    }
+  }
+}
+
+/* ── Sub-indicator panes (ROC + ATR) — rendered via canvas ───────────── */
+
+let subCanvas = null;
+let subCtx = null;
+let rocHistory = [];
+let atrHistory = [];
+
+function initSubPaneCanvas() {
+  const wrapper = $("sub-pane");
+  if (!wrapper) return;
+  const existing = wrapper.querySelector(".sub-canvas");
+  if (existing) existing.remove();
+
+  subCanvas = document.createElement("canvas");
+  subCanvas.className = "sub-canvas";
+  subCanvas.style.cssText = "width:100%;height:100%;display:block;";
+  wrapper.appendChild(subCanvas);
+  subCtx = subCanvas.getContext("2d");
+
+  function resizeSub() {
+    const dpr = window.devicePixelRatio || 1;
+    subCanvas.width = wrapper.clientWidth * dpr;
+    subCanvas.height = wrapper.clientHeight * dpr;
+    subCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    renderSubPanes();
+  }
+
+  const ro = new ResizeObserver(resizeSub);
+  ro.observe(wrapper);
+  setTimeout(resizeSub, 50);
+}
+
+function renderSubPanes() {
+  if (!subCtx || !subCanvas) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const w = subCanvas.width / dpr;
+  const h = subCanvas.height / dpr;
+  subCtx.clearRect(0, 0, w, h);
+
+  if (rocHistory.length < 2) return;
+
+  const totalH = h;
+  const rocH = totalH * 0.5;
+  const atrH = totalH * 0.5;
+  const padding = 4;
+
+  // ── ROC pane ──
+  drawSubLine(subCtx, rocHistory, 0, rocH, w, ROC_COLOR, "ROC 3", padding);
+  // Zero line for ROC
+  const rocMin = Math.min(...rocHistory.map(r => r.value));
+  const rocMax = Math.max(...rocHistory.map(r => r.value));
+  if (rocMin < 0 && rocMax > 0) {
+    const rocRange = rocMax - rocMin || 1;
+    const zeroY = padding + (rocH - 2 * padding) * (1 - (0 - rocMin) / rocRange);
+    subCtx.strokeStyle = "#5a607166";
+    subCtx.lineWidth = 1;
+    subCtx.setLineDash([4, 4]);
+    subCtx.beginPath();
+    subCtx.moveTo(0, zeroY);
+    subCtx.lineTo(w, zeroY);
+    subCtx.stroke();
+    subCtx.setLineDash([]);
+  }
+
+  // ── ATR pane ──
+  drawSubLine(subCtx, atrHistory, rocH, atrH, w, ATR_COLOR, "ATR 7", padding);
+
+  // Divider
+  subCtx.strokeStyle = "#1e2330";
+  subCtx.lineWidth = 1;
+  subCtx.beginPath();
+  subCtx.moveTo(0, rocH);
+  subCtx.lineTo(w, rocH);
+  subCtx.stroke();
+}
+
+function drawSubLine(ctx, data, yOffset, height, width, color, label, padding = 4) {
+  if (data.length < 2) return;
+
+  const values = data.map(d => d.value);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+
+  const drawH = height - 2 * padding;
+  const stepX = width / (data.length - 1);
+
+  // Label
+  ctx.fillStyle = color;
+  ctx.font = "bold 10px 'JetBrains Mono', monospace";
+  ctx.fillText(label, 6, yOffset + 14);
+
+  // Current value
+  const lastVal = values[values.length - 1];
+  ctx.fillStyle = "#d1d5e0";
+  ctx.font = "10px 'JetBrains Mono', monospace";
+  ctx.fillText(lastVal.toFixed(3), 6 + ctx.measureText(label + " ").width + 6, yOffset + 14);
+
+  // Line
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i < data.length; i++) {
+    const x = i * stepX;
+    const y = yOffset + padding + drawH * (1 - (values[i] - min) / range);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Fill gradient below line
+  ctx.lineTo((data.length - 1) * stepX, yOffset + height);
+  ctx.lineTo(0, yOffset + height);
+  ctx.closePath();
+  const grad = ctx.createLinearGradient(0, yOffset, 0, yOffset + height);
+  grad.addColorStop(0, color + "30");
+  grad.addColorStop(1, color + "05");
+  ctx.fillStyle = grad;
+  ctx.fill();
+}
+
+/* ── Regime bar rendering ────────────────────────────────────────────── */
+
+let regimeCanvas = null;
+let regimeCtx = null;
+let regimeHistory = [];
+
+function initRegimeCanvas() {
+  const wrapper = $("regime-bar-canvas");
+  if (!wrapper) return;
+  const existing = wrapper.querySelector(".regime-canvas");
+  if (existing) existing.remove();
+
+  regimeCanvas = document.createElement("canvas");
+  regimeCanvas.className = "regime-canvas";
+  regimeCanvas.style.cssText = "width:100%;height:100%;display:block;";
+  wrapper.appendChild(regimeCanvas);
+  regimeCtx = regimeCanvas.getContext("2d");
+
+  function resizeRegime() {
+    const dpr = window.devicePixelRatio || 1;
+    regimeCanvas.width = wrapper.clientWidth * dpr;
+    regimeCanvas.height = wrapper.clientHeight * dpr;
+    regimeCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    renderRegimeBar();
+  }
+
+  const ro = new ResizeObserver(resizeRegime);
+  ro.observe(wrapper);
+  setTimeout(resizeRegime, 50);
+}
+
+function renderRegimeBar() {
+  if (!regimeCtx || !regimeCanvas || !regimeHistory.length) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const w = regimeCanvas.width / dpr;
+  const h = regimeCanvas.height / dpr;
+  regimeCtx.clearRect(0, 0, w, h);
+
+  const stepX = w / regimeHistory.length;
+
+  for (let i = 0; i < regimeHistory.length; i++) {
+    const regime = regimeHistory[i];
+    const color = REGIME_COLORS[regime] || "#5a6071";
+    regimeCtx.fillStyle = color + "aa";
+    regimeCtx.fillRect(i * stepX, 0, stepX + 0.5, h);
+  }
+}
+
+/* ── Buy/Sell markers on price chart ─────────────────────────────────── */
+
+function updateMarkers() {
+  if (!candleSeries) return;
+  try {
+    candleSeries.setMarkers(markers.sort((a, b) => a.time - b.time));
+  } catch (e) {
+    // Markers may fail if times are not monotonic
+  }
+}
+
+function addSignalMarker(time, signal, regimeLabel, price) {
+  if (signal === "buy") {
+    markers.push({
+      time,
+      position: "belowBar",
+      color: "#26a69a",
+      shape: "arrowUp",
+      text: `BUY (${regimeLabel})`,
+    });
+  } else if (signal === "exit") {
+    markers.push({
+      time,
+      position: "aboveBar",
+      color: "#ff9800",
+      shape: "circle",
+      text: `EXIT (${regimeLabel})`,
+    });
+  }
+}
+
+/* ── Process strategy results from historical data ───────────────────── */
+
+function processHistoricalStrategy(results, candles) {
+  if (!results || !results.length) return;
+
+  strategyResults = results;
+  markers = [];
+  rocHistory = [];
+  atrHistory = [];
+  regimeHistory = [];
+
+  const emaFastData = [];
+  const emaSlowData = [];
+
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    const candle = candles[i];
+    if (!r || !candle) continue;
+
+    // Collect indicator data
+    if (r.indicators) {
+      if (r.indicators.ema_fast) {
+        emaFastData.push({ time: candle.time, value: toMarketCapValue(r.indicators.ema_fast) });
+      }
+      if (r.indicators.ema_slow) {
+        emaSlowData.push({ time: candle.time, value: toMarketCapValue(r.indicators.ema_slow) });
+      }
+      if (r.indicators.roc !== null && r.indicators.roc !== undefined) {
+        rocHistory.push({ time: candle.time, value: r.indicators.roc });
+      }
+      if (r.indicators.atr !== null && r.indicators.atr !== undefined) {
+        atrHistory.push({ time: candle.time, value: r.indicators.atr });
+      }
+    }
+
+    // Regime history
+    regimeHistory.push(r.regime || "idle");
+
+    // Markers
+    if (r.signal && r.signal !== "none") {
+      addSignalMarker(candle.time, r.signal, r.regime, candle.close);
+    }
+  }
+
+  // Set EMA data on chart
+  if (emaFastData.length) emaFastSeries.setData(emaFastData);
+  if (emaSlowData.length) emaSlowSeries.setData(emaSlowData);
+
+  // Update markers
+  updateMarkers();
+
+  // Render sub panes
+  renderSubPanes();
+  renderRegimeBar();
+  renderVolumeProfiles();
+
+  // Update strategy panel with last result
+  updateStrategyPanel(results[results.length - 1]);
+}
+
+/* ── Process live strategy result ────────────────────────────────────── */
+
+function processLiveStrategy(result, candle) {
+  if (!result) return;
+
+  strategyResults.push(result);
+
+  // Update indicators
+  if (result.indicators) {
+    if (result.indicators.ema_fast && candle) {
+      emaFastSeries.update({ time: candle.time, value: toMarketCapValue(result.indicators.ema_fast) });
+    }
+    if (result.indicators.ema_slow && candle) {
+      emaSlowSeries.update({ time: candle.time, value: toMarketCapValue(result.indicators.ema_slow) });
+    }
+    if (result.indicators.roc !== null && result.indicators.roc !== undefined) {
+      rocHistory.push({ time: candle?.time, value: result.indicators.roc });
+      if (rocHistory.length > 300) rocHistory.shift();
+    }
+    if (result.indicators.atr !== null && result.indicators.atr !== undefined) {
+      atrHistory.push({ time: candle?.time, value: result.indicators.atr });
+      if (atrHistory.length > 300) atrHistory.shift();
+    }
+  }
+
+  regimeHistory.push(result.regime || "idle");
+  if (regimeHistory.length > 300) regimeHistory.shift();
+
+  // Markers
+  if (result.signal && result.signal !== "none" && candle) {
+    addSignalMarker(candle.time, result.signal, result.regime, candle.close);
+    updateMarkers();
+  }
+
+  // Re-render overlays
+  renderSubPanes();
+  renderRegimeBar();
+  renderVolumeProfiles();
+
+  // Update panel
+  updateStrategyPanel(result);
+}
+
 /* ── WebSocket connection ────────────────────────────────────────────── */
 
 function connect(mint, timeframe) {
@@ -277,8 +814,15 @@ function connect(mint, timeframe) {
   liveMcapCandle = null;
   tokenBar.classList.add("hidden");
   tradeFeed.innerHTML = "";
+  strategyResults = [];
+  markers = [];
+  rocHistory = [];
+  atrHistory = [];
+  regimeHistory = [];
   if (candleSeries) { candleSeries.setData([]); }
   if (volSeries)    volSeries.setData([]);
+  if (emaFastSeries) emaFastSeries.setData([]);
+  if (emaSlowSeries) emaSlowSeries.setData([]);
   showOverlay("⏳", "Connecting…");
   setDot("connecting", "Connecting…");
 
@@ -344,6 +888,11 @@ function connect(mint, timeframe) {
       if (LIVE_ONLY_MARKETCAP) {
         if (cs[cs.length - 1]?.close > 0) chartBasePrice = cs[cs.length - 1].close;
         showOverlay("📡", "Live market-cap mode. Waiting for ticks…");
+
+        // Still process strategy data even in live marketcap mode
+        if (msg.strategy) {
+          processHistoricalStrategy(msg.strategy, cs);
+        }
         return;
       }
       if (cs[cs.length - 1]?.close > 0) chartBasePrice = cs[cs.length - 1].close;
@@ -362,6 +911,12 @@ function connect(mint, timeframe) {
       lastCandleClose = mcapCandles[mcapCandles.length - 1].close;
       updateOhlc(mcapCandles[mcapCandles.length - 1]);
       updatePrice(mcapCandles[mcapCandles.length - 1].close);
+
+      // Process strategy results
+      if (msg.strategy) {
+        processHistoricalStrategy(msg.strategy, cs);
+      }
+
       chart.timeScale().scrollToRealTime();
       chart.timeScale().fitContent();
       hideOverlay();
@@ -411,6 +966,11 @@ function connect(mint, timeframe) {
         }
       }
 
+      // Process live strategy
+      if (msg.strategy) {
+        processLiveStrategy(msg.strategy, msg.candle);
+      }
+
       chart.timeScale().scrollToRealTime();
       hideOverlay();
     }
@@ -451,4 +1011,19 @@ tfBtns.forEach(btn => {
   });
 });
 
+/* Re-render volume profiles when chart view changes */
+function setupChartRedraw() {
+  if (!chart) return;
+  chart.timeScale().subscribeVisibleTimeRangeChange(() => {
+    renderVolumeProfiles();
+  });
+  chart.subscribeCrosshairMove(() => {
+    renderVolumeProfiles();
+  });
+}
+
 initChart();
+initVolumeProfileCanvas();
+initSubPaneCanvas();
+initRegimeCanvas();
+setupChartRedraw();

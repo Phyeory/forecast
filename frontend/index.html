@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>pump-chart</title>
+  <title>pump-chart · Strategy Dashboard</title>
+  <meta name="description" content="Real-time Solana token charting with physics-based strategy engine and forward testing" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" />
   <link rel="stylesheet" href="/static/css/style.css" />
@@ -56,14 +57,43 @@
       <span class="stat-label">Session Vol</span>
       <span class="stat-value" id="stat-vol">0 SOL</span>
     </div>
+    <!-- Strategy indicators in token bar -->
+    <div style="width:1px;height:24px;background:var(--border)"></div>
+    <div id="regime-badge" class="regime-badge">IDLE</div>
+    <div id="direction-badge" class="direction-badge">— NONE</div>
+    <div class="stat-item">
+      <span class="stat-label">Signal S</span>
+      <span class="stat-value" id="signal-strength">0.00</span>
+    </div>
   </div>
 
-  <div id="chart-wrapper">
-    <div id="chart"></div>
-    <div id="trade-feed"></div>
-    <div id="overlay">
-      <div id="overlay-icon">📈</div>
-      <div id="overlay-msg">Enter a pump.fun token address above to start.</div>
+  <div id="main-content">
+    <!-- Left: Strategy panel -->
+    <aside id="strategy-panel">
+      <div class="panel-section">
+        <h3 class="panel-title">📊 Indicators</h3>
+        <div id="indicators-display" class="indicators-grid"></div>
+      </div>
+      <div class="panel-section">
+        <h3 class="panel-title">💰 Forward Test</h3>
+        <div id="ft-stats" class="ft-grid"></div>
+      </div>
+    </aside>
+
+    <!-- Center: Chart + Sub panes -->
+    <div id="chart-area">
+      <div id="chart-wrapper">
+        <div id="chart"></div>
+        <div id="trade-feed"></div>
+        <div id="overlay">
+          <div id="overlay-icon">📈</div>
+          <div id="overlay-msg">Enter a pump.fun token address above to start.</div>
+        </div>
+      </div>
+      <!-- Regime color bar -->
+      <div id="regime-bar-canvas" class="sub-pane-wrapper regime-bar-wrapper"></div>
+      <!-- ROC + ATR sub panes -->
+      <div id="sub-pane" class="sub-pane-wrapper"></div>
     </div>
   </div>
 

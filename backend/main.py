@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from candle_aggregator import CandleAggregator, TIMEFRAME_SECONDS
 from pumpfun_client import DexScreenerPollClient, PumpFunWSClient, PumpSwapRPCClient, get_historical_candles, get_token_info, resolve_input, SUB_MINUTE_TFS
+from forward_tester import ForwardTester
 
 logging.basicConfig(
     level=logging.INFO,
@@ -77,6 +78,16 @@ async def chart_ws(
         ws_client = PumpFunWSClient(real_mint)
     aggregator = CandleAggregator(timeframe)
     cancelled  = asyncio.Event()
+    last_sent_price = None  # Track to skip unchanged price updates
+
+    # Initialize forward tester
+    forward_tester = ForwardTester(
+        starting_balance=1.0,
+        buy_size_sol=0.1,
+        priority_fee=0.0001,
+        bribe_fee=0.00001,
+        slippage_pct=10.0,
+    )
 
     async def send(obj: dict) -> bool:
         try:
@@ -97,23 +108,67 @@ async def chart_ws(
 
     hist = await get_historical_candles(real_mint, timeframe)
     if hist:
-        await send({"type": "historical", "candles": hist})
+        # Run historical candles through forward tester first
+        strategy_results = []
+        for candle in hist:
+            result = forward_tester.update(
+                time=int(candle["time"]),
+                o=candle["open"],
+                h=candle["high"],
+                l=candle["low"],
+                c=candle["close"],
+                volume=candle.get("volume", 0),
+            )
+            strategy_results.append(result)
+
+        await send({
+            "type": "historical",
+            "candles": hist,
+            "strategy": strategy_results,
+        })
         last = hist[-1]
         aggregator.process_trade(last["close"], 0.0, float(last["time"]))
-        logger.info(f"Sent {len(hist)} candles")
+        logger.info(f"Sent {len(hist)} candles + strategy data")
     else:
         await send(
             {"type": "error", "message": "No historical data found. Waiting for live trades…"}
         )
 
     async def stream_live():
+        nonlocal last_sent_price
         async for trade in ws_client.stream():
             if cancelled.is_set():
                 break
+
+            is_synthetic = bool(trade.get("synthetic"))
+
+            # Always treat external trades as confirmed so the aggregator
+            # opens new time buckets normally. is_synthetic only controls
+            # whether we show the trade in the sidebar feed.
             candle, is_new = aggregator.process_trade(
-                trade["price"], trade["sol_amount"], trade["timestamp"]
+                trade["price"], trade["sol_amount"], trade["timestamp"],
+                synthetic=False,
             )
-            trade_payload = None if trade.get("synthetic") else {
+
+            # Skip if price hasn't changed (dedup rapid-fire identical ticks)
+            candle_dict = candle.to_dict()
+            current_price = candle_dict["close"]
+            if last_sent_price is not None and current_price == last_sent_price and not is_new:
+                continue
+            last_sent_price = current_price
+
+            # Run strategy engine on new/updated candle
+            strategy_result = forward_tester.update(
+                time=candle_dict["time"],
+                o=candle_dict["open"],
+                h=candle_dict["high"],
+                l=candle_dict["low"],
+                c=candle_dict["close"],
+                volume=candle_dict.get("volume", 0),
+            )
+
+            # Only show real trades in the trade feed sidebar (not synthetic price polls)
+            trade_payload = None if is_synthetic else {
                 "price":      trade["price"],
                 "sol_amount": trade["sol_amount"],
                 "tx_type":    trade["tx_type"],
@@ -124,11 +179,12 @@ async def chart_ws(
             ok = await send(
                 {
                     "type":           "candle",
-                    "candle":         candle.to_dict(),
+                    "candle":         candle_dict,
                     "is_new":         is_new,
                     "market_cap_sol": trade.get("market_cap_sol", 0),
                     "market_cap_usd": trade.get("market_cap_usd", 0),
                     "trade":          trade_payload,
+                    "strategy":       strategy_result,
                 }
             )
             if not ok:

@@ -76,10 +76,153 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .pos { color: var(--green); }
 .neg { color: var(--red); }
 
+/* ── Regime & Direction badges ───────────────────────────────────────── */
+
+.regime-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: var(--mono);
+  color: #fff;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background: var(--muted);
+  white-space: nowrap;
+  transition: background 0.3s ease;
+}
+
+.direction-badge {
+  font-size: 12px;
+  font-weight: 700;
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+/* ── Main content layout ─────────────────────────────────────────────── */
+
+#main-content {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+/* ── Strategy panel sidebar ──────────────────────────────────────────── */
+
+#strategy-panel {
+  width: 220px;
+  min-width: 220px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+  flex-shrink: 0;
+}
+
+#strategy-panel::-webkit-scrollbar { width: 4px; }
+#strategy-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.panel-section {
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 10px;
+}
+
+/* Indicators grid */
+.indicators-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ind-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  font-family: var(--mono);
+}
+
+.ind-label {
+  font-weight: 600;
+  font-size: 10px;
+}
+
+.ind-val {
+  color: var(--text);
+}
+
+/* Forward test grid */
+.ft-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.ft-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  font-family: var(--mono);
+}
+
+.ft-label {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.ft-val {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.ft-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+
 /* ── Chart area ──────────────────────────────────────────────────────── */
+
+#chart-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
 
 #chart-wrapper { flex: 1; position: relative; overflow: hidden; }
 #chart { width: 100%; height: 100%; }
+
+/* Sub pane containers */
+.sub-pane-wrapper {
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  overflow: hidden;
+}
+
+#sub-pane {
+  height: 120px;
+  min-height: 80px;
+}
+
+.regime-bar-wrapper {
+  height: 16px;
+  min-height: 16px;
+}
 
 /* Trade feed */
 #trade-feed { position: absolute; top: 8px; right: 8px; width: 220px; max-height: calc(100% - 16px); overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border) transparent; display: flex; flex-direction: column; gap: 3px; pointer-events: none; }
@@ -104,3 +247,25 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 
 .social-link { display: inline-flex; align-items: center; justify-content: center; min-width: 26px; height: 22px; padding: 0 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--muted); font-size: 11px; font-weight: 700; text-decoration: none; transition: color .12s, border-color .12s; white-space: nowrap; }
 .social-link:hover { color: var(--text); border-color: var(--accent); }
+
+/* ── VP Canvas overlay ───────────────────────────────────────────────── */
+
+.vp-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 5;
+}
+
+/* ── Responsive ──────────────────────────────────────────────────────── */
+
+@media (max-width: 768px) {
+  #strategy-panel {
+    display: none;
+  }
+  #sub-pane {
+    height: 80px;
+    min-height: 60px;
+  }
+}
