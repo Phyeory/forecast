@@ -286,8 +286,20 @@ async def resolve_input(user_input: str) -> tuple[str, Optional[dict]]:
                         info["_live_source"] = "pumpportal"
                     return base_mint, info
                 return base_mint, _info_from_ds(pair)
+            # pair_address == user_input: DexScreener gave us info but couldn't
+            # resolve to a different base mint. Build info from DS.
             info = _info_from_ds(pair)
-            info["_live_source"] = "solana_rpc"
+            # Only use Solana RPC pool streaming if there's a known PumpSwap
+            # pair address that differs from the token mint.
+            pair_addr = pair.get("pairAddress", "")
+            dex_id = pair.get("dexId", "").lower()
+            is_pumpswap = "pump" in dex_id or "pumpswap" in dex_id
+            if is_pumpswap and pair_addr and pair_addr != user_input:
+                info["pair_address"] = pair_addr
+                info["_live_source"] = "solana_rpc"
+            else:
+                # Default: poll DexScreener for price updates
+                info["_live_source"] = "dexscreener"
             return user_input, info
 
         logger.warning(f"resolve_input: unresolved {user_input[:8]}")
@@ -719,7 +731,17 @@ class PumpSwapRPCClient:
                 logger.warning(f"[PumpSwapRPC] {e} — reconnecting in {backoff:.1f}s")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 10)
+            except RuntimeError as e:
+                msg = str(e)
+                if "Missing mint or vault accounts" in msg or "Pool account not found" in msg:
+                    # Token is not on PumpSwap (still on bonding curve or not migrated).
+                    # Stop retrying — this will never succeed.
+                    logger.warning(f"[PumpSwapRPC] Token not on PumpSwap ({msg}). Stopping.")
+                    return
+                logger.error(f"[PumpSwapRPC] RuntimeError: {e} — reconnecting in {backoff:.1f}s")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 10)
             except Exception as e:
-                logger.error(f"[PumpSwapRPC] Unexpected: {e}")
+                logger.error(f"[PumpSwapRPC] Unexpected: {e} — reconnecting in {backoff:.1f}s")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 10)

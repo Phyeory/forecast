@@ -134,12 +134,15 @@ async def chart_ws(
             {"type": "error", "message": "No historical data found. Waiting for live trades…"}
         )
 
-    async def stream_live():
+    async def _process_stream(client) -> bool:
+        """Drain a ws_client stream. Returns True if at least one trade was processed."""
         nonlocal last_sent_price
-        async for trade in ws_client.stream():
+        got_trade = False
+        async for trade in client.stream():
             if cancelled.is_set():
                 break
 
+            got_trade = True
             is_synthetic = bool(trade.get("synthetic"))
 
             # Pass synthetic flag so aggregator skips ghost candles when price
@@ -188,6 +191,23 @@ async def chart_ws(
             )
             if not ok:
                 break
+        return got_trade
+
+    async def stream_live():
+        got = await _process_stream(ws_client)
+
+        # If the primary client stopped without producing any trades, it likely
+        # means the token is non-migrated (no PumpSwap pool). Fall back to
+        # PumpPortal WebSocket which handles bonding-curve tokens.
+        if not got and not cancelled.is_set() and not isinstance(ws_client, PumpFunWSClient):
+            logger.warning(
+                f"Primary client yielded no trades — falling back to PumpPortal for {real_mint[:8]}…"
+            )
+            fallback = PumpFunWSClient(real_mint)
+            try:
+                await _process_stream(fallback)
+            finally:
+                fallback.stop()
 
     async def keepalive():
         while not cancelled.is_set():
