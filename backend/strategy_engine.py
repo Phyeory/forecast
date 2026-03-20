@@ -360,6 +360,7 @@ class StrategyEngine:
         self.regime = Regime.IDLE
         self.direction = Direction.NONE
         self.prev_direction = Direction.NONE
+        self.trend_before_exhaustion = Direction.NONE  # Immutable trend dir at exhaustion entry
 
         # Indicator state
         self.ema_fast_val: Optional[float] = None
@@ -524,6 +525,7 @@ class StrategyEngine:
 
             if met >= 3:
                 self.regime = Regime.EXHAUSTION
+                self.trend_before_exhaustion = self.direction  # Lock original trend
                 self.exhaustion_bar_count = 0
                 return self.regime, None
 
@@ -536,21 +538,39 @@ class StrategyEngine:
                     return self.regime, None
                 # EMA cross happened but momentum still OK — go to exhaustion first
                 self.regime = Regime.EXHAUSTION
+                self.trend_before_exhaustion = self.direction  # Lock original trend
                 self.exhaustion_bar_count = 0
                 return self.regime, None
 
-        # ─── C. EXHAUSTION → REVERSAL / back to TREND ────────────────────
+        # ─── C. EXHAUSTION → CONTINUATION / REVERSAL ────────────────────
         elif self.regime == Regime.EXHAUSTION:
             self.exhaustion_bar_count += 1
 
-            # Can recover back to TREND
+            # Continuation after exhaustion: original trend resumes
             if self.spread_expanding and S > self.S_strong and not momentum_decay:
-                self.regime = Regime.TREND
-                self.exhaustion_bar_count = 0
-                return self.regime, None
+                if direction == self.trend_before_exhaustion:
+                    # Same direction as original trend → CONTINUATION (with signal)
+                    self.regime = Regime.CONTINUATION
+                    self.direction = direction
+                    signal = None
+                    if direction == Direction.UP:
+                        signal = Signal.BUY
+                    elif direction == Direction.DOWN and self.in_position:
+                        signal = Signal.EXIT
+                    self.trend_start_price = c
+                    self.trend_start_atr = self.atr_val or 0
+                    self._start_new_profile(c)
+                    self.exhaustion_bar_count = 0
+                    return self.regime, signal
+                else:
+                    # Direction flipped during exhaustion → just recover to TREND
+                    self.regime = Regime.TREND
+                    self.exhaustion_bar_count = 0
+                    return self.regime, None
 
-            # Check for direction flip (EMA cross)
-            direction_flipped = (direction != Direction.NONE and direction != self.direction)
+            # Check for direction flip (EMA cross) relative to original trend
+            direction_flipped = (direction != Direction.NONE and
+                                 direction != self.trend_before_exhaustion)
 
             # Check reversal conditions
             rev_conds = [
@@ -563,7 +583,8 @@ class StrategyEngine:
             rev_met = sum(1 for x in rev_conds if x)
 
             if rev_met >= 3:
-                self.prev_direction = self.direction
+                # Use the locked trend direction, not the drifted self.direction
+                self.prev_direction = self.trend_before_exhaustion
                 self.direction = direction if direction != Direction.NONE else self.direction
                 self.regime = Regime.REVERSAL
                 return self.regime, None
@@ -591,9 +612,14 @@ class StrategyEngine:
             if cont_met >= 3 and ema_cross:
                 self.regime = Regime.CONTINUATION
                 self.direction = new_dir
-                # Fire BUY signal only for uptrends (long-only)
-                if new_dir == Direction.UP:
+                # Direction-aware signals (long-only):
+                #   BUY  = continuing UP after reversing from a DOWN trend
+                #   EXIT = continuing DOWN after reversing from an UP trend
+                if new_dir == Direction.UP and self.prev_direction == Direction.DOWN:
                     signal = Signal.BUY
+                elif new_dir == Direction.DOWN and self.prev_direction == Direction.UP:
+                    if self.in_position:
+                        signal = Signal.EXIT
                 # Transition to TREND with new direction
                 self.trend_start_price = c
                 self.trend_start_atr = self.atr_val or 0
@@ -605,6 +631,7 @@ class StrategyEngine:
             # If momentum truly died, go back to exhaustion
             if S < self.S_noise and not roc_zero_cross and not momentum_decay:
                 self.regime = Regime.EXHAUSTION
+                self.trend_before_exhaustion = self.prev_direction  # Original trend before reversal
                 self.exhaustion_bar_count = 0
                 return self.regime, None
 
