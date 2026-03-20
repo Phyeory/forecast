@@ -332,15 +332,15 @@ class StrategyEngine:
 
     def __init__(
         self,
-        ema_fast: int = 5,
-        ema_slow: int = 13,
-        atr_period: int = 10,
-        roc_period: int = 5,
+        ema_fast: int = 3,
+        ema_slow: int = 7,
+        atr_period: int = 7,
+        roc_period: int = 3,
         warmup: int = 20,
         signal_strong: float = 2.5,
         signal_weak: float = 1.5,
         signal_noise: float = 1.0,
-        exhaustion_bars_limit: int = 7,
+        exhaustion_bars_limit: int = 20,
         delta_threshold: float = 0.3,
         kalman_gamma: float = 0.1,
     ):
