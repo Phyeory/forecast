@@ -340,7 +340,7 @@ class StrategyEngine:
         signal_strong: float = 2.5,
         signal_weak: float = 1.5,
         signal_noise: float = 1.0,
-        exhaustion_bars_limit: int = 20,
+        exhaustion_bars_limit: int = 14,
         delta_threshold: float = 0.3,
         kalman_gamma: float = 0.1,
     ):
@@ -399,6 +399,11 @@ class StrategyEngine:
         self.entry_price: float = 0.0
         self.trailing_stop: Optional[float] = None
         self.position_direction: Direction = Direction.NONE
+
+        # Entry sequencing: True for exactly one bar after the first condition
+        # (exhaustion or reversal) is met. A BUY is only emitted if continuation
+        # fires on that very next bar. Any miss resets the flag.
+        self.pending_entry: bool = False
 
     def _update_indicators(self, o: float, h: float, l: float, c: float, vol: float):
         """Update EMA, ATR, ROC from new OHLC bar."""
@@ -527,6 +532,9 @@ class StrategyEngine:
                 self.regime = Regime.EXHAUSTION
                 self.trend_before_exhaustion = self.direction  # Lock original trend
                 self.exhaustion_bar_count = 0
+                # First condition met — arm the pending-entry latch for one bar
+                if not self.in_position:
+                    self.pending_entry = True
                 return self.regime, None
 
             # Direction change while in trend → could be rapid reversal
@@ -535,11 +543,17 @@ class StrategyEngine:
                 if roc_zero_cross or S < self.S_weak:
                     self.regime = Regime.REVERSAL
                     self.direction = direction
+                    # First condition met — arm the pending-entry latch for one bar
+                    if not self.in_position:
+                        self.pending_entry = True
                     return self.regime, None
                 # EMA cross happened but momentum still OK — go to exhaustion first
                 self.regime = Regime.EXHAUSTION
                 self.trend_before_exhaustion = self.direction  # Lock original trend
                 self.exhaustion_bar_count = 0
+                # First condition met — arm the pending-entry latch for one bar
+                if not self.in_position:
+                    self.pending_entry = True
                 return self.regime, None
 
         # ─── C. EXHAUSTION → CONTINUATION / REVERSAL ────────────────────
@@ -549,24 +563,35 @@ class StrategyEngine:
             # Continuation after exhaustion: original trend resumes
             if self.spread_expanding and S > self.S_strong and not momentum_decay:
                 if direction == self.trend_before_exhaustion:
-                    # Same direction as original trend → CONTINUATION (with signal)
+                    # Same direction as original trend → CONTINUATION
                     self.regime = Regime.CONTINUATION
                     self.direction = direction
                     signal = None
                     if direction == Direction.UP:
-                        signal = Signal.BUY
+                        # BUY only if continuation is immediate (pending_entry set
+                        # on the prior bar) AND we are not already in a position
+                        if self.pending_entry and not self.in_position:
+                            signal = Signal.BUY
+                        # Always EXIT any open long if price is going down
                     elif direction == Direction.DOWN and self.in_position:
                         signal = Signal.EXIT
+                    # Consume the latch regardless — sequence is now resolved
+                    self.pending_entry = False
                     self.trend_start_price = c
                     self.trend_start_atr = self.atr_val or 0
                     self._start_new_profile(c)
                     self.exhaustion_bar_count = 0
                     return self.regime, signal
                 else:
-                    # Direction flipped during exhaustion → just recover to TREND
+                    # Direction flipped during exhaustion → recover to TREND, reset latch
+                    self.pending_entry = False
                     self.regime = Regime.TREND
                     self.exhaustion_bar_count = 0
                     return self.regime, None
+            else:
+                # Continuation did NOT fire this bar — if we had a pending latch
+                # from last bar, the back-to-back requirement is broken; reset it
+                self.pending_entry = False
 
             # Check for direction flip (EMA cross) relative to original trend
             direction_flipped = (direction != Direction.NONE and
@@ -587,6 +612,10 @@ class StrategyEngine:
                 self.prev_direction = self.trend_before_exhaustion
                 self.direction = direction if direction != Direction.NONE else self.direction
                 self.regime = Regime.REVERSAL
+                # Arm latch: reversal is the first signal; continuation must follow
+                # immediately on the next bar
+                if not self.in_position:
+                    self.pending_entry = True
                 return self.regime, None
 
             # Prolonged exhaustion → signal exit if in position
@@ -613,13 +642,19 @@ class StrategyEngine:
                 self.regime = Regime.CONTINUATION
                 self.direction = new_dir
                 # Direction-aware signals (long-only):
-                #   BUY  = continuing UP after reversing from a DOWN trend
+                #   BUY  = continuing UP after reversing from a DOWN trend,
+                #          but ONLY when the latch was armed on the previous bar
+                #          (reversal immediately preceding this continuation)
+                #          and we are not already in a position.
                 #   EXIT = continuing DOWN after reversing from an UP trend
                 if new_dir == Direction.UP and self.prev_direction == Direction.DOWN:
-                    signal = Signal.BUY
+                    if self.pending_entry and not self.in_position:
+                        signal = Signal.BUY
                 elif new_dir == Direction.DOWN and self.prev_direction == Direction.UP:
                     if self.in_position:
                         signal = Signal.EXIT
+                # Consume the latch — sequence resolved
+                self.pending_entry = False
                 # Transition to TREND with new direction
                 self.trend_start_price = c
                 self.trend_start_atr = self.atr_val or 0
@@ -627,6 +662,9 @@ class StrategyEngine:
                 self.exhaustion_bar_count = 0
                 # Move to TREND on next bar
                 return self.regime, signal
+
+            # Continuation did NOT fire this bar — back-to-back requirement broken
+            self.pending_entry = False
 
             # If momentum truly died, go back to exhaustion
             if S < self.S_noise and not roc_zero_cross and not momentum_decay:
@@ -707,6 +745,9 @@ class StrategyEngine:
         self.entry_price = 0.0
         self.trailing_stop = None
         self.position_direction = Direction.NONE
+        # Reset the entry latch so the two-signal sequence must start fresh
+        # after every closed trade.
+        self.pending_entry = False
 
     def update(
         self,

@@ -48,6 +48,7 @@ let volumeProfileOverlays = [];
 let markers = [];
 let lastRegime = "idle";
 let forwardTestStats = null;
+let pendingMarkerData = [];  // raw marker data awaiting market cap resolution
 
 const $ = id => document.getElementById(id);
 const mintInput   = $("mint-input");
@@ -678,24 +679,47 @@ function updateMarkers() {
   }
 }
 
-function addSignalMarker(time, signal, regimeLabel, price) {
+function addSignalMarker(time, signal, regimeLabel, mcapPrice, closedTrade) {
   if (signal === "buy") {
+    const priceLabel = mcapPrice ? ` @ ${formatMcap(mcapPrice)}` : "";
     markers.push({
       time,
       position: "belowBar",
       color: "#26a69a",
       shape: "arrowUp",
-      text: `BUY (${regimeLabel})`,
+      text: `BUY${priceLabel}`,
     });
   } else if (signal === "exit") {
+    const priceLabel = mcapPrice ? ` @ ${formatMcap(mcapPrice)}` : "";
+    let pnlLabel = "";
+    if (closedTrade && typeof closedTrade.pnl_pct === "number") {
+      const sign = closedTrade.pnl_pct >= 0 ? "+" : "";
+      pnlLabel = ` (${sign}${closedTrade.pnl_pct.toFixed(2)}%)`;
+    }
     markers.push({
       time,
       position: "aboveBar",
-      color: "#ff9800",
+      color: closedTrade && closedTrade.pnl_pct >= 0 ? "#26a69a" : "#ef5350",
       shape: "circle",
-      text: `EXIT (${regimeLabel})`,
+      text: `EXIT${priceLabel}${pnlLabel}`,
     });
   }
+}
+
+/**
+ * Once chartBaseMcap is known, convert any markers that were placed during
+ * the historical pass (when market cap wasn't available yet) and set them
+ * with proper price labels.
+ */
+function flushPendingMarkers() {
+  if (!pendingMarkerData.length || !chartBaseMcap) return;
+  markers = [];  // rebuild from scratch with correct prices
+  for (const m of pendingMarkerData) {
+    const mcapPrice = toMarketCapValue(m.rawPrice);
+    addSignalMarker(m.time, m.signal, m.regime, mcapPrice, m.closedTrade);
+  }
+  pendingMarkerData = [];
+  updateMarkers();
 }
 
 /* ── Process strategy results from historical data ───────────────────── */
@@ -736,9 +760,24 @@ function processHistoricalStrategy(results, candles) {
     // Regime history
     regimeHistory.push(r.regime || "idle");
 
-    // Markers
+    // Markers — store raw price; market cap may not be known yet
+    // (LIVE_ONLY_MARKETCAP defers chartBaseMcap set until first live tick)
     if (r.signal && r.signal !== "none") {
-      addSignalMarker(candle.time, r.signal, r.regime, candle.close);
+      const closedTrade = r.forward_test ? r.forward_test.closed_trade : null;
+      if (chartBaseMcap) {
+        // Market cap already set (non-live-only mode or token_info arrived first)
+        const mcapClose = toMarketCapValue(candle.close);
+        addSignalMarker(candle.time, r.signal, r.regime, mcapClose, closedTrade);
+      } else {
+        // Queue for later resolution
+        pendingMarkerData.push({
+          time: candle.time,
+          signal: r.signal,
+          regime: r.regime,
+          rawPrice: candle.close,
+          closedTrade,
+        });
+      }
     }
   }
 
@@ -762,6 +801,10 @@ function processHistoricalStrategy(results, candles) {
 
 function processLiveStrategy(result, candle) {
   if (!result) return;
+
+  // On the first live tick, chartBaseMcap is now known — flush any historical
+  // markers that were waiting for market cap conversion.
+  flushPendingMarkers();
 
   strategyResults.push(result);
 
@@ -788,7 +831,9 @@ function processLiveStrategy(result, candle) {
 
   // Markers
   if (result.signal && result.signal !== "none" && candle) {
-    addSignalMarker(candle.time, result.signal, result.regime, candle.close);
+    const mcapClose = toMarketCapValue(candle.close);
+    const closedTrade = result.forward_test ? result.forward_test.closed_trade : null;
+    addSignalMarker(candle.time, result.signal, result.regime, mcapClose, closedTrade);
     updateMarkers();
   }
 
@@ -821,6 +866,7 @@ function connect(mint, timeframe) {
   tradeFeed.innerHTML = "";
   strategyResults = [];
   markers = [];
+  pendingMarkerData = [];
   rocHistory = [];
   atrHistory = [];
   regimeHistory = [];
