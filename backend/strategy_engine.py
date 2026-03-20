@@ -4,18 +4,19 @@ Strategy Engine — Physics-based (Langevin dynamics) regime detection.
 Regimes:  IDLE → TREND → EXHAUSTION → REVERSAL → CONTINUATION → TREND …
 
 Observable proxies:
-  m   (momentum)       → ROC
+  m   (momentum)       → Kalman-filtered momentum (m_hat)
   m   (trend dir)      → EMA(3) vs EMA(7)
   γ   (damping)        → EMA spread contraction rate
   σ   (noise)          → ATR
   U(p)(potential)      → Volume profile nodes
   external force       → Delta volume
 
-Core signal:  S = |ROC| / ATR
+Core signal:  S = |m_hat| / ATR
 """
 
 from __future__ import annotations
 import math
+import numpy as np
 from enum import Enum, auto
 from dataclasses import dataclass, field
 from typing import Optional
@@ -192,6 +193,133 @@ def ema_step(prev: float, value: float, period: int) -> float:
     return value * k + prev * (1 - k)
 
 
+# ── Kalman Filter for Momentum Estimation ────────────────────────────────────
+
+class KalmanFilterMomentum:
+    """
+    2-state Kalman filter for price + momentum estimation.
+
+    State vector:  x = [p, m]^T
+      p = price
+      m = momentum (dp/dt)
+
+    State transition (dt = 1):
+      p_t = p_{t-1} + m_{t-1}
+      m_t = m_{t-1} * (1 - gamma)
+
+    Observation:
+      z_t = p_t  (we observe price only)
+    """
+
+    def __init__(self, gamma: float = 0.1, q_price: float = 0.01,
+                 q_momentum: float = 0.05, r_measure: float = 1.0):
+        """
+        Parameters
+        ----------
+        gamma : float
+            Momentum decay factor (0.05–0.2 typical). Higher = faster decay.
+        q_price : float
+            Process noise for price state.
+        q_momentum : float
+            Process noise for momentum state.
+        r_measure : float
+            Measurement noise variance. Will be auto-calibrated from
+            short-term price variance if `auto_r=True` in update.
+        """
+        self.gamma = gamma
+        self.dt = 1.0
+
+        # State transition matrix F
+        decay = 1.0 - gamma * self.dt
+        self.F = np.array([
+            [1.0, self.dt],
+            [0.0, decay],
+        ])
+
+        # Observation matrix H  (we observe price only)
+        self.H = np.array([[1.0, 0.0]])
+
+        # Process noise covariance Q
+        self.Q = np.array([
+            [q_price, 0.0],
+            [0.0, q_momentum],
+        ])
+
+        # Measurement noise covariance R
+        self.R = np.array([[r_measure]])
+
+        # State estimate & covariance (initialised on first update)
+        self.x: Optional[np.ndarray] = None      # [p, m]
+        self.P: Optional[np.ndarray] = None       # 2×2 covariance
+
+        # Short-term variance tracker for auto-R calibration
+        self._price_buf: list[float] = []
+        self._var_window = 10
+
+        self.initialised = False
+
+    def _auto_r(self, price: float):
+        """Update measurement noise R from recent price variance."""
+        self._price_buf.append(price)
+        if len(self._price_buf) > self._var_window:
+            self._price_buf.pop(0)
+        if len(self._price_buf) >= 3:
+            var = float(np.var(self._price_buf))
+            if var > 0:
+                self.R[0, 0] = var
+
+    def update(self, price: float) -> tuple[float, float]:
+        """
+        Feed a new price observation. Returns (p_hat, m_hat).
+
+        Parameters
+        ----------
+        price : float
+            Latest close / tick price.
+
+        Returns
+        -------
+        p_hat : float
+            Filtered price estimate.
+        m_hat : float
+            Filtered momentum estimate (replaces ROC).
+        """
+        # Auto-calibrate measurement noise
+        self._auto_r(price)
+
+        z = np.array([[price]])
+
+        if not self.initialised:
+            self.x = np.array([[price], [0.0]])
+            self.P = np.eye(2) * 1.0
+            self.initialised = True
+            return float(self.x[0, 0]), float(self.x[1, 0])
+
+        # ── Predict ──────────────────────────────────────────────────────
+        x_pred = self.F @ self.x
+        P_pred = self.F @ self.P @ self.F.T + self.Q
+
+        # ── Update ───────────────────────────────────────────────────────
+        y = z - self.H @ x_pred                        # Innovation
+        S = self.H @ P_pred @ self.H.T + self.R        # Innovation cov
+        K = P_pred @ self.H.T @ np.linalg.inv(S)       # Kalman gain
+
+        self.x = x_pred + K @ y
+        I = np.eye(2)
+        self.P = (I - K @ self.H) @ P_pred
+
+        p_hat = float(self.x[0, 0])
+        m_hat = float(self.x[1, 0])
+        return p_hat, m_hat
+
+    def reset(self):
+        """Reset filter state."""
+        self.x = None
+        self.P = None
+        self.initialised = False
+        self._price_buf.clear()
+
+
 # ── Strategy Engine ──────────────────────────────────────────────────────────
 
 class StrategyEngine:
@@ -214,11 +342,12 @@ class StrategyEngine:
         signal_noise: float = 1.0,
         exhaustion_bars_limit: int = 7,
         delta_threshold: float = 0.3,
+        kalman_gamma: float = 0.1,
     ):
         self.ema_fast_p = ema_fast
         self.ema_slow_p = ema_slow
         self.atr_period = atr_period
-        self.roc_period = roc_period
+        self.roc_period = roc_period      # Kept for backward compat; unused
         self.warmup = warmup
         self.S_strong = signal_strong
         self.S_weak = signal_weak
@@ -236,8 +365,12 @@ class StrategyEngine:
         self.ema_fast_val: Optional[float] = None
         self.ema_slow_val: Optional[float] = None
         self.atr_val: Optional[float] = None
-        self.roc_val: float = 0.0
-        self.prev_roc_val: float = 0.0
+        self.m_hat: float = 0.0           # Kalman-filtered momentum (replaces ROC)
+        self.prev_m_hat: float = 0.0      # Previous m_hat (replaces prev_roc)
+        self.p_hat: float = 0.0           # Kalman-filtered price estimate
+
+        # Kalman filter
+        self.kalman = KalmanFilterMomentum(gamma=kalman_gamma)
         self.signal_strength: float = 0.0
 
         # Price history for ATR / ROC
@@ -297,23 +430,19 @@ class StrategyEngine:
         else:
             self.atr_val = ema_step(self.atr_val, tr, self.atr_period)
 
-        # ROC
-        self.prev_roc_val = self.roc_val
-        if len(self.close_history) > self.roc_period:
-            prev_price = self.close_history[-(self.roc_period + 1)]
-            if prev_price > 0:
-                self.roc_val = (c - prev_price) / prev_price * 100
-            else:
-                self.roc_val = 0.0
-        else:
-            self.roc_val = 0.0
+        # Kalman-filtered momentum (replaces ROC)
+        self.prev_m_hat = self.m_hat
+        self.p_hat, self.m_hat = self.kalman.update(c)
 
-        # Signal strength S = |ROC| / ATR  (normalised)
+        # Signal strength S = |m_hat_pct * roc_period| / ATR_pct  (normalised)
+        # m_hat is instantaneous velocity (per-bar); the old ROC accumulated
+        # over roc_period bars, so we scale by roc_period to keep existing
+        # thresholds (S_strong, S_weak, S_noise) valid without modification.
         if self.atr_val and self.atr_val > 0 and c > 0:
-            # Normalize ATR as percentage of price
+            m_hat_pct = (self.m_hat / c) * 100 * self.roc_period
             atr_pct = (self.atr_val / c) * 100
             if atr_pct > 0:
-                self.signal_strength = abs(self.roc_val) / atr_pct
+                self.signal_strength = abs(m_hat_pct) / atr_pct
             else:
                 self.signal_strength = 0.0
         else:
@@ -333,9 +462,9 @@ class StrategyEngine:
         signal = None
 
         S = self.signal_strength
-        roc_decreasing = abs(self.roc_val) < abs(self.prev_roc_val)
-        roc_zero_cross = (self.roc_val * self.prev_roc_val) < 0 if self.prev_roc_val != 0 else False
-        momentum_decay = (abs(self.roc_val) - abs(self.prev_roc_val)) < 0  # D < 0
+        roc_decreasing = abs(self.m_hat) < abs(self.prev_m_hat)
+        roc_zero_cross = (self.m_hat * self.prev_m_hat) < 0 if self.prev_m_hat != 0 else False
+        momentum_decay = (abs(self.m_hat) - abs(self.prev_m_hat)) < 0  # D < 0
         atr_expanding = False
         if self.trend_start_atr > 0 and self.atr_val:
             atr_expanding = self.atr_val > self.trend_start_atr * 1.1
@@ -616,7 +745,9 @@ class StrategyEngine:
                 "ema_fast": self.ema_fast_val,
                 "ema_slow": self.ema_slow_val,
                 "atr": self.atr_val,
-                "roc": self.roc_val,
+                "roc": self.m_hat,              # Kalman momentum (drop-in for ROC)
+                "m_hat": self.m_hat,             # Explicit alias
+                "p_hat": self.p_hat,             # Kalman filtered price
                 "signal_strength": self.signal_strength,
                 "ema_spread": self.ema_spread,
                 "spread_expanding": self.spread_expanding,
