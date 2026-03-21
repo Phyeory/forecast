@@ -86,7 +86,7 @@ async def chart_ws(
         buy_size_sol=0.1,
         priority_fee=0.0001,
         bribe_fee=0.00001,
-        slippage_pct=10.0,
+        slippage_pct=1.0,
     )
 
     async def send(obj: dict) -> bool:

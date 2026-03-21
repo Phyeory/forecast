@@ -8,6 +8,16 @@ Settings:
   - Bribe fee: 0.00001 SOL
   - Slippage: 10%
   - Trailing stop: +5% profit → lock stop at entry +5%
+
+Execution model:
+  - Signals from candle N are executed at the OPEN of candle N+1 (1-bar delay).
+  - entry_price / exit_price stored in Trade are the RAW candle open prices
+    (no slippage baked in).  This makes them directly comparable to what you
+    see on the chart.
+  - Slippage cost is deducted from the SOL proceeds as an explicit fee so
+    that PnL in SOL is still realistic.
+  - pnl_pct reflects the raw price move: (exit_price - entry_price) / entry_price
+    minus the round-trip slippage percentage.
 """
 
 from __future__ import annotations
@@ -19,15 +29,16 @@ from strategy_engine import StrategyEngine, Signal, Direction, Regime
 @dataclass
 class Trade:
     entry_time: int
-    entry_price: float
-    size_sol: float
-    size_tokens: float
+    entry_price: float          # RAW candle open — what you see on the chart
+    size_sol: float             # SOL committed to the trade
+    size_tokens: float          # tokens bought (accounting for slippage)
     exit_time: Optional[int] = None
-    exit_price: Optional[float] = None
+    exit_price: Optional[float] = None   # RAW candle open at exit
     pnl_sol: float = 0.0
     pnl_pct: float = 0.0
     exit_reason: str = ""
-    fees_paid: float = 0.0
+    fees_paid: float = 0.0      # priority + bribe fees (not slippage)
+    slippage_cost_sol: float = 0.0  # total SOL lost to slippage both ways
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -62,7 +73,7 @@ class ForwardTester:
         buy_size_sol: float = 0.1,
         priority_fee: float = 0.0001,
         bribe_fee: float = 0.00001,
-        slippage_pct: float = 10.0,
+        slippage_pct: float = 1.0,
     ):
         self.engine = StrategyEngine()
         self.balance = starting_balance
@@ -81,72 +92,112 @@ class ForwardTester:
         self.trade_history: list[Trade] = []
         self.signals_log: list[dict] = []
 
+        # Pending signals: executed on the next candle's open (1-bar delay)
+        self._pending_buy: bool = False
+        self._pending_exit: bool = False
+        self._pending_exit_reason: str = ""
+
     @property
     def total_fees_per_trade(self) -> float:
         return self.priority_fee + self.bribe_fee
 
-    def _apply_slippage(self, price: float, is_buy: bool) -> float:
-        """Apply slippage to execution price."""
+    def _slippage_cost_buy(self, raw_price: float, trade_size_sol: float) -> float:
+        """
+        SOL lost to slippage on a buy.
+        We pay raw_price * (1 + slip) effective price instead of raw_price.
+        Extra cost = trade_size_sol * slip / (1 + slip)  ≈ trade_size_sol * slip
+        (exact: we get fewer tokens than ideal, so effective cost = trade_size_sol * slip/(1+slip))
+        """
         slip = self.slippage_pct / 100.0
-        if is_buy:
-            return price * (1 + slip)  # Pay more when buying
-        else:
-            return price * (1 - slip)  # Get less when selling
+        # tokens we'd get at perfect price vs slipped price
+        # cost is expressed as SOL we didn't get back
+        return trade_size_sol * slip / (1.0 + slip)
 
-    def _open_long(self, price: float, time: int) -> Optional[Trade]:
-        """Open a long position (buy tokens with SOL)."""
+    def _slippage_cost_sell(self, raw_price: float, size_tokens: float) -> float:
+        """
+        SOL lost to slippage on a sell.
+        We receive raw_price * (1 - slip) instead of raw_price per token.
+        """
+        slip = self.slippage_pct / 100.0
+        return raw_price * size_tokens * slip
+
+    def _open_long(self, raw_price: float, time: int) -> Optional[Trade]:
+        """
+        Open a long position.
+        raw_price = candle open (what shows on the chart).
+        Slippage is deducted as a cost but does NOT inflate the stored entry_price.
+        """
         if self.current_trade is not None:
-            return None  # Already in a trade
+            return None
+        if raw_price <= 0:
+            return None
 
         fees = self.total_fees_per_trade
         trade_size = min(self.buy_size_sol, self.balance - fees)
         if trade_size <= 0:
-            return None  # Not enough balance
+            return None
 
-        exec_price = self._apply_slippage(price, is_buy=True)
+        slip = self.slippage_pct / 100.0
+        exec_price = raw_price * (1.0 + slip)   # actual fill price (internal)
+
+        # Tokens received at slipped price
+        tokens = trade_size / exec_price
+
+        # Slippage cost in SOL = difference between ideal tokens and actual tokens, valued at raw price
+        ideal_tokens = trade_size / raw_price
+        slippage_cost = (ideal_tokens - tokens) * raw_price  # ≈ trade_size * slip/(1+slip)
 
         # Deduct trade size + fees from balance
         self.balance -= (trade_size + fees)
 
-        # Calculate tokens bought
-        tokens = trade_size / exec_price if exec_price > 0 else 0
-
         trade = Trade(
             entry_time=time,
-            entry_price=exec_price,
+            entry_price=raw_price,          # CHART price — no slippage baked in
             size_sol=trade_size,
             size_tokens=tokens,
             fees_paid=fees,
+            slippage_cost_sol=slippage_cost,
         )
         self.current_trade = trade
-        self.engine.notify_trade_opened(exec_price, Direction.UP)
+        self.engine.notify_trade_opened(raw_price, Direction.UP)
         return trade
 
-    def _close_long(self, price: float, time: int, reason: str = "") -> Optional[Trade]:
-        """Close long position (sell tokens back to SOL)."""
+    def _close_long(self, raw_price: float, time: int, reason: str = "") -> Optional[Trade]:
+        """
+        Close long position.
+        raw_price = candle open at exit (what shows on the chart).
+        """
         if self.current_trade is None:
             return None
 
         trade = self.current_trade
         fees = self.total_fees_per_trade
-        exec_price = self._apply_slippage(price, is_buy=False)
+        slip = self.slippage_pct / 100.0
+        exec_price = raw_price * (1.0 - slip)   # actual fill price (internal)
 
-        # Proceeds = tokens * sell price
+        # Proceeds at slipped price
         proceeds = trade.size_tokens * exec_price
+
+        # Slippage cost on exit
+        ideal_proceeds = trade.size_tokens * raw_price
+        exit_slippage_cost = ideal_proceeds - proceeds
 
         # Deduct exit fees
         proceeds -= fees
 
-        # PnL
+        # PnL in SOL: actual proceeds vs SOL we put in
         pnl = proceeds - trade.size_sol
-        pnl_pct = (pnl / trade.size_sol * 100) if trade.size_sol > 0 else 0
+
+        # PnL % exactly matches the SOL profit/loss
+        pnl_pct = (pnl / trade.size_sol * 100.0) if trade.size_sol > 0 else 0.0
 
         trade.exit_time = time
-        trade.exit_price = exec_price
+        trade.exit_price = raw_price            # CHART price — no slippage baked in
         trade.pnl_sol = pnl
         trade.pnl_pct = pnl_pct
         trade.exit_reason = reason
         trade.fees_paid += fees
+        trade.slippage_cost_sol += exit_slippage_cost
 
         # Update balance
         self.balance += proceeds
@@ -194,57 +245,87 @@ class ForwardTester:
         """
         Process one candle through strategy engine + forward tester.
         LONG-ONLY: only BUY to enter, EXIT to close.
-        """
-        # Run strategy engine
-        result = self.engine.update(time, o, h, l, c, volume)
-        signal = result["signal"]
-        regime = result["regime"]
 
+        Execution model:
+          1. Any pending signal from the PREVIOUS bar is executed at THIS
+             candle's open price.  entry_price / exit_price will equal the
+             open visible on the chart.
+          2. The strategy engine evaluates THIS full candle and may queue
+             a new pending signal for the NEXT candle.
+        """
         trade_action = None
         closed_trade = None
         opened_trade = None
 
-        # Handle signals — LONG ONLY
-        if signal == Signal.BUY.value:
-            if self.current_trade is None:
-                opened_trade = self._open_long(c, time)
-                if opened_trade:
-                    trade_action = "buy"
+        # ── Step 1: Execute pending signal from the previous bar ──────────
+        if self._pending_buy and self.current_trade is None:
+            opened_trade = self._open_long(o, time)
+            if opened_trade:
+                trade_action = "buy"
+            self._pending_buy = False
 
-        elif signal == Signal.EXIT.value:
-            if self.current_trade is not None:
-                reason = "exit_signal"
-                if regime == Regime.REVERSAL.value:
-                    reason = "reversal_exit"
-                elif regime == Regime.EXHAUSTION.value:
-                    reason = "exhaustion_exit"
-                closed_trade = self._close_long(c, time, reason)
-                trade_action = "exit"
+        elif self._pending_exit and self.current_trade is not None:
+            closed_trade = self._close_long(o, time, self._pending_exit_reason)
+            trade_action = "exit"
+            self._pending_exit = False
+            self._pending_exit_reason = ""
 
-        # Calculate unrealized PnL (long only)
+        # Guard: a just-opened trade shouldn't also be pending exit
+        if opened_trade and self._pending_exit:
+            self._pending_exit = False
+            self._pending_exit_reason = ""
+
+        # ── Step 2: Run strategy engine on this full candle ───────────────
+        result = self.engine.update(time, o, h, l, c, volume)
+        signal = result["signal"]
+        regime = result["regime"]
+
+        # ── Step 3: Queue signal for the NEXT candle's open ───────────────
+        if signal == Signal.BUY.value and self.current_trade is None and not self._pending_buy:
+            self._pending_buy = True
+            self._pending_exit = False
+
+        elif signal == Signal.EXIT.value and self.current_trade is not None:
+            reason = "exit_signal"
+            if regime == Regime.REVERSAL.value:
+                reason = "reversal_exit"
+            elif regime == Regime.EXHAUSTION.value:
+                reason = "exhaustion_exit"
+            self._pending_exit = True
+            self._pending_exit_reason = reason
+            self._pending_buy = False
+
+        # ── Step 4: Unrealized PnL using raw prices (matches chart) ───────
         unrealized_pnl = 0.0
         unrealized_pnl_pct = 0.0
         if self.current_trade is not None:
-            unrealized_pnl = (
-                (c - self.current_trade.entry_price) * self.current_trade.size_tokens
-            )
+            # Raw price move vs what we'd net after exit slippage + fees
+            slip = self.slippage_pct / 100.0
+            hypothetical_proceeds = self.current_trade.size_tokens * c * (1.0 - slip)
+            hypothetical_proceeds -= self.total_fees_per_trade
+            unrealized_pnl = hypothetical_proceeds - self.current_trade.size_sol
             if self.current_trade.entry_price > 0:
+                # Show % as: how much has price moved since entry (raw)
                 unrealized_pnl_pct = (
                     (c - self.current_trade.entry_price)
                     / self.current_trade.entry_price
                     * 100
                 )
 
-        # Log signal
+        # ── Log executed action ───────────────────────────────────────────
         if trade_action:
+            display_price = (
+                opened_trade.entry_price if opened_trade else
+                (closed_trade.exit_price if closed_trade else o)
+            )
             self.signals_log.append({
                 "time": time,
                 "action": trade_action,
-                "price": c,
+                "price": display_price,
                 "regime": regime,
             })
 
-        # Build output
+        # ── Build output ──────────────────────────────────────────────────
         output = {
             **result,
             "forward_test": {

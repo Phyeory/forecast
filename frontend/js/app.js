@@ -760,21 +760,23 @@ function processHistoricalStrategy(results, candles) {
     // Regime history
     regimeHistory.push(r.regime || "idle");
 
-    // Markers — store raw price; market cap may not be known yet
-    // (LIVE_ONLY_MARKETCAP defers chartBaseMcap set until first live tick)
-    if (r.signal && r.signal !== "none") {
-      const closedTrade = r.forward_test ? r.forward_test.closed_trade : null;
+    // Markers — execution is at the OPEN of the candle (1-bar delay model).
+    // Use candle.open for the label so it matches what's visible on the chart.
+    if (r.forward_test && (r.forward_test.trade_action === "buy" || r.forward_test.trade_action === "exit")) {
+      const ft = r.forward_test;
+      const signal = ft.trade_action;
+      const closedTrade = ft.closed_trade;
+      // candle.open is the execution bar's open — the visible price on the chart
+      const rawExecPrice = candle?.open ?? candle?.close;
       if (chartBaseMcap) {
-        // Market cap already set (non-live-only mode or token_info arrived first)
-        const mcapClose = toMarketCapValue(candle.close);
-        addSignalMarker(candle.time, r.signal, r.regime, mcapClose, closedTrade);
+        const mcapExecPrice = toMarketCapValue(rawExecPrice);
+        addSignalMarker(candle.time, signal, r.regime, mcapExecPrice, closedTrade);
       } else {
-        // Queue for later resolution
         pendingMarkerData.push({
           time: candle.time,
-          signal: r.signal,
+          signal,
           regime: r.regime,
-          rawPrice: candle.close,
+          rawPrice: rawExecPrice,
           closedTrade,
         });
       }
@@ -799,7 +801,7 @@ function processHistoricalStrategy(results, candles) {
 
 /* ── Process live strategy result ────────────────────────────────────── */
 
-function processLiveStrategy(result, candle) {
+function processLiveStrategy(result, candle, mcapCandle) {
   if (!result) return;
 
   // On the first live tick, chartBaseMcap is now known — flush any historical
@@ -829,12 +831,22 @@ function processLiveStrategy(result, candle) {
   regimeHistory.push(result.regime || "idle");
   if (regimeHistory.length > 300) regimeHistory.shift();
 
-  // Markers
-  if (result.signal && result.signal !== "none" && candle) {
-    const mcapClose = toMarketCapValue(candle.close);
-    const closedTrade = result.forward_test ? result.forward_test.closed_trade : null;
-    addSignalMarker(candle.time, result.signal, result.regime, mcapClose, closedTrade);
-    updateMarkers();
+  // Markers — use mcapCandle.open for the EXACT chart Y-axis alignment.
+  // Execution happens at next-bar open; entry_price/exit_price equal the open.
+  if (result.forward_test && mcapCandle) {
+    const ft = result.forward_test;
+    if (ft.trade_action === "buy" || ft.trade_action === "exit") {
+      const execPrice = mcapCandle.open;
+      const fallback = mcapCandle.close;
+      addSignalMarker(
+        mcapCandle.time,
+        ft.trade_action,
+        result.regime,
+        execPrice || fallback,
+        ft.closed_trade
+      );
+      updateMarkers();
+    }
   }
 
   // Re-render overlays
@@ -1019,7 +1031,7 @@ function connect(mint, timeframe) {
 
       // Process live strategy
       if (msg.strategy) {
-        processLiveStrategy(msg.strategy, msg.candle);
+        processLiveStrategy(msg.strategy, msg.candle, c);
       }
 
       chart.timeScale().scrollToRealTime();
