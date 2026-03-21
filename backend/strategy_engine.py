@@ -340,7 +340,7 @@ class StrategyEngine:
         signal_strong: float = 2.0,
         signal_weak: float = 1.2,
         signal_noise: float = 1.0,
-        exhaustion_bars_limit: int = 14,
+        exhaustion_bars_limit: int = 7,
         delta_threshold: float = 0.3,
         kalman_gamma: float = 0.1,
         min_trend_bars: int = 3,

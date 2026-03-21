@@ -679,8 +679,11 @@ function updateMarkers() {
   }
 }
 
+let lastBuyMcapPrice = null;
+
 function addSignalMarker(time, signal, regimeLabel, mcapPrice, closedTrade) {
   if (signal === "buy") {
+    lastBuyMcapPrice = mcapPrice;
     const priceLabel = mcapPrice ? ` @ ${formatMcap(mcapPrice)}` : "";
     markers.push({
       time,
@@ -692,17 +695,29 @@ function addSignalMarker(time, signal, regimeLabel, mcapPrice, closedTrade) {
   } else if (signal === "exit") {
     const priceLabel = mcapPrice ? ` @ ${formatMcap(mcapPrice)}` : "";
     let pnlLabel = "";
-    if (closedTrade && typeof closedTrade.pnl_pct === "number") {
+    let finalColor = "#ef5350";
+    
+    // Give precedence to visual marker difference so the math checks out seamlessly
+    if (lastBuyMcapPrice && mcapPrice) {
+      const pnl = ((mcapPrice - lastBuyMcapPrice) / lastBuyMcapPrice) * 100;
+      const sign = pnl >= 0 ? "+" : "";
+      pnlLabel = ` (${sign}${pnl.toFixed(2)}%)`;
+      finalColor = pnl >= 0 ? "#26a69a" : "#ef5350";
+    } else if (closedTrade && typeof closedTrade.pnl_pct === "number") {
       const sign = closedTrade.pnl_pct >= 0 ? "+" : "";
       pnlLabel = ` (${sign}${closedTrade.pnl_pct.toFixed(2)}%)`;
+      finalColor = closedTrade.pnl_pct >= 0 ? "#26a69a" : "#ef5350";
     }
+
     markers.push({
       time,
       position: "aboveBar",
-      color: closedTrade && closedTrade.pnl_pct >= 0 ? "#26a69a" : "#ef5350",
+      color: finalColor,
       shape: "circle",
       text: `EXIT${priceLabel}${pnlLabel}`,
     });
+    // Reset tracker
+    lastBuyMcapPrice = null;
   }
 }
 
@@ -714,6 +729,7 @@ function addSignalMarker(time, signal, regimeLabel, mcapPrice, closedTrade) {
 function flushPendingMarkers() {
   if (!pendingMarkerData.length || !chartBaseMcap) return;
   markers = [];  // rebuild from scratch with correct prices
+  lastBuyMcapPrice = null; // reset before replaying
   for (const m of pendingMarkerData) {
     const mcapPrice = toMarketCapValue(m.rawPrice);
     addSignalMarker(m.time, m.signal, m.regime, mcapPrice, m.closedTrade);
@@ -878,6 +894,7 @@ function connect(mint, timeframe) {
   tradeFeed.innerHTML = "";
   strategyResults = [];
   markers = [];
+  lastBuyMcapPrice = null;
   pendingMarkerData = [];
   rocHistory = [];
   atrHistory = [];

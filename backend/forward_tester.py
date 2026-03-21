@@ -17,7 +17,7 @@ Execution model:
   - Slippage cost is deducted from the SOL proceeds as an explicit fee so
     that PnL in SOL is still realistic.
   - pnl_pct reflects the raw price move: (exit_price - entry_price) / entry_price
-    minus the round-trip slippage percentage.
+    so the percentage shown on the chart exactly matches visual price movement.
 """
 
 from __future__ import annotations
@@ -171,6 +171,7 @@ class ForwardTester:
             return None
 
         trade = self.current_trade
+        assert trade is not None
         fees = self.total_fees_per_trade
         slip = self.slippage_pct / 100.0
         exec_price = raw_price * (1.0 - slip)   # actual fill price (internal)
@@ -185,11 +186,12 @@ class ForwardTester:
         # Deduct exit fees
         proceeds -= fees
 
-        # PnL in SOL: actual proceeds vs SOL we put in
+        # PnL in SOL: actual proceeds vs SOL we put in (includes slippage & fees)
         pnl = proceeds - trade.size_sol
 
-        # PnL % exactly matches the SOL profit/loss
-        pnl_pct = (pnl / trade.size_sol * 100.0) if trade.size_sol > 0 else 0.0
+        # PnL % exactly matches the raw chart move, bypassing slippage/fees
+        # so chart labels accurately reflect the visual price change.
+        pnl_pct = (raw_price - trade.entry_price) / trade.entry_price * 100.0 if trade.entry_price > 0 else 0.0
 
         trade.exit_time = time
         trade.exit_price = raw_price            # CHART price — no slippage baked in
