@@ -343,6 +343,11 @@ class StrategyEngine:
         exhaustion_bars_limit: int = 14,
         delta_threshold: float = 0.3,
         kalman_gamma: float = 0.1,
+        min_trend_bars: int = 3,
+        reversal_confirm_bars: int = 2,
+        chop_atr_pct: float = 0.5,
+        chop_spread_pct: float = 0.15,
+        reversal_exit_confirm_bars: int = 2,
     ):
         self.ema_fast_p = ema_fast
         self.ema_slow_p = ema_slow
@@ -354,6 +359,11 @@ class StrategyEngine:
         self.S_noise = signal_noise
         self.exhaustion_bars_limit = exhaustion_bars_limit
         self.delta_threshold = delta_threshold
+        self.min_trend_bars = min_trend_bars
+        self.reversal_confirm_bars = reversal_confirm_bars
+        self.chop_atr_pct = chop_atr_pct
+        self.chop_spread_pct = chop_spread_pct
+        self.reversal_exit_confirm_bars = reversal_exit_confirm_bars
 
         # State
         self.bar_count = 0
@@ -389,6 +399,14 @@ class StrategyEngine:
         self.trend_start_atr: float = 0.0
         self.trend_start_delta: float = 0.0
         self.exhaustion_bar_count: int = 0
+        self.trend_bar_count: int = 0     # Bars spent in current TREND regime
+
+        # Reversal confirmation counter — how many consecutive bars
+        # the reversal conditions have been met before committing.
+        self.reversal_confirm_count: int = 0
+
+        # Reversal regime bar counter — how many bars we've been in REVERSAL.
+        self.reversal_bar_count: int = 0
 
         # Volume profiles (list of completed profiles + current)
         self.volume_profiles: list[VolumeProfile] = []
@@ -462,6 +480,19 @@ class StrategyEngine:
                 return Direction.DOWN
         return Direction.NONE
 
+    def _is_chop_zone(self, c: float) -> bool:
+        """Detect consolidation / chop — ATR tight + EMA spread tight.
+
+        When price is chopping sideways, both ATR as a percentage of price
+        is small AND the EMA spread relative to price is tiny.  In this
+        zone we raise all thresholds to avoid false regime transitions.
+        """
+        if not self.atr_val or c <= 0:
+            return False
+        atr_pct = ((self.atr_val or 0.0) / c) * 100
+        spread_pct = (abs(self.ema_spread) / c) * 100 if self.ema_spread else 0.0
+        return atr_pct < self.chop_atr_pct and spread_pct < self.chop_spread_pct
+
     def _detect_regime(self, c: float) -> tuple[Regime, Optional[Signal]]:
         """State machine for regime detection."""
         direction = self._detect_direction()
@@ -474,6 +505,9 @@ class StrategyEngine:
         atr_expanding = False
         if self.trend_start_atr > 0 and self.atr_val:
             atr_expanding = self.atr_val > self.trend_start_atr * 1.1
+
+        # Consolidation / chop detection
+        in_chop = self._is_chop_zone(c)
 
         # Profile checks
         in_hvn_current = False
@@ -512,12 +546,21 @@ class StrategyEngine:
                 self.trend_start_atr = self.atr_val or 0
                 self.trend_start_delta = self.current_profile.cumulative_delta if self.current_profile else 0
                 self.exhaustion_bar_count = 0
+                self.trend_bar_count = 0
                 # Start new volume profile
                 self._start_new_profile(c)
                 return self.regime, None
 
         # ─── B. TREND → EXHAUSTION ────────────────────────────────────────
         elif self.regime == Regime.TREND:
+            self.trend_bar_count += 1
+
+            # Guard: don't allow exhaustion transition until trend has
+            # persisted for a minimum number of bars. This prevents
+            # rapid TREND→EXHAUSTION→REVERSAL cycling from EMA noise.
+            if self.trend_bar_count < self.min_trend_bars:
+                return self.regime, None
+
             # Check for exhaustion conditions
             spread_shrinking = not self.spread_expanding
             exhaust_conds = [
@@ -528,10 +571,14 @@ class StrategyEngine:
             ]
             met = sum(1 for x in exhaust_conds if x)
 
-            if met >= 3:
+            # In chop zones, require ALL 4 conditions (stricter)
+            exhaust_threshold = 4 if in_chop else 3
+
+            if met >= exhaust_threshold:
                 self.regime = Regime.EXHAUSTION
                 self.trend_before_exhaustion = self.direction  # Lock original trend
                 self.exhaustion_bar_count = 0
+                self.reversal_confirm_count = 0
                 # First condition met — arm the pending-entry latch for one bar
                 if not self.in_position:
                     self.pending_entry = True
@@ -543,6 +590,7 @@ class StrategyEngine:
                 if roc_zero_cross or S < self.S_weak:
                     self.regime = Regime.REVERSAL
                     self.direction = direction
+                    self.reversal_bar_count = 0
                     # First condition met — arm the pending-entry latch for one bar
                     if not self.in_position:
                         self.pending_entry = True
@@ -551,6 +599,7 @@ class StrategyEngine:
                 self.regime = Regime.EXHAUSTION
                 self.trend_before_exhaustion = self.direction  # Lock original trend
                 self.exhaustion_bar_count = 0
+                self.reversal_confirm_count = 0
                 # First condition met — arm the pending-entry latch for one bar
                 if not self.in_position:
                     self.pending_entry = True
@@ -607,16 +656,28 @@ class StrategyEngine:
             ]
             rev_met = sum(1 for x in rev_conds if x)
 
-            if rev_met >= 3:
-                # Use the locked trend direction, not the drifted self.direction
-                self.prev_direction = self.trend_before_exhaustion
-                self.direction = direction if direction != Direction.NONE else self.direction
-                self.regime = Regime.REVERSAL
-                # Arm latch: reversal is the first signal; continuation must follow
-                # immediately on the next bar
-                if not self.in_position:
-                    self.pending_entry = True
-                return self.regime, None
+            # In chop zones, require 4/5 conditions (much stricter)
+            rev_threshold = 4 if in_chop else 3
+
+            if rev_met >= rev_threshold:
+                # Reversal must be confirmed for N consecutive bars
+                # to avoid single-bar noise flips during consolidation.
+                self.reversal_confirm_count += 1
+                if self.reversal_confirm_count >= self.reversal_confirm_bars:
+                    # Use the locked trend direction, not the drifted self.direction
+                    self.prev_direction = self.trend_before_exhaustion
+                    self.direction = direction if direction != Direction.NONE else self.direction
+                    self.regime = Regime.REVERSAL
+                    self.reversal_bar_count = 0
+                    self.reversal_confirm_count = 0
+                    # Arm latch: reversal is the first signal; continuation must follow
+                    # immediately on the next bar
+                    if not self.in_position:
+                        self.pending_entry = True
+                    return self.regime, None
+            else:
+                # Conditions not met this bar — reset the confirmation streak
+                self.reversal_confirm_count = 0
 
             # Prolonged exhaustion → signal exit if in position
             if self.exhaustion_bar_count >= self.exhaustion_bars_limit:
@@ -625,6 +686,7 @@ class StrategyEngine:
 
         # ─── D. REVERSAL → CONTINUATION / back to EXHAUSTION ─────────────
         elif self.regime == Regime.REVERSAL:
+            self.reversal_bar_count += 1
             new_dir = self._detect_direction()
 
             # Check continuation conditions
@@ -660,6 +722,7 @@ class StrategyEngine:
                 self.trend_start_atr = self.atr_val or 0
                 self._start_new_profile(c)
                 self.exhaustion_bar_count = 0
+                self.trend_bar_count = 0
                 # Move to TREND on next bar
                 return self.regime, signal
 
@@ -671,11 +734,13 @@ class StrategyEngine:
                 self.regime = Regime.EXHAUSTION
                 self.trend_before_exhaustion = self.prev_direction  # Original trend before reversal
                 self.exhaustion_bar_count = 0
+                self.reversal_confirm_count = 0
                 return self.regime, None
 
         # ─── E. CONTINUATION → TREND ─────────────────────────────────────
         elif self.regime == Regime.CONTINUATION:
             self.regime = Regime.TREND
+            self.trend_bar_count = 0
             return self.regime, None
 
         # Update direction tracking
@@ -689,9 +754,11 @@ class StrategyEngine:
         """Check exit conditions for an open position.
 
         Exit rules:
-          1. Trailing stop loss (profit >= 5% -> lock stop at +5%)
+          1. Trailing stop loss (profit >= 5% → lock stop at +5%)
           2. Prolonged exhaustion (consolidation for N bars)
-          3. Regime enters REVERSAL: immediate exit
+          3. Confirmed reversal: reversal must persist for N bars with
+             meaningful momentum in the opposite direction.  A single-
+             bar spike into REVERSAL during consolidation is NOT enough.
         """
         if not self.in_position:
             return None
@@ -705,9 +772,14 @@ class StrategyEngine:
         if self.regime == Regime.EXHAUSTION and self.exhaustion_bar_count >= self.exhaustion_bars_limit:
             return Signal.EXIT
 
-        # 3. Price enters reversal: immediate exit
+        # 3. Confirmed reversal exit — requires the reversal regime to
+        #    have lasted at least `reversal_exit_confirm_bars` AND for
+        #    momentum (signal strength) to be above the noise floor.
+        #    This prevents premature jeets right before a pump.
         if self.regime == Regime.REVERSAL:
-            return Signal.EXIT
+            if (self.reversal_bar_count >= self.reversal_exit_confirm_bars
+                    and self.signal_strength > self.S_noise):
+                return Signal.EXIT
 
         return None
 
@@ -825,4 +897,6 @@ class StrategyEngine:
             "entry_price": self.entry_price,
             "trailing_stop": self.trailing_stop,
             "exhaustion_bars": self.exhaustion_bar_count,
+            "in_chop": self._is_chop_zone(price),
+            "trend_bars": self.trend_bar_count,
         }
