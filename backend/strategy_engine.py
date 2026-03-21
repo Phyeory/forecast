@@ -337,8 +337,8 @@ class StrategyEngine:
         atr_period: int = 7,
         roc_period: int = 3,
         warmup: int = 20,
-        signal_strong: float = 2.5,
-        signal_weak: float = 1.5,
+        signal_strong: float = 2.0,
+        signal_weak: float = 1.2,
         signal_noise: float = 1.0,
         exhaustion_bars_limit: int = 14,
         delta_threshold: float = 0.3,
@@ -348,6 +348,8 @@ class StrategyEngine:
         chop_atr_pct: float = 0.5,
         chop_spread_pct: float = 0.15,
         reversal_exit_confirm_bars: int = 2,
+        s_effective_threshold: float = 0.5,
+        exhaustion_persist_bars: int = 2,
     ):
         self.ema_fast_p = ema_fast
         self.ema_slow_p = ema_slow
@@ -364,6 +366,8 @@ class StrategyEngine:
         self.chop_atr_pct = chop_atr_pct
         self.chop_spread_pct = chop_spread_pct
         self.reversal_exit_confirm_bars = reversal_exit_confirm_bars
+        self.s_effective_threshold = s_effective_threshold
+        self.exhaustion_persist_bars = exhaustion_persist_bars
 
         # State
         self.bar_count = 0
@@ -379,10 +383,12 @@ class StrategyEngine:
         self.m_hat: float = 0.0           # Kalman-filtered momentum (replaces ROC)
         self.prev_m_hat: float = 0.0      # Previous m_hat (replaces prev_roc)
         self.p_hat: float = 0.0           # Kalman-filtered price estimate
+        self.momentum_acceleration: float = 0.0  # m_hat(t) - m_hat(t-1)
 
         # Kalman filter
         self.kalman = KalmanFilterMomentum(gamma=kalman_gamma)
         self.signal_strength: float = 0.0
+        self.s_effective: float = 0.0     # S / delta_U (barrier-adjusted signal)
 
         # Price history for ATR / ROC
         self.close_history: list[float] = []
@@ -401,9 +407,17 @@ class StrategyEngine:
         self.exhaustion_bar_count: int = 0
         self.trend_bar_count: int = 0     # Bars spent in current TREND regime
 
+        # Exhaustion persistence counter — how many consecutive bars
+        # the exhaustion conditions have been met before committing.
+        self.exhaustion_persist_count: int = 0
+
         # Reversal confirmation counter — how many consecutive bars
         # the reversal conditions have been met before committing.
         self.reversal_confirm_count: int = 0
+
+        # In-trend reversal confirmation counter — for direction change
+        # while still in TREND regime (requires AND + persistence).
+        self.trend_reversal_confirm_count: int = 0
 
         # Reversal regime bar counter — how many bars we've been in REVERSAL.
         self.reversal_bar_count: int = 0
@@ -417,11 +431,6 @@ class StrategyEngine:
         self.entry_price: float = 0.0
         self.trailing_stop: Optional[float] = None
         self.position_direction: Direction = Direction.NONE
-
-        # Entry sequencing: True for exactly one bar after the first condition
-        # (exhaustion or reversal) is met. A BUY is only emitted if continuation
-        # fires on that very next bar. Any miss resets the flag.
-        self.pending_entry: bool = False
 
     def _update_indicators(self, o: float, h: float, l: float, c: float, vol: float):
         """Update EMA, ATR, ROC from new OHLC bar."""
@@ -458,6 +467,9 @@ class StrategyEngine:
         self.prev_m_hat = self.m_hat
         self.p_hat, self.m_hat = self.kalman.update(c)
 
+        # Momentum acceleration: rate of change of momentum
+        self.momentum_acceleration = self.m_hat - self.prev_m_hat
+
         # Signal strength S = |m_hat_pct * roc_period| / ATR_pct  (normalised)
         # m_hat is instantaneous velocity (per-bar); the old ROC accumulated
         # over roc_period bars, so we scale by roc_period to keep existing
@@ -471,6 +483,10 @@ class StrategyEngine:
                 self.signal_strength = 0.0
         else:
             self.signal_strength = 0.0
+
+        # Barrier proximity: S_effective = S / delta_U
+        # delta_U = normalised distance from price to nearest HVN in trade direction
+        self.s_effective = self._compute_s_effective(c)
 
     def _detect_direction(self) -> Direction:
         if self.ema_fast_val is not None and self.ema_slow_val is not None:
@@ -492,6 +508,59 @@ class StrategyEngine:
         atr_pct = ((self.atr_val or 0.0) / c) * 100
         spread_pct = (abs(self.ema_spread) / c) * 100 if self.ema_spread else 0.0
         return atr_pct < self.chop_atr_pct and spread_pct < self.chop_spread_pct
+
+    def _compute_s_effective(self, c: float) -> float:
+        """Compute barrier-adjusted signal strength: S / delta_U.
+
+        delta_U = normalised distance from current price to nearest HVN
+        in the direction of the trade.  If no profile or no HVN found,
+        returns raw S (assume no barrier).
+        """
+        S = self.signal_strength
+        if not self.current_profile or not self.current_profile.bins:
+            return S
+        if c <= 0:
+            return S
+
+        direction = self._detect_direction()
+        hvn_bins = self.current_profile.get_hvn_bins(top_n=5)
+
+        # Find nearest HVN in the trade direction
+        min_dist = float('inf')
+        for b in hvn_bins:
+            mid = (b.price_low + b.price_high) / 2
+            if direction == Direction.UP and mid > c:
+                dist = (mid - c) / c  # normalised distance
+                min_dist = min(min_dist, dist)
+            elif direction == Direction.DOWN and mid < c:
+                dist = (c - mid) / c
+                min_dist = min(min_dist, dist)
+
+        if min_dist == float('inf') or min_dist <= 0:
+            # No barrier ahead → S_effective = S (unimpeded)
+            return S
+
+        # delta_U is the normalised distance; S_effective = S / delta_U
+        # We cap delta_U at a minimum to avoid division by tiny numbers
+        delta_U = max(min_dist, 0.001)
+        return S / delta_U
+
+    def _is_leaving_hvn(self, c: float, direction: Direction = Direction.NONE) -> bool:
+        """Check if price is NOT trapped inside an opposing-direction HVN.
+
+        For a long entry (Direction.UP), we check that we're NOT sitting
+        inside a sell-dominated HVN (resistance).  Being in a buy-dominated
+        HVN is fine — that's support, not resistance.
+
+        If direction is NONE, defaults to True (no block).
+        """
+        if not self.current_profile:
+            return True  # No profile → no barrier
+        if direction == Direction.NONE:
+            return True
+        # Check opposing direction — are we in a resistance zone?
+        opp_dir = Direction.DOWN if direction == Direction.UP else Direction.UP
+        return not self.current_profile.is_price_in_hvn(c, opp_dir)
 
     def _detect_regime(self, c: float) -> tuple[Regime, Optional[Signal]]:
         """State machine for regime detection."""
@@ -547,6 +616,7 @@ class StrategyEngine:
                 self.trend_start_delta = self.current_profile.cumulative_delta if self.current_profile else 0
                 self.exhaustion_bar_count = 0
                 self.trend_bar_count = 0
+                self.exhaustion_persist_count = 0
                 # Start new volume profile
                 self._start_new_profile(c)
                 return self.regime, None
@@ -568,79 +638,97 @@ class StrategyEngine:
                 roc_decreasing,
                 momentum_decay,
                 S < self.S_weak,
+                self.momentum_acceleration < 0,  # Improvement #2: require decelerating momentum
             ]
             met = sum(1 for x in exhaust_conds if x)
 
-            # In chop zones, require ALL 4 conditions (stricter)
-            exhaust_threshold = 4 if in_chop else 3
+            # In chop zones, require ALL 5 conditions (stricter)
+            exhaust_threshold = 5 if in_chop else 3
 
             if met >= exhaust_threshold:
-                self.regime = Regime.EXHAUSTION
-                self.trend_before_exhaustion = self.direction  # Lock original trend
-                self.exhaustion_bar_count = 0
-                self.reversal_confirm_count = 0
-                # First condition met — arm the pending-entry latch for one bar
-                if not self.in_position:
-                    self.pending_entry = True
-                return self.regime, None
+                # Improvement #3: Exhaustion persistence — conditions must hold
+                # for >= exhaustion_persist_bars consecutive bars before transition
+                self.exhaustion_persist_count += 1
+                if self.exhaustion_persist_count >= self.exhaustion_persist_bars:
+                    self.regime = Regime.EXHAUSTION
+                    self.trend_before_exhaustion = self.direction  # Lock original trend
+                    self.exhaustion_bar_count = 0
+                    self.reversal_confirm_count = 0
+                    self.exhaustion_persist_count = 0
+                    return self.regime, None
+            else:
+                # Conditions not met this bar — reset persistence streak
+                self.exhaustion_persist_count = 0
 
             # Direction change while in trend → could be rapid reversal
+            # Improvement #4: require momentum zero-cross AND persistence
+            # over reversal_confirm_bars (no single-bar reversals)
             if direction != self.direction and direction != Direction.NONE:
-                self.prev_direction = self.direction
-                if roc_zero_cross or S < self.S_weak:
-                    self.regime = Regime.REVERSAL
-                    self.direction = direction
-                    self.reversal_bar_count = 0
-                    # First condition met — arm the pending-entry latch for one bar
-                    if not self.in_position:
-                        self.pending_entry = True
+                if roc_zero_cross:
+                    self.trend_reversal_confirm_count += 1
+                    if self.trend_reversal_confirm_count >= self.reversal_confirm_bars:
+                        self.prev_direction = self.direction
+                        self.regime = Regime.REVERSAL
+                        self.direction = direction
+                        self.reversal_bar_count = 0
+                        self.trend_reversal_confirm_count = 0
+                        return self.regime, None
+                else:
+                    self.trend_reversal_confirm_count = 0
+
+                # EMA cross happened but momentum zero-cross not confirmed yet
+                # → go to exhaustion first (with persistence requirement)
+                self.exhaustion_persist_count += 1
+                if self.exhaustion_persist_count >= self.exhaustion_persist_bars:
+                    self.regime = Regime.EXHAUSTION
+                    self.trend_before_exhaustion = self.direction  # Lock original trend
+                    self.exhaustion_bar_count = 0
+                    self.reversal_confirm_count = 0
+                    self.exhaustion_persist_count = 0
                     return self.regime, None
-                # EMA cross happened but momentum still OK — go to exhaustion first
-                self.regime = Regime.EXHAUSTION
-                self.trend_before_exhaustion = self.direction  # Lock original trend
-                self.exhaustion_bar_count = 0
-                self.reversal_confirm_count = 0
-                # First condition met — arm the pending-entry latch for one bar
-                if not self.in_position:
-                    self.pending_entry = True
-                return self.regime, None
+            else:
+                self.trend_reversal_confirm_count = 0
 
         # ─── C. EXHAUSTION → CONTINUATION / REVERSAL ────────────────────
         elif self.regime == Regime.EXHAUSTION:
             self.exhaustion_bar_count += 1
 
             # Continuation after exhaustion: original trend resumes
+            # State transition gate: only checks core regime conditions.
+            # Entry-specific gates (momentum_acceleration, s_effective,
+            # delta_aligned, leaving_hvn) are applied to the BUY decision only.
             if self.spread_expanding and S > self.S_strong and not momentum_decay:
                 if direction == self.trend_before_exhaustion:
                     # Same direction as original trend → CONTINUATION
                     self.regime = Regime.CONTINUATION
                     self.direction = direction
                     signal = None
-                    if direction == Direction.UP:
-                        # BUY only if continuation is immediate (pending_entry set
-                        # on the prior bar) AND we are not already in a position
-                        if self.pending_entry and not self.in_position:
-                            signal = Signal.BUY
-                        # Always EXIT any open long if price is going down
+                    # Dynamic entry: BUY when core conditions met + enough
+                    # confirming signals.  S > S_weak and momentum_acceleration > 0
+                    # are hard requirements; the rest are scored (3/5 needed).
+                    if direction == Direction.UP and not self.in_position:
+                        if S > self.S_weak and self.momentum_acceleration > 0:
+                            entry_conds = [
+                                S > self.S_strong,
+                                delta_aligned,
+                                self._is_leaving_hvn(c, direction),
+                                self.s_effective > self.s_effective_threshold,
+                                self.spread_expanding,
+                            ]
+                            if sum(1 for x in entry_conds if x) >= 2:
+                                signal = Signal.BUY
                     elif direction == Direction.DOWN and self.in_position:
                         signal = Signal.EXIT
-                    # Consume the latch regardless — sequence is now resolved
-                    self.pending_entry = False
                     self.trend_start_price = c
                     self.trend_start_atr = self.atr_val or 0
                     self._start_new_profile(c)
                     self.exhaustion_bar_count = 0
                     return self.regime, signal
                 else:
-                    # Direction flipped during exhaustion → recover to TREND, reset latch
-                    self.pending_entry = False
+                    # Direction flipped during exhaustion → recover to TREND
                     self.regime = Regime.TREND
                     self.exhaustion_bar_count = 0
                     return self.regime, None
-            else:
-                # Continuation did NOT fire this bar — if we had a pending latch
-                # from last bar, the back-to-back requirement is broken; reset it
-                self.pending_entry = False
 
             # Check for direction flip (EMA cross) relative to original trend
             direction_flipped = (direction != Direction.NONE and
@@ -670,10 +758,6 @@ class StrategyEngine:
                     self.regime = Regime.REVERSAL
                     self.reversal_bar_count = 0
                     self.reversal_confirm_count = 0
-                    # Arm latch: reversal is the first signal; continuation must follow
-                    # immediately on the next bar
-                    if not self.in_position:
-                        self.pending_entry = True
                     return self.regime, None
             else:
                 # Conditions not met this bar — reset the confirmation streak
@@ -689,7 +773,8 @@ class StrategyEngine:
             self.reversal_bar_count += 1
             new_dir = self._detect_direction()
 
-            # Check continuation conditions
+            # Check continuation conditions — core state transition only.
+            # Entry-specific gates are applied to BUY decision below.
             ema_cross = (new_dir != Direction.NONE and new_dir != self.prev_direction)
             cont_conds = [
                 ema_cross,
@@ -703,20 +788,24 @@ class StrategyEngine:
             if cont_met >= 3 and ema_cross:
                 self.regime = Regime.CONTINUATION
                 self.direction = new_dir
-                # Direction-aware signals (long-only):
-                #   BUY  = continuing UP after reversing from a DOWN trend,
-                #          but ONLY when the latch was armed on the previous bar
-                #          (reversal immediately preceding this continuation)
-                #          and we are not already in a position.
-                #   EXIT = continuing DOWN after reversing from an UP trend
+                signal = None
+                # Dynamic entry: BUY when core conditions met + enough
+                # confirming signals.  S > S_weak and momentum_acceleration > 0
+                # are hard requirements; the rest are scored (2/5 needed).
                 if new_dir == Direction.UP and self.prev_direction == Direction.DOWN:
-                    if self.pending_entry and not self.in_position:
-                        signal = Signal.BUY
+                    if not self.in_position and S > self.S_weak and self.momentum_acceleration > 0:
+                        entry_conds = [
+                            S > self.S_strong,
+                            delta_aligned,
+                            self._is_leaving_hvn(c, new_dir),
+                            self.s_effective > self.s_effective_threshold,
+                            self.spread_expanding,
+                        ]
+                        if sum(1 for x in entry_conds if x) >= 2:
+                            signal = Signal.BUY
                 elif new_dir == Direction.DOWN and self.prev_direction == Direction.UP:
                     if self.in_position:
                         signal = Signal.EXIT
-                # Consume the latch — sequence resolved
-                self.pending_entry = False
                 # Transition to TREND with new direction
                 self.trend_start_price = c
                 self.trend_start_atr = self.atr_val or 0
@@ -725,9 +814,6 @@ class StrategyEngine:
                 self.trend_bar_count = 0
                 # Move to TREND on next bar
                 return self.regime, signal
-
-            # Continuation did NOT fire this bar — back-to-back requirement broken
-            self.pending_entry = False
 
             # If momentum truly died, go back to exhaustion
             if S < self.S_noise and not roc_zero_cross and not momentum_decay:
@@ -817,9 +903,6 @@ class StrategyEngine:
         self.entry_price = 0.0
         self.trailing_stop = None
         self.position_direction = Direction.NONE
-        # Reset the entry latch so the two-signal sequence must start fresh
-        # after every closed trade.
-        self.pending_entry = False
 
     def update(
         self,
@@ -889,6 +972,8 @@ class StrategyEngine:
                 "m_hat": self.m_hat,             # Explicit alias
                 "p_hat": self.p_hat,             # Kalman filtered price
                 "signal_strength": self.signal_strength,
+                "momentum_acceleration": self.momentum_acceleration,
+                "s_effective": self.s_effective,
                 "ema_spread": self.ema_spread,
                 "spread_expanding": self.spread_expanding,
             },
