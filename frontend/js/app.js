@@ -681,16 +681,17 @@ function updateMarkers() {
 
 let lastBuyMcapPrice = null;
 
-function addSignalMarker(time, signal, regimeLabel, mcapPrice, closedTrade) {
+function addSignalMarker(time, signal, signalLabel, regimeLabel, mcapPrice, closedTrade) {
   if (signal === "buy") {
     lastBuyMcapPrice = mcapPrice;
     const priceLabel = mcapPrice ? ` @ ${formatMcap(mcapPrice)}` : "";
+    let prefix = signalLabel ? signalLabel.replace("_", " ").toUpperCase() : "BUY";
     markers.push({
       time,
       position: "belowBar",
       color: "#26a69a",
       shape: "arrowUp",
-      text: `BUY${priceLabel}`,
+      text: `${prefix}${priceLabel}`,
     });
   } else if (signal === "exit") {
     const priceLabel = mcapPrice ? ` @ ${formatMcap(mcapPrice)}` : "";
@@ -709,12 +710,13 @@ function addSignalMarker(time, signal, regimeLabel, mcapPrice, closedTrade) {
       finalColor = closedTrade.pnl_pct >= 0 ? "#26a69a" : "#ef5350";
     }
 
+    let prefix = signalLabel ? signalLabel.replace("_", " ").toUpperCase() : "EXIT";
     markers.push({
       time,
       position: "aboveBar",
       color: finalColor,
       shape: "circle",
-      text: `EXIT${priceLabel}${pnlLabel}`,
+      text: `${prefix}${priceLabel}${pnlLabel}`,
     });
     // Reset tracker
     lastBuyMcapPrice = null;
@@ -732,7 +734,7 @@ function flushPendingMarkers() {
   lastBuyMcapPrice = null; // reset before replaying
   for (const m of pendingMarkerData) {
     const mcapPrice = toMarketCapValue(m.rawPrice);
-    addSignalMarker(m.time, m.signal, m.regime, mcapPrice, m.closedTrade);
+    addSignalMarker(m.time, m.signal, m.signalLabel, m.regime, mcapPrice, m.closedTrade);
   }
   pendingMarkerData = [];
   updateMarkers();
@@ -781,16 +783,18 @@ function processHistoricalStrategy(results, candles) {
     if (r.forward_test && (r.forward_test.trade_action === "buy" || r.forward_test.trade_action === "exit")) {
       const ft = r.forward_test;
       const signal = ft.trade_action;
+      const signalLabel = ft.trade_label;
       const closedTrade = ft.closed_trade;
       // candle.open is the execution bar's open — the visible price on the chart
       const rawExecPrice = candle?.open ?? candle?.close;
       if (chartBaseMcap) {
         const mcapExecPrice = toMarketCapValue(rawExecPrice);
-        addSignalMarker(candle.time, signal, r.regime, mcapExecPrice, closedTrade);
+        addSignalMarker(candle.time, signal, signalLabel, r.regime, mcapExecPrice, closedTrade);
       } else {
         pendingMarkerData.push({
           time: candle.time,
           signal,
+          signalLabel,
           regime: r.regime,
           rawPrice: rawExecPrice,
           closedTrade,
@@ -857,6 +861,7 @@ function processLiveStrategy(result, candle, mcapCandle) {
       addSignalMarker(
         mcapCandle.time,
         ft.trade_action,
+        ft.trade_label,
         result.regime,
         execPrice || fallback,
         ft.closed_trade

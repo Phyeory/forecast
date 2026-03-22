@@ -347,7 +347,7 @@ class StrategyEngine:
         reversal_confirm_bars: int = 2,
         chop_atr_pct: float = 0.5,
         chop_spread_pct: float = 0.15,
-        reversal_exit_confirm_bars: int = 2,
+        reversal_exit_confirm_bars: int = 1,
         s_effective_threshold: float = 0.5,
         exhaustion_persist_bars: int = 2,
     ):
@@ -703,21 +703,8 @@ class StrategyEngine:
                     self.regime = Regime.CONTINUATION
                     self.direction = direction
                     signal = None
-                    # Dynamic entry: BUY when core conditions met + enough
-                    # confirming signals.  S > S_weak and momentum_acceleration > 0
-                    # are hard requirements; the rest are scored (3/5 needed).
-                    if direction == Direction.UP and not self.in_position:
-                        if S > self.S_weak and self.momentum_acceleration > 0:
-                            entry_conds = [
-                                S > self.S_strong,
-                                delta_aligned,
-                                self._is_leaving_hvn(c, direction),
-                                self.s_effective > self.s_effective_threshold,
-                                self.spread_expanding,
-                            ]
-                            if sum(1 for x in entry_conds if x) >= 2:
-                                signal = Signal.BUY
-                    elif direction == Direction.DOWN and self.in_position:
+                    # NO LONGER BUY on continuation of an UP trend.
+                    if direction == Direction.DOWN and self.in_position:
                         signal = Signal.EXIT
                     self.trend_start_price = c
                     self.trend_start_atr = self.atr_val or 0
@@ -725,10 +712,34 @@ class StrategyEngine:
                     self.exhaustion_bar_count = 0
                     return self.regime, signal
                 else:
-                    # Direction flipped during exhaustion → recover to TREND
-                    self.regime = Regime.TREND
+                    # Direction flipped during exhaustion (e.g. DOWN -> UP)!
+                    # This is a strong momentum shift that bypasses the REVERSAL regime.
+                    # We treat it as CONTINUATION of the new momentum.
+                    self.regime = Regime.CONTINUATION
+                    self.direction = direction
+                    signal = None
+                    
+                    if direction == Direction.UP and self.trend_before_exhaustion == Direction.DOWN:
+                        # it shouldnt be just 1 bar, it should be the exhaustion threshold
+                        if self.exhaustion_bar_count >= self.exhaustion_persist_bars:
+                            if not self.in_position and S > self.S_weak and self.momentum_acceleration > 0:
+                                entry_conds = [
+                                    S > self.S_strong,
+                                    delta_aligned,
+                                    self._is_leaving_hvn(c, direction),
+                                    self.s_effective > self.s_effective_threshold,
+                                    self.spread_expanding,
+                                ]
+                                if sum(1 for x in entry_conds if x) >= 2:
+                                    signal = Signal.BUY
+                    elif direction == Direction.DOWN and self.in_position:
+                        signal = Signal.EXIT
+
+                    self.trend_start_price = c
+                    self.trend_start_atr = self.atr_val or 0
+                    self._start_new_profile(c)
                     self.exhaustion_bar_count = 0
-                    return self.regime, None
+                    return self.regime, signal
 
             # Check for direction flip (EMA cross) relative to original trend
             direction_flipped = (direction != Direction.NONE and

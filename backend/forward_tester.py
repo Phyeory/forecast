@@ -37,6 +37,7 @@ class Trade:
     pnl_sol: float = 0.0
     pnl_pct: float = 0.0
     exit_reason: str = ""
+    entry_reason: str = ""
     fees_paid: float = 0.0      # priority + bribe fees (not slippage)
     slippage_cost_sol: float = 0.0  # total SOL lost to slippage both ways
 
@@ -94,6 +95,7 @@ class ForwardTester:
 
         # Pending signals: executed on the next candle's open (1-bar delay)
         self._pending_buy: bool = False
+        self._pending_buy_reason: str = ""
         self._pending_exit: bool = False
         self._pending_exit_reason: str = ""
 
@@ -121,7 +123,7 @@ class ForwardTester:
         slip = self.slippage_pct / 100.0
         return raw_price * size_tokens * slip
 
-    def _open_long(self, raw_price: float, time: int) -> Optional[Trade]:
+    def _open_long(self, raw_price: float, time: int, reason: str = "") -> Optional[Trade]:
         """
         Open a long position.
         raw_price = candle open (what shows on the chart).
@@ -157,6 +159,7 @@ class ForwardTester:
             size_tokens=tokens,
             fees_paid=fees,
             slippage_cost_sol=slippage_cost,
+            entry_reason=reason,
         )
         self.current_trade = trade
         self.engine.notify_trade_opened(raw_price, Direction.UP)
@@ -261,7 +264,7 @@ class ForwardTester:
 
         # ── Step 1: Execute pending signal from the previous bar ──────────
         if self._pending_buy and self.current_trade is None:
-            opened_trade = self._open_long(o, time)
+            opened_trade = self._open_long(o, time, getattr(self, '_pending_buy_reason', 'buy'))
             if opened_trade:
                 trade_action = "buy"
             self._pending_buy = False
@@ -285,6 +288,7 @@ class ForwardTester:
         # ── Step 3: Queue signal for the NEXT candle's open ───────────────
         if signal == Signal.BUY.value and self.current_trade is None and not self._pending_buy:
             self._pending_buy = True
+            self._pending_buy_reason = f"buy_{regime}"
             self._pending_exit = False
 
         elif signal == Signal.EXIT.value and self.current_trade is not None:
@@ -293,6 +297,13 @@ class ForwardTester:
                 reason = "reversal_exit"
             elif regime == Regime.EXHAUSTION.value:
                 reason = "exhaustion_exit"
+            elif regime == Regime.CONTINUATION.value:
+                reason = "continuation_exit"
+            elif regime == Regime.TREND.value:
+                reason = "trend_exit"
+            elif self.engine.trailing_stop is not None and c <= self.engine.trailing_stop:
+                reason = "trailing_stop"
+                
             self._pending_exit = True
             self._pending_exit_reason = reason
             self._pending_buy = False
@@ -328,11 +339,18 @@ class ForwardTester:
             })
 
         # ── Build output ──────────────────────────────────────────────────
+        trade_label = ""
+        if trade_action == "buy" and opened_trade:
+            trade_label = opened_trade.entry_reason
+        elif trade_action == "exit" and closed_trade:
+            trade_label = closed_trade.exit_reason
+
         output = {
             **result,
             "forward_test": {
                 "balance": round(self.balance, 6),
                 "trade_action": trade_action,
+                "trade_label": trade_label,
                 "opened_trade": opened_trade.to_dict() if opened_trade else None,
                 "closed_trade": closed_trade.to_dict() if closed_trade else None,
                 "current_trade": self.current_trade.to_dict() if self.current_trade else None,
