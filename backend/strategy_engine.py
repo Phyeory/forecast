@@ -431,6 +431,21 @@ class StrategyEngine:
         self.entry_price: float = 0.0
         self.trailing_stop: Optional[float] = None
         self.position_direction: Direction = Direction.NONE
+        
+        # --- NEW REGIME & FILTER STATE ---
+        self.m_hat_history: list[float] = []
+        self.atr_history: list[float] = []
+        self.s_history: list[float] = []
+        self.is_trending: bool = False
+        
+        self.cross_persist_count: int = 0
+        self.current_target_dir: Direction = Direction.NONE
+        
+        # New Filter Thresholds
+        self.atr_floor_k: float = 0.6
+        self.ema_spread_min_pct: float = 0.0001
+        self.m_hat_mean_threshold_pct: float = 0.0001
+        self.local_range_threshold_pct: float = 0.003
 
     def _update_indicators(self, o: float, h: float, l: float, c: float, vol: float):
         """Update EMA, ATR, ROC from new OHLC bar."""
@@ -463,37 +478,83 @@ class StrategyEngine:
         else:
             self.atr_val = ema_step(self.atr_val, tr, self.atr_period)
 
+        self.atr_history.append(self.atr_val or 0.0)
+        if len(self.atr_history) > 20: self.atr_history.pop(0)
+
         # Kalman-filtered momentum (replaces ROC)
         self.prev_m_hat = self.m_hat
         self.p_hat, self.m_hat = self.kalman.update(c)
+        self.m_hat_history.append(self.m_hat)
+        if len(self.m_hat_history) > 5: self.m_hat_history.pop(0)
 
         # Momentum acceleration: rate of change of momentum
         self.momentum_acceleration = self.m_hat - self.prev_m_hat
 
-        # Signal strength S = |m_hat_pct * roc_period| / ATR_pct  (normalised)
-        # m_hat is instantaneous velocity (per-bar); the old ROC accumulated
-        # over roc_period bars, so we scale by roc_period to keep existing
-        # thresholds (S_strong, S_weak, S_noise) valid without modification.
-        if self.atr_val and self.atr_val > 0 and c > 0:
+        # Signal strength S = |m_hat_pct * roc_period| / ATR_floor_pct
+        if self.atr_val is not None and self.atr_val > 0 and c > 0:
+            current_atr = float(self.atr_val)
+            rolling_median_atr = float(np.median(self.atr_history)) if self.atr_history else current_atr
+            atr_floor = max(current_atr, self.atr_floor_k * rolling_median_atr)
+
             m_hat_pct = (self.m_hat / c) * 100 * self.roc_period
-            atr_pct = (self.atr_val / c) * 100
+            atr_pct = (atr_floor / c) * 100
             if atr_pct > 0:
                 self.signal_strength = abs(m_hat_pct) / atr_pct
             else:
                 self.signal_strength = 0.0
         else:
             self.signal_strength = 0.0
+            
+        self.s_history.append(self.signal_strength)
+        if len(self.s_history) > 3: self.s_history.pop(0)
 
-        # Barrier proximity: S_effective = S / delta_U
-        # delta_U = normalised distance from price to nearest HVN in trade direction
+        # Global Regime Filter Evaluation
+        if len(self.m_hat_history) >= 3:
+            # A) Directional persistence over last 3 bars
+            m_hat_signs = [math.copysign(1, m) for m in self.m_hat_history[-3:]]
+            dir_persistence = len(set(m_hat_signs)) == 1
+            
+            # B) Momentum strength
+            m_hat_mean = sum(abs(m) for m in self.m_hat_history[-3:]) / 3.0
+            mom_strength_ok = m_hat_mean > (self.m_hat_mean_threshold_pct * c)
+            
+            # C) Volatility Expansion
+            current_atr = float(self.atr_val) if self.atr_val is not None else 0.0
+            rolling_median_atr_global = float(np.median(self.atr_history)) if self.atr_history else current_atr
+            vol_expansion = current_atr > (rolling_median_atr_global * 0.95)
+            
+            # D) EMA Separation
+            ema_sep_ok = abs(self.ema_spread) > (self.ema_spread_min_pct * c)
+            
+            self.is_trending = dir_persistence and mom_strength_ok and vol_expansion and ema_sep_ok
+        else:
+            self.is_trending = False
+
+        # Barrier proximity: S_effective = S / weighted_delta_U
         self.s_effective = self._compute_s_effective(c)
 
-    def _detect_direction(self) -> Direction:
+    def _detect_direction(self, c: float) -> Direction:
         if self.ema_fast_val is not None and self.ema_slow_val is not None:
-            if self.ema_fast_val > self.ema_slow_val:
-                return Direction.UP
-            elif self.ema_fast_val < self.ema_slow_val:
-                return Direction.DOWN
+            spread = self.ema_fast_val - self.ema_slow_val
+            target_dir = Direction.UP if spread > 0 else Direction.DOWN
+            
+            spread_mag = abs(spread)
+            spread_increasing = spread_mag > abs(self.prev_ema_spread)
+            magnitude_ok = spread_mag > (self.ema_spread_min_pct * c)
+
+            if target_dir != self.current_target_dir:
+                self.cross_persist_count = 0
+                self.current_target_dir = target_dir
+
+            if spread_increasing and magnitude_ok:
+                self.cross_persist_count += 1
+            else:
+                self.cross_persist_count = 0
+
+            # 3. REDUCE EMA CROSS SENSITIVITY
+            if self.cross_persist_count >= 2:
+                return target_dir
+            return self.direction
         return Direction.NONE
 
     def _is_chop_zone(self, c: float) -> bool:
@@ -510,11 +571,7 @@ class StrategyEngine:
         return atr_pct < self.chop_atr_pct and spread_pct < self.chop_spread_pct
 
     def _compute_s_effective(self, c: float) -> float:
-        """Compute barrier-adjusted signal strength: S / delta_U.
-
-        delta_U = normalised distance from current price to nearest HVN
-        in the direction of the trade.  If no profile or no HVN found,
-        returns raw S (assume no barrier).
+        """Compute barrier-adjusted signal strength: S / weighted_delta_U
         """
         S = self.signal_strength
         if not self.current_profile or not self.current_profile.bins:
@@ -522,28 +579,33 @@ class StrategyEngine:
         if c <= 0:
             return S
 
-        direction = self._detect_direction()
+        direction = self._detect_direction(c)
         hvn_bins = self.current_profile.get_hvn_bins(top_n=5)
 
-        # Find nearest HVN in the trade direction
+        # 5. STRUCTURE-AWARE ENTRY FILTER
         min_dist = float('inf')
+        blocking_node = None
+        
         for b in hvn_bins:
             mid = (b.price_low + b.price_high) / 2
             if direction == Direction.UP and mid > c:
-                dist = (mid - c) / c  # normalised distance
-                min_dist = min(min_dist, dist)
+                dist = (mid - c) / c
+                if dist < min_dist:
+                    min_dist = dist
+                    blocking_node = b
             elif direction == Direction.DOWN and mid < c:
                 dist = (c - mid) / c
-                min_dist = min(min_dist, dist)
+                if dist < min_dist:
+                    min_dist = dist
+                    blocking_node = b
 
-        if min_dist == float('inf') or min_dist <= 0:
-            # No barrier ahead → S_effective = S (unimpeded)
+        if blocking_node is None:
             return S
 
-        # delta_U is the normalised distance; S_effective = S / delta_U
-        # We cap delta_U at a minimum to avoid division by tiny numbers
-        delta_U = max(min_dist, 0.001)
-        return S / delta_U
+        avg_hvn_vol = float(sum(b.total_volume for b in hvn_bins)) / max(1.0, float(len(hvn_bins)))
+        density_factor = float(blocking_node.total_volume / avg_hvn_vol) if avg_hvn_vol > 0 else 1.0
+        weighted_delta_U = max(float(min_dist), 0.001) * density_factor
+        return S / weighted_delta_U
 
     def _is_leaving_hvn(self, c: float, direction: Direction = Direction.NONE) -> bool:
         """Check if price is NOT trapped inside an opposing-direction HVN.
@@ -564,13 +626,52 @@ class StrategyEngine:
 
     def _detect_regime(self, c: float) -> tuple[Regime, Optional[Signal]]:
         """State machine for regime detection."""
-        direction = self._detect_direction()
+        direction = self._detect_direction(c)
         signal = None
 
         S = self.signal_strength
+        # 6. LOCAL RANGE FILTER (ANTI-CHOP)
+        local_range_pct = 0.0
+        sign_flips = 0
+        if len(self.high_history) >= 10:
+            # using manual max/min loops to avoid list slicing type confusion in pyre
+            recent_highs = self.high_history[-10:]
+            recent_lows = self.low_history[-10:]
+            recent_max = max(recent_highs) if recent_highs else c
+            recent_min = min(recent_lows) if recent_lows else c
+            local_range_pct = (recent_max - recent_min) / c
+        if len(self.m_hat_history) >= 2:
+            sign_flips = sum(1 for i in range(1, len(self.m_hat_history)) if self.m_hat_history[i] * self.m_hat_history[i-1] < 0)
+        
+        is_anti_chop_triggered = (local_range_pct < self.local_range_threshold_pct) and (sign_flips >= 2)
+
+        # 1. GLOBAL REGIME FILTER (Intelligent application)
+        # If IDLE, wait for a confirmed trend or explicitly abort entering one.
+        if self.regime == Regime.IDLE:
+             if not self.is_trending or is_anti_chop_triggered:
+                 self.direction = Direction.NONE
+                 return self.regime, None
+        elif self.regime == Regime.TREND:
+             # Enforce global trend criteria. Give the trend a brief 3-bar buffer
+             # to establish m_hat sign persistence upon fresh entry.
+             if (self.trend_bar_count > 3 and not self.is_trending) or is_anti_chop_triggered:
+                 self.regime = Regime.IDLE
+                 self.direction = Direction.NONE
+                 return self.regime, Signal.EXIT if self.in_position else None
+        else:
+             # For EXHAUSTION/REVERSAL (where momentum naturally decays and flips signs):
+             # We only abort on pure, tight, directionless noise (anti-chop)
+             if is_anti_chop_triggered:
+                 self.regime = Regime.IDLE
+                 self.direction = Direction.NONE
+                 return self.regime, Signal.EXIT if self.in_position else None
+
         roc_decreasing = abs(self.m_hat) < abs(self.prev_m_hat)
         roc_zero_cross = (self.m_hat * self.prev_m_hat) < 0 if self.prev_m_hat != 0 else False
         momentum_decay = (abs(self.m_hat) - abs(self.prev_m_hat)) < 0  # D < 0
+        s_increasing = len(self.s_history) >= 2 and self.s_history[-1] > self.s_history[-2]
+        s_decreasing = len(self.s_history) >= 2 and self.s_history[-1] < self.s_history[-2]
+        
         atr_expanding = False
         if self.trend_start_atr > 0 and self.atr_val:
             atr_expanding = self.atr_val > self.trend_start_atr * 1.1
@@ -597,7 +698,7 @@ class StrategyEngine:
             elif direction == Direction.DOWN and cum_delta > self.delta_threshold:
                 strong_opposite_delta = True
 
-        # Delta aligned with new direction
+        # Delta aligned
         delta_aligned = False
         if self.current_profile:
             cum_delta = self.current_profile.cumulative_delta
@@ -625,44 +726,26 @@ class StrategyEngine:
         elif self.regime == Regime.TREND:
             self.trend_bar_count += 1
 
-            # Guard: don't allow exhaustion transition until trend has
-            # persisted for a minimum number of bars. This prevents
-            # rapid TREND→EXHAUSTION→REVERSAL cycling from EMA noise.
             if self.trend_bar_count < self.min_trend_bars:
                 return self.regime, None
 
-            # Check for exhaustion conditions
-            spread_shrinking = not self.spread_expanding
-            exhaust_conds = [
-                spread_shrinking,
-                roc_decreasing,
-                momentum_decay,
-                S < self.S_weak,
-                self.momentum_acceleration < 0,  # Improvement #2: require decelerating momentum
-            ]
-            met = sum(1 for x in exhaust_conds if x)
-
-            # In chop zones, require ALL 5 conditions (stricter)
-            exhaust_threshold = 5 if in_chop else 3
-
-            if met >= exhaust_threshold:
-                # Improvement #3: Exhaustion persistence — conditions must hold
-                # for >= exhaustion_persist_bars consecutive bars before transition
+            # 4. STRENGTHEN EXHAUSTION CONDITIONS
+            # Require BOTH momentum decay AND S decreasing, plus persistence
+            if momentum_decay and s_decreasing:
                 self.exhaustion_persist_count += 1
-                if self.exhaustion_persist_count >= self.exhaustion_persist_bars:
-                    self.regime = Regime.EXHAUSTION
-                    self.trend_before_exhaustion = self.direction  # Lock original trend
-                    self.exhaustion_bar_count = 0
-                    self.reversal_confirm_count = 0
-                    self.exhaustion_persist_count = 0
-                    return self.regime, None
             else:
-                # Conditions not met this bar — reset persistence streak
                 self.exhaustion_persist_count = 0
 
-            # Direction change while in trend → could be rapid reversal
-            # Improvement #4: require momentum zero-cross AND persistence
-            # over reversal_confirm_bars (no single-bar reversals)
+            # Must hold for 2-3 bars
+            if self.exhaustion_persist_count >= 2:
+                self.regime = Regime.EXHAUSTION
+                self.trend_before_exhaustion = self.direction
+                self.exhaustion_bar_count = 0
+                self.reversal_confirm_count = 0
+                self.exhaustion_persist_count = 0
+                return self.regime, None
+
+            # Direction change while in trend
             if direction != self.direction and direction != Direction.NONE:
                 if roc_zero_cross:
                     self.trend_reversal_confirm_count += 1
@@ -675,17 +758,6 @@ class StrategyEngine:
                         return self.regime, None
                 else:
                     self.trend_reversal_confirm_count = 0
-
-                # EMA cross happened but momentum zero-cross not confirmed yet
-                # → go to exhaustion first (with persistence requirement)
-                self.exhaustion_persist_count += 1
-                if self.exhaustion_persist_count >= self.exhaustion_persist_bars:
-                    self.regime = Regime.EXHAUSTION
-                    self.trend_before_exhaustion = self.direction  # Lock original trend
-                    self.exhaustion_bar_count = 0
-                    self.reversal_confirm_count = 0
-                    self.exhaustion_persist_count = 0
-                    return self.regime, None
             else:
                 self.trend_reversal_confirm_count = 0
 
@@ -720,9 +792,15 @@ class StrategyEngine:
                     signal = None
                     
                     if direction == Direction.UP and self.trend_before_exhaustion == Direction.DOWN:
-                        # it shouldnt be just 1 bar, it should be the exhaustion threshold
                         if self.exhaustion_bar_count >= self.exhaustion_persist_bars:
-                            if not self.in_position and S > self.S_weak and self.momentum_acceleration > 0:
+                            # 7. ENTRY TIMING IMPROVEMENT
+                            if not self.in_position and S > self.S_weak and self.momentum_acceleration > 0 and s_increasing:
+                                # Structure-aware check: reject if in HVN
+                                valid_structure = True
+                                profile = self.current_profile
+                                if profile is not None and profile.is_price_in_hvn(c):
+                                    valid_structure = False
+                                
                                 entry_conds = [
                                     S > self.S_strong,
                                     delta_aligned,
@@ -730,7 +808,7 @@ class StrategyEngine:
                                     self.s_effective > self.s_effective_threshold,
                                     self.spread_expanding,
                                 ]
-                                if sum(1 for x in entry_conds if x) >= 2:
+                                if valid_structure and sum(1 for x in entry_conds if x) >= 2:
                                     signal = Signal.BUY
                     elif direction == Direction.DOWN and self.in_position:
                         signal = Signal.EXIT
@@ -782,7 +860,7 @@ class StrategyEngine:
         # ─── D. REVERSAL → CONTINUATION / back to EXHAUSTION ─────────────
         elif self.regime == Regime.REVERSAL:
             self.reversal_bar_count += 1
-            new_dir = self._detect_direction()
+            new_dir = self._detect_direction(c)
 
             # Check continuation conditions — core state transition only.
             # Entry-specific gates are applied to BUY decision below.
@@ -803,8 +881,14 @@ class StrategyEngine:
                 # Dynamic entry: BUY when core conditions met + enough
                 # confirming signals.  S > S_weak and momentum_acceleration > 0
                 # are hard requirements; the rest are scored (2/5 needed).
+                # 7. ENTRY TIMING IMPROVEMENT: require s_increasing and structure clearance
                 if new_dir == Direction.UP and self.prev_direction == Direction.DOWN:
-                    if not self.in_position and S > self.S_weak and self.momentum_acceleration > 0:
+                    if not self.in_position and S > self.S_weak and self.momentum_acceleration > 0 and s_increasing:
+                        valid_structure = True
+                        profile = self.current_profile
+                        if profile is not None and profile.is_price_in_hvn(c):
+                            valid_structure = False
+                            
                         entry_conds = [
                             S > self.S_strong,
                             delta_aligned,
@@ -812,7 +896,7 @@ class StrategyEngine:
                             self.s_effective > self.s_effective_threshold,
                             self.spread_expanding,
                         ]
-                        if sum(1 for x in entry_conds if x) >= 2:
+                        if valid_structure and sum(1 for x in entry_conds if x) >= 2:
                             signal = Signal.BUY
                 elif new_dir == Direction.DOWN and self.prev_direction == Direction.UP:
                     if self.in_position:
