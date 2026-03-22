@@ -11,13 +11,12 @@ Settings:
 
 Execution model:
   - Signals from candle N are executed at the OPEN of candle N+1 (1-bar delay).
-  - entry_price / exit_price stored in Trade are the RAW candle open prices
-    (no slippage baked in).  This makes them directly comparable to what you
-    see on the chart.
-  - Slippage cost is deducted from the SOL proceeds as an explicit fee so
-    that PnL in SOL is still realistic.
-  - pnl_pct reflects the raw price move: (exit_price - entry_price) / entry_price
-    so the percentage shown on the chart exactly matches visual price movement.
+    (1-bar delay), but the fill price realistically interpolates between 
+    Open and Close based on Priority Fees (simulating execution delay).
+  - Then, Slippage is applied to this delayed price.
+  - The final hyper-realistic price is stored as entry_price / exit_price,
+    so the chart reflects what you actually got filled at.
+  - pnl_pct reflects the performance based on these final real prices.
 """
 
 from __future__ import annotations
@@ -29,11 +28,11 @@ from strategy_engine import StrategyEngine, Signal, Direction, Regime
 @dataclass
 class Trade:
     entry_time: int
-    entry_price: float          # RAW candle open — what you see on the chart
+    entry_price: float          # Hyper-realistic price (delay + slippage)
     size_sol: float             # SOL committed to the trade
     size_tokens: float          # tokens bought (accounting for slippage)
     exit_time: Optional[int] = None
-    exit_price: Optional[float] = None   # RAW candle open at exit
+    exit_price: Optional[float] = None   # Hyper-realistic price at exit
     pnl_sol: float = 0.0
     pnl_pct: float = 0.0
     exit_reason: str = ""
@@ -74,7 +73,7 @@ class ForwardTester:
         buy_size_sol: float = 0.1,
         priority_fee: float = 0.0001,
         bribe_fee: float = 0.00001,
-        slippage_pct: float = 1.0,
+        slippage_pct: float = 10.0,
     ):
         self.engine = StrategyEngine()
         self.balance = starting_balance
@@ -123,38 +122,47 @@ class ForwardTester:
         slip = self.slippage_pct / 100.0
         return raw_price * size_tokens * slip
 
-    def _open_long(self, raw_price: float, time: int, reason: str = "") -> Optional[Trade]:
+    def _open_long(self, o: float, h: float, l: float, c: float, time: int, reason: str = "") -> Optional[Trade]:
         """
         Open a long position.
-        raw_price = candle open (what shows on the chart).
-        Slippage is deducted as a cost but does NOT inflate the stored entry_price.
+        Calculates realistic execution price factoring in priority-fee based delay
+        and slippage, storing the final real price.
         """
         if self.current_trade is not None:
             return None
-        if raw_price <= 0:
+        if o <= 0:
             return None
+
+        # 1. Simulate delay: penalty moves price towards the TOP of the execution candle
+        total_fee = self.priority_fee + self.bribe_fee
+        delay_fraction = 0.000005 / max(total_fee, 1e-9)
+        delay_fraction = max(0.01, min(1.0, delay_fraction))
+        
+        # The penalty moves price from Open to the High (worst realistic price for a buy)
+        delayed_price = o + (h - o) * delay_fraction
+
+        # 2. Add slippage
+        slip = self.slippage_pct / 100.0
+        exec_price = delayed_price * (1.0 + slip)   # hyper-realistic fill price
 
         fees = self.total_fees_per_trade
         trade_size = min(self.buy_size_sol, self.balance - fees)
         if trade_size <= 0:
             return None
 
-        slip = self.slippage_pct / 100.0
-        exec_price = raw_price * (1.0 + slip)   # actual fill price (internal)
-
-        # Tokens received at slipped price
+        # Tokens received at exact filled price
         tokens = trade_size / exec_price
 
-        # Slippage cost in SOL = difference between ideal tokens and actual tokens, valued at raw price
-        ideal_tokens = trade_size / raw_price
-        slippage_cost = (ideal_tokens - tokens) * raw_price  # ≈ trade_size * slip/(1+slip)
+        # Slippage/delay cost vs ideal Raw Open
+        ideal_tokens = trade_size / o
+        slippage_cost = max(0.0, (ideal_tokens - tokens) * o)
 
         # Deduct trade size + fees from balance
         self.balance -= (trade_size + fees)
 
         trade = Trade(
             entry_time=time,
-            entry_price=raw_price,          # CHART price — no slippage baked in
+            entry_price=exec_price,          # CHART price — realistic, includes delay + slippage
             size_sol=trade_size,
             size_tokens=tokens,
             fees_paid=fees,
@@ -162,13 +170,14 @@ class ForwardTester:
             entry_reason=reason,
         )
         self.current_trade = trade
-        self.engine.notify_trade_opened(raw_price, Direction.UP)
+        self.engine.notify_trade_opened(exec_price, Direction.UP)
         return trade
 
-    def _close_long(self, raw_price: float, time: int, reason: str = "") -> Optional[Trade]:
+    def _close_long(self, o: float, h: float, l: float, c: float, time: int, reason: str = "") -> Optional[Trade]:
         """
         Close long position.
-        raw_price = candle open at exit (what shows on the chart).
+        Calculates realistic execution price factoring in priority-fee based delay
+        and slippage, storing the final real price.
         """
         if self.current_trade is None:
             return None
@@ -176,15 +185,25 @@ class ForwardTester:
         trade = self.current_trade
         assert trade is not None
         fees = self.total_fees_per_trade
-        slip = self.slippage_pct / 100.0
-        exec_price = raw_price * (1.0 - slip)   # actual fill price (internal)
+        
+        # 1. Simulate delay: penalty moves price towards the BOTTOM of the execution candle
+        total_fee = self.priority_fee + self.bribe_fee
+        delay_fraction = 0.000005 / max(total_fee, 1e-9)
+        delay_fraction = max(0.01, min(1.0, delay_fraction))
+        
+        # The penalty moves price from Open to the Low (worst realistic price for a sell)
+        delayed_price = o - (o - l) * delay_fraction
 
-        # Proceeds at slipped price
+        # 2. Add slippage
+        slip = self.slippage_pct / 100.0
+        exec_price = delayed_price * (1.0 - slip)   # actual fill price
+
+        # Proceeds at realistic slipped price
         proceeds = trade.size_tokens * exec_price
 
-        # Slippage cost on exit
-        ideal_proceeds = trade.size_tokens * raw_price
-        exit_slippage_cost = ideal_proceeds - proceeds
+        # Slippage cost vs ideal
+        ideal_proceeds = trade.size_tokens * o
+        exit_slippage_cost = max(0.0, ideal_proceeds - proceeds)
 
         # Deduct exit fees
         proceeds -= fees
@@ -192,12 +211,11 @@ class ForwardTester:
         # PnL in SOL: actual proceeds vs SOL we put in (includes slippage & fees)
         pnl = proceeds - trade.size_sol
 
-        # PnL % exactly matches the raw chart move, bypassing slippage/fees
-        # so chart labels accurately reflect the visual price change.
-        pnl_pct = (raw_price - trade.entry_price) / trade.entry_price * 100.0 if trade.entry_price > 0 else 0.0
+        # PnL % using the realistic slipped entry/exit prices
+        pnl_pct = (exec_price - trade.entry_price) / trade.entry_price * 100.0 if trade.entry_price > 0 else 0.0
 
         trade.exit_time = time
-        trade.exit_price = raw_price            # CHART price — no slippage baked in
+        trade.exit_price = exec_price            # CHART price — realistic, includes delay + slippage
         trade.pnl_sol = pnl
         trade.pnl_pct = pnl_pct
         trade.exit_reason = reason
@@ -264,13 +282,13 @@ class ForwardTester:
 
         # ── Step 1: Execute pending signal from the previous bar ──────────
         if self._pending_buy and self.current_trade is None:
-            opened_trade = self._open_long(o, time, getattr(self, '_pending_buy_reason', 'buy'))
+            opened_trade = self._open_long(o, h, l, c, time, getattr(self, '_pending_buy_reason', 'buy'))
             if opened_trade:
                 trade_action = "buy"
             self._pending_buy = False
 
         elif self._pending_exit and self.current_trade is not None:
-            closed_trade = self._close_long(o, time, self._pending_exit_reason)
+            closed_trade = self._close_long(o, h, l, c, time, self._pending_exit_reason)
             trade_action = "exit"
             self._pending_exit = False
             self._pending_exit_reason = ""
@@ -308,20 +326,28 @@ class ForwardTester:
             self._pending_exit_reason = reason
             self._pending_buy = False
 
-        # ── Step 4: Unrealized PnL using raw prices (matches chart) ───────
+        # ── Step 4: Unrealized PnL using realistic delayed/slipped prices ───────
         unrealized_pnl = 0.0
         unrealized_pnl_pct = 0.0
-        if self.current_trade is not None:
-            # Raw price move vs what we'd net after exit slippage + fees
+        current_trade = self.current_trade
+        if current_trade is not None:
+            # Simulate delay and slippage for hypothetical exit right now
+            total_fee = self.priority_fee + self.bribe_fee
+            delay_fraction = 0.000005 / max(total_fee, 1e-9)
+            delay_fraction = max(0.01, min(1.0, delay_fraction))
+            # since we are intra-candle (c is current price), just use c
+            delayed_price_now = c 
             slip = self.slippage_pct / 100.0
-            hypothetical_proceeds = self.current_trade.size_tokens * c * (1.0 - slip)
+            hypothetical_exit_price = delayed_price_now * (1.0 - slip)
+
+            hypothetical_proceeds = current_trade.size_tokens * hypothetical_exit_price
             hypothetical_proceeds -= self.total_fees_per_trade
-            unrealized_pnl = hypothetical_proceeds - self.current_trade.size_sol
-            if self.current_trade.entry_price > 0:
-                # Show % as: how much has price moved since entry (raw)
+            unrealized_pnl = hypothetical_proceeds - current_trade.size_sol
+            
+            if current_trade.entry_price > 0:
                 unrealized_pnl_pct = (
-                    (c - self.current_trade.entry_price)
-                    / self.current_trade.entry_price
+                    (hypothetical_exit_price - current_trade.entry_price)
+                    / current_trade.entry_price
                     * 100
                 )
 

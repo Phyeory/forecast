@@ -785,8 +785,11 @@ function processHistoricalStrategy(results, candles) {
       const signal = ft.trade_action;
       const signalLabel = ft.trade_label;
       const closedTrade = ft.closed_trade;
-      // candle.open is the execution bar's open — the visible price on the chart
-      const rawExecPrice = candle?.open ?? candle?.close;
+      // Retrieve hyper-realistic execution price from backend Trade object
+      let rawExecPrice = candle?.open ?? candle?.close;
+      if (signal === "buy" && ft.opened_trade) rawExecPrice = ft.opened_trade.entry_price;
+      else if (signal === "exit" && ft.closed_trade) rawExecPrice = ft.closed_trade.exit_price;
+      
       if (chartBaseMcap) {
         const mcapExecPrice = toMarketCapValue(rawExecPrice);
         addSignalMarker(candle.time, signal, signalLabel, r.regime, mcapExecPrice, closedTrade);
@@ -851,19 +854,22 @@ function processLiveStrategy(result, candle, mcapCandle) {
   regimeHistory.push(result.regime || "idle");
   if (regimeHistory.length > 300) regimeHistory.shift();
 
-  // Markers — use mcapCandle.open for the EXACT chart Y-axis alignment.
-  // Execution happens at next-bar open; entry_price/exit_price equal the open.
+  // Use the realistic entry_price/exit_price returned by the backend
   if (result.forward_test && mcapCandle) {
     const ft = result.forward_test;
     if (ft.trade_action === "buy" || ft.trade_action === "exit") {
-      const execPrice = mcapCandle.open;
-      const fallback = mcapCandle.close;
+      let rawExecPrice = candle?.open ?? candle?.close;
+      if (ft.trade_action === "buy" && ft.opened_trade) rawExecPrice = ft.opened_trade.entry_price;
+      else if (ft.trade_action === "exit" && ft.closed_trade) rawExecPrice = ft.closed_trade.exit_price;
+
+      const mcapExecPrice = rawExecPrice ? toMarketCapValue(rawExecPrice) : mcapCandle.open;
+
       addSignalMarker(
         mcapCandle.time,
         ft.trade_action,
         ft.trade_label,
         result.regime,
-        execPrice || fallback,
+        mcapExecPrice,
         ft.closed_trade
       );
       updateMarkers();
