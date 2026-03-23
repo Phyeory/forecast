@@ -350,6 +350,24 @@ class StrategyEngine:
         reversal_exit_confirm_bars: int = 1,
         s_effective_threshold: float = 0.5,
         exhaustion_persist_bars: int = 2,
+        # ── NEW: Regime Filter & Confidence params ────────────────────
+        regime_lookback: int = 5,             # N bars for persistence / rolling calcs
+        persistence_threshold: int = 3,       # min same-sign m_hat bars (§1A)
+        momentum_mean_threshold: float = 0.0, # auto-calibrated; fallback floor
+        ema_min_spread_pct: float = 0.05,     # min |EMA3-EMA7|/price * 100 (§1D)
+        confidence_high: float = 0.70,        # above → allow trading (§3)
+        confidence_low: float = 0.45,         # below → force IDLE (§3)
+        confidence_w1: float = 0.30,          # persistence weight  (§2)
+        confidence_w2: float = 0.25,          # normalised momentum weight
+        confidence_w3: float = 0.25,          # volatility expansion weight
+        confidence_w4: float = 0.20,          # EMA separation weight
+        atr_floor_k: float = 0.6,             # ATR floor multiplier (§4)
+        ema_cross_persist_bars: int = 2,       # bars EMA cross must persist (§5)
+        exhaustion_s_decay_bars: int = 2,      # bars S must decay for exhaustion (§6)
+        local_range_bars: int = 10,            # lookback for local range (§8)
+        local_range_threshold_pct: float = 0.3,# min range % of price (§8)
+        sign_flip_threshold: int = 4,          # max sign flips before chop (§8)
+        stability_bars: int = 2,               # pre-entry stability lookback (§9)
     ):
         self.ema_fast_p = ema_fast
         self.ema_slow_p = ema_slow
@@ -368,6 +386,25 @@ class StrategyEngine:
         self.reversal_exit_confirm_bars = reversal_exit_confirm_bars
         self.s_effective_threshold = s_effective_threshold
         self.exhaustion_persist_bars = exhaustion_persist_bars
+
+        # ── NEW parameters ────────────────────────────────────────────
+        self.regime_lookback = regime_lookback
+        self.persistence_threshold = persistence_threshold
+        self.momentum_mean_threshold = momentum_mean_threshold
+        self.ema_min_spread_pct = ema_min_spread_pct
+        self.confidence_high = confidence_high
+        self.confidence_low = confidence_low
+        self.confidence_w1 = confidence_w1
+        self.confidence_w2 = confidence_w2
+        self.confidence_w3 = confidence_w3
+        self.confidence_w4 = confidence_w4
+        self.atr_floor_k = atr_floor_k
+        self.ema_cross_persist_bars = ema_cross_persist_bars
+        self.exhaustion_s_decay_bars = exhaustion_s_decay_bars
+        self.local_range_bars = local_range_bars
+        self.local_range_threshold_pct = local_range_threshold_pct
+        self.sign_flip_threshold = sign_flip_threshold
+        self.stability_bars = stability_bars
 
         # State
         self.bar_count = 0
@@ -431,21 +468,35 @@ class StrategyEngine:
         self.entry_price: float = 0.0
         self.trailing_stop: Optional[float] = None
         self.position_direction: Direction = Direction.NONE
-        
-        # --- NEW REGIME & FILTER STATE ---
-        self.m_hat_history: list[float] = []
-        self.atr_history: list[float] = []
-        self.s_history: list[float] = []
+
+        # ── NEW: Rolling buffers for regime filter & confidence ────────
+        self._m_hat_history: list[float] = []        # rolling m_hat values
+        self._abs_m_hat_history: list[float] = []    # rolling |m_hat|
+        self._atr_history: list[float] = []          # rolling ATR values
+        self._signal_strength_history: list[float] = []  # rolling S values
+        self._ema_spread_history: list[float] = []   # rolling EMA spread magnitudes
+
+        # §1: Global regime filter result
         self.is_trending: bool = False
-        
-        self.cross_persist_count: int = 0
-        self.current_target_dir: Direction = Direction.NONE
-        
-        # New Filter Thresholds
-        self.atr_floor_k: float = 0.6
-        self.ema_spread_min_pct: float = 0.0001
-        self.m_hat_mean_threshold_pct: float = 0.0001
-        self.local_range_threshold_pct: float = 0.003
+
+        # §2: Trend confidence score [0, 1]
+        self.trend_confidence: float = 0.0
+
+        # §4: ATR floor for S normalisation
+        self.atr_floor: float = 0.0
+
+        # §5: EMA cross persistence counter
+        self._ema_cross_persist_count: int = 0
+        self._ema_cross_valid: bool = False   # True when cross passes all gates
+
+        # §6: Exhaustion S-decay counter
+        self._exhaustion_s_decay_count: int = 0
+
+        # §8: Local range chop detection
+        self._in_local_chop: bool = False
+
+        # §9: Pre-entry stability
+        self._pre_entry_stable: bool = False
 
     def _update_indicators(self, o: float, h: float, l: float, c: float, vol: float):
         """Update EMA, ATR, ROC from new OHLC bar."""
@@ -478,83 +529,289 @@ class StrategyEngine:
         else:
             self.atr_val = ema_step(self.atr_val, tr, self.atr_period)
 
-        self.atr_history.append(self.atr_val or 0.0)
-        if len(self.atr_history) > 20: self.atr_history.pop(0)
-
         # Kalman-filtered momentum (replaces ROC)
         self.prev_m_hat = self.m_hat
         self.p_hat, self.m_hat = self.kalman.update(c)
-        self.m_hat_history.append(self.m_hat)
-        if len(self.m_hat_history) > 5: self.m_hat_history.pop(0)
 
         # Momentum acceleration: rate of change of momentum
         self.momentum_acceleration = self.m_hat - self.prev_m_hat
 
-        # Signal strength S = |m_hat_pct * roc_period| / ATR_floor_pct
-        if self.atr_val is not None and self.atr_val > 0 and c > 0:
-            current_atr = float(self.atr_val)
-            rolling_median_atr = float(np.median(self.atr_history)) if self.atr_history else current_atr
-            atr_floor = max(current_atr, self.atr_floor_k * rolling_median_atr)
+        # ── §4: ATR Floor — prevent S inflation in low-volatility ─────
+        # rolling_median_ATR from recent history
+        self._atr_history.append(self.atr_val or 0.0)
+        if len(self._atr_history) > self.regime_lookback * 4:
+            self._atr_history = self._atr_history[-(self.regime_lookback * 4):]
+        if len(self._atr_history) >= 3:
+            sorted_atr = sorted(self._atr_history)
+            rolling_median_atr = sorted_atr[len(sorted_atr) // 2]
+        else:
+            rolling_median_atr = self.atr_val or 0.0
+        self.atr_floor = max(self.atr_val or 0.0, self.atr_floor_k * rolling_median_atr)
 
+        # Signal strength S = |m_hat_pct * roc_period| / ATR_floor_pct
+        # (§4: uses ATR_floor instead of raw ATR to prevent inflation)
+        if self.atr_floor > 0 and c > 0:
             m_hat_pct = (self.m_hat / c) * 100 * self.roc_period
-            atr_pct = (atr_floor / c) * 100
-            if atr_pct > 0:
-                self.signal_strength = abs(m_hat_pct) / atr_pct
+            atr_floor_pct = (self.atr_floor / c) * 100
+            if atr_floor_pct > 0:
+                self.signal_strength = abs(m_hat_pct) / atr_floor_pct
             else:
                 self.signal_strength = 0.0
         else:
             self.signal_strength = 0.0
-            
-        self.s_history.append(self.signal_strength)
-        if len(self.s_history) > 3: self.s_history.pop(0)
 
-        # Global Regime Filter Evaluation
-        if len(self.m_hat_history) >= 3:
-            # A) Directional persistence over last 3 bars
-            m_hat_signs = [math.copysign(1, m) for m in self.m_hat_history[-3:]]
-            dir_persistence = len(set(m_hat_signs)) == 1
-            
-            # B) Momentum strength
-            m_hat_mean = sum(abs(m) for m in self.m_hat_history[-3:]) / 3.0
-            mom_strength_ok = m_hat_mean > (self.m_hat_mean_threshold_pct * c)
-            
-            # C) Volatility Expansion
-            current_atr = float(self.atr_val) if self.atr_val is not None else 0.0
-            rolling_median_atr_global = float(np.median(self.atr_history)) if self.atr_history else current_atr
-            vol_expansion = current_atr > (rolling_median_atr_global * 0.95)
-            
-            # D) EMA Separation
-            ema_sep_ok = abs(self.ema_spread) > (self.ema_spread_min_pct * c)
-            
-            self.is_trending = dir_persistence and mom_strength_ok and vol_expansion and ema_sep_ok
-        else:
-            self.is_trending = False
+        # ── Update rolling buffers for regime filter ──────────────────
+        N = self.regime_lookback
+        self._m_hat_history.append(self.m_hat)
+        if len(self._m_hat_history) > N * 2:
+            self._m_hat_history = self._m_hat_history[-(N * 2):]
 
-        # Barrier proximity: S_effective = S / weighted_delta_U
+        self._abs_m_hat_history.append(abs(self.m_hat))
+        if len(self._abs_m_hat_history) > N * 2:
+            self._abs_m_hat_history = self._abs_m_hat_history[-(N * 2):]
+
+        self._signal_strength_history.append(self.signal_strength)
+        if len(self._signal_strength_history) > N * 2:
+            self._signal_strength_history = self._signal_strength_history[-(N * 2):]
+
+        spread_mag = abs(self.ema_spread) if self.ema_spread else 0.0
+        self._ema_spread_history.append(spread_mag)
+        if len(self._ema_spread_history) > N * 2:
+            self._ema_spread_history = self._ema_spread_history[-(N * 2):]
+
+        # Barrier proximity: S_effective = S / delta_U
+        # delta_U = normalised distance from price to nearest HVN in trade direction
         self.s_effective = self._compute_s_effective(c)
 
-    def _detect_direction(self, c: float) -> Direction:
-        if self.ema_fast_val is not None and self.ema_slow_val is not None:
-            spread = self.ema_fast_val - self.ema_slow_val
-            target_dir = Direction.UP if spread > 0 else Direction.DOWN
-            
-            spread_mag = abs(spread)
-            spread_increasing = spread_mag > abs(self.prev_ema_spread)
-            magnitude_ok = spread_mag > (self.ema_spread_min_pct * c)
+        # ── §1–§3: Regime filter, confidence, and ambiguous zone ──────
+        self._update_regime_filter(c)
 
-            if target_dir != self.current_target_dir:
-                self.cross_persist_count = 0
-                self.current_target_dir = target_dir
+        # ── §5: EMA cross validation ──────────────────────────────────
+        self._update_ema_cross_validation(c)
 
-            if spread_increasing and magnitude_ok:
-                self.cross_persist_count += 1
+        # ── §8: Local range chop detection ────────────────────────────
+        self._update_local_chop(c)
+
+        # ── §9: Pre-entry stability check ─────────────────────────────
+        self._update_pre_entry_stability()
+
+    # ── §1–§3: Global Regime Filter + Trend Confidence + Ambiguous Zone ───
+
+    def _update_regime_filter(self, c: float):
+        """Compute trend confidence and apply global regime filter.
+
+        Sets self.is_trending and self.trend_confidence.
+        If not trending and not in position, forces state to IDLE.
+        """
+        N = self.regime_lookback
+
+        if len(self._m_hat_history) < N:
+            self.is_trending = False
+            self.trend_confidence = 0.0
+            return
+
+        recent_m = self._m_hat_history[-N:]
+        recent_abs_m = self._abs_m_hat_history[-N:]
+
+        # ── A) Directional Persistence ────────────────────────────────
+        # Count consecutive same-sign m_hat from most recent bar backward
+        current_sign = 1 if recent_m[-1] >= 0 else -1
+        persistence_count = 0
+        for v in reversed(recent_m):
+            if (v >= 0 and current_sign == 1) or (v < 0 and current_sign == -1):
+                persistence_count += 1
             else:
-                self.cross_persist_count = 0
+                break
+        persistence_ok = persistence_count >= self.persistence_threshold
 
-            # 3. REDUCE EMA CROSS SENSITIVITY
-            if self.cross_persist_count >= 2:
-                return target_dir
-            return self.direction
+        # ── B) Momentum Strength ──────────────────────────────────────
+        rolling_mean_abs_m = sum(recent_abs_m) / len(recent_abs_m)
+        # Auto-calibrate threshold: must be above the rolling mean itself
+        # (i.e. recent momentum is meaningful, not just noise)
+        mom_threshold = max(self.momentum_mean_threshold, rolling_mean_abs_m * 0.3)
+        momentum_ok = rolling_mean_abs_m > mom_threshold
+
+        # ── C) Volatility Expansion ───────────────────────────────────
+        atr_hist = self._atr_history
+        if len(atr_hist) >= 3:
+            sorted_atr = sorted(atr_hist)
+            rolling_median_atr = sorted_atr[len(sorted_atr) // 2]
+        else:
+            rolling_median_atr = self.atr_val or 0.0
+        volatility_ok = (self.atr_val or 0.0) > rolling_median_atr
+
+        # ── D) EMA Separation ─────────────────────────────────────────
+        if c > 0 and self.ema_fast_val is not None and self.ema_slow_val is not None:
+            ema_sep_pct = abs(self.ema_fast_val - self.ema_slow_val) / c * 100
+        else:
+            ema_sep_pct = 0.0
+        ema_sep_ok = ema_sep_pct > self.ema_min_spread_pct
+
+        # ── Boolean filter (§1) ───────────────────────────────────────
+        self.is_trending = all([persistence_ok, momentum_ok, volatility_ok, ema_sep_ok])
+
+        # ── §2: Continuous Trend Confidence ───────────────────────────
+        # persistence = fraction of last N bars with same momentum sign
+        same_sign_count = sum(1 for v in recent_m
+                              if (v >= 0) == (recent_m[-1] >= 0))
+        persistence_frac = same_sign_count / N
+
+        # normalised momentum = |m_hat| / rolling_mean(|m_hat|)
+        if rolling_mean_abs_m > 0:
+            norm_momentum = abs(self.m_hat) / rolling_mean_abs_m
+        else:
+            norm_momentum = 0.0
+        # Cap at 2.0 to prevent outliers dominating
+        norm_momentum = min(norm_momentum, 2.0) / 2.0
+
+        # volatility_expansion = ATR / rolling_median_ATR
+        if rolling_median_atr > 0:
+            vol_expansion = (self.atr_val or 0.0) / rolling_median_atr
+        else:
+            vol_expansion = 0.0
+        vol_expansion = min(vol_expansion, 2.0) / 2.0
+
+        # EMA separation = |EMA3 - EMA7| / price
+        ema_sep_norm = min(ema_sep_pct / max(self.ema_min_spread_pct * 3, 0.01), 1.0)
+
+        self.trend_confidence = (
+            self.confidence_w1 * persistence_frac
+            + self.confidence_w2 * norm_momentum
+            + self.confidence_w3 * vol_expansion
+            + self.confidence_w4 * ema_sep_norm
+        )
+        # Clamp to [0, 1]
+        self.trend_confidence = max(0.0, min(1.0, self.trend_confidence))
+
+    # ── §5: EMA Cross Sensitivity Reduction ───────────────────────────
+
+    def _update_ema_cross_validation(self, c: float):
+        """EMA cross is only valid if spread is increasing, magnitude is
+        above threshold, and it persists for >= ema_cross_persist_bars.
+        """
+        if c <= 0:
+            self._ema_cross_valid = False
+            return
+
+        spread_mag_pct = abs(self.ema_spread) / c * 100 if c > 0 else 0.0
+        spread_derivative = abs(self.ema_spread) - abs(self.prev_ema_spread)
+
+        # All three conditions must hold
+        cond_increasing = spread_derivative > 0
+        cond_magnitude = spread_mag_pct > self.ema_min_spread_pct
+        cond_all = cond_increasing and cond_magnitude
+
+        if cond_all:
+            self._ema_cross_persist_count += 1
+        else:
+            self._ema_cross_persist_count = 0
+
+        self._ema_cross_valid = (
+            self._ema_cross_persist_count >= self.ema_cross_persist_bars
+        )
+
+    # ── §8: Local Range Anti-Chop Filter ──────────────────────────────
+
+    def _update_local_chop(self, c: float):
+        """Detect choppy/range-bound conditions from price range and
+        momentum sign flips over the local window.
+        """
+        N = self.local_range_bars
+        if len(self.close_history) < N or c <= 0:
+            self._in_local_chop = False
+            return
+
+        prices = self.close_history[-N:]
+        local_range = max(prices) - min(prices)
+        range_pct = (local_range / c) * 100
+        range_small = range_pct < self.local_range_threshold_pct
+
+        # Count momentum sign flips
+        m_recent = self._m_hat_history[-N:] if len(self._m_hat_history) >= N else self._m_hat_history
+        sign_flips = 0
+        for i in range(1, len(m_recent)):
+            if m_recent[i] * m_recent[i - 1] < 0:
+                sign_flips += 1
+
+        self._in_local_chop = range_small and sign_flips >= self.sign_flip_threshold
+
+    # ── §9: Pre-Entry Stability Check ─────────────────────────────────
+
+    def _update_pre_entry_stability(self):
+        """Require m_hat increasing for >= stability_bars bars, S increasing
+        for >= stability_bars bars, and momentum_acceleration > 0.
+        """
+        N = self.stability_bars
+        if len(self._m_hat_history) < N + 1 or len(self._signal_strength_history) < N + 1:
+            self._pre_entry_stable = False
+            return
+
+        # m_hat increasing for N bars
+        m_recent = self._m_hat_history[-(N + 1):]
+        m_increasing = all(
+            abs(m_recent[i + 1]) > abs(m_recent[i]) for i in range(N)
+        )
+
+        # S increasing for N bars
+        s_recent = self._signal_strength_history[-(N + 1):]
+        s_increasing = all(s_recent[i + 1] > s_recent[i] for i in range(N))
+
+        # momentum_acceleration > 0 (current bar)
+        accel_positive = self.momentum_acceleration > 0
+
+        self._pre_entry_stable = m_increasing and s_increasing and accel_positive
+
+    # ── §7 + §10: Unified Entry Gate ──────────────────────────────────
+
+    def _passes_entry_gate(self, c: float, direction: Direction) -> bool:
+        """Combined entry gate: regime filter, confidence, stability,
+        local chop, and structure-aware location.
+
+        Returns True only if all regime / stability conditions allow entry.
+        This does NOT replace the existing entry scoring — it's a hard gate
+        that must pass BEFORE the scoring is evaluated.
+        """
+        # §3: Ambiguous zone — confidence must be above HIGH_THRESHOLD
+        if self.trend_confidence < self.confidence_high:
+            return False
+
+        # §8: No trading in local chop
+        if self._in_local_chop:
+            return False
+
+        # §9: Pre-entry stability
+        if not self._pre_entry_stable:
+            return False
+
+        # §10: Entry location filter — reject if mid-range / in value area
+        # "value area" = inside an HVN cluster (already tracked)
+        if self.current_profile:
+            # Reject if price is inside a high-volume cluster (value area)
+            if self.current_profile.is_price_in_hvn(c):
+                # Exception: allow if price is actively breaking OUT of the cluster
+                # (momentum strong enough to overcome)
+                if self.signal_strength < self.S_strong * 1.2:
+                    return False
+
+        # §7: Structure-aware rejection — directly below strong resistance
+        if direction == Direction.UP and self.current_profile:
+            hvn_bins = self.current_profile.get_hvn_bins(top_n=3)
+            for b in hvn_bins:
+                mid = (b.price_low + b.price_high) / 2
+                if mid > c:
+                    dist_pct = (mid - c) / c
+                    # Very close to overhead resistance with sell pressure
+                    if dist_pct < 0.005 and b.delta < 0:
+                        return False
+
+        return True
+
+    def _detect_direction(self) -> Direction:
+        if self.ema_fast_val is not None and self.ema_slow_val is not None:
+            if self.ema_fast_val > self.ema_slow_val:
+                return Direction.UP
+            elif self.ema_fast_val < self.ema_slow_val:
+                return Direction.DOWN
         return Direction.NONE
 
     def _is_chop_zone(self, c: float) -> bool:
@@ -571,7 +828,11 @@ class StrategyEngine:
         return atr_pct < self.chop_atr_pct and spread_pct < self.chop_spread_pct
 
     def _compute_s_effective(self, c: float) -> float:
-        """Compute barrier-adjusted signal strength: S / weighted_delta_U
+        """Compute barrier-adjusted signal strength: S / delta_U.
+
+        delta_U = normalised distance from current price to nearest HVN
+        in the direction of the trade.  If no profile or no HVN found,
+        returns raw S (assume no barrier).
         """
         S = self.signal_strength
         if not self.current_profile or not self.current_profile.bins:
@@ -579,33 +840,28 @@ class StrategyEngine:
         if c <= 0:
             return S
 
-        direction = self._detect_direction(c)
+        direction = self._detect_direction()
         hvn_bins = self.current_profile.get_hvn_bins(top_n=5)
 
-        # 5. STRUCTURE-AWARE ENTRY FILTER
+        # Find nearest HVN in the trade direction
         min_dist = float('inf')
-        blocking_node = None
-        
         for b in hvn_bins:
             mid = (b.price_low + b.price_high) / 2
             if direction == Direction.UP and mid > c:
-                dist = (mid - c) / c
-                if dist < min_dist:
-                    min_dist = dist
-                    blocking_node = b
+                dist = (mid - c) / c  # normalised distance
+                min_dist = min(min_dist, dist)
             elif direction == Direction.DOWN and mid < c:
                 dist = (c - mid) / c
-                if dist < min_dist:
-                    min_dist = dist
-                    blocking_node = b
+                min_dist = min(min_dist, dist)
 
-        if blocking_node is None:
+        if min_dist == float('inf') or min_dist <= 0:
+            # No barrier ahead → S_effective = S (unimpeded)
             return S
 
-        avg_hvn_vol = float(sum(b.total_volume for b in hvn_bins)) / max(1.0, float(len(hvn_bins)))
-        density_factor = float(blocking_node.total_volume / avg_hvn_vol) if avg_hvn_vol > 0 else 1.0
-        weighted_delta_U = max(float(min_dist), 0.001) * density_factor
-        return S / weighted_delta_U
+        # delta_U is the normalised distance; S_effective = S / delta_U
+        # We cap delta_U at a minimum to avoid division by tiny numbers
+        delta_U = max(min_dist, 0.001)
+        return S / delta_U
 
     def _is_leaving_hvn(self, c: float, direction: Direction = Direction.NONE) -> bool:
         """Check if price is NOT trapped inside an opposing-direction HVN.
@@ -625,59 +881,33 @@ class StrategyEngine:
         return not self.current_profile.is_price_in_hvn(c, opp_dir)
 
     def _detect_regime(self, c: float) -> tuple[Regime, Optional[Signal]]:
-        """State machine for regime detection."""
-        direction = self._detect_direction(c)
+        """State machine for regime detection.
+
+        Integrations:
+          §1/§3: Global regime filter — force IDLE when confidence < LOW_THRESHOLD,
+                 freeze state in ambiguous zone.
+          §5:    EMA cross only valid when _ema_cross_valid is True.
+          §6:    Strengthened exhaustion — require BOTH momentum_decay AND S decay.
+          §7/§9/§10: All BUY signals gated by _passes_entry_gate().
+        """
+        direction = self._detect_direction()
         signal = None
 
         S = self.signal_strength
-        # 6. LOCAL RANGE FILTER (ANTI-CHOP)
-        local_range_pct = 0.0
-        sign_flips = 0
-        if len(self.high_history) >= 10:
-            # using manual max/min loops to avoid list slicing type confusion in pyre
-            recent_highs = self.high_history[-10:]
-            recent_lows = self.low_history[-10:]
-            recent_max = max(recent_highs) if recent_highs else c
-            recent_min = min(recent_lows) if recent_lows else c
-            local_range_pct = (recent_max - recent_min) / c
-        if len(self.m_hat_history) >= 2:
-            sign_flips = sum(1 for i in range(1, len(self.m_hat_history)) if self.m_hat_history[i] * self.m_hat_history[i-1] < 0)
-        
-        is_anti_chop_triggered = (local_range_pct < self.local_range_threshold_pct) and (sign_flips >= 2)
-
-        # 1. GLOBAL REGIME FILTER (Intelligent application)
-        # If IDLE, wait for a confirmed trend or explicitly abort entering one.
-        if self.regime == Regime.IDLE:
-             if not self.is_trending or is_anti_chop_triggered:
-                 self.direction = Direction.NONE
-                 return self.regime, None
-        elif self.regime == Regime.TREND:
-             # Enforce global trend criteria. Give the trend a brief 3-bar buffer
-             # to establish m_hat sign persistence upon fresh entry.
-             if (self.trend_bar_count > 3 and not self.is_trending) or is_anti_chop_triggered:
-                 self.regime = Regime.IDLE
-                 self.direction = Direction.NONE
-                 return self.regime, Signal.EXIT if self.in_position else None
-        else:
-             # For EXHAUSTION/REVERSAL (where momentum naturally decays and flips signs):
-             # We only abort on pure, tight, directionless noise (anti-chop)
-             if is_anti_chop_triggered:
-                 self.regime = Regime.IDLE
-                 self.direction = Direction.NONE
-                 return self.regime, Signal.EXIT if self.in_position else None
-
         roc_decreasing = abs(self.m_hat) < abs(self.prev_m_hat)
         roc_zero_cross = (self.m_hat * self.prev_m_hat) < 0 if self.prev_m_hat != 0 else False
         momentum_decay = (abs(self.m_hat) - abs(self.prev_m_hat)) < 0  # D < 0
-        s_increasing = len(self.s_history) >= 2 and self.s_history[-1] > self.s_history[-2]
-        s_decreasing = len(self.s_history) >= 2 and self.s_history[-1] < self.s_history[-2]
-        
         atr_expanding = False
         if self.trend_start_atr > 0 and self.atr_val:
             atr_expanding = self.atr_val > self.trend_start_atr * 1.1
 
-        # Consolidation / chop detection
-        in_chop = self._is_chop_zone(c)
+        # Consolidation / chop detection (original + new §8)
+        in_chop = self._is_chop_zone(c) or self._in_local_chop
+
+        # §6: Signal strength decay tracking for exhaustion
+        s_decreasing = False
+        if len(self._signal_strength_history) >= 2:
+            s_decreasing = self._signal_strength_history[-1] < self._signal_strength_history[-2]
 
         # Profile checks
         in_hvn_current = False
@@ -698,7 +928,7 @@ class StrategyEngine:
             elif direction == Direction.DOWN and cum_delta > self.delta_threshold:
                 strong_opposite_delta = True
 
-        # Delta aligned
+        # Delta aligned with new direction
         delta_aligned = False
         if self.current_profile:
             cum_delta = self.current_profile.cumulative_delta
@@ -707,9 +937,35 @@ class StrategyEngine:
             elif direction == Direction.DOWN and cum_delta < 0:
                 delta_aligned = True
 
+        # ── §1/§3: GLOBAL REGIME FILTER — runs BEFORE state machine ──────
+        # If confidence is below LOW_THRESHOLD → force IDLE, disable everything.
+        # If in ambiguous zone (between LOW and HIGH) → freeze state, no transitions.
+        if self.trend_confidence < self.confidence_low:
+            # Below low threshold: force IDLE (unless holding a position — allow exits)
+            if self.regime != Regime.IDLE:
+                if self.in_position:
+                    # Allow regime to persist so exit logic can trigger,
+                    # but block new entries and new transitions
+                    pass
+                else:
+                    self.regime = Regime.IDLE
+                    self.direction = Direction.NONE
+                    return self.regime, None
+            return self.regime, None
+
+        if self.trend_confidence < self.confidence_high:
+            # Ambiguous zone: no entries, no state transitions
+            # But still process exits if in position
+            if self.in_position:
+                # Allow exit checks to run (handled after _detect_regime)
+                pass
+            return self.regime, None
+
         # ─── A. IDLE → TREND ──────────────────────────────────────────────
         if self.regime == Regime.IDLE:
-            if direction != Direction.NONE and self.spread_expanding and S > self.S_strong:
+            # §5: Require EMA cross to be validated before entering TREND
+            if (direction != Direction.NONE and self.spread_expanding
+                    and S > self.S_strong and self._ema_cross_valid):
                 self.regime = Regime.TREND
                 self.direction = direction
                 self.trend_start_price = c
@@ -726,28 +982,50 @@ class StrategyEngine:
         elif self.regime == Regime.TREND:
             self.trend_bar_count += 1
 
+            # Guard: don't allow exhaustion transition until trend has
+            # persisted for a minimum number of bars. This prevents
+            # rapid TREND→EXHAUSTION→REVERSAL cycling from EMA noise.
             if self.trend_bar_count < self.min_trend_bars:
                 return self.regime, None
 
-            # 4. STRENGTHEN EXHAUSTION CONDITIONS
-            # Require BOTH momentum decay AND S decreasing, plus persistence
-            if momentum_decay and s_decreasing:
-                self.exhaustion_persist_count += 1
+            # §6: Strengthened exhaustion — require BOTH momentum decay AND S decay
+            spread_shrinking = not self.spread_expanding
+            exhaust_conds = [
+                spread_shrinking,
+                roc_decreasing,
+                momentum_decay,
+                S < self.S_weak,
+                self.momentum_acceleration < 0,  # require decelerating momentum
+                s_decreasing,                    # §6: S must also be decreasing
+            ]
+            met = sum(1 for x in exhaust_conds if x)
+
+            # In chop zones, require ALL 6 conditions (stricter)
+            exhaust_threshold = 6 if in_chop else 4  # raised from 3→4 with new s_decreasing
+
+            if met >= exhaust_threshold:
+                # §6: Exhaustion persistence with BOTH decay conditions
+                if momentum_decay and s_decreasing:
+                    self.exhaustion_persist_count += 1
+                else:
+                    self.exhaustion_persist_count = 0
+
+                if self.exhaustion_persist_count >= self.exhaustion_persist_bars:
+                    self.regime = Regime.EXHAUSTION
+                    self.trend_before_exhaustion = self.direction  # Lock original trend
+                    self.exhaustion_bar_count = 0
+                    self.reversal_confirm_count = 0
+                    self.exhaustion_persist_count = 0
+                    self._exhaustion_s_decay_count = 0
+                    return self.regime, None
             else:
+                # Conditions not met this bar — reset persistence streak
                 self.exhaustion_persist_count = 0
 
-            # Must hold for 2-3 bars
-            if self.exhaustion_persist_count >= 2:
-                self.regime = Regime.EXHAUSTION
-                self.trend_before_exhaustion = self.direction
-                self.exhaustion_bar_count = 0
-                self.reversal_confirm_count = 0
-                self.exhaustion_persist_count = 0
-                return self.regime, None
-
-            # Direction change while in trend
+            # Direction change while in trend → could be rapid reversal
+            # §5: require EMA cross to be validated + momentum zero-cross + persistence
             if direction != self.direction and direction != Direction.NONE:
-                if roc_zero_cross:
+                if roc_zero_cross and self._ema_cross_valid:
                     self.trend_reversal_confirm_count += 1
                     if self.trend_reversal_confirm_count >= self.reversal_confirm_bars:
                         self.prev_direction = self.direction
@@ -758,6 +1036,17 @@ class StrategyEngine:
                         return self.regime, None
                 else:
                     self.trend_reversal_confirm_count = 0
+
+                # EMA cross happened but momentum zero-cross not confirmed yet
+                # → go to exhaustion first (with persistence requirement)
+                self.exhaustion_persist_count += 1
+                if self.exhaustion_persist_count >= self.exhaustion_persist_bars:
+                    self.regime = Regime.EXHAUSTION
+                    self.trend_before_exhaustion = self.direction  # Lock original trend
+                    self.exhaustion_bar_count = 0
+                    self.reversal_confirm_count = 0
+                    self.exhaustion_persist_count = 0
+                    return self.regime, None
             else:
                 self.trend_reversal_confirm_count = 0
 
@@ -792,24 +1081,20 @@ class StrategyEngine:
                     signal = None
                     
                     if direction == Direction.UP and self.trend_before_exhaustion == Direction.DOWN:
+                        # it shouldnt be just 1 bar, it should be the exhaustion threshold
                         if self.exhaustion_bar_count >= self.exhaustion_persist_bars:
-                            # 7. ENTRY TIMING IMPROVEMENT
-                            if not self.in_position and S > self.S_weak and self.momentum_acceleration > 0 and s_increasing:
-                                # Structure-aware check: reject if in HVN
-                                valid_structure = True
-                                profile = self.current_profile
-                                if profile is not None and profile.is_price_in_hvn(c):
-                                    valid_structure = False
-                                
-                                entry_conds = [
-                                    S > self.S_strong,
-                                    delta_aligned,
-                                    self._is_leaving_hvn(c, direction),
-                                    self.s_effective > self.s_effective_threshold,
-                                    self.spread_expanding,
-                                ]
-                                if valid_structure and sum(1 for x in entry_conds if x) >= 2:
-                                    signal = Signal.BUY
+                            if not self.in_position and S > self.S_weak and self.momentum_acceleration > 0:
+                                # §7/§9/§10: Entry gate must pass
+                                if self._passes_entry_gate(c, direction):
+                                    entry_conds = [
+                                        S > self.S_strong,
+                                        delta_aligned,
+                                        self._is_leaving_hvn(c, direction),
+                                        self.s_effective > self.s_effective_threshold,
+                                        self.spread_expanding,
+                                    ]
+                                    if sum(1 for x in entry_conds if x) >= 2:
+                                        signal = Signal.BUY
                     elif direction == Direction.DOWN and self.in_position:
                         signal = Signal.EXIT
 
@@ -820,8 +1105,10 @@ class StrategyEngine:
                     return self.regime, signal
 
             # Check for direction flip (EMA cross) relative to original trend
+            # §5: only consider validated EMA crosses
             direction_flipped = (direction != Direction.NONE and
-                                 direction != self.trend_before_exhaustion)
+                                 direction != self.trend_before_exhaustion
+                                 and self._ema_cross_valid)
 
             # Check reversal conditions
             rev_conds = [
@@ -860,11 +1147,13 @@ class StrategyEngine:
         # ─── D. REVERSAL → CONTINUATION / back to EXHAUSTION ─────────────
         elif self.regime == Regime.REVERSAL:
             self.reversal_bar_count += 1
-            new_dir = self._detect_direction(c)
+            new_dir = self._detect_direction()
 
             # Check continuation conditions — core state transition only.
             # Entry-specific gates are applied to BUY decision below.
-            ema_cross = (new_dir != Direction.NONE and new_dir != self.prev_direction)
+            # §5: EMA cross must be validated
+            ema_cross = (new_dir != Direction.NONE and new_dir != self.prev_direction
+                         and self._ema_cross_valid)
             cont_conds = [
                 ema_cross,
                 S > self.S_strong,
@@ -881,23 +1170,19 @@ class StrategyEngine:
                 # Dynamic entry: BUY when core conditions met + enough
                 # confirming signals.  S > S_weak and momentum_acceleration > 0
                 # are hard requirements; the rest are scored (2/5 needed).
-                # 7. ENTRY TIMING IMPROVEMENT: require s_increasing and structure clearance
                 if new_dir == Direction.UP and self.prev_direction == Direction.DOWN:
-                    if not self.in_position and S > self.S_weak and self.momentum_acceleration > 0 and s_increasing:
-                        valid_structure = True
-                        profile = self.current_profile
-                        if profile is not None and profile.is_price_in_hvn(c):
-                            valid_structure = False
-                            
-                        entry_conds = [
-                            S > self.S_strong,
-                            delta_aligned,
-                            self._is_leaving_hvn(c, new_dir),
-                            self.s_effective > self.s_effective_threshold,
-                            self.spread_expanding,
-                        ]
-                        if valid_structure and sum(1 for x in entry_conds if x) >= 2:
-                            signal = Signal.BUY
+                    if not self.in_position and S > self.S_weak and self.momentum_acceleration > 0:
+                        # §7/§9/§10: Entry gate must pass
+                        if self._passes_entry_gate(c, new_dir):
+                            entry_conds = [
+                                S > self.S_strong,
+                                delta_aligned,
+                                self._is_leaving_hvn(c, new_dir),
+                                self.s_effective > self.s_effective_threshold,
+                                self.spread_expanding,
+                            ]
+                            if sum(1 for x in entry_conds if x) >= 2:
+                                signal = Signal.BUY
                 elif new_dir == Direction.DOWN and self.prev_direction == Direction.UP:
                     if self.in_position:
                         signal = Signal.EXIT
@@ -1063,6 +1348,7 @@ class StrategyEngine:
                 "ema_fast": self.ema_fast_val,
                 "ema_slow": self.ema_slow_val,
                 "atr": self.atr_val,
+                "atr_floor": self.atr_floor,
                 "roc": self.m_hat,              # Kalman momentum (drop-in for ROC)
                 "m_hat": self.m_hat,             # Explicit alias
                 "p_hat": self.p_hat,             # Kalman filtered price
@@ -1071,12 +1357,17 @@ class StrategyEngine:
                 "s_effective": self.s_effective,
                 "ema_spread": self.ema_spread,
                 "spread_expanding": self.spread_expanding,
+                "trend_confidence": self.trend_confidence,
+                "is_trending": self.is_trending,
+                "ema_cross_valid": self._ema_cross_valid,
+                "pre_entry_stable": self._pre_entry_stable,
+                "in_local_chop": self._in_local_chop,
             },
             "volume_profiles": all_profiles,
             "in_position": self.in_position,
             "entry_price": self.entry_price,
             "trailing_stop": self.trailing_stop,
             "exhaustion_bars": self.exhaustion_bar_count,
-            "in_chop": self._is_chop_zone(price),
+            "in_chop": self._is_chop_zone(price) or self._in_local_chop,
             "trend_bars": self.trend_bar_count,
         }
