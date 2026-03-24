@@ -355,19 +355,19 @@ class StrategyEngine:
         persistence_threshold: int = 3,       # min same-sign m_hat bars (§1A)
         momentum_mean_threshold: float = 0.0, # auto-calibrated; fallback floor
         ema_min_spread_pct: float = 0.05,     # min |EMA3-EMA7|/price * 100 (§1D)
-        confidence_high: float = 0.55,        # above → allow trading
-        confidence_low: float = 0.28,         # below → force IDLE
+        confidence_high: float = 0.60,        # above → allow trading
+        confidence_low: float = 0.35,         # below → force IDLE
         confidence_w1: float = 0.30,          # persistence weight  (§2)
         confidence_w2: float = 0.25,          # normalised momentum weight
         confidence_w3: float = 0.25,          # volatility expansion weight
         confidence_w4: float = 0.20,          # EMA separation weight
         atr_floor_k: float = 0.6,             # ATR floor multiplier (§4)
-        ema_cross_persist_bars: int = 1,       # bars EMA cross must persist (§5) [was 2]
+        ema_cross_persist_bars: int = 2,      # min bars EMA spread increasing (§5)
         exhaustion_s_decay_bars: int = 2,      # bars S must decay for exhaustion (§6)
         local_range_bars: int = 10,            # lookback for local range (§8)
         local_range_threshold_pct: float = 0.3,# min range % of price (§8)
         sign_flip_threshold: int = 4,          # max sign flips before chop (§8)
-        stability_bars: int = 1,               # pre-entry stability lookback (§9) [was 2]
+        stability_bars: int = 2,              # required consecutive stability bars (§9) [was 2]
     ):
         self.ema_fast_p = ema_fast
         self.ema_slow_p = ema_slow

@@ -74,8 +74,11 @@ class ForwardTester:
         priority_fee: float = 0.0001,
         bribe_fee: float = 0.00001,
         slippage_pct: float = 10.0,
+        engine_kwargs: Optional[dict] = None,
     ):
-        self.engine = StrategyEngine()
+        if engine_kwargs is None:
+            engine_kwargs = {}
+        self.engine = StrategyEngine(**engine_kwargs)
         self.balance = starting_balance
         self.buy_size_sol = buy_size_sol
         self.priority_fee = priority_fee

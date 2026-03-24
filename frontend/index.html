@@ -18,6 +18,7 @@
     <form id="address-form" onsubmit="return false">
       <input id="mint-input" type="text" placeholder="Enter pump.fun token address…" autocomplete="off" spellcheck="false" />
       <button id="load-btn" type="button">Load Chart</button>
+      <button id="settings-btn" type="button">⚙️</button>
     </form>
     <div id="tf-bar">
       <button class="tf-btn"        data-tf="1s">1s</button>
@@ -95,9 +96,22 @@
       <!-- ROC + ATR sub panes -->
       <div id="sub-pane" class="sub-pane-wrapper"></div>
     </div>
+  <div id="settings-modal" class="hidden">
+    <div class="settings-content">
+      <div class="settings-header">
+        <h2>Strategy Parameters</h2>
+        <button id="close-settings">&times;</button>
+      </div>
+      <div class="settings-body" id="settings-form">
+        <!-- Will be populated by JS -->
+      </div>
+      <div class="settings-footer">
+        <button id="apply-settings-btn" type="button">Apply</button>
+      </div>
+    </div>
   </div>
 
 </div>
-<script src="/static/js/app.js?v=3"></script>
+<script src="/static/js/app.js?v=4"></script>
 </body>
 </html>

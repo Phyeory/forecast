@@ -51,6 +51,7 @@ async def chart_ws(
     websocket: WebSocket,
     mint: str,
     timeframe: str = Query(default="1m"),
+    params: str = Query(default="{}"),
 ):
     if timeframe not in TIMEFRAME_SECONDS:
         await websocket.close(code=4000, reason="Unknown timeframe")
@@ -80,6 +81,12 @@ async def chart_ws(
     cancelled  = asyncio.Event()
     last_sent_price = None  # Track to skip unchanged price updates
 
+    try:
+        engine_params = json.loads(params)
+    except Exception as e:
+        logger.error(f"Failed to parse engine params: {e}")
+        engine_params = {}
+
     # Initialize forward tester
     forward_tester = ForwardTester(
         starting_balance=1.0,
@@ -87,6 +94,7 @@ async def chart_ws(
         priority_fee=0.0001,
         bribe_fee=0.00001,
         slippage_pct=1.0,
+        engine_kwargs=engine_params,
     )
 
     async def send(obj: dict) -> bool:

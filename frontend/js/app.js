@@ -50,6 +50,22 @@ let lastRegime = "idle";
 let forwardTestStats = null;
 let pendingMarkerData = [];  // raw marker data awaiting market cap resolution
 
+/* Strategy Engine Parameters */
+let engineParams = {
+  ema_fast: 3, ema_slow: 7, atr_period: 7, roc_period: 3, warmup: 20,
+  signal_strong: 2.0, signal_weak: 1.2, signal_noise: 1.0,
+  exhaustion_bars_limit: 7, delta_threshold: 0.3, kalman_gamma: 0.1,
+  min_trend_bars: 3, reversal_confirm_bars: 2, chop_atr_pct: 0.5,
+  chop_spread_pct: 0.15, reversal_exit_confirm_bars: 1,
+  s_effective_threshold: 0.5, exhaustion_persist_bars: 2,
+  regime_lookback: 5, persistence_threshold: 3, momentum_mean_threshold: 0.0,
+  ema_min_spread_pct: 0.05, confidence_high: 0.60, confidence_low: 0.35,
+  confidence_w1: 0.30, confidence_w2: 0.25, confidence_w3: 0.25, confidence_w4: 0.20,
+  atr_floor_k: 0.6, ema_cross_persist_bars: 2, exhaustion_s_decay_bars: 2,
+  local_range_bars: 10, local_range_threshold_pct: 0.3, sign_flip_threshold: 4,
+  stability_bars: 2,
+};
+
 const $ = id => document.getElementById(id);
 const mintInput   = $("mint-input");
 const loadBtn     = $("load-btn");
@@ -72,6 +88,11 @@ const tradeFeed   = $("trade-feed");
 const overlay     = $("overlay");
 const overlayIcon = $("overlay-icon");
 const overlayMsg  = $("overlay-msg");
+const settingsBtn = $("settings-btn");
+const settingsModal = $("settings-modal");
+const closeSettingsBtn = $("close-settings");
+const applySettingsBtn = $("apply-settings-btn");
+const settingsForm = $("settings-form");
 
 /* ── Chart init ──────────────────────────────────────────────────────── */
 
@@ -917,7 +938,8 @@ function connect(mint, timeframe) {
   showOverlay("⏳", "Connecting…");
   setDot("connecting", "Connecting…");
 
-  ws = new WebSocket(`${WS_BASE}/${mint}?timeframe=${timeframe}`);
+  const paramsStr = encodeURIComponent(JSON.stringify(engineParams));
+  ws = new WebSocket(`${WS_BASE}/${mint}?timeframe=${timeframe}&params=${paramsStr}`);
 
   ws.onopen = () => {
     reconnectMs = RECONNECT_MS;
@@ -1100,6 +1122,53 @@ tfBtns.forEach(btn => {
     currentTf = btn.dataset.tf;
     if (currentMint) connect(currentMint, currentTf);
   });
+});
+
+/* ── Settings Logic ──────────────────────────────────────────────────── */
+
+function renderSettings() {
+  settingsForm.innerHTML = "";
+  for (const [key, val] of Object.entries(engineParams)) {
+    const group = document.createElement("div");
+    group.className = "param-group";
+    const label = document.createElement("label");
+    label.className = "param-label";
+    label.textContent = key;
+    const input = document.createElement("input");
+    input.className = "param-input";
+    input.dataset.key = key;
+    input.value = val;
+    // determine type
+    if (Number.isInteger(val)) input.type = "number";
+    else { input.type = "number"; input.step = "0.01"; }
+    
+    group.append(label, input);
+    settingsForm.append(group);
+  }
+}
+
+settingsBtn.addEventListener("click", () => {
+  renderSettings();
+  settingsModal.classList.remove("hidden");
+});
+
+closeSettingsBtn.addEventListener("click", () => {
+  settingsModal.classList.add("hidden");
+});
+
+settingsModal.addEventListener("click", (e) => {
+  if (e.target === settingsModal) settingsModal.classList.add("hidden");
+});
+
+applySettingsBtn.addEventListener("click", () => {
+  const inputs = settingsForm.querySelectorAll(".param-input");
+  inputs.forEach(inp => {
+    const key = inp.dataset.key;
+    const isInt = Number.isInteger(engineParams[key]);
+    engineParams[key] = isInt ? parseInt(inp.value, 10) : parseFloat(inp.value);
+  });
+  settingsModal.classList.add("hidden");
+  if (currentMint) connect(currentMint, currentTf);
 });
 
 /* Re-render volume profiles when chart view changes */
