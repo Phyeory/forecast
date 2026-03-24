@@ -800,17 +800,17 @@ function processHistoricalStrategy(results, candles) {
     regimeHistory.push(r.regime || "idle");
 
     // Markers — execution is at the OPEN of the candle (1-bar delay model).
-    // Use candle.open for the label so it matches what's visible on the chart.
+    // Use candle.open for the label price so it sits within the visible candle range.
+    // entry_price/exit_price include slippage+delay and would appear outside the candle.
     if (r.forward_test && (r.forward_test.trade_action === "buy" || r.forward_test.trade_action === "exit")) {
       const ft = r.forward_test;
       const signal = ft.trade_action;
       const signalLabel = ft.trade_label;
       const closedTrade = ft.closed_trade;
-      // Retrieve hyper-realistic execution price from backend Trade object
-      let rawExecPrice = candle?.open ?? candle?.close;
-      if (signal === "buy" && ft.opened_trade) rawExecPrice = ft.opened_trade.entry_price;
-      else if (signal === "exit" && ft.closed_trade) rawExecPrice = ft.closed_trade.exit_price;
-      
+      // Always use candle open for visual label — the fill price (entry/exit_price)
+      // includes delay + slippage and would render outside the candle's range.
+      const rawExecPrice = candle?.open ?? candle?.close;
+
       if (chartBaseMcap) {
         const mcapExecPrice = toMarketCapValue(rawExecPrice);
         addSignalMarker(candle.time, signal, signalLabel, r.regime, mcapExecPrice, closedTrade);
@@ -875,15 +875,13 @@ function processLiveStrategy(result, candle, mcapCandle) {
   regimeHistory.push(result.regime || "idle");
   if (regimeHistory.length > 300) regimeHistory.shift();
 
-  // Use the realistic entry_price/exit_price returned by the backend
+  // Use candle open for the visual label price — entry/exit_price include
+  // delay + slippage and would render outside the candle's visible range.
   if (result.forward_test && mcapCandle) {
     const ft = result.forward_test;
     if (ft.trade_action === "buy" || ft.trade_action === "exit") {
-      let rawExecPrice = candle?.open ?? candle?.close;
-      if (ft.trade_action === "buy" && ft.opened_trade) rawExecPrice = ft.opened_trade.entry_price;
-      else if (ft.trade_action === "exit" && ft.closed_trade) rawExecPrice = ft.closed_trade.exit_price;
-
-      const mcapExecPrice = rawExecPrice ? toMarketCapValue(rawExecPrice) : mcapCandle.open;
+      // candle.open is the reference price that sits within the candle range.
+      const mcapExecPrice = mcapCandle.open;
 
       addSignalMarker(
         mcapCandle.time,
