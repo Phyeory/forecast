@@ -1185,3 +1185,446 @@ initVolumeProfileCanvas();
 initSubPaneCanvas();
 initRegimeCanvas();
 setupChartRedraw();
+
+/* ════════════════════════════════════════════════════════════════════════
+   NEW PAGES: Navigation + Recorder + Viewer + Backtest
+   ════════════════════════════════════════════════════════════════════════ */
+
+const API_BASE = `${location.protocol}//${location.host}`;
+
+/* ── Page Navigation ─────────────────────────────────────────────────── */
+
+const navTabs = document.querySelectorAll(".nav-tab");
+const pages   = document.querySelectorAll(".page");
+
+function switchPage(pageId) {
+  pages.forEach(p => p.classList.remove("active"));
+  navTabs.forEach(t => t.classList.remove("active"));
+  const target = document.getElementById(`page-${pageId}`);
+  const tab = document.querySelector(`.nav-tab[data-page="${pageId}"]`);
+  if (target) target.classList.add("active");
+  if (tab) tab.classList.add("active");
+
+  // Refresh data when switching to pages
+  if (pageId === "recorder") { loadRecordingsList("recordings-list"); checkRecorderStatus(); }
+  if (pageId === "viewer") loadRecordingsList("viewer-recordings-list", true);
+  if (pageId === "backtest") { loadBacktestsList(); loadRecordingsDropdown(); }
+}
+
+navTabs.forEach(tab => tab.addEventListener("click", () => switchPage(tab.dataset.page)));
+
+/* ── Shared helpers ──────────────────────────────────────────────────── */
+
+async function apiFetch(path, opts = {}) {
+  const res = await fetch(`${API_BASE}${path}`, { headers: { "Content-Type": "application/json" }, ...opts });
+  return res.json();
+}
+
+function fmtTs(ts) {
+  if (!ts) return "—";
+  return new Date(ts * 1000).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
+}
+
+function fmtDuration(start, end) {
+  if (!start || !end) return "—";
+  const s = Math.round(end - start);
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.round(s/60) + "m";
+  return (s/3600).toFixed(1) + "h";
+}
+
+/* ── Recording card HTML ─────────────────────────────────────────────── */
+
+function renderRecordingCard(rec, opts = {}) {
+  const statusClass = rec.status === "recording" ? "status-recording" : "status-completed";
+  const actions = opts.viewerMode
+    ? `<button class="btn btn-primary btn-sm" onclick="loadViewer(${rec.id})">📊 View Chart</button>
+       <button class="btn btn-danger btn-xs" onclick="deleteRecording(${rec.id}, event)">🗑</button>`
+    : `<button class="btn btn-danger btn-xs" onclick="deleteRecording(${rec.id}, event)">🗑</button>`;
+  return `
+    <div class="recording-card" data-id="${rec.id}">
+      <div class="rec-card-header">
+        <div><span class="rec-card-name">${rec.token_name || 'Unknown'}</span> <span class="rec-card-symbol">${rec.token_symbol ? '$'+rec.token_symbol : ''}</span></div>
+        <div class="rec-card-badges">
+          <span class="rec-card-badge">${rec.timeframe}</span>
+          <span class="rec-card-badge ${statusClass}">${rec.status}</span>
+        </div>
+      </div>
+      <div class="rec-card-details">
+        <span>🕐 ${fmtTs(rec.started_at)}</span>
+        <span>📊 ${rec.candle_count} candles</span>
+        ${rec.stopped_at ? `<span>⏱ ${fmtDuration(rec.started_at, rec.stopped_at)}</span>` : ''}
+      </div>
+      <div class="rec-card-mint">${rec.mint || ''}</div>
+      <div class="rec-card-actions">${actions}</div>
+    </div>`;
+}
+
+/* ── Recordings list ─────────────────────────────────────────────────── */
+
+async function loadRecordingsList(containerId, viewerMode = false) {
+  const list = await apiFetch("/api/recordings");
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  if (!list.length) {
+    el.innerHTML = `<div class="empty-state">No recordings yet.</div>`;
+    return;
+  }
+  el.innerHTML = list.map(r => renderRecordingCard(r, { viewerMode })).join("");
+}
+
+async function deleteRecording(id, e) {
+  if (e) e.stopPropagation();
+  if (!confirm("Delete this recording?")) return;
+  await apiFetch(`/api/recordings/${id}`, { method: "DELETE" });
+  loadRecordingsList("recordings-list");
+  loadRecordingsList("viewer-recordings-list", true);
+}
+
+/* ── Recorder ────────────────────────────────────────────────────────── */
+
+let recPollTimer = null;
+
+async function checkRecorderStatus() {
+  const data = await apiFetch("/api/recorder/status");
+  const statusEl = document.getElementById("rec-status");
+  const startBtn = document.getElementById("rec-start-btn");
+  const stopBtn  = document.getElementById("rec-stop-btn");
+  if (data.active) {
+    statusEl.classList.remove("hidden");
+    startBtn.classList.add("hidden");
+    stopBtn.classList.remove("hidden");
+    document.getElementById("rec-status-mint").textContent = (data.token_name || data.mint?.slice(0,8)) + (data.token_symbol ? ` $${data.token_symbol}` : "");
+    document.getElementById("rec-status-tf").textContent = data.timeframe;
+    document.getElementById("rec-status-candles").textContent = `${data.candle_count} candles`;
+    if (!recPollTimer) recPollTimer = setInterval(checkRecorderStatus, 3000);
+  } else {
+    statusEl.classList.add("hidden");
+    startBtn.classList.remove("hidden");
+    stopBtn.classList.add("hidden");
+    if (recPollTimer) { clearInterval(recPollTimer); recPollTimer = null; }
+  }
+}
+
+document.getElementById("rec-start-btn").addEventListener("click", async () => {
+  const mint = document.getElementById("rec-mint-input").value.trim();
+  if (!mint) return alert("Enter a token address");
+  const tf = document.getElementById("rec-tf-select").value;
+  const data = await apiFetch("/api/recorder/start", { method: "POST", body: JSON.stringify({ mint, timeframe: tf }) });
+  if (data.error) return alert(data.error);
+  checkRecorderStatus();
+});
+
+document.getElementById("rec-stop-btn").addEventListener("click", async () => {
+  await apiFetch("/api/recorder/stop", { method: "POST" });
+  checkRecorderStatus();
+  loadRecordingsList("recordings-list");
+});
+
+/* ── Offline Chart Formatter ─────────── */
+
+async function formatOfflineCandles(mint, rawCandles, timeframeStr) {
+  if (!rawCandles || !rawCandles.length) return { candles: [], currency: "SOL" };
+  
+  let basePrice = rawCandles[0].open;
+  let baseMcap = 0;
+  let ccy = "SOL";
+  
+  try {
+    const tInfo = await apiFetch(`/api/token/${mint}`);
+    if (tInfo) {
+      // Determine authentic SOL price to prevent decoupled market cap evaluations
+      let solPrice = 160;
+      if (tInfo.price_usd && tInfo.price_sol) {
+        const pU = parseFloat(tInfo.price_usd);
+        const pS = parseFloat(tInfo.price_sol);
+        if (pU > 0 && pS > 0) solPrice = pU / pS;
+      } else if (tInfo.usd_market_cap && tInfo.market_cap) {
+        const sp = tInfo.usd_market_cap / tInfo.market_cap;
+        if (sp > 50 && sp < 1000) solPrice = sp;
+      }
+
+      if (tInfo.usd_market_cap || tInfo.price_usd) {
+        baseMcap = basePrice * 1_000_000_000 * solPrice;
+        ccy = "USD";
+      } else {
+        baseMcap = basePrice * 1e9;
+      }
+    } else {
+      baseMcap = basePrice * 1e9;
+    }
+  } catch(e) {
+    baseMcap = basePrice * 1e9;
+  }
+
+  if (!baseMcap || isNaN(baseMcap) || baseMcap <= 0) baseMcap = basePrice * 1e9;
+
+  const toMcap = (p) => {
+    if (!p) return 0;
+    return baseMcap * (p / basePrice);
+  };
+
+  const tfSec = timeframeToSeconds(timeframeStr);
+  const formatted = [];
+  let lastTime = null;
+  let lastClose = null;
+
+  for (const c of rawCandles) {
+    if (lastTime !== null && lastClose !== null && c.time > lastTime + tfSec) {
+      const gap = Math.floor((c.time - lastTime) / tfSec) - 1;
+      if (gap <= 15) { // Fill up to 15 empty candles to preserve continuity/connections
+        for (let t = lastTime + tfSec; t < c.time; t += tfSec) {
+          formatted.push({
+            time: t,
+            open: lastClose, high: lastClose, low: lastClose, close: lastClose,
+            volume: 0,
+            color: CANDLE_FLAT, borderColor: CANDLE_FLAT, wickColor: CANDLE_FLAT
+          });
+          lastTime = t;
+        }
+      }
+    }
+
+    let open = toMcap(c.open);
+    let high = toMcap(c.high);
+    let low = toMcap(c.low);
+    const close = toMcap(c.close);
+    
+    // Crucial for replicating the live charting: bridge open/close 
+    // to strictly form a continuous timeline preventing disjointed dashes
+    if (lastClose !== null) {
+      open = lastClose;
+      high = Math.max(lastClose, high, close);
+      low = Math.min(lastClose, low, close);
+    }
+
+    let color = CANDLE_FLAT;
+    if (close > open) color = CANDLE_UP;
+    else if (close < open) color = CANDLE_DOWN;
+    else if (lastClose !== null) {
+      if (close > lastClose) color = CANDLE_UP;
+      else if (close < lastClose) color = CANDLE_DOWN;
+    }
+
+    formatted.push({ ...c, time: c.time, open, high, low, close, volume: c.volume || 0, color, borderColor: color, wickColor: color });
+    lastTime = c.time;
+    lastClose = close;
+  }
+  
+  return { candles: formatted, currency: ccy };
+}
+
+/* ── Viewer ───────────────────────────────────────────────────────────── */
+
+let viewerChart = null;
+
+async function loadViewer(recordingId) {
+  const rec = await apiFetch(`/api/recordings/${recordingId}`);
+  const candles = await apiFetch(`/api/recordings/${recordingId}/candles`);
+  if (!candles.length) return alert("No candles in this recording");
+
+  document.getElementById("viewer-select-area").classList.add("hidden");
+  document.getElementById("viewer-chart-area").classList.remove("hidden");
+  document.getElementById("viewer-token-name").textContent = rec.token_name || "Unknown";
+  document.getElementById("viewer-token-symbol").textContent = rec.token_symbol ? `$${rec.token_symbol}` : "";
+  document.getElementById("viewer-meta-tf").textContent = rec.timeframe;
+  document.getElementById("viewer-meta-candles").textContent = `${candles.length} candles`;
+
+  const wrapper = document.getElementById("viewer-chart");
+  wrapper.innerHTML = "";
+  viewerChart = LightweightCharts.createChart(wrapper, {
+    layout: { background: { color: "#0d0f12" }, textColor: "#5a6071" },
+    grid: { vertLines: { color: "#1e2330" }, horzLines: { color: "#1e2330" } },
+    timeScale: { borderColor: "#1e2330", timeVisible: true, secondsVisible: true },
+    rightPriceScale: { borderColor: "#1e2330" },
+    width: wrapper.clientWidth, height: wrapper.clientHeight,
+  });
+
+  const formattedData = await formatOfflineCandles(rec.mint, candles, rec.timeframe);
+  chartCurrency = formattedData.currency;
+
+  const cs = viewerChart.addCandlestickSeries({
+    upColor: CANDLE_UP, downColor: CANDLE_DOWN,
+    borderUpColor: CANDLE_UP, borderDownColor: CANDLE_DOWN,
+    wickUpColor: CANDLE_UP, wickDownColor: CANDLE_DOWN,
+    priceFormat: { type: 'custom', minMove: 1, formatter: p => formatMcap(p) }
+  });
+  cs.setData(formattedData.candles);
+
+  const vs = viewerChart.addHistogramSeries({ color: "#5865f222", priceFormat: { type: "volume" }, priceScaleId: "vol" });
+  viewerChart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
+  vs.setData(formattedData.candles.map(c => ({ time: c.time, value: c.volume || 0, color: c.close >= c.open ? "#26a69a33" : "#ef535033" })));
+
+  viewerChart.timeScale().fitContent();
+  new ResizeObserver(() => viewerChart.applyOptions({ width: wrapper.clientWidth, height: wrapper.clientHeight })).observe(wrapper);
+}
+
+document.getElementById("viewer-back-btn").addEventListener("click", () => {
+  document.getElementById("viewer-select-area").classList.remove("hidden");
+  document.getElementById("viewer-chart-area").classList.add("hidden");
+  if (viewerChart) { viewerChart.remove(); viewerChart = null; }
+});
+
+/* ── Backtest ─────────────────────────────────────────────────────────── */
+
+let btChart = null;
+
+async function loadRecordingsDropdown() {
+  const list = await apiFetch("/api/recordings");
+  const sel = document.getElementById("bt-recording-select");
+  sel.innerHTML = `<option value="">— Choose a recording —</option>` +
+    list.filter(r => r.status === "completed").map(r =>
+      `<option value="${r.id}">${r.token_name || r.mint?.slice(0,8)} ($${r.token_symbol || '?'}) — ${r.timeframe} — ${r.candle_count} candles</option>`
+    ).join("");
+}
+
+async function loadBacktestsList() {
+  const list = await apiFetch("/api/backtests");
+  const el = document.getElementById("backtests-list");
+  if (!list.length) { el.innerHTML = `<div class="empty-state">No backtests yet.</div>`; return; }
+  el.innerHTML = list.map(bt => {
+    const pnlClass = bt.total_pnl >= 0 ? "pos" : "neg";
+    const pnlSign = bt.total_pnl >= 0 ? "+" : "";
+    return `
+    <div class="backtest-card" onclick="loadBacktestResult(${bt.id})">
+      <div class="bt-card-header">
+        <div><span class="bt-card-name">${bt.token_name || bt.mint?.slice(0,8)}</span> <span class="rec-card-symbol">${bt.token_symbol ? '$'+bt.token_symbol : ''}</span></div>
+        <div class="rec-card-badges"><span class="rec-card-badge">${bt.timeframe}</span></div>
+      </div>
+      <div class="bt-card-stats">
+        <div class="bt-stat"><span class="bt-stat-label">Trades</span><span class="bt-stat-value">${bt.total_trades}</span></div>
+        <div class="bt-stat"><span class="bt-stat-label">Win Rate</span><span class="bt-stat-value">${bt.win_rate.toFixed(1)}%</span></div>
+        <div class="bt-stat"><span class="bt-stat-label">PnL</span><span class="bt-stat-value ${pnlClass}">${pnlSign}${bt.total_pnl.toFixed(4)}</span></div>
+      </div>
+      <div class="rec-card-details" style="margin-top:8px"><span>🕐 ${fmtTs(bt.created_at)}</span></div>
+      <div class="bt-card-actions"><button class="btn btn-danger btn-xs" onclick="deleteBacktest(${bt.id}, event)">🗑</button></div>
+    </div>`;
+  }).join("");
+}
+
+async function deleteBacktest(id, e) {
+  if (e) e.stopPropagation();
+  if (!confirm("Delete this backtest?")) return;
+  await apiFetch(`/api/backtests/${id}`, { method: "DELETE" });
+  loadBacktestsList();
+}
+
+document.getElementById("bt-run-btn").addEventListener("click", async () => {
+  const recId = document.getElementById("bt-recording-select").value;
+  if (!recId) return alert("Select a recording first");
+  const prog = document.getElementById("bt-progress");
+  prog.classList.remove("hidden");
+  document.getElementById("bt-run-btn").disabled = true;
+  try {
+    const result = await apiFetch("/api/backtest", { method: "POST", body: JSON.stringify({ recording_id: parseInt(recId), engine_params: engineParams }) });
+    if (result.error) { alert(result.error); return; }
+    loadBacktestsList();
+    loadBacktestResult(result.backtest_id);
+  } finally {
+    prog.classList.add("hidden");
+    document.getElementById("bt-run-btn").disabled = false;
+  }
+});
+
+document.getElementById("bt-params-btn").addEventListener("click", () => {
+  renderSettings();
+  settingsModal.classList.remove("hidden");
+});
+
+async function loadBacktestResult(id) {
+  const bt = await apiFetch(`/api/backtests/${id}`);
+  if (!bt || bt.error) return alert("Failed to load backtest");
+
+  document.getElementById("bt-controls").classList.add("hidden");
+  document.querySelector(".backtests-section").classList.add("hidden");
+  document.getElementById("bt-result-area").classList.remove("hidden");
+
+  document.getElementById("bt-result-name").textContent = `${bt.token_name || bt.mint?.slice(0,8)} ${bt.token_symbol ? '$'+bt.token_symbol : ''}`;
+  document.getElementById("bt-result-tf").textContent = bt.timeframe;
+
+  // Stats
+  const s = bt.summary_json || {};
+  const statsEl = document.getElementById("bt-stats-grid");
+  const pnlC = s.total_pnl_sol >= 0 ? "pos" : "neg";
+  statsEl.innerHTML = [
+    { l: "Total Trades", v: s.total_trades || 0 },
+    { l: "Win Rate", v: `${(s.win_rate||0).toFixed(1)}%` },
+    { l: "Total PnL", v: `${s.total_pnl_sol >= 0 ? '+' : ''}${(s.total_pnl_sol||0).toFixed(4)} SOL`, c: pnlC },
+    { l: "Final Balance", v: `${(s.current_balance||1).toFixed(4)} SOL` },
+    { l: "Max Drawdown", v: `${(s.max_drawdown_pct||0).toFixed(2)}%`, c: "neg" },
+    { l: "Fees Paid", v: `${(s.total_fees_paid||0).toFixed(4)} SOL` },
+  ].map(x => `<div class="bt-stats-card"><div class="bt-stats-card-label">${x.l}</div><div class="bt-stats-card-value ${x.c||''}">${x.v}</div></div>`).join("");
+
+  // Chart
+  const wrapper = document.getElementById("bt-chart");
+  wrapper.innerHTML = "";
+  if (btChart) btChart.remove();
+  btChart = LightweightCharts.createChart(wrapper, {
+    layout: { background: { color: "#0d0f12" }, textColor: "#5a6071" },
+    grid: { vertLines: { color: "#1e2330" }, horzLines: { color: "#1e2330" } },
+    timeScale: { borderColor: "#1e2330", timeVisible: true, secondsVisible: true },
+    rightPriceScale: { borderColor: "#1e2330" },
+    width: wrapper.clientWidth, height: wrapper.clientHeight,
+  });
+
+  const candles = bt.candles || [];
+  const formattedData = await formatOfflineCandles(bt.mint, candles, bt.timeframe);
+  chartCurrency = formattedData.currency;
+
+  const cs2 = btChart.addCandlestickSeries({
+    upColor: CANDLE_UP, downColor: CANDLE_DOWN,
+    borderUpColor: CANDLE_UP, borderDownColor: CANDLE_DOWN,
+    wickUpColor: CANDLE_UP, wickDownColor: CANDLE_DOWN,
+    priceFormat: { type: 'custom', minMove: 1, formatter: p => formatMcap(p) }
+  });
+  cs2.setData(formattedData.candles);
+
+  const vs = btChart.addHistogramSeries({ color: "#5865f222", priceFormat: { type: "volume" }, priceScaleId: "vol" });
+  btChart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
+  vs.setData(formattedData.candles.map(c => ({ time: c.time, value: c.volume || 0, color: c.close >= c.open ? "#26a69a33" : "#ef535033" })));
+
+  // Markers
+  const btMarkers = [];
+  for (const c of formattedData.candles) {
+    if (c.trade_action === "buy") {
+      btMarkers.push({ time: c.time, position: "belowBar", color: CANDLE_UP, shape: "arrowUp", text: `BUY @ ${formatMcap(c.open)}` });
+    } else if (c.trade_action === "exit") {
+      btMarkers.push({ time: c.time, position: "aboveBar", color: CANDLE_DOWN, shape: "circle", text: `EXIT @ ${formatMcap(c.open)}` });
+    }
+  }
+  if (btMarkers.length) cs2.setMarkers(btMarkers.sort((a,b) => a.time - b.time));
+
+  btChart.timeScale().fitContent();
+  new ResizeObserver(() => btChart.applyOptions({ width: wrapper.clientWidth, height: wrapper.clientHeight })).observe(wrapper);
+
+  // Trades table
+  const tbody = document.getElementById("bt-trades-tbody");
+  const trades = bt.trades || [];
+  tbody.innerHTML = trades.map((t, i) => {
+    const pnlClass = t.pnl_sol >= 0 ? "trade-pnl-pos" : "trade-pnl-neg";
+    return `<tr>
+      <td>${i+1}</td>
+      <td>${fmtTs(t.entry_time)}</td>
+      <td>${t.entry_price?.toExponential(4) || '—'}</td>
+      <td>${fmtTs(t.exit_time)}</td>
+      <td>${t.exit_price?.toExponential(4) || '—'}</td>
+      <td class="${pnlClass}">${t.pnl_sol >= 0 ? '+' : ''}${t.pnl_sol?.toFixed(6) || '0'}</td>
+      <td class="${pnlClass}">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct?.toFixed(2) || '0'}%</td>
+      <td>${t.entry_reason || '—'}</td>
+      <td>${t.exit_reason || '—'}</td>
+    </tr>`;
+  }).join("");
+}
+
+document.getElementById("bt-result-back-btn").addEventListener("click", () => {
+  document.getElementById("bt-controls").classList.remove("hidden");
+  document.querySelector(".backtests-section").classList.remove("hidden");
+  document.getElementById("bt-result-area").classList.add("hidden");
+  if (btChart) { btChart.remove(); btChart = null; }
+});
+
+// Make functions globally available for onclick handlers
+window.loadViewer = loadViewer;
+window.deleteRecording = deleteRecording;
+window.loadBacktestResult = loadBacktestResult;
+window.deleteBacktest = deleteBacktest;

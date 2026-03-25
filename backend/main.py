@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -12,6 +12,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from candle_aggregator import CandleAggregator, TIMEFRAME_SECONDS
 from pumpfun_client import DexScreenerPollClient, PumpFunWSClient, PumpSwapRPCClient, get_historical_candles, get_token_info, resolve_input, SUB_MINUTE_TFS
 from forward_tester import ForwardTester
+import data_store
+from backtester import run_backtest
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,6 +46,204 @@ async def index():
 async def token_info_endpoint(mint: str):
     _, info = await resolve_input(mint)
     return JSONResponse(info) if info else JSONResponse({"error": "not found"}, status_code=404)
+
+
+# ── Active recorder state ────────────────────────────────────────────────────
+
+_active_recorder: dict | None = None   # {"recording_id", "mint", "timeframe", "task", "cancelled"}
+
+
+# ── Recording API ────────────────────────────────────────────────────────────
+
+@app.post("/api/recorder/start")
+async def recorder_start(body: dict = Body(...)):
+    """Start recording price data for a coin."""
+    global _active_recorder
+    if _active_recorder is not None:
+        return JSONResponse({"error": "A recording is already active", "recording_id": _active_recorder["recording_id"]}, status_code=409)
+
+    mint = body.get("mint", "").strip()
+    timeframe = body.get("timeframe", "1s")
+    if not mint:
+        return JSONResponse({"error": "mint is required"}, status_code=400)
+    if timeframe not in TIMEFRAME_SECONDS:
+        return JSONResponse({"error": f"Unknown timeframe: {timeframe}"}, status_code=400)
+
+    # Resolve token info
+    real_mint, token_info = await resolve_input(mint)
+    token_name = (token_info or {}).get("name", "")
+    token_symbol = (token_info or {}).get("symbol", "")
+
+    rec_id = data_store.create_recording(real_mint, timeframe, token_name, token_symbol)
+    cancelled = asyncio.Event()
+
+    async def _record():
+        live_source = (token_info or {}).get("_live_source", "pumpportal")
+        live_query = (token_info or {}).get("pair_address") or real_mint
+        if live_source == "solana_rpc" and (token_info or {}).get("pair_address"):
+            ws_client = PumpSwapRPCClient(live_query)
+        elif live_source == "dexscreener":
+            poll_seconds = 0.25 if timeframe in {"1s", "5s", "15s"} else 0.5
+            ws_client = DexScreenerPollClient(live_query, poll_seconds=poll_seconds)
+        else:
+            ws_client = PumpFunWSClient(real_mint)
+
+        aggregator = CandleAggregator(timeframe)
+        last_candle_time = None
+
+        # Seed with historical candles
+        hist = await get_historical_candles(real_mint, timeframe)
+        if hist:
+            data_store.insert_candles_batch(rec_id, hist)
+            last = hist[-1]
+            aggregator.process_trade(last["close"], 0.0, float(last["time"]))
+            last_candle_time = last["time"]
+            logger.info(f"[Recorder] Seeded {len(hist)} historical candles")
+
+        try:
+            async for trade in ws_client.stream():
+                if cancelled.is_set():
+                    break
+                is_synthetic = bool(trade.get("synthetic"))
+                candle, is_new = aggregator.process_trade(
+                    trade["price"], trade["sol_amount"], trade["timestamp"],
+                    synthetic=is_synthetic,
+                )
+                candle_dict = candle.to_dict()
+                ct = candle_dict["time"]
+                if ct != last_candle_time or is_new:
+                    data_store.insert_candle(
+                        rec_id, ct,
+                        candle_dict["open"], candle_dict["high"],
+                        candle_dict["low"], candle_dict["close"],
+                        candle_dict.get("volume", 0),
+                    )
+                    last_candle_time = ct
+        finally:
+            ws_client.stop()
+            data_store.stop_recording(rec_id)
+            logger.info(f"[Recorder] Stopped recording {rec_id}")
+
+    task = asyncio.create_task(_record())
+    _active_recorder = {
+        "recording_id": rec_id,
+        "mint": real_mint,
+        "token_name": token_name,
+        "token_symbol": token_symbol,
+        "timeframe": timeframe,
+        "task": task,
+        "cancelled": cancelled,
+    }
+
+    return JSONResponse({
+        "status": "recording",
+        "recording_id": rec_id,
+        "mint": real_mint,
+        "token_name": token_name,
+        "token_symbol": token_symbol,
+        "timeframe": timeframe,
+    })
+
+
+@app.post("/api/recorder/stop")
+async def recorder_stop():
+    global _active_recorder
+    if _active_recorder is None:
+        return JSONResponse({"error": "No active recording"}, status_code=404)
+
+    rec = _active_recorder
+    rec["cancelled"].set()
+    _active_recorder = None
+    data_store.update_recording_candle_count(rec["recording_id"])
+    return JSONResponse({"status": "stopped", "recording_id": rec["recording_id"]})
+
+
+@app.get("/api/recorder/status")
+async def recorder_status():
+    if _active_recorder is None:
+        return JSONResponse({"active": False})
+    rec = data_store.get_recording(_active_recorder["recording_id"])
+    return JSONResponse({
+        "active": True,
+        "recording_id": _active_recorder["recording_id"],
+        "mint": _active_recorder["mint"],
+        "token_name": _active_recorder.get("token_name", ""),
+        "token_symbol": _active_recorder.get("token_symbol", ""),
+        "timeframe": _active_recorder["timeframe"],
+        "candle_count": rec["candle_count"] if rec else 0,
+    })
+
+
+# ── Recordings API ───────────────────────────────────────────────────────────
+
+@app.get("/api/recordings")
+async def list_recordings_endpoint():
+    return JSONResponse(data_store.list_recordings())
+
+
+@app.get("/api/recordings/{recording_id}")
+async def get_recording_endpoint(recording_id: int):
+    rec = data_store.get_recording(recording_id)
+    if not rec:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(rec)
+
+
+@app.get("/api/recordings/{recording_id}/candles")
+async def get_recording_candles_endpoint(recording_id: int):
+    candles = data_store.get_recording_candles(recording_id)
+    return JSONResponse(candles)
+
+
+@app.delete("/api/recordings/{recording_id}")
+async def delete_recording_endpoint(recording_id: int):
+    data_store.delete_recording(recording_id)
+    return JSONResponse({"status": "deleted"})
+
+
+# ── Backtest API ─────────────────────────────────────────────────────────────
+
+@app.post("/api/backtest")
+async def run_backtest_endpoint(body: dict = Body(...)):
+    recording_id = body.get("recording_id")
+    if recording_id is None:
+        return JSONResponse({"error": "recording_id is required"}, status_code=400)
+    engine_params = body.get("engine_params", {})
+    try:
+        result = run_backtest(
+            recording_id=int(recording_id),
+            engine_params=engine_params,
+            buy_size_sol=body.get("buy_size_sol", 0.1),
+            priority_fee=body.get("priority_fee", 0.0001),
+            bribe_fee=body.get("bribe_fee", 0.00001),
+            slippage_pct=body.get("slippage_pct", 1.0),
+            starting_balance=body.get("starting_balance", 1.0),
+        )
+        return JSONResponse(result)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except Exception as e:
+        logger.error(f"Backtest error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/backtests")
+async def list_backtests_endpoint():
+    return JSONResponse(data_store.list_backtests())
+
+
+@app.get("/api/backtests/{backtest_id}")
+async def get_backtest_endpoint(backtest_id: int):
+    bt = data_store.get_backtest(backtest_id)
+    if not bt:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(bt)
+
+
+@app.delete("/api/backtests/{backtest_id}")
+async def delete_backtest_endpoint(backtest_id: int):
+    data_store.delete_backtest(backtest_id)
+    return JSONResponse({"status": "deleted"})
 
 
 @app.websocket("/ws/{mint}")

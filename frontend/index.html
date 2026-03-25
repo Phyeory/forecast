@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>pump-chart · Strategy Dashboard</title>
-  <meta name="description" content="Real-time Solana token charting with physics-based strategy engine and forward testing" />
+  <meta name="description" content="Real-time Solana token charting with physics-based strategy engine, recording, and backtesting" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" />
   <link rel="stylesheet" href="/static/css/style.css" />
@@ -15,87 +15,277 @@
 
   <header id="topbar">
     <div id="logo">pump<span>chart</span></div>
-    <form id="address-form" onsubmit="return false">
-      <input id="mint-input" type="text" placeholder="Enter pump.fun token address…" autocomplete="off" spellcheck="false" />
-      <button id="load-btn" type="button">Load Chart</button>
-      <button id="settings-btn" type="button">⚙️</button>
-    </form>
-    <div id="tf-bar">
-      <button class="tf-btn"        data-tf="1s">1s</button>
-      <button class="tf-btn"        data-tf="5s">5s</button>
-      <button class="tf-btn"        data-tf="15s">15s</button>
-      <button class="tf-btn active" data-tf="1m">1m</button>
-      <button class="tf-btn"        data-tf="5m">5m</button>
-      <button class="tf-btn"        data-tf="15m">15m</button>
-      <button class="tf-btn"        data-tf="1h">1h</button>
-    </div>
+
+    <!-- Navigation Tabs -->
+    <nav id="main-nav">
+      <button class="nav-tab active" data-page="live" id="nav-live">📈 Live</button>
+      <button class="nav-tab" data-page="recorder" id="nav-recorder">🔴 Record</button>
+      <button class="nav-tab" data-page="viewer" id="nav-viewer">📂 Viewer</button>
+      <button class="nav-tab" data-page="backtest" id="nav-backtest">🧪 Backtest</button>
+    </nav>
+
     <div id="conn-indicator">
       <div id="dot" class="dot"></div>
       <span id="conn-label">Idle</span>
     </div>
   </header>
 
-  <div id="token-bar" class="hidden">
-    <img id="token-logo" alt="" />
-    <span id="token-name">—</span>
-    <span id="token-symbol"></span>
-    <div style="width:1px;height:24px;background:var(--border)"></div>
-    <div id="ohlc-strip" class="ohlc-strip">
-      <span class="ohlc-item">O <span id="ohlc-open">—</span></span>
-      <span class="ohlc-item">H <span id="ohlc-high">—</span></span>
-      <span class="ohlc-item">L <span id="ohlc-low">—</span></span>
-      <span class="ohlc-item">C <span id="ohlc-close">—</span></span>
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- PAGE: LIVE (original chart)                                       -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <div id="page-live" class="page active">
+    <div id="live-controls">
+      <form id="address-form" onsubmit="return false">
+        <input id="mint-input" type="text" placeholder="Enter pump.fun token address…" autocomplete="off" spellcheck="false" />
+        <button id="load-btn" type="button">Load Chart</button>
+        <button id="settings-btn" type="button">⚙️</button>
+      </form>
+      <div id="tf-bar">
+        <button class="tf-btn"        data-tf="1s">1s</button>
+        <button class="tf-btn"        data-tf="5s">5s</button>
+        <button class="tf-btn"        data-tf="15s">15s</button>
+        <button class="tf-btn active" data-tf="1m">1m</button>
+        <button class="tf-btn"        data-tf="5m">5m</button>
+        <button class="tf-btn"        data-tf="15m">15m</button>
+        <button class="tf-btn"        data-tf="1h">1h</button>
+      </div>
     </div>
-    <div style="width:1px;height:24px;background:var(--border)"></div>
-    <span id="last-price">—</span>
-    <span id="price-change" class="price-change">—</span>
-    <div style="width:1px;height:24px;background:var(--border)"></div>
-    <div class="stat-item">
-      <span class="stat-label">Mkt Cap</span>
-      <span class="stat-value" id="stat-mcap">—</span>
+
+    <div id="token-bar" class="hidden">
+      <img id="token-logo" alt="" />
+      <span id="token-name">—</span>
+      <span id="token-symbol"></span>
+      <div style="width:1px;height:24px;background:var(--border)"></div>
+      <div id="ohlc-strip" class="ohlc-strip">
+        <span class="ohlc-item">O <span id="ohlc-open">—</span></span>
+        <span class="ohlc-item">H <span id="ohlc-high">—</span></span>
+        <span class="ohlc-item">L <span id="ohlc-low">—</span></span>
+        <span class="ohlc-item">C <span id="ohlc-close">—</span></span>
+      </div>
+      <div style="width:1px;height:24px;background:var(--border)"></div>
+      <span id="last-price">—</span>
+      <span id="price-change" class="price-change">—</span>
+      <div style="width:1px;height:24px;background:var(--border)"></div>
+      <div class="stat-item">
+        <span class="stat-label">Mkt Cap</span>
+        <span class="stat-value" id="stat-mcap">—</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-label">Session Vol</span>
+        <span class="stat-value" id="stat-vol">0 SOL</span>
+      </div>
+      <div style="width:1px;height:24px;background:var(--border)"></div>
+      <div id="regime-badge" class="regime-badge">IDLE</div>
+      <div id="direction-badge" class="direction-badge">— NONE</div>
+      <div class="stat-item">
+        <span class="stat-label">Signal S</span>
+        <span class="stat-value" id="signal-strength">0.00</span>
+      </div>
     </div>
-    <div class="stat-item">
-      <span class="stat-label">Session Vol</span>
-      <span class="stat-value" id="stat-vol">0 SOL</span>
-    </div>
-    <!-- Strategy indicators in token bar -->
-    <div style="width:1px;height:24px;background:var(--border)"></div>
-    <div id="regime-badge" class="regime-badge">IDLE</div>
-    <div id="direction-badge" class="direction-badge">— NONE</div>
-    <div class="stat-item">
-      <span class="stat-label">Signal S</span>
-      <span class="stat-value" id="signal-strength">0.00</span>
+
+    <div id="main-content">
+      <aside id="strategy-panel">
+        <div class="panel-section">
+          <h3 class="panel-title">📊 Indicators</h3>
+          <div id="indicators-display" class="indicators-grid"></div>
+        </div>
+        <div class="panel-section">
+          <h3 class="panel-title">💰 Forward Test</h3>
+          <div id="ft-stats" class="ft-grid"></div>
+        </div>
+      </aside>
+
+      <div id="chart-area">
+        <div id="chart-wrapper">
+          <div id="chart"></div>
+          <div id="trade-feed"></div>
+          <div id="overlay">
+            <div id="overlay-icon">📈</div>
+            <div id="overlay-msg">Enter a pump.fun token address above to start.</div>
+          </div>
+        </div>
+        <div id="regime-bar-canvas" class="sub-pane-wrapper regime-bar-wrapper"></div>
+        <div id="sub-pane" class="sub-pane-wrapper"></div>
+      </div>
     </div>
   </div>
 
-  <div id="main-content">
-    <!-- Left: Strategy panel -->
-    <aside id="strategy-panel">
-      <div class="panel-section">
-        <h3 class="panel-title">📊 Indicators</h3>
-        <div id="indicators-display" class="indicators-grid"></div>
-      </div>
-      <div class="panel-section">
-        <h3 class="panel-title">💰 Forward Test</h3>
-        <div id="ft-stats" class="ft-grid"></div>
-      </div>
-    </aside>
-
-    <!-- Center: Chart + Sub panes -->
-    <div id="chart-area">
-      <div id="chart-wrapper">
-        <div id="chart"></div>
-        <div id="trade-feed"></div>
-        <div id="overlay">
-          <div id="overlay-icon">📈</div>
-          <div id="overlay-msg">Enter a pump.fun token address above to start.</div>
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- PAGE: RECORDER                                                    -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <div id="page-recorder" class="page">
+    <div class="page-inner">
+      <div class="page-header">
+        <div class="page-header-icon">🔴</div>
+        <div>
+          <h1 class="page-title">Price Recorder</h1>
+          <p class="page-subtitle">Record live price action for any token to use in backtesting later</p>
         </div>
       </div>
-      <!-- Regime color bar -->
-      <div id="regime-bar-canvas" class="sub-pane-wrapper regime-bar-wrapper"></div>
-      <!-- ROC + ATR sub panes -->
-      <div id="sub-pane" class="sub-pane-wrapper"></div>
+
+      <div class="recorder-card glass-card">
+        <div class="recorder-form">
+          <div class="form-group">
+            <label class="form-label">Token Address</label>
+            <input id="rec-mint-input" type="text" class="form-input" placeholder="Enter pump.fun token address…" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Timeframe</label>
+            <select id="rec-tf-select" class="form-select">
+              <option value="1s">1s</option>
+              <option value="5s">5s</option>
+              <option value="15s">15s</option>
+              <option value="1m" selected>1m</option>
+              <option value="5m">5m</option>
+              <option value="15m">15m</option>
+              <option value="1h">1h</option>
+            </select>
+          </div>
+          <div class="form-actions">
+            <button id="rec-start-btn" class="btn btn-record">⏺ Start Recording</button>
+            <button id="rec-stop-btn" class="btn btn-danger hidden">⏹ Stop Recording</button>
+          </div>
+        </div>
+
+        <div id="rec-status" class="recorder-status hidden">
+          <div class="rec-pulse"></div>
+          <div class="rec-status-info">
+            <span class="rec-status-label">Recording</span>
+            <span id="rec-status-mint" class="rec-status-detail"></span>
+            <span id="rec-status-tf" class="rec-status-detail"></span>
+            <span id="rec-status-candles" class="rec-status-detail">0 candles</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Saved recordings list -->
+      <div class="recordings-section">
+        <h2 class="section-title">📂 Saved Recordings</h2>
+        <div id="recordings-list" class="recordings-grid">
+          <div class="empty-state">No recordings yet. Start recording to capture price data.</div>
+        </div>
+      </div>
     </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- PAGE: VIEWER                                                      -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <div id="page-viewer" class="page">
+    <div class="page-inner">
+      <div class="page-header">
+        <div class="page-header-icon">📂</div>
+        <div>
+          <h1 class="page-title">Price Viewer</h1>
+          <p class="page-subtitle">Load and view saved price action recordings</p>
+        </div>
+      </div>
+
+      <div id="viewer-select-area">
+        <div id="viewer-recordings-list" class="recordings-grid">
+          <div class="empty-state">No recordings available. Record some price data first.</div>
+        </div>
+      </div>
+
+      <div id="viewer-chart-area" class="hidden">
+        <div class="viewer-header">
+          <div class="viewer-meta">
+            <span id="viewer-token-name" class="viewer-meta-name"></span>
+            <span id="viewer-token-symbol" class="viewer-meta-symbol"></span>
+            <span id="viewer-meta-tf" class="viewer-meta-badge"></span>
+            <span id="viewer-meta-candles" class="viewer-meta-badge"></span>
+          </div>
+          <button id="viewer-back-btn" class="btn btn-secondary">← Back to list</button>
+        </div>
+        <div id="viewer-chart" class="viewer-chart-container"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- PAGE: BACKTEST                                                    -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <div id="page-backtest" class="page">
+    <div class="page-inner">
+      <div class="page-header">
+        <div class="page-header-icon">🧪</div>
+        <div>
+          <h1 class="page-title">Backtester</h1>
+          <p class="page-subtitle">Run the strategy engine on saved price data and analyze results</p>
+        </div>
+      </div>
+
+      <!-- Backtest controls -->
+      <div id="bt-controls" class="glass-card">
+        <div class="bt-form">
+          <div class="form-group">
+            <label class="form-label">Select Recording</label>
+            <select id="bt-recording-select" class="form-select">
+              <option value="">— Choose a recording —</option>
+            </select>
+          </div>
+          <div class="form-actions">
+            <button id="bt-run-btn" class="btn btn-primary">▶ Run Backtest</button>
+            <button id="bt-params-btn" class="btn btn-secondary">⚙️ Parameters</button>
+          </div>
+        </div>
+        <div id="bt-progress" class="hidden">
+          <div class="progress-bar"><div id="bt-progress-fill" class="progress-fill"></div></div>
+          <span id="bt-progress-label" class="progress-label">Running…</span>
+        </div>
+      </div>
+
+      <!-- Saved backtests -->
+      <div class="backtests-section">
+        <h2 class="section-title">📊 Saved Backtests</h2>
+        <div id="backtests-list" class="backtests-grid">
+          <div class="empty-state">No backtests yet. Select a recording and run a backtest.</div>
+        </div>
+      </div>
+
+      <!-- Backtest result view -->
+      <div id="bt-result-area" class="hidden">
+        <div class="bt-result-header">
+          <div class="bt-result-meta">
+            <span id="bt-result-name" class="bt-result-name"></span>
+            <span id="bt-result-tf" class="viewer-meta-badge"></span>
+          </div>
+          <button id="bt-result-back-btn" class="btn btn-secondary">← Back</button>
+        </div>
+
+        <!-- Stats cards -->
+        <div id="bt-stats-grid" class="bt-stats-grid"></div>
+
+        <!-- Backtest chart -->
+        <div id="bt-chart" class="viewer-chart-container"></div>
+
+        <!-- Trades table -->
+        <div class="bt-trades-section">
+          <h3 class="section-title">📋 Trade Log</h3>
+          <div id="bt-trades-table-wrapper" class="trades-table-wrapper">
+            <table id="bt-trades-table" class="trades-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Entry Time</th>
+                  <th>Entry Price</th>
+                  <th>Exit Time</th>
+                  <th>Exit Price</th>
+                  <th>PnL SOL</th>
+                  <th>PnL %</th>
+                  <th>Entry Reason</th>
+                  <th>Exit Reason</th>
+                </tr>
+              </thead>
+              <tbody id="bt-trades-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal (shared) -->
   <div id="settings-modal" class="hidden">
     <div class="settings-content">
       <div class="settings-header">
@@ -103,7 +293,6 @@
         <button id="close-settings">&times;</button>
       </div>
       <div class="settings-body" id="settings-form">
-        <!-- Will be populated by JS -->
       </div>
       <div class="settings-footer">
         <button id="apply-settings-btn" type="button">Apply</button>
@@ -112,6 +301,6 @@
   </div>
 
 </div>
-<script src="/static/js/app.js?v=4"></script>
+<script src="/static/js/app.js?v=9"></script>
 </body>
 </html>
