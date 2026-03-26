@@ -2,26 +2,26 @@
    pump-chart  ·  Price Action + Strategy Dashboard
    ────────────────────────────────────────────────────────────────────────── */
 
-const WS_BASE      = `ws://${location.host}/ws`;
-const MAX_TRADES   = 60;
+const WS_BASE = `ws://${location.host}/ws`;
+const MAX_TRADES = 60;
 const RECONNECT_MS = 1500;
-const CANDLE_UP    = "#26a69a";
-const CANDLE_DOWN  = "#ef5350";
-const CANDLE_FLAT  = "#5a6071";
+const CANDLE_UP = "#26a69a";
+const CANDLE_DOWN = "#ef5350";
+const CANDLE_FLAT = "#5a6071";
 
 /* Colors for indicators */
-const EMA_FAST_COLOR  = "#00e5ff";  // Cyan
-const EMA_SLOW_COLOR  = "#ff9800";  // Orange
-const ATR_COLOR       = "#ef5350";  // Red
-const ROC_COLOR       = "#64b5f6";  // Light blue
+const EMA_FAST_COLOR = "#00e5ff";  // Cyan
+const EMA_SLOW_COLOR = "#ff9800";  // Orange
+const ATR_COLOR = "#ef5350";  // Red
+const ROC_COLOR = "#64b5f6";  // Light blue
 const ROC_SIGNAL_COLOR = "#ff9800"; // Orange for signal line
 
 /* Regime colors */
 const REGIME_COLORS = {
-  idle:         "#5a6071",
-  trend:        "#26a69a",
-  exhaustion:   "#ff9800",
-  reversal:     "#ef5350",
+  idle: "#5a6071",
+  trend: "#26a69a",
+  exhaustion: "#ff9800",
+  reversal: "#ef5350",
   continuation: "#7c4dff",
 };
 
@@ -67,27 +67,27 @@ let engineParams = {
 };
 
 const $ = id => document.getElementById(id);
-const mintInput   = $("mint-input");
-const loadBtn     = $("load-btn");
-const tfBtns      = document.querySelectorAll(".tf-btn");
-const dot         = $("dot");
-const connLabel   = $("conn-label");
-const tokenBar    = $("token-bar");
-const tokenLogo   = $("token-logo");
-const tokenName   = $("token-name");
+const mintInput = $("mint-input");
+const loadBtn = $("load-btn");
+const tfBtns = document.querySelectorAll(".tf-btn");
+const dot = $("dot");
+const connLabel = $("conn-label");
+const tokenBar = $("token-bar");
+const tokenLogo = $("token-logo");
+const tokenName = $("token-name");
 const tokenSymbol = $("token-symbol");
 const lastPriceEl = $("last-price");
 const priceChange = $("price-change");
-const mcapEl      = $("stat-mcap");
-const volEl       = $("stat-vol");
-const ohlcOpenEl  = $("ohlc-open");
-const ohlcHighEl  = $("ohlc-high");
-const ohlcLowEl   = $("ohlc-low");
+const mcapEl = $("stat-mcap");
+const volEl = $("stat-vol");
+const ohlcOpenEl = $("ohlc-open");
+const ohlcHighEl = $("ohlc-high");
+const ohlcLowEl = $("ohlc-low");
 const ohlcCloseEl = $("ohlc-close");
-const tradeFeed   = $("trade-feed");
-const overlay     = $("overlay");
+const tradeFeed = $("trade-feed");
+const overlay = $("overlay");
 const overlayIcon = $("overlay-icon");
-const overlayMsg  = $("overlay-msg");
+const overlayMsg = $("overlay-msg");
 const settingsBtn = $("settings-btn");
 const settingsModal = $("settings-modal");
 const closeSettingsBtn = $("close-settings");
@@ -100,13 +100,13 @@ function initChart() {
   const wrapper = $("chart");
   if (chart) chart.remove();
   chart = LightweightCharts.createChart(wrapper, {
-    layout:      { background: { color: "#0d0f12" }, textColor: "#5a6071" },
-    grid:        { vertLines: { color: "#1e2330" }, horzLines: { color: "#1e2330" } },
-    crosshair:   { mode: LightweightCharts.CrosshairMode.Normal, vertLine: { color: "#5865f2", labelBackgroundColor: "#5865f2" }, horzLine: { color: "#5865f2", labelBackgroundColor: "#5865f2" } },
-    timeScale:   { borderColor: "#1e2330", timeVisible: true, secondsVisible: true, rightBarStaysOnScroll: true, shiftVisibleRangeOnNewBar: true },
+    layout: { background: { color: "#0d0f12" }, textColor: "#5a6071" },
+    grid: { vertLines: { color: "#1e2330" }, horzLines: { color: "#1e2330" } },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal, vertLine: { color: "#5865f2", labelBackgroundColor: "#5865f2" }, horzLine: { color: "#5865f2", labelBackgroundColor: "#5865f2" } },
+    timeScale: { borderColor: "#1e2330", timeVisible: true, secondsVisible: true, rightBarStaysOnScroll: true, shiftVisibleRangeOnNewBar: true },
     rightPriceScale: { borderColor: "#1e2330", scaleMargins: { top: 0.12, bottom: 0.28 } },
     handleScroll: { mouseWheel: true, pressedMouseMove: true },
-    handleScale:  { mouseWheel: true, pinch: true },
+    handleScale: { mouseWheel: true, pinch: true },
   });
 
   candleSeries = chart.addCandlestickSeries({
@@ -174,8 +174,8 @@ function timeframeToSeconds(tf) {
 
 function fmtLarge(n) {
   if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(2) + "B";
-  if (n >= 1_000_000)     return (n / 1_000_000).toFixed(2) + "M";
-  if (n >= 1_000)         return (n / 1_000).toFixed(1) + "K";
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
   return n.toLocaleString(undefined, { maximumFractionDigits: 0 });
 }
 
@@ -305,7 +305,7 @@ function setDot(state, label) {
 function showOverlay(icon, msg) {
   overlay.classList.remove("hidden");
   overlayIcon.textContent = icon;
-  overlayMsg.textContent  = msg;
+  overlayMsg.textContent = msg;
 }
 function hideOverlay() { overlay.classList.add("hidden"); }
 
@@ -325,7 +325,7 @@ function addTrade(trade) {
   row.className = `trade-row ${trade.tx_type}`;
   const t = document.createElement("span"); t.className = `trade-type ${trade.tx_type}`; t.textContent = trade.tx_type;
   const s = document.createElement("span"); s.className = "trade-sol"; s.textContent = trade.sol_amount.toFixed(3) + " SOL";
-  const tm = document.createElement("span"); tm.className = "trade-time"; tm.textContent = new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"});
+  const tm = document.createElement("span"); tm.className = "trade-time"; tm.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   row.append(t, s, tm);
   tradeFeed.prepend(row);
   while (tradeFeed.children.length > MAX_TRADES) tradeFeed.lastElementChild.remove();
@@ -718,7 +718,7 @@ function addSignalMarker(time, signal, signalLabel, regimeLabel, mcapPrice, clos
     const priceLabel = mcapPrice ? ` @ ${formatMcap(mcapPrice)}` : "";
     let pnlLabel = "";
     let finalColor = "#ef5350";
-    
+
     // Give precedence to visual marker difference so the math checks out seamlessly
     if (lastBuyMcapPrice && mcapPrice) {
       const pnl = ((mcapPrice - lastBuyMcapPrice) / lastBuyMcapPrice) * 100;
@@ -930,7 +930,7 @@ function connect(mint, timeframe) {
   atrHistory = [];
   regimeHistory = [];
   if (candleSeries) { candleSeries.setData([]); }
-  if (volSeries)    volSeries.setData([]);
+  if (volSeries) volSeries.setData([]);
   if (emaFastSeries) emaFastSeries.setData([]);
   if (emaSlowSeries) emaSlowSeries.setData([]);
   showOverlay("⏳", "Connecting…");
@@ -950,7 +950,7 @@ function connect(mint, timeframe) {
 
     if (msg.type === "token_info") {
       const d = msg.data;
-      tokenName.textContent   = d.name   || mint.slice(0, 8) + "…";
+      tokenName.textContent = d.name || mint.slice(0, 8) + "…";
       tokenSymbol.textContent = d.symbol ? `$${d.symbol}` : "";
       if (d.description) tokenName.title = d.description;
 
@@ -975,9 +975,9 @@ function connect(mint, timeframe) {
       // Social links
       tokenBar.querySelectorAll(".social-link").forEach(el => el.remove());
       const socials = [
-        { key: "twitter",  label: "𝕏",  base: "https://twitter.com/" },
+        { key: "twitter", label: "𝕏", base: "https://twitter.com/" },
         { key: "telegram", label: "TG", base: "" },
-        { key: "website",  label: "🌐", base: "" },
+        { key: "website", label: "🌐", base: "" },
       ];
       socials.forEach(({ key, label, base }) => {
         let href = d[key];
@@ -1087,13 +1087,13 @@ function connect(mint, timeframe) {
     }
 
     else if (msg.type === "error") showOverlay("⚠️", msg.message || "Error");
-    else if (msg.type === "ping") ws.send(JSON.stringify({type:"pong"}));
+    else if (msg.type === "ping") ws.send(JSON.stringify({ type: "pong" }));
   };
 
   ws.onerror = () => { setDot("error", "Error"); showOverlay("❌", "Connection error. Reconnecting…"); };
   ws.onclose = () => {
     setDot("error", "Disconnected");
-    showOverlay("🔌", `Disconnected — reconnecting in ${reconnectMs/1000}s…`);
+    showOverlay("🔌", `Disconnected — reconnecting in ${reconnectMs / 1000}s…`);
     reconnectTimer = setTimeout(() => {
       reconnectMs = Math.min(reconnectMs * 2, 30000);
       connect(currentMint, currentTf);
@@ -1139,7 +1139,7 @@ function renderSettings() {
     // determine type
     if (Number.isInteger(val)) input.type = "number";
     else { input.type = "number"; input.step = "0.01"; }
-    
+
     group.append(label, input);
     settingsForm.append(group);
   }
@@ -1195,7 +1195,7 @@ const API_BASE = `${location.protocol}//${location.host}`;
 /* ── Page Navigation ─────────────────────────────────────────────────── */
 
 const navTabs = document.querySelectorAll(".nav-tab");
-const pages   = document.querySelectorAll(".page");
+const pages = document.querySelectorAll(".page");
 
 function switchPage(pageId) {
   pages.forEach(p => p.classList.remove("active"));
@@ -1222,15 +1222,15 @@ async function apiFetch(path, opts = {}) {
 
 function fmtTs(ts) {
   if (!ts) return "—";
-  return new Date(ts * 1000).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
+  return new Date(ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
 function fmtDuration(start, end) {
   if (!start || !end) return "—";
   const s = Math.round(end - start);
   if (s < 60) return s + "s";
-  if (s < 3600) return Math.round(s/60) + "m";
-  return (s/3600).toFixed(1) + "h";
+  if (s < 3600) return Math.round(s / 60) + "m";
+  return (s / 3600).toFixed(1) + "h";
 }
 
 /* ── Recording card HTML ─────────────────────────────────────────────── */
@@ -1244,7 +1244,7 @@ function renderRecordingCard(rec, opts = {}) {
   return `
     <div class="recording-card" data-id="${rec.id}">
       <div class="rec-card-header">
-        <div><span class="rec-card-name">${rec.token_name || 'Unknown'}</span> <span class="rec-card-symbol">${rec.token_symbol ? '$'+rec.token_symbol : ''}</span></div>
+        <div><span class="rec-card-name">${rec.token_name || 'Unknown'}</span> <span class="rec-card-symbol">${rec.token_symbol ? '$' + rec.token_symbol : ''}</span></div>
         <div class="rec-card-badges">
           <span class="rec-card-badge">${rec.timeframe}</span>
           <span class="rec-card-badge ${statusClass}">${rec.status}</span>
@@ -1289,12 +1289,12 @@ async function checkRecorderStatus() {
   const data = await apiFetch("/api/recorder/status");
   const statusEl = document.getElementById("rec-status");
   const startBtn = document.getElementById("rec-start-btn");
-  const stopBtn  = document.getElementById("rec-stop-btn");
+  const stopBtn = document.getElementById("rec-stop-btn");
   if (data.active) {
     statusEl.classList.remove("hidden");
     startBtn.classList.add("hidden");
     stopBtn.classList.remove("hidden");
-    document.getElementById("rec-status-mint").textContent = (data.token_name || data.mint?.slice(0,8)) + (data.token_symbol ? ` $${data.token_symbol}` : "");
+    document.getElementById("rec-status-mint").textContent = (data.token_name || data.mint?.slice(0, 8)) + (data.token_symbol ? ` $${data.token_symbol}` : "");
     document.getElementById("rec-status-tf").textContent = data.timeframe;
     document.getElementById("rec-status-candles").textContent = `${data.candle_count} candles`;
     if (!recPollTimer) recPollTimer = setInterval(checkRecorderStatus, 3000);
@@ -1325,11 +1325,11 @@ document.getElementById("rec-stop-btn").addEventListener("click", async () => {
 
 async function formatOfflineCandles(mint, rawCandles, timeframeStr) {
   if (!rawCandles || !rawCandles.length) return { candles: [], currency: "SOL" };
-  
+
   let basePrice = rawCandles[0].open;
   let baseMcap = 0;
   let ccy = "SOL";
-  
+
   try {
     const tInfo = await apiFetch(`/api/token/${mint}`);
     if (tInfo) {
@@ -1353,7 +1353,7 @@ async function formatOfflineCandles(mint, rawCandles, timeframeStr) {
     } else {
       baseMcap = basePrice * 1e9;
     }
-  } catch(e) {
+  } catch (e) {
     baseMcap = basePrice * 1e9;
   }
 
@@ -1389,7 +1389,7 @@ async function formatOfflineCandles(mint, rawCandles, timeframeStr) {
     let high = toMcap(c.high);
     let low = toMcap(c.low);
     const close = toMcap(c.close);
-    
+
     // Crucial for replicating the live charting: bridge open/close 
     // to strictly form a continuous timeline preventing disjointed dashes
     if (lastClose !== null) {
@@ -1410,7 +1410,7 @@ async function formatOfflineCandles(mint, rawCandles, timeframeStr) {
     lastTime = c.time;
     lastClose = close;
   }
-  
+
   return { candles: formatted, currency: ccy };
 }
 
@@ -1474,7 +1474,7 @@ async function loadRecordingsDropdown() {
   const sel = document.getElementById("bt-recording-select");
   sel.innerHTML = `<option value="">— Choose a recording —</option>` +
     list.filter(r => r.status === "completed").map(r =>
-      `<option value="${r.id}">${r.token_name || r.mint?.slice(0,8)} ($${r.token_symbol || '?'}) — ${r.timeframe} — ${r.candle_count} candles</option>`
+      `<option value="${r.id}">${r.token_name || r.mint?.slice(0, 8)} ($${r.token_symbol || '?'}) — ${r.timeframe} — ${r.candle_count} candles</option>`
     ).join("");
 }
 
@@ -1488,7 +1488,7 @@ async function loadBacktestsList() {
     return `
     <div class="backtest-card" onclick="loadBacktestResult(${bt.id})">
       <div class="bt-card-header">
-        <div><span class="bt-card-name">${bt.token_name || bt.mint?.slice(0,8)}</span> <span class="rec-card-symbol">${bt.token_symbol ? '$'+bt.token_symbol : ''}</span></div>
+        <div><span class="bt-card-name">${bt.token_name || bt.mint?.slice(0, 8)}</span> <span class="rec-card-symbol">${bt.token_symbol ? '$' + bt.token_symbol : ''}</span></div>
         <div class="rec-card-badges"><span class="rec-card-badge">${bt.timeframe}</span></div>
       </div>
       <div class="bt-card-stats">
@@ -1539,7 +1539,7 @@ async function loadBacktestResult(id) {
   document.querySelector(".backtests-section").classList.add("hidden");
   document.getElementById("bt-result-area").classList.remove("hidden");
 
-  document.getElementById("bt-result-name").textContent = `${bt.token_name || bt.mint?.slice(0,8)} ${bt.token_symbol ? '$'+bt.token_symbol : ''}`;
+  document.getElementById("bt-result-name").textContent = `${bt.token_name || bt.mint?.slice(0, 8)} ${bt.token_symbol ? '$' + bt.token_symbol : ''}`;
   document.getElementById("bt-result-tf").textContent = bt.timeframe;
 
   // Stats
@@ -1548,12 +1548,12 @@ async function loadBacktestResult(id) {
   const pnlC = s.total_pnl_sol >= 0 ? "pos" : "neg";
   statsEl.innerHTML = [
     { l: "Total Trades", v: s.total_trades || 0 },
-    { l: "Win Rate", v: `${(s.win_rate||0).toFixed(1)}%` },
-    { l: "Total PnL", v: `${s.total_pnl_sol >= 0 ? '+' : ''}${(s.total_pnl_sol||0).toFixed(4)} SOL`, c: pnlC },
-    { l: "Final Balance", v: `${(s.current_balance||1).toFixed(4)} SOL` },
-    { l: "Max Drawdown", v: `${(s.max_drawdown_pct||0).toFixed(2)}%`, c: "neg" },
-    { l: "Fees Paid", v: `${(s.total_fees_paid||0).toFixed(4)} SOL` },
-  ].map(x => `<div class="bt-stats-card"><div class="bt-stats-card-label">${x.l}</div><div class="bt-stats-card-value ${x.c||''}">${x.v}</div></div>`).join("");
+    { l: "Win Rate", v: `${(s.win_rate || 0).toFixed(1)}%` },
+    { l: "Total PnL", v: `${s.total_pnl_sol >= 0 ? '+' : ''}${(s.total_pnl_sol || 0).toFixed(4)} SOL`, c: pnlC },
+    { l: "Final Balance", v: `${(s.current_balance || 1).toFixed(4)} SOL` },
+    { l: "Max Drawdown", v: `${(s.max_drawdown_pct || 0).toFixed(2)}%`, c: "neg" },
+    { l: "Fees Paid", v: `${(s.total_fees_paid || 0).toFixed(4)} SOL` },
+  ].map(x => `<div class="bt-stats-card"><div class="bt-stats-card-label">${x.l}</div><div class="bt-stats-card-value ${x.c || ''}">${x.v}</div></div>`).join("");
 
   // Chart
   const wrapper = document.getElementById("bt-chart");
@@ -1592,7 +1592,7 @@ async function loadBacktestResult(id) {
       btMarkers.push({ time: c.time, position: "aboveBar", color: CANDLE_DOWN, shape: "circle", text: `EXIT @ ${formatMcap(c.open)}` });
     }
   }
-  if (btMarkers.length) cs2.setMarkers(btMarkers.sort((a,b) => a.time - b.time));
+  if (btMarkers.length) cs2.setMarkers(btMarkers.sort((a, b) => a.time - b.time));
 
   btChart.timeScale().fitContent();
   new ResizeObserver(() => btChart.applyOptions({ width: wrapper.clientWidth, height: wrapper.clientHeight })).observe(wrapper);
@@ -1603,7 +1603,7 @@ async function loadBacktestResult(id) {
   tbody.innerHTML = trades.map((t, i) => {
     const pnlClass = t.pnl_sol >= 0 ? "trade-pnl-pos" : "trade-pnl-neg";
     return `<tr>
-      <td>${i+1}</td>
+      <td>${i + 1}</td>
       <td>${fmtTs(t.entry_time)}</td>
       <td>${t.entry_price?.toExponential(4) || '—'}</td>
       <td>${fmtTs(t.exit_time)}</td>

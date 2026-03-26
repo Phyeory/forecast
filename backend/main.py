@@ -50,17 +50,14 @@ async def token_info_endpoint(mint: str):
 
 # ── Active recorder state ────────────────────────────────────────────────────
 
-_active_recorder: dict | None = None   # {"recording_id", "mint", "timeframe", "task", "cancelled"}
-
+_active_recorders: dict[int, dict] = {}
 
 # ── Recording API ────────────────────────────────────────────────────────────
 
 @app.post("/api/recorder/start")
 async def recorder_start(body: dict = Body(...)):
     """Start recording price data for a coin."""
-    global _active_recorder
-    if _active_recorder is not None:
-        return JSONResponse({"error": "A recording is already active", "recording_id": _active_recorder["recording_id"]}, status_code=409)
+    global _active_recorders
 
     mint = body.get("mint", "").strip()
     timeframe = body.get("timeframe", "1s")
@@ -68,6 +65,10 @@ async def recorder_start(body: dict = Body(...)):
         return JSONResponse({"error": "mint is required"}, status_code=400)
     if timeframe not in TIMEFRAME_SECONDS:
         return JSONResponse({"error": f"Unknown timeframe: {timeframe}"}, status_code=400)
+
+    for rec in _active_recorders.values():
+        if rec["mint"] == mint and rec["timeframe"] == timeframe:
+            return JSONResponse({"error": "Already recording this coin on this timeframe", "recording_id": rec["recording_id"]}, status_code=409)
 
     # Resolve token info
     real_mint, token_info = await resolve_input(mint)
@@ -125,7 +126,7 @@ async def recorder_start(body: dict = Body(...)):
             logger.info(f"[Recorder] Stopped recording {rec_id}")
 
     task = asyncio.create_task(_record())
-    _active_recorder = {
+    _active_recorders[rec_id] = {
         "recording_id": rec_id,
         "mint": real_mint,
         "token_name": token_name,
@@ -146,32 +147,45 @@ async def recorder_start(body: dict = Body(...)):
 
 
 @app.post("/api/recorder/stop")
-async def recorder_stop():
-    global _active_recorder
-    if _active_recorder is None:
-        return JSONResponse({"error": "No active recording"}, status_code=404)
+async def recorder_stop(body: dict = Body(default={})):
+    global _active_recorders
+    rec_id = body.get("recording_id")
+    if rec_id is None:
+        return JSONResponse({"error": "recording_id required to stop a specific recording"}, status_code=400)
+    
+    rec = _active_recorders.get(rec_id)
+    if rec is None:
+        return JSONResponse({"error": "No active recording with that id"}, status_code=404)
 
-    rec = _active_recorder
     rec["cancelled"].set()
-    _active_recorder = None
-    data_store.update_recording_candle_count(rec["recording_id"])
-    return JSONResponse({"status": "stopped", "recording_id": rec["recording_id"]})
+    del _active_recorders[rec_id]
+    data_store.update_recording_candle_count(rec_id)
+    return JSONResponse({"status": "stopped", "recording_id": rec_id})
 
 
 @app.get("/api/recorder/status")
 async def recorder_status():
-    if _active_recorder is None:
-        return JSONResponse({"active": False})
-    rec = data_store.get_recording(_active_recorder["recording_id"])
-    return JSONResponse({
+    global _active_recorders
+    if not _active_recorders:
+        return {"active": False, "count": 0}
+
+    reqs = []
+    for r_id, rec in _active_recorders.items():
+        db_rec = data_store.get_recording(r_id)
+        reqs.append({
+            "recording_id": r_id,
+            "mint": rec["mint"],
+            "token_name": rec.get("token_name", ""),
+            "token_symbol": rec.get("token_symbol", ""),
+            "timeframe": rec["timeframe"],
+            "candle_count": db_rec["candle_count"] if db_rec else 0
+        })
+
+    return {
         "active": True,
-        "recording_id": _active_recorder["recording_id"],
-        "mint": _active_recorder["mint"],
-        "token_name": _active_recorder.get("token_name", ""),
-        "token_symbol": _active_recorder.get("token_symbol", ""),
-        "timeframe": _active_recorder["timeframe"],
-        "candle_count": rec["candle_count"] if rec else 0,
-    })
+        "count": len(_active_recorders),
+        "recordings": reqs
+    }
 
 
 # ── Recordings API ───────────────────────────────────────────────────────────
