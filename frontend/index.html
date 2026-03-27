@@ -145,6 +145,14 @@
             <button id="rec-start-btn" class="btn btn-record">⏺ Start Recording</button>
           </div>
         </div>
+
+        <!-- Active recording status bar -->
+        <div id="rec-status" class="hidden" style="margin-top:12px;padding:10px 14px;background:rgba(239,83,80,0.12);border:1px solid rgba(239,83,80,0.3);border-radius:8px;display:flex;gap:16px;align-items:center;font-size:13px;">
+          <span style="color:#ef5350;font-weight:600;">🔴 Recording</span>
+          <span id="rec-status-mint" style="color:#d1d5e0;font-weight:600;"></span>
+          <span id="rec-status-tf" class="rec-card-badge"></span>
+          <span id="rec-status-candles" style="color:#5a6071;"></span>
+        </div>
       </div>
 
       <!-- Saved recordings list -->
@@ -215,6 +223,7 @@
           </div>
           <div class="form-actions">
             <button id="bt-run-btn" class="btn btn-primary">▶ Run Backtest</button>
+            <button id="bt-run-all-btn" class="btn btn-secondary">⚡ Run All Recordings</button>
             <button id="bt-params-btn" class="btn btn-secondary">⚙️ Parameters</button>
           </div>
         </div>
@@ -290,6 +299,6 @@
   </div>
 
 </div>
-<script src="/static/js/app.js?v=10"></script>
+<script src="/static/js/app.js?v=12"></script>
 </body>
 </html>

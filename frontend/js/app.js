@@ -54,12 +54,12 @@ let pendingMarkerData = [];  // raw marker data awaiting market cap resolution
 let engineParams = {
   ema_fast: 3, ema_slow: 7, atr_period: 7, roc_period: 3, warmup: 20,
   signal_strong: 2.0, signal_weak: 1.2, signal_noise: 1.0,
-  exhaustion_bars_limit: 7, delta_threshold: 0.3, kalman_gamma: 0.1,
-  min_trend_bars: 3, reversal_confirm_bars: 2, chop_atr_pct: 0.5,
+  exhaustion_bars_limit: 3, delta_threshold: 0.3, kalman_gamma: 0.1,
+  min_trend_bars: 2, reversal_confirm_bars: 2, chop_atr_pct: 0.5,
   chop_spread_pct: 0.15, reversal_exit_confirm_bars: 1,
   s_effective_threshold: 0.5, exhaustion_persist_bars: 2,
   regime_lookback: 5, persistence_threshold: 3, momentum_mean_threshold: 0.0,
-  ema_min_spread_pct: 0.05, confidence_high: 0.60, confidence_low: 0.35,
+  ema_min_spread_pct: 0.05, confidence_high: 0.65, confidence_low: 0.4,
   confidence_w1: 0.30, confidence_w2: 0.25, confidence_w3: 0.25, confidence_w4: 0.20,
   atr_floor_k: 0.6, ema_cross_persist_bars: 2, exhaustion_s_decay_bars: 2,
   local_range_bars: 10, local_range_threshold_pct: 0.3, sign_flip_threshold: 4,
@@ -1237,10 +1237,14 @@ function fmtDuration(start, end) {
 
 function renderRecordingCard(rec, opts = {}) {
   const statusClass = rec.status === "recording" ? "status-recording" : "status-completed";
+  let stopBtn = "";
+  if (rec.status === "recording") {
+    stopBtn = `<button class="btn btn-danger btn-xs" style="margin-right:4px;" onclick="stopRecording(${rec.id}, event)">⏹ Stop</button>`;
+  }
   const actions = opts.viewerMode
-    ? `<button class="btn btn-primary btn-sm" onclick="loadViewer(${rec.id})">📊 View Chart</button>
-       <button class="btn btn-danger btn-xs" onclick="deleteRecording(${rec.id}, event)">🗑</button>`
-    : `<button class="btn btn-danger btn-xs" onclick="deleteRecording(${rec.id}, event)">🗑</button>`;
+    ? `${stopBtn}<button class="btn btn-primary btn-sm" onclick="loadViewer(${rec.id})">📊 View Chart</button>
+       <button class="btn btn-danger btn-xs" style="margin-left:4px;" onclick="deleteRecording(${rec.id}, event)">🗑</button>`
+    : `${stopBtn}<button class="btn btn-danger btn-xs" onclick="deleteRecording(${rec.id}, event)">🗑</button>`;
   return `
     <div class="recording-card" data-id="${rec.id}">
       <div class="rec-card-header">
@@ -1273,6 +1277,14 @@ async function loadRecordingsList(containerId, viewerMode = false) {
   el.innerHTML = list.map(r => renderRecordingCard(r, { viewerMode })).join("");
 }
 
+async function stopRecording(id, e) {
+  if (e) e.stopPropagation();
+  await apiFetch("/api/recorder/stop", { method: "POST", body: JSON.stringify({ recording_id: id }) });
+  checkRecorderStatus();
+  loadRecordingsList("recordings-list");
+  loadRecordingsList("viewer-recordings-list", true);
+}
+
 async function deleteRecording(id, e) {
   if (e) e.stopPropagation();
   if (!confirm("Delete this recording?")) return;
@@ -1289,19 +1301,19 @@ async function checkRecorderStatus() {
   const data = await apiFetch("/api/recorder/status");
   const statusEl = document.getElementById("rec-status");
   const startBtn = document.getElementById("rec-start-btn");
-  const stopBtn = document.getElementById("rec-stop-btn");
-  if (data.active) {
+  if (data.active && data.recordings && data.recordings.length) {
+    const rec = data.recordings[0];
     statusEl.classList.remove("hidden");
-    startBtn.classList.add("hidden");
-    stopBtn.classList.remove("hidden");
-    document.getElementById("rec-status-mint").textContent = (data.token_name || data.mint?.slice(0, 8)) + (data.token_symbol ? ` $${data.token_symbol}` : "");
-    document.getElementById("rec-status-tf").textContent = data.timeframe;
-    document.getElementById("rec-status-candles").textContent = `${data.candle_count} candles`;
+    startBtn.classList.remove("hidden");
+    const nameStr = (rec.token_name || rec.mint?.slice(0, 8) || "—") + (rec.token_symbol ? ` $${rec.token_symbol}` : "");
+    document.getElementById("rec-status-mint").textContent =
+      data.count > 1 ? `${nameStr} +${data.count - 1} more` : nameStr;
+    document.getElementById("rec-status-tf").textContent = rec.timeframe;
+    document.getElementById("rec-status-candles").textContent = `${rec.candle_count} candles`;
     if (!recPollTimer) recPollTimer = setInterval(checkRecorderStatus, 3000);
   } else {
     statusEl.classList.add("hidden");
     startBtn.classList.remove("hidden");
-    stopBtn.classList.add("hidden");
     if (recPollTimer) { clearInterval(recPollTimer); recPollTimer = null; }
   }
 }
@@ -1312,11 +1324,7 @@ document.getElementById("rec-start-btn").addEventListener("click", async () => {
   const tf = document.getElementById("rec-tf-select").value;
   const data = await apiFetch("/api/recorder/start", { method: "POST", body: JSON.stringify({ mint, timeframe: tf }) });
   if (data.error) return alert(data.error);
-  checkRecorderStatus();
-});
-
-document.getElementById("rec-stop-btn").addEventListener("click", async () => {
-  await apiFetch("/api/recorder/stop", { method: "POST" });
+  document.getElementById("rec-mint-input").value = "";
   checkRecorderStatus();
   loadRecordingsList("recordings-list");
 });
@@ -1504,7 +1512,6 @@ async function loadBacktestsList() {
 
 async function deleteBacktest(id, e) {
   if (e) e.stopPropagation();
-  if (!confirm("Delete this backtest?")) return;
   await apiFetch(`/api/backtests/${id}`, { method: "DELETE" });
   loadBacktestsList();
 }
@@ -1524,6 +1531,44 @@ document.getElementById("bt-run-btn").addEventListener("click", async () => {
     prog.classList.add("hidden");
     document.getElementById("bt-run-btn").disabled = false;
   }
+});
+
+document.getElementById("bt-run-all-btn").addEventListener("click", async () => {
+  const recordings = await apiFetch("/api/recordings");
+  const completed = recordings.filter(r => r.status === "completed");
+  if (!completed.length) return alert("No completed recordings to backtest.");
+
+  const prog = document.getElementById("bt-progress");
+  const progLabel = document.getElementById("bt-progress-label");
+  const runAllBtn = document.getElementById("bt-run-all-btn");
+  const runBtn = document.getElementById("bt-run-btn");
+  prog.classList.remove("hidden");
+  runAllBtn.disabled = true;
+  runBtn.disabled = true;
+
+  let done = 0;
+  let failed = 0;
+  for (const rec of completed) {
+    progLabel.textContent = `Running ${done + 1} / ${completed.length}: ${rec.token_name || rec.mint?.slice(0, 8) || "?"}…`;
+    try {
+      const result = await apiFetch("/api/backtest", {
+        method: "POST",
+        body: JSON.stringify({ recording_id: rec.id, engine_params: engineParams }),
+      });
+      if (result.error) failed++;
+      done++;
+    } catch (e) {
+      failed++;
+      done++;
+    }
+  }
+
+  prog.classList.add("hidden");
+  runAllBtn.disabled = false;
+  runBtn.disabled = false;
+  progLabel.textContent = "Running…";
+  loadBacktestsList();
+  if (failed) alert(`Done. ${completed.length - failed}/${completed.length} backtests succeeded.`);
 });
 
 document.getElementById("bt-params-btn").addEventListener("click", () => {

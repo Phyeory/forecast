@@ -340,10 +340,10 @@ class StrategyEngine:
         signal_strong: float = 2.0,
         signal_weak: float = 1.2,
         signal_noise: float = 1.0,
-        exhaustion_bars_limit: int = 7,
+        exhaustion_bars_limit: int = 3, #changed from 7
         delta_threshold: float = 0.3,
         kalman_gamma: float = 0.1,
-        min_trend_bars: int = 3,
+        min_trend_bars: int = 2, # changed from 3
         reversal_confirm_bars: int = 2,
         chop_atr_pct: float = 0.5,
         chop_spread_pct: float = 0.15,
@@ -355,8 +355,8 @@ class StrategyEngine:
         persistence_threshold: int = 3,       # min same-sign m_hat bars (§1A)
         momentum_mean_threshold: float = 0.0, # auto-calibrated; fallback floor
         ema_min_spread_pct: float = 0.05,     # min |EMA3-EMA7|/price * 100 (§1D)
-        confidence_high: float = 0.60,        # above → allow trading
-        confidence_low: float = 0.35,         # below → force IDLE
+        confidence_high: float = 0.65,        # above → allow trading changed from 0.6
+        confidence_low: float = 0.4,         # below → force IDLE $ changed form 0.35
         confidence_w1: float = 0.30,          # persistence weight  (§2)
         confidence_w2: float = 0.25,          # normalised momentum weight
         confidence_w3: float = 0.25,          # volatility expansion weight
