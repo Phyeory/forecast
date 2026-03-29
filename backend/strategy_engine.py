@@ -338,11 +338,11 @@ class StrategyEngine:
         roc_period: int = 3,
         warmup: int = 20,
         signal_strong: float = 2.0,
-        signal_weak: float = 1.2,
+        signal_weak: float = 1.5,
         signal_noise: float = 1.0,
         exhaustion_bars_limit: int = 3, #changed from 7
         delta_threshold: float = 0.3,
-        kalman_gamma: float = 0.1,
+        kalman_gamma: float = 0.05,
         min_trend_bars: int = 2, # changed from 3
         reversal_confirm_bars: int = 2,
         chop_atr_pct: float = 0.5,
@@ -368,7 +368,7 @@ class StrategyEngine:
         local_range_threshold_pct: float = 0.3,# min range % of price (§8)
         sign_flip_threshold: int = 4,          # max sign flips before chop (§8)
         stability_bars: int = 2,              # required consecutive stability bars (§9) [was 2]
-        spike_atr_multiplier: float = 3.5,    # §11: reject entry if last candle body > N×ATR
+        spike_atr_multiplier: float = 2.0,    # §11: reject entry if last candle body > N×ATR
     ):
         self.ema_fast_p = ema_fast
         self.ema_slow_p = ema_slow
