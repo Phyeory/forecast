@@ -53,8 +53,8 @@ let pendingMarkerData = [];  // raw marker data awaiting market cap resolution
 /* Strategy Engine Parameters */
 let engineParams = {
   ema_fast: 3, ema_slow: 7, atr_period: 7, roc_period: 3, warmup: 20,
-  signal_strong: 2.0, signal_weak: 1.2, signal_noise: 1.0,
-  exhaustion_bars_limit: 3, delta_threshold: 0.3, kalman_gamma: 0.1,
+  signal_strong: 2, signal_weak: 1.5, signal_noise: 1,
+  exhaustion_bars_limit: 3, delta_threshold: 0.3, kalman_gamma: 0.05,
   min_trend_bars: 2, reversal_confirm_bars: 2, chop_atr_pct: 0.5,
   chop_spread_pct: 0.15, reversal_exit_confirm_bars: 1,
   s_effective_threshold: 0.5, exhaustion_persist_bars: 2,
@@ -64,6 +64,7 @@ let engineParams = {
   atr_floor_k: 0.6, ema_cross_persist_bars: 2, exhaustion_s_decay_bars: 2,
   local_range_bars: 10, local_range_threshold_pct: 0.3, sign_flip_threshold: 4,
   stability_bars: 2,
+  spike_atr_multiplier: 2.0,
 };
 
 const $ = id => document.getElementById(id);

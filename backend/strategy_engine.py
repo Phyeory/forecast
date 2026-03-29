@@ -368,6 +368,7 @@ class StrategyEngine:
         local_range_threshold_pct: float = 0.3,# min range % of price (§8)
         sign_flip_threshold: int = 4,          # max sign flips before chop (§8)
         stability_bars: int = 2,              # required consecutive stability bars (§9) [was 2]
+        spike_atr_multiplier: float = 3.5,    # §11: reject entry if last candle body > N×ATR
     ):
         self.ema_fast_p = ema_fast
         self.ema_slow_p = ema_slow
@@ -405,6 +406,7 @@ class StrategyEngine:
         self.local_range_threshold_pct = local_range_threshold_pct
         self.sign_flip_threshold = sign_flip_threshold
         self.stability_bars = stability_bars
+        self.spike_atr_multiplier = spike_atr_multiplier
 
         # State
         self.bar_count = 0
@@ -801,6 +803,19 @@ class StrategyEngine:
             return False
         if direction == Direction.DOWN and not self._pre_entry_stable_down:
             return False
+
+        # §11: Single-candle spike filter — block entries triggered by a single
+        # outlier candle (pump/manipulation spike).  If the most recent candle's
+        # body (|close - open|) is larger than spike_atr_multiplier × ATR, the
+        # signal is driven by one anomalous bar, not a real trend buildup.
+        if (self.atr_val and self.atr_val > 0
+                and len(self.close_history) >= 2
+                and len(self.high_history) >= 1):
+            last_open = self.close_history[-2]   # prev close ≈ current open
+            last_close = self.close_history[-1]  # current close
+            candle_body = abs(last_close - last_open)
+            if candle_body > self.spike_atr_multiplier * self.atr_val:
+                return False
 
         # §10: Entry location filter — reject if mid-range / in value area
         # "value area" = inside an HVN cluster (already tracked)
