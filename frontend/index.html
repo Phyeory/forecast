@@ -22,6 +22,7 @@
       <button class="nav-tab" data-page="recorder" id="nav-recorder">🔴 Record</button>
       <button class="nav-tab" data-page="viewer" id="nav-viewer">📂 Viewer</button>
       <button class="nav-tab" data-page="backtest" id="nav-backtest">🧪 Backtest</button>
+      <button class="nav-tab" data-page="live-trading" id="nav-live-trading">⚡ Live Trading</button>
     </nav>
 
     <div id="conn-indicator">
@@ -283,6 +284,105 @@
     </div>
   </div>
 
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- PAGE: LIVE TRADING                                                -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <div id="page-live-trading" class="page">
+    <div class="page-inner">
+      <div class="page-header">
+        <div class="page-header-icon">⚡</div>
+        <div>
+          <h1 class="page-title">Live Trading</h1>
+          <p class="page-subtitle">Real on-chain trading with your Phantom wallet — same algorithm, real transactions</p>
+        </div>
+      </div>
+
+      <!-- Wallet Connection -->
+      <div class="glass-card" id="lt-wallet-card">
+        <div class="lt-wallet-row">
+          <div class="lt-wallet-status">
+            <div id="lt-wallet-dot" class="dot error"></div>
+            <span id="lt-wallet-label">Wallet not connected</span>
+            <span id="lt-wallet-addr" class="lt-wallet-addr"></span>
+            <span id="lt-wallet-bal" class="lt-wallet-bal"></span>
+          </div>
+          <button id="lt-connect-btn" class="btn btn-primary">🔗 Connect Phantom</button>
+        </div>
+      </div>
+
+      <!-- Trading Config -->
+      <div class="glass-card" id="lt-config-card">
+        <h3 class="panel-title" style="margin-bottom:12px">⚙️ Trading Configuration</h3>
+        <div class="lt-config-grid">
+          <div class="form-group">
+            <label class="form-label">Buy Size (SOL)</label>
+            <input id="lt-buy-size" type="number" class="form-input" value="0.1" step="0.01" min="0.001" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Slippage (%)</label>
+            <input id="lt-slippage" type="number" class="form-input" value="10" step="0.5" min="0.1" max="50" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Priority Fee (SOL)</label>
+            <input id="lt-priority-fee" type="number" class="form-input" value="0.0001" step="0.0001" min="0" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Timeframe</label>
+            <select id="lt-timeframe" class="form-select">
+              <option value="1s">1s</option>
+              <option value="5s">5s</option>
+              <option value="15s">15s</option>
+              <option value="1m" selected>1m</option>
+              <option value="5m">5m</option>
+              <option value="15m">15m</option>
+              <option value="1h">1h</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- Add Token -->
+      <div class="glass-card" id="lt-add-card">
+        <div class="lt-add-row">
+          <input id="lt-token-input" type="text" class="form-input" placeholder="Enter token address to start live trading…" autocomplete="off" spellcheck="false" style="flex:1" />
+          <button id="lt-add-btn" class="btn btn-record" disabled>⚡ Start Trading</button>
+          <button id="lt-stop-all-btn" class="btn btn-danger" style="display:none">⏹ Stop All</button>
+        </div>
+      </div>
+
+      <!-- Active Traders Grid -->
+      <div class="lt-traders-section">
+        <h2 class="section-title">📊 Active Traders</h2>
+        <div id="lt-traders-grid" class="lt-traders-grid">
+          <div class="empty-state">No active traders. Connect wallet and add tokens above.</div>
+        </div>
+      </div>
+
+      <!-- Trade History -->
+      <div class="lt-history-section">
+        <h2 class="section-title">📋 Trade History</h2>
+        <div id="lt-trades-table-wrapper" class="trades-table-wrapper">
+          <table id="lt-trades-table" class="trades-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Token</th>
+                <th>Action</th>
+                <th>Time</th>
+                <th>Price</th>
+                <th>PnL SOL</th>
+                <th>PnL %</th>
+                <th>TX Hash</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="lt-trades-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Settings Modal (shared) -->
   <div id="settings-modal" class="hidden">
     <div class="settings-content">
@@ -299,6 +399,6 @@
   </div>
 
 </div>
-<script src="/static/js/app.js?v=12"></script>
+<script src="/static/js/app.js?v=13"></script>
 </body>
 </html>

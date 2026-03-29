@@ -616,6 +616,100 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 }
 .progress-label { font-size: 12px; color: var(--muted); margin-top: 8px; display: block; }
 
+/* ═══════════════════════════════════════════════════════════════════════ */
+/* Live Trading page                                                     */
+/* ═══════════════════════════════════════════════════════════════════════ */
+
+.lt-wallet-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+.lt-wallet-status { display: flex; align-items: center; gap: 10px; }
+.lt-wallet-addr { font-family: var(--mono); font-size: 12px; color: var(--text); background: var(--bg); padding: 3px 10px; border-radius: 4px; }
+.lt-wallet-bal { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--cyan); }
+.lt-wallet-status .dot { width: 10px; height: 10px; }
+
+.lt-config-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+.lt-add-row { display: flex; gap: 10px; align-items: center; }
+
+.lt-traders-section, .lt-history-section { margin-top: 28px; }
+.lt-traders-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 12px; }
+
+.lt-trader-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  position: relative;
+  overflow: hidden;
+  transition: border-color .15s;
+}
+.lt-trader-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--cyan), var(--green));
+  opacity: 1;
+}
+.lt-trader-card.has-position::before { background: linear-gradient(90deg, var(--gold), var(--orange)); }
+.lt-trader-card:hover { border-color: var(--accent); }
+
+.lt-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.lt-card-name { font-weight: 700; color: #fff; font-size: 14px; }
+.lt-card-symbol { color: var(--muted); font-size: 12px; margin-left: 6px; }
+.lt-card-status { font-size: 10px; font-weight: 700; font-family: var(--mono); padding: 2px 8px; border-radius: 4px; }
+.lt-card-status.running { background: rgba(38, 166, 154, 0.15); color: var(--green); }
+.lt-card-status.position-open { background: rgba(255, 215, 64, 0.15); color: var(--gold); }
+
+.lt-card-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.lt-card-unrealized {
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: rgba(88, 101, 242, 0.08);
+  border: 1px solid rgba(88, 101, 242, 0.15);
+  font-family: var(--mono);
+  font-size: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.lt-card-actions { display: flex; gap: 6px; }
+
+.lt-event-log {
+  margin-top: 8px;
+  max-height: 80px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+}
+.lt-event-log div { padding: 2px 0; border-bottom: 1px solid rgba(30,35,48,0.5); }
+.lt-event-log .buy { color: var(--green); }
+.lt-event-log .sell { color: var(--red); }
+.lt-event-log .error { color: var(--red); }
+
+@keyframes livePulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(0, 229, 255, 0.3); }
+  50% { box-shadow: 0 0 0 6px rgba(0, 229, 255, 0); }
+}
+
+.lt-live-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--cyan);
+  animation: livePulse 2s infinite;
+  display: inline-block;
+  margin-right: 6px;
+}
+
 /* ── Responsive ──────────────────────────────────────────────────────── */
 
 @media (max-width: 768px) {
@@ -628,4 +722,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
   .backtests-grid { grid-template-columns: 1fr; }
   .bt-stats-grid { grid-template-columns: repeat(2, 1fr); }
   .viewer-chart-container { height: 350px; }
+  .lt-config-grid { grid-template-columns: repeat(2, 1fr); }
+  .lt-traders-grid { grid-template-columns: 1fr; }
 }
+

@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from candle_aggregator import CandleAggregator, TIMEFRAME_SECONDS
 from pumpfun_client import DexScreenerPollClient, PumpFunWSClient, PumpSwapRPCClient, get_historical_candles, get_token_info, resolve_input, SUB_MINUTE_TFS
 from forward_tester import ForwardTester
+from live_trader import LiveTrader
 import data_store
 from backtester import run_backtest
 
@@ -461,5 +462,258 @@ async def chart_ws(
         logger.info(f"Disconnect  mint={real_mint[:8]}…")
 
 
+# ── Live trading state ───────────────────────────────────────────────────
+_active_live_traders: dict[str, dict] = {}   # keyed by token mint
+
+
+@app.get("/api/live/status")
+async def live_status():
+    traders = []
+    for mint, info in _active_live_traders.items():
+        trader: LiveTrader = info["trader"]
+        traders.append({
+            "mint": mint,
+            "token_name": info.get("token_name", ""),
+            "token_symbol": info.get("token_symbol", ""),
+            "timeframe": info.get("timeframe", "1m"),
+            "status": "running" if not info.get("cancelled", asyncio.Event()).is_set() else "stopped",
+            "stats": trader.stats.to_dict(),
+            "current_trade": trader.current_trade.to_dict() if trader.current_trade else None,
+            "trade_count": len(trader.trade_history),
+        })
+    return JSONResponse({"traders": traders, "count": len(traders)})
+
+
+@app.post("/api/live/stop")
+async def live_stop(body: dict = Body(...)):
+    mint = body.get("mint", "").strip()
+    if not mint or mint not in _active_live_traders:
+        return JSONResponse({"error": "No active trader for this mint"}, status_code=404)
+    info = _active_live_traders[mint]
+    info["cancelled"].set()
+    del _active_live_traders[mint]
+    return JSONResponse({"status": "stopped", "mint": mint})
+
+
+@app.post("/api/live/stop_all")
+async def live_stop_all():
+    for mint, info in list(_active_live_traders.items()):
+        info["cancelled"].set()
+    _active_live_traders.clear()
+    return JSONResponse({"status": "all_stopped"})
+
+
+@app.websocket("/ws/live/{mint}")
+async def live_trading_ws(
+    websocket: WebSocket,
+    mint: str,
+    timeframe: str = Query(default="1m"),
+    wallet: str = Query(default=""),
+    buy_size: float = Query(default=0.1),
+    slippage_bps: int = Query(default=1000),
+    priority_fee: int = Query(default=100000),
+    params: str = Query(default="{}"),
+):
+    if timeframe not in TIMEFRAME_SECONDS:
+        await websocket.close(code=4000, reason="Unknown timeframe")
+        return
+    if not wallet:
+        await websocket.close(code=4001, reason="Wallet pubkey required")
+        return
+
+    await websocket.accept()
+    logger.info(f"[LIVE] Connect  mint={mint[:8]}…  wallet={wallet[:8]}…  tf={timeframe}")
+
+    real_mint, token_info = await resolve_input(mint)
+    token_name = (token_info or {}).get("name", "")
+    token_symbol = (token_info or {}).get("symbol", "")
+
+    try:
+        engine_params = json.loads(params)
+    except Exception:
+        engine_params = {}
+
+    live_trader = LiveTrader(
+        token_mint=real_mint,
+        wallet_pubkey=wallet,
+        buy_size_sol=buy_size,
+        slippage_bps=slippage_bps,
+        priority_fee_lamports=priority_fee,
+        engine_kwargs=engine_params,
+    )
+
+    cancelled = asyncio.Event()
+    _active_live_traders[real_mint] = {
+        "trader": live_trader,
+        "token_name": token_name,
+        "token_symbol": token_symbol,
+        "timeframe": timeframe,
+        "cancelled": cancelled,
+        "wallet": wallet,
+    }
+
+    # Resolve live data source
+    live_source = (token_info or {}).get("_live_source", "pumpportal")
+    live_query = (token_info or {}).get("pair_address") or real_mint
+    if live_source == "solana_rpc" and (token_info or {}).get("pair_address"):
+        ws_client = PumpSwapRPCClient(live_query)
+    elif live_source == "dexscreener":
+        poll_seconds = 0.25 if timeframe in {"1s", "5s", "15s"} else 0.5
+        ws_client = DexScreenerPollClient(live_query, poll_seconds=poll_seconds)
+    else:
+        ws_client = PumpFunWSClient(real_mint)
+
+    aggregator = CandleAggregator(timeframe)
+    last_sent_price = None
+
+    async def send(obj: dict) -> bool:
+        try:
+            await websocket.send_json(obj)
+            return True
+        except Exception:
+            return False
+
+    if token_info:
+        await send({"type": "token_info", "data": token_info})
+
+    # Send historical candles + run through strategy (warm up indicators)
+    hist = await get_historical_candles(real_mint, timeframe)
+    if hist:
+        strategy_results = []
+        for candle in hist:
+            result = live_trader.update(
+                time_val=int(candle["time"]),
+                o=candle["open"], h=candle["high"],
+                l=candle["low"], c=candle["close"],
+                volume=candle.get("volume", 0),
+            )
+            # Strip swap_requests from historical warmup
+            if result.get("live_trade", {}).get("swap_request"):
+                result["live_trade"]["swap_request"] = None
+            strategy_results.append(result)
+
+        await send({"type": "historical", "candles": hist, "strategy": strategy_results})
+        last = hist[-1]
+        aggregator.process_trade(last["close"], 0.0, float(last["time"]))
+        logger.info(f"[LIVE] Sent {len(hist)} historical candles for {real_mint[:8]}")
+
+    async def _process_stream(client) -> bool:
+        nonlocal last_sent_price
+        got_trade = False
+        async for trade in client.stream():
+            if cancelled.is_set():
+                break
+            got_trade = True
+            is_synthetic = bool(trade.get("synthetic"))
+            candle, is_new = aggregator.process_trade(
+                trade["price"], trade["sol_amount"], trade["timestamp"],
+                synthetic=is_synthetic,
+            )
+            candle_dict = candle.to_dict()
+            current_price = candle_dict["close"]
+            if last_sent_price is not None and current_price == last_sent_price and not is_new:
+                continue
+            last_sent_price = current_price
+
+            strategy_result = live_trader.update(
+                time_val=candle_dict["time"],
+                o=candle_dict["open"], h=candle_dict["high"],
+                l=candle_dict["low"], c=candle_dict["close"],
+                volume=candle_dict.get("volume", 0),
+            )
+
+            trade_payload = None if is_synthetic else {
+                "price": trade["price"],
+                "sol_amount": trade["sol_amount"],
+                "tx_type": trade["tx_type"],
+                "trader": trade["trader"],
+                "tx_hash": trade["tx_hash"],
+            }
+
+            ok = await send({
+                "type": "candle",
+                "candle": candle_dict,
+                "is_new": is_new,
+                "market_cap_sol": trade.get("market_cap_sol", 0),
+                "market_cap_usd": trade.get("market_cap_usd", 0),
+                "trade": trade_payload,
+                "strategy": strategy_result,
+            })
+            if not ok:
+                break
+        return got_trade
+
+    async def stream_live():
+        got = await _process_stream(ws_client)
+        if not got and not cancelled.is_set() and not isinstance(ws_client, PumpFunWSClient):
+            fallback = PumpFunWSClient(real_mint)
+            try:
+                await _process_stream(fallback)
+            finally:
+                fallback.stop()
+
+    async def keepalive():
+        while not cancelled.is_set():
+            await asyncio.sleep(15)
+            if not await send({"type": "ping"}):
+                break
+
+    async def listen():
+        """Listen for messages from frontend (tx confirmations, config updates)."""
+        try:
+            while not cancelled.is_set():
+                data = await websocket.receive_text()
+                try:
+                    msg = json.loads(data)
+                except Exception:
+                    continue
+                msg_type = msg.get("type", "")
+                if msg_type == "tx_confirmed":
+                    action = msg.get("action", "")
+                    if action == "buy":
+                        live_trader.confirm_buy(
+                            tx_hash=msg.get("tx_hash", ""),
+                            tokens_received=float(msg.get("tokens_received", 0)),
+                            actual_price=float(msg.get("actual_price", 0)),
+                        )
+                    elif action == "sell":
+                        live_trader.confirm_sell(
+                            tx_hash=msg.get("tx_hash", ""),
+                            sol_received=float(msg.get("sol_received", 0)),
+                            actual_price=float(msg.get("actual_price", 0)),
+                        )
+                elif msg_type == "tx_failed":
+                    live_trader.confirm_failed(
+                        action=msg.get("action", ""),
+                        error=msg.get("error", "unknown"),
+                    )
+                elif msg_type == "update_config":
+                    if "buy_size" in msg:
+                        live_trader.buy_size_sol = float(msg["buy_size"])
+                    if "slippage_bps" in msg:
+                        live_trader.slippage_bps = int(msg["slippage_bps"])
+                    if "priority_fee" in msg:
+                        live_trader.priority_fee_lamports = int(msg["priority_fee"])
+                elif msg_type == "pong":
+                    pass
+        except WebSocketDisconnect:
+            pass
+        finally:
+            cancelled.set()
+            ws_client.stop()
+
+    try:
+        await asyncio.gather(stream_live(), keepalive(), listen())
+    except (WebSocketDisconnect, asyncio.CancelledError):
+        pass
+    finally:
+        cancelled.set()
+        ws_client.stop()
+        if real_mint in _active_live_traders:
+            del _active_live_traders[real_mint]
+        logger.info(f"[LIVE] Disconnect  mint={real_mint[:8]}…")
+
+
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False, log_level="info")
+

@@ -1210,6 +1210,7 @@ function switchPage(pageId) {
   if (pageId === "recorder") { loadRecordingsList("recordings-list"); checkRecorderStatus(); }
   if (pageId === "viewer") loadRecordingsList("viewer-recordings-list", true);
   if (pageId === "backtest") { loadBacktestsList(); loadRecordingsDropdown(); }
+  if (pageId === "live-trading" && typeof refreshWalletBalance === "function" && ltWalletConnected) { refreshWalletBalance(); }
 }
 
 navTabs.forEach(tab => tab.addEventListener("click", () => switchPage(tab.dataset.page)));
@@ -1674,3 +1675,476 @@ window.loadViewer = loadViewer;
 window.deleteRecording = deleteRecording;
 window.loadBacktestResult = loadBacktestResult;
 window.deleteBacktest = deleteBacktest;
+
+/* ════════════════════════════════════════════════════════════════════════
+   LIVE TRADING — Real on-chain execution via Phantom + Jupiter
+   ════════════════════════════════════════════════════════════════════════ */
+
+const JUPITER_QUOTE = "https://quote-api.jup.ag/v6/quote";
+const JUPITER_SWAP  = "https://quote-api.jup.ag/v6/swap";
+const WSOL = "So11111111111111111111111111111111111111112";
+const SOL_DECIMALS = 9;
+const LT_WS_BASE = `ws://${location.host}/ws/live`;
+
+/* ── State ────────────────────────────────────────────────────────────── */
+
+let ltWalletPubkey = null;
+let ltWalletConnected = false;
+const ltActiveTraders = {};  // mint -> { ws, info, events[] }
+let ltTradeCounter = 0;
+
+/* ── DOM refs ─────────────────────────────────────────────────────────── */
+
+const ltConnectBtn   = $("lt-connect-btn");
+const ltWalletDot    = $("lt-wallet-dot");
+const ltWalletLabel  = $("lt-wallet-label");
+const ltWalletAddr   = $("lt-wallet-addr");
+const ltWalletBal    = $("lt-wallet-bal");
+const ltAddBtn       = $("lt-add-btn");
+const ltStopAllBtn   = $("lt-stop-all-btn");
+const ltTokenInput   = $("lt-token-input");
+const ltTradersGrid  = $("lt-traders-grid");
+const ltTradesTbody  = $("lt-trades-tbody");
+
+/* ── Phantom Wallet ──────────────────────────────────────────────────── */
+
+function getPhantom() {
+  if (window.solana && window.solana.isPhantom) return window.solana;
+  if (window.phantom && window.phantom.solana) return window.phantom.solana;
+  return null;
+}
+
+async function connectWallet() {
+  const phantom = getPhantom();
+  if (!phantom) {
+    alert("Phantom wallet not found. Please install the Phantom browser extension.");
+    return;
+  }
+  try {
+    const resp = await phantom.connect();
+    ltWalletPubkey = resp.publicKey.toString();
+    ltWalletConnected = true;
+    ltWalletDot.className = "dot connected";
+    ltWalletLabel.textContent = "Connected";
+    ltWalletAddr.textContent = ltWalletPubkey.slice(0, 4) + "…" + ltWalletPubkey.slice(-4);
+    ltAddBtn.disabled = false;
+    refreshWalletBalance();
+
+    phantom.on("disconnect", () => {
+      ltWalletConnected = false;
+      ltWalletPubkey = null;
+      ltWalletDot.className = "dot error";
+      ltWalletLabel.textContent = "Disconnected";
+      ltWalletAddr.textContent = "";
+      ltWalletBal.textContent = "";
+      ltAddBtn.disabled = true;
+    });
+  } catch (e) {
+    console.error("Wallet connect failed:", e);
+    alert("Failed to connect: " + e.message);
+  }
+}
+
+async function refreshWalletBalance() {
+  if (!ltWalletPubkey) return;
+  try {
+    const resp = await fetch(`https://api.mainnet-beta.solana.com`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1,
+        method: "getBalance",
+        params: [ltWalletPubkey, { commitment: "processed" }],
+      }),
+    });
+    const data = await resp.json();
+    const bal = (data.result?.value || 0) / 1e9;
+    ltWalletBal.textContent = bal.toFixed(4) + " SOL";
+  } catch (e) {
+    console.error("Balance fetch failed:", e);
+  }
+}
+
+ltConnectBtn.addEventListener("click", connectWallet);
+
+/* ── Get config values ───────────────────────────────────────────────── */
+
+function getLtConfig() {
+  return {
+    buySize: parseFloat($("lt-buy-size").value) || 0.1,
+    slippagePct: parseFloat($("lt-slippage").value) || 10,
+    slippageBps: Math.round((parseFloat($("lt-slippage").value) || 10) * 100),
+    priorityFeeSol: parseFloat($("lt-priority-fee").value) || 0.0001,
+    priorityFeeLamports: Math.round((parseFloat($("lt-priority-fee").value) || 0.0001) * 1e9),
+    timeframe: $("lt-timeframe").value,
+  };
+}
+
+/* ── Jupiter swap execution ──────────────────────────────────────────── */
+
+async function executeJupiterSwap(swapReq, traderCtx) {
+  const phantom = getPhantom();
+  if (!phantom || !ltWalletPubkey) {
+    traderCtx.ws.send(JSON.stringify({ type: "tx_failed", action: swapReq.action, error: "Wallet not connected" }));
+    addTraderEvent(traderCtx, "error", "Wallet not connected");
+    return;
+  }
+
+  const config = getLtConfig();
+  const isBuy = swapReq.action === "buy";
+  addTraderEvent(traderCtx, swapReq.action, `${isBuy ? "BUY" : "SELL"} signal — executing swap…`);
+
+  try {
+    let quoteParams;
+    if (isBuy) {
+      const amountLamports = Math.round(config.buySize * 1e9);
+      quoteParams = `inputMint=${WSOL}&outputMint=${swapReq.output_mint}&amount=${amountLamports}&slippageBps=${config.slippageBps}`;
+    } else {
+      // Sell ALL tokens — get token balance first
+      const balResp = await fetch("https://api.mainnet-beta.solana.com", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 1,
+          method: "getTokenAccountsByOwner",
+          params: [ltWalletPubkey, { mint: swapReq.input_mint }, { encoding: "jsonParsed" }],
+        }),
+      });
+      const balData = await balResp.json();
+      const accounts = balData.result?.value || [];
+      let tokenAmount = "0";
+      for (const acc of accounts) {
+        const info = acc.account?.data?.parsed?.info;
+        if (info) tokenAmount = info.tokenAmount?.amount || "0";
+      }
+      if (tokenAmount === "0") {
+        traderCtx.ws.send(JSON.stringify({ type: "tx_failed", action: "sell", error: "No tokens to sell" }));
+        addTraderEvent(traderCtx, "error", "No tokens found to sell");
+        return;
+      }
+      quoteParams = `inputMint=${swapReq.input_mint}&outputMint=${WSOL}&amount=${tokenAmount}&slippageBps=${config.slippageBps}`;
+    }
+
+    // 1. Get Jupiter quote
+    const quoteResp = await fetch(`${JUPITER_QUOTE}?${quoteParams}`);
+    if (!quoteResp.ok) {
+      const errTxt = await quoteResp.text();
+      throw new Error(`Quote failed: ${errTxt}`);
+    }
+    const quote = await quoteResp.json();
+
+    // 2. Get swap transaction
+    const swapResp = await fetch(JUPITER_SWAP, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        quoteResponse: quote,
+        userPublicKey: ltWalletPubkey,
+        wrapAndUnwrapSol: true,
+        computeUnitPriceMicroLamports: config.priorityFeeLamports,
+        dynamicComputeUnitLimit: true,
+      }),
+    });
+    if (!swapResp.ok) {
+      const errTxt = await swapResp.text();
+      throw new Error(`Swap TX build failed: ${errTxt}`);
+    }
+    const swapData = await swapResp.json();
+    const swapTx = swapData.swapTransaction;
+
+    // 3. Deserialise and sign with Phantom
+    const txBuf = Uint8Array.from(atob(swapTx), c => c.charCodeAt(0));
+    const signed = await phantom.signTransaction(
+      // VersionedTransaction from base64
+      (() => {
+        // Use the raw buffer directly — Phantom accepts Uint8Array
+        return { serialize: () => txBuf, _raw: txBuf };
+      })()
+    );
+
+    // 4. Send raw transaction
+    const sendResp = await fetch("https://api.mainnet-beta.solana.com", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1,
+        method: "sendRawTransaction",
+        params: [btoa(String.fromCharCode(...(signed.serialize ? signed.serialize() : txBuf))), {
+          skipPreflight: true,
+          maxRetries: 3,
+          preflightCommitment: "processed",
+        }],
+      }),
+    });
+    const sendData = await sendResp.json();
+    if (sendData.error) throw new Error(sendData.error.message || JSON.stringify(sendData.error));
+
+    const txHash = sendData.result;
+    addTraderEvent(traderCtx, swapReq.action, `TX sent: ${txHash.slice(0, 12)}…`);
+
+    // 5. Confirm transaction
+    const inAmount = parseInt(quote.inAmount || "0");
+    const outAmount = parseInt(quote.outAmount || "0");
+
+    if (isBuy) {
+      const outDecimals = quote.outputMint === WSOL ? 9 : 6;
+      const tokensReceived = outAmount / (10 ** outDecimals);
+      const actualPrice = (inAmount / 1e9) / tokensReceived;
+      traderCtx.ws.send(JSON.stringify({
+        type: "tx_confirmed", action: "buy",
+        tx_hash: txHash, tokens_received: tokensReceived, actual_price: actualPrice,
+      }));
+      addLtTradeRow(traderCtx, "BUY", actualPrice, 0, 0, txHash, "confirmed");
+      addTraderEvent(traderCtx, "buy", `BUY confirmed ✓ ${tokensReceived.toFixed(2)} tokens`);
+    } else {
+      const solReceived = outAmount / 1e9;
+      const inDecimals = 6;
+      const tokensSold = inAmount / (10 ** inDecimals);
+      const actualPrice = solReceived / tokensSold;
+      traderCtx.ws.send(JSON.stringify({
+        type: "tx_confirmed", action: "sell",
+        tx_hash: txHash, sol_received: solReceived, actual_price: actualPrice,
+      }));
+      addTraderEvent(traderCtx, "sell", `SELL confirmed ✓ ${solReceived.toFixed(4)} SOL received`);
+    }
+
+    refreshWalletBalance();
+
+  } catch (e) {
+    console.error("Swap execution error:", e);
+    traderCtx.ws.send(JSON.stringify({ type: "tx_failed", action: swapReq.action, error: e.message }));
+    addTraderEvent(traderCtx, "error", `FAILED: ${e.message}`);
+  }
+}
+
+/* ── Trader event log ────────────────────────────────────────────────── */
+
+function addTraderEvent(ctx, type, msg) {
+  const ts = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  ctx.events.unshift({ type, msg, ts });
+  if (ctx.events.length > 50) ctx.events.pop();
+  updateTraderCard(ctx.mint);
+}
+
+/* ── Trade history table ─────────────────────────────────────────────── */
+
+function addLtTradeRow(ctx, action, price, pnlSol, pnlPct, txHash, status) {
+  ltTradeCounter++;
+  const tr = document.createElement("tr");
+  const pnlClass = pnlSol >= 0 ? "trade-pnl-pos" : "trade-pnl-neg";
+  const ts = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const solscanUrl = `https://solscan.io/tx/${txHash}`;
+  tr.innerHTML = `
+    <td>${ltTradeCounter}</td>
+    <td>${ctx.info?.token_symbol ? "$" + ctx.info.token_symbol : ctx.mint.slice(0, 6) + "…"}</td>
+    <td style="color:${action === "BUY" ? "var(--green)" : "var(--red)"}; font-weight:700">${action}</td>
+    <td>${ts}</td>
+    <td>${price ? price.toExponential(4) : "—"}</td>
+    <td class="${pnlClass}">${pnlSol ? (pnlSol >= 0 ? "+" : "") + pnlSol.toFixed(6) : "—"}</td>
+    <td class="${pnlClass}">${pnlPct ? (pnlPct >= 0 ? "+" : "") + pnlPct.toFixed(2) + "%" : "—"}</td>
+    <td><a href="${solscanUrl}" target="_blank" style="color:var(--accent);text-decoration:none">${txHash.slice(0, 8)}…</a></td>
+    <td>${status}</td>
+  `;
+  ltTradesTbody.prepend(tr);
+}
+
+/* ── Trader card rendering ───────────────────────────────────────────── */
+
+function updateTraderCard(mint) {
+  const ctx = ltActiveTraders[mint];
+  if (!ctx) return;
+
+  let card = document.querySelector(`.lt-trader-card[data-mint="${mint}"]`);
+  if (!card) {
+    card = document.createElement("div");
+    card.className = "lt-trader-card";
+    card.dataset.mint = mint;
+    // Remove empty state
+    const empty = ltTradersGrid.querySelector(".empty-state");
+    if (empty) empty.remove();
+    ltTradersGrid.appendChild(card);
+  }
+
+  const st = ctx.stats || {};
+  const ct = ctx.currentTrade;
+  const hasPos = !!ct;
+  card.className = `lt-trader-card${hasPos ? " has-position" : ""}`;
+
+  const pnlClass = (st.total_pnl_sol || 0) >= 0 ? "pos" : "neg";
+  const upnlClass = (ctx.unrealizedPnl || 0) >= 0 ? "pos" : "neg";
+  const name = ctx.info?.token_name || mint.slice(0, 8);
+  const symbol = ctx.info?.token_symbol ? "$" + ctx.info.token_symbol : "";
+
+  const eventsHtml = ctx.events.slice(0, 5).map(e =>
+    `<div class="${e.type}">${e.ts} — ${e.msg}</div>`
+  ).join("");
+
+  card.innerHTML = `
+    <div class="lt-card-header">
+      <div><span class="lt-card-name">${name}</span><span class="lt-card-symbol">${symbol}</span></div>
+      <div style="display:flex;gap:6px;align-items:center">
+        ${hasPos ? '<span class="lt-card-status position-open">IN POSITION</span>' : '<span class="lt-card-status running"><span class="lt-live-dot"></span>MONITORING</span>'}
+      </div>
+    </div>
+    <div class="lt-card-stats">
+      <div class="bt-stat"><span class="bt-stat-label">Trades</span><span class="bt-stat-value">${st.total_trades || 0}</span></div>
+      <div class="bt-stat"><span class="bt-stat-label">Win Rate</span><span class="bt-stat-value">${(st.win_rate || 0).toFixed(1)}%</span></div>
+      <div class="bt-stat"><span class="bt-stat-label">PnL</span><span class="bt-stat-value ${pnlClass}">${(st.total_pnl_sol || 0) >= 0 ? "+" : ""}${(st.total_pnl_sol || 0).toFixed(4)}</span></div>
+    </div>
+    ${hasPos ? `
+      <div class="lt-card-unrealized">
+        <span>Unrealized PnL</span>
+        <span class="${upnlClass}" style="font-weight:700">${(ctx.unrealizedPnl || 0) >= 0 ? "+" : ""}${(ctx.unrealizedPnl || 0).toFixed(4)} SOL (${(ctx.unrealizedPnlPct || 0) >= 0 ? "+" : ""}${(ctx.unrealizedPnlPct || 0).toFixed(2)}%)</span>
+      </div>
+    ` : ""}
+    <div class="lt-event-log">${eventsHtml}</div>
+    <div class="lt-card-actions">
+      <button class="btn btn-danger btn-xs" onclick="stopLiveTrader('${mint}')">⏹ Stop</button>
+    </div>
+  `;
+}
+
+/* ── Start live trading on a token ───────────────────────────────────── */
+
+function startLiveTrader(mint) {
+  if (!ltWalletPubkey) return alert("Connect wallet first");
+  if (ltActiveTraders[mint]) return alert("Already trading this token");
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)) return alert("Invalid Solana address");
+
+  const config = getLtConfig();
+  const paramsStr = encodeURIComponent(JSON.stringify(engineParams));
+  const wsUrl = `${LT_WS_BASE}/${mint}?timeframe=${config.timeframe}&wallet=${ltWalletPubkey}&buy_size=${config.buySize}&slippage_bps=${config.slippageBps}&priority_fee=${config.priorityFeeLamports}&params=${paramsStr}`;
+
+  const ws = new WebSocket(wsUrl);
+  const ctx = {
+    mint,
+    ws,
+    info: null,
+    stats: {},
+    currentTrade: null,
+    unrealizedPnl: 0,
+    unrealizedPnlPct: 0,
+    events: [],
+    regime: "idle",
+  };
+  ltActiveTraders[mint] = ctx;
+  ltStopAllBtn.style.display = "inline-flex";
+
+  addTraderEvent(ctx, "info", "Connecting…");
+  updateTraderCard(mint);
+
+  ws.onopen = () => { addTraderEvent(ctx, "info", "Connected — warming up indicators…"); };
+
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+
+    if (msg.type === "token_info") {
+      ctx.info = msg.data;
+      addTraderEvent(ctx, "info", `Token: ${msg.data.name || mint.slice(0, 8)}`);
+      updateTraderCard(mint);
+    }
+
+    if (msg.type === "historical" && msg.strategy) {
+      addTraderEvent(ctx, "info", `Loaded ${msg.candles?.length || 0} historical candles`);
+    }
+
+    if (msg.type === "candle" && msg.strategy) {
+      const s = msg.strategy;
+      // Update live_trade data
+      const lt = s.live_trade || s.forward_test;
+      if (lt) {
+        ctx.stats = lt.stats || ctx.stats;
+        ctx.currentTrade = lt.current_trade;
+        ctx.unrealizedPnl = lt.unrealized_pnl || 0;
+        ctx.unrealizedPnlPct = lt.unrealized_pnl_pct || 0;
+
+        // Check for swap request — execute trade!
+        if (lt.swap_request) {
+          executeJupiterSwap(lt.swap_request, ctx);
+        }
+      }
+      ctx.regime = s.regime || "idle";
+      updateTraderCard(mint);
+    }
+
+    if (msg.type === "ping") {
+      ws.send(JSON.stringify({ type: "pong" }));
+    }
+  };
+
+  ws.onerror = () => { addTraderEvent(ctx, "error", "WebSocket error"); };
+  ws.onclose = () => {
+    addTraderEvent(ctx, "info", "Disconnected");
+    updateTraderCard(mint);
+  };
+}
+
+/* ── Stop trader ─────────────────────────────────────────────────────── */
+
+function stopLiveTrader(mint) {
+  const ctx = ltActiveTraders[mint];
+  if (!ctx) return;
+  ctx.ws.close();
+  apiFetch("/api/live/stop", { method: "POST", body: JSON.stringify({ mint }) }).catch(() => {});
+  delete ltActiveTraders[mint];
+  const card = document.querySelector(`.lt-trader-card[data-mint="${mint}"]`);
+  if (card) card.remove();
+  if (Object.keys(ltActiveTraders).length === 0) {
+    ltTradersGrid.innerHTML = '<div class="empty-state">No active traders. Connect wallet and add tokens above.</div>';
+    ltStopAllBtn.style.display = "none";
+  }
+}
+
+function stopAllTraders() {
+  for (const mint of Object.keys(ltActiveTraders)) {
+    stopLiveTrader(mint);
+  }
+}
+
+/* ── Event listeners ─────────────────────────────────────────────────── */
+
+ltAddBtn.addEventListener("click", () => {
+  const mint = ltTokenInput.value.trim();
+  if (!mint) return;
+  startLiveTrader(mint);
+  ltTokenInput.value = "";
+});
+
+ltTokenInput.addEventListener("keydown", e => { if (e.key === "Enter") ltAddBtn.click(); });
+ltStopAllBtn.addEventListener("click", stopAllTraders);
+
+/* Config change listeners — hot-update all active traders */
+["lt-buy-size", "lt-slippage", "lt-priority-fee"].forEach(id => {
+  $(id).addEventListener("change", () => {
+    const config = getLtConfig();
+    for (const ctx of Object.values(ltActiveTraders)) {
+      if (ctx.ws.readyState === WebSocket.OPEN) {
+        ctx.ws.send(JSON.stringify({
+          type: "update_config",
+          buy_size: config.buySize,
+          slippage_bps: config.slippageBps,
+          priority_fee: config.priorityFeeLamports,
+        }));
+      }
+    }
+  });
+});
+
+// Page switch handler for live trading
+const origSwitchPage = switchPage;
+switchPage = function(pageId) {
+  origSwitchPage(pageId);
+  if (pageId === "live-trading" && ltWalletConnected) {
+    refreshWalletBalance();
+  }
+};
+// Re-bind nav tabs with new switchPage
+navTabs.forEach(tab => {
+  tab.removeEventListener("click", () => {});
+  tab.addEventListener("click", () => switchPage(tab.dataset.page));
+});
+
+window.stopLiveTrader = stopLiveTrader;
+window.stopAllTraders = stopAllTraders;
+
