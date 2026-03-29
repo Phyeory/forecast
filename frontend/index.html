@@ -3,6 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <title>pump-chart · Strategy Dashboard</title>
   <meta name="description" content="Real-time Solana token charting with physics-based strategy engine, recording, and backtesting" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -297,7 +300,7 @@
         </div>
       </div>
 
-      <!-- Wallet Connection -->
+      <!-- Wallet Connection (Private Key) -->
       <div class="glass-card" id="lt-wallet-card">
         <div class="lt-wallet-row">
           <div class="lt-wallet-status">
@@ -306,7 +309,13 @@
             <span id="lt-wallet-addr" class="lt-wallet-addr"></span>
             <span id="lt-wallet-bal" class="lt-wallet-bal"></span>
           </div>
-          <button id="lt-connect-btn" class="btn btn-primary">🔗 Connect Phantom</button>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:8px">
+          <input id="lt-private-key" type="password" class="form-input" style="flex:1" placeholder="Enter Base58 Private Key (from Phantom export)…" autocomplete="off" spellcheck="false" />
+          <button id="lt-connect-btn" class="btn btn-primary" onclick="connectWallet()">🔑 Set Wallet</button>
+        </div>
+        <div style="margin-top:8px;font-size:11px;color:#888;">
+          * Private key is sent to your local backend only (for server-side signing). Never share this key.
         </div>
       </div>
 
@@ -320,7 +329,7 @@
           </div>
           <div class="form-group">
             <label class="form-label">Slippage (%)</label>
-            <input id="lt-slippage" type="number" class="form-input" value="10" step="0.5" min="0.1" max="50" />
+            <input id="lt-slippage" type="number" class="form-input" value="10" step="0.5" min="0.1" max="100" />
           </div>
           <div class="form-group">
             <label class="form-label">Priority Fee (SOL)</label>
@@ -399,6 +408,27 @@
   </div>
 
 </div>
-<script src="/static/js/app.js?v=13"></script>
+<!-- Phantom wallet detection diagnostic — runs immediately so it's visible in console before app.js loads -->
+<script>
+(function() {
+  var check = function() {
+    var hasPhantom = !!(window.phantom && window.phantom.solana && window.phantom.solana.isPhantom);
+    var hasSolana  = !!(window.solana && window.solana.isPhantom);
+    console.log('[phantom-check] window.phantom:', window.phantom);
+    console.log('[phantom-check] window.solana:', window.solana);
+    console.log('[phantom-check] isPhantom via phantom.solana:', hasPhantom);
+    console.log('[phantom-check] isPhantom via solana:', hasSolana);
+    if (!hasPhantom && !hasSolana) {
+      console.warn('[phantom-check] ⚠️  Phantom NOT detected. Make sure the extension is installed and enabled in this browser.');
+    } else {
+      console.log('[phantom-check] ✅ Phantom detected and ready.');
+    }
+  };
+  // Check immediately and again after 1s (extension may inject late)
+  check();
+  setTimeout(check, 1000);
+})();
+</script>
+<script src="/static/js/app.js?v=23"></script>
 </body>
 </html>

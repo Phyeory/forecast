@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 
 import uvicorn
@@ -12,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from candle_aggregator import CandleAggregator, TIMEFRAME_SECONDS
 from pumpfun_client import DexScreenerPollClient, PumpFunWSClient, PumpSwapRPCClient, get_historical_candles, get_token_info, resolve_input, SUB_MINUTE_TFS
 from forward_tester import ForwardTester
-from live_trader import LiveTrader
+from live_trader import LiveTrader, keypair_from_private_key
 import data_store
 from backtester import run_backtest
 
@@ -40,7 +41,32 @@ if FRONTEND_DIR.exists():
 @app.get("/")
 async def index():
     p = FRONTEND_DIR / "index.html"
-    return FileResponse(str(p)) if p.exists() else JSONResponse({"status": "ok"})
+    if not p.exists():
+        return JSONResponse({"status": "ok"})
+    return FileResponse(
+        str(p),
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        }
+    )
+
+@app.get("/static/js/{filename}")
+async def serve_js(filename: str):
+    """Serve JS files with no-cache headers to prevent stale code being loaded."""
+    p = FRONTEND_DIR / "js" / filename
+    if not p.exists():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(
+        str(p),
+        media_type="application/javascript",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        }
+    )
 
 
 @app.get("/api/token/{mint}")
@@ -508,7 +534,7 @@ async def live_trading_ws(
     websocket: WebSocket,
     mint: str,
     timeframe: str = Query(default="1m"),
-    wallet: str = Query(default=""),
+    private_key: str = Query(default=""),
     buy_size: float = Query(default=0.1),
     slippage_bps: int = Query(default=1000),
     priority_fee: int = Query(default=100000),
@@ -517,12 +543,20 @@ async def live_trading_ws(
     if timeframe not in TIMEFRAME_SECONDS:
         await websocket.close(code=4000, reason="Unknown timeframe")
         return
-    if not wallet:
-        await websocket.close(code=4001, reason="Wallet pubkey required")
+    if not private_key:
+        await websocket.close(code=4001, reason="Private key required")
         return
 
+    try:
+        keypair = keypair_from_private_key(private_key)
+    except ValueError as e:
+        await websocket.close(code=4002, reason=f"Invalid private key: {e}")
+        return
+
+    wallet_pubkey = str(keypair.pubkey())
+
     await websocket.accept()
-    logger.info(f"[LIVE] Connect  mint={mint[:8]}…  wallet={wallet[:8]}…  tf={timeframe}")
+    logger.info(f"[LIVE] Connect  mint={mint[:8]}…  wallet={wallet_pubkey[:8]}…  tf={timeframe}")
 
     real_mint, token_info = await resolve_input(mint)
     token_name = (token_info or {}).get("name", "")
@@ -535,7 +569,7 @@ async def live_trading_ws(
 
     live_trader = LiveTrader(
         token_mint=real_mint,
-        wallet_pubkey=wallet,
+        keypair=keypair,
         buy_size_sol=buy_size,
         slippage_bps=slippage_bps,
         priority_fee_lamports=priority_fee,
@@ -549,7 +583,7 @@ async def live_trading_ws(
         "token_symbol": token_symbol,
         "timeframe": timeframe,
         "cancelled": cancelled,
-        "wallet": wallet,
+        "wallet": wallet_pubkey,
     }
 
     # Resolve live data source
@@ -658,8 +692,11 @@ async def live_trading_ws(
             if not await send({"type": "ping"}):
                 break
 
+    # Allow LiveTrader to push trade updates directly to this WS
+    live_trader.broadcast_fn = websocket.send_text
+
     async def listen():
-        """Listen for messages from frontend (tx confirmations, config updates)."""
+        """Listen for messages from frontend (config updates, manual trades)."""
         try:
             while not cancelled.is_set():
                 data = await websocket.receive_text()
@@ -668,32 +705,24 @@ async def live_trading_ws(
                 except Exception:
                     continue
                 msg_type = msg.get("type", "")
-                if msg_type == "tx_confirmed":
-                    action = msg.get("action", "")
-                    if action == "buy":
-                        live_trader.confirm_buy(
-                            tx_hash=msg.get("tx_hash", ""),
-                            tokens_received=float(msg.get("tokens_received", 0)),
-                            actual_price=float(msg.get("actual_price", 0)),
-                        )
-                    elif action == "sell":
-                        live_trader.confirm_sell(
-                            tx_hash=msg.get("tx_hash", ""),
-                            sol_received=float(msg.get("sol_received", 0)),
-                            actual_price=float(msg.get("actual_price", 0)),
-                        )
-                elif msg_type == "tx_failed":
-                    live_trader.confirm_failed(
-                        action=msg.get("action", ""),
-                        error=msg.get("error", "unknown"),
-                    )
-                elif msg_type == "update_config":
+
+                if msg_type == "update_config":
                     if "buy_size" in msg:
                         live_trader.buy_size_sol = float(msg["buy_size"])
                     if "slippage_bps" in msg:
                         live_trader.slippage_bps = int(msg["slippage_bps"])
                     if "priority_fee" in msg:
                         live_trader.priority_fee_lamports = int(msg["priority_fee"])
+                elif msg_type == "manual_trade":
+                    action = msg.get("action")
+                    tx_sig = None
+                    if action == "buy":
+                        tx_sig = await live_trader.force_buy()
+                    elif action == "sell":
+                        tx_sig = await live_trader.force_sell()
+                    if tx_sig:
+                        # Trade updates will be pushed by LiveTrader._broadcast_status
+                        pass
                 elif msg_type == "pong":
                     pass
         except WebSocketDisconnect:

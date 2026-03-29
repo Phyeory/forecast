@@ -1210,7 +1210,7 @@ function switchPage(pageId) {
   if (pageId === "recorder") { loadRecordingsList("recordings-list"); checkRecorderStatus(); }
   if (pageId === "viewer") loadRecordingsList("viewer-recordings-list", true);
   if (pageId === "backtest") { loadBacktestsList(); loadRecordingsDropdown(); }
-  if (pageId === "live-trading" && typeof refreshWalletBalance === "function" && ltWalletConnected) { refreshWalletBalance(); }
+  // Phantom wallet auto-refresh removed
 }
 
 navTabs.forEach(tab => tab.addEventListener("click", () => switchPage(tab.dataset.page)));
@@ -1421,7 +1421,7 @@ async function formatOfflineCandles(mint, rawCandles, timeframeStr) {
     lastClose = close;
   }
 
-  return { candles: formatted, currency: ccy };
+  return { candles: formatted, currency: ccy, baseMcap, basePrice, lastClose, lastTime };
 }
 
 /* ── Viewer ───────────────────────────────────────────────────────────── */
@@ -1706,63 +1706,28 @@ const ltTokenInput   = $("lt-token-input");
 const ltTradersGrid  = $("lt-traders-grid");
 const ltTradesTbody  = $("lt-trades-tbody");
 
-/* ── Phantom Wallet ──────────────────────────────────────────────────── */
+/* ── Wallet Setup (Private Key) ────────────────────────────────────────── */
 
-function getPhantom() {
-  if (window.solana && window.solana.isPhantom) return window.solana;
-  if (window.phantom && window.phantom.solana) return window.phantom.solana;
-  return null;
-}
+let _privateKey = "";
 
-async function connectWallet() {
-  const phantom = getPhantom();
-  if (!phantom) {
-    alert("Phantom wallet not found. Please install the Phantom browser extension.");
-    return;
-  }
-  try {
-    const resp = await phantom.connect();
-    ltWalletPubkey = resp.publicKey.toString();
-    ltWalletConnected = true;
-    ltWalletDot.className = "dot connected";
-    ltWalletLabel.textContent = "Connected";
-    ltWalletAddr.textContent = ltWalletPubkey.slice(0, 4) + "…" + ltWalletPubkey.slice(-4);
-    ltAddBtn.disabled = false;
-    refreshWalletBalance();
+function connectWallet() {
+  const pkInput = $("lt-private-key").value.trim();
+  if (!pkInput) return alert("Please enter your base58 private key.");
+  if (pkInput.length < 32) return alert("Private key seems too short. Expected a base58 string.");
 
-    phantom.on("disconnect", () => {
-      ltWalletConnected = false;
-      ltWalletPubkey = null;
-      ltWalletDot.className = "dot error";
-      ltWalletLabel.textContent = "Disconnected";
-      ltWalletAddr.textContent = "";
-      ltWalletBal.textContent = "";
-      ltAddBtn.disabled = true;
-    });
-  } catch (e) {
-    console.error("Wallet connect failed:", e);
-    alert("Failed to connect: " + e.message);
-  }
-}
+  _privateKey = pkInput;
+  ltWalletPubkey = "connected";
+  ltWalletConnected = true;
 
-async function refreshWalletBalance() {
-  if (!ltWalletPubkey) return;
-  try {
-    const resp = await fetch(`https://api.mainnet-beta.solana.com`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0", id: 1,
-        method: "getBalance",
-        params: [ltWalletPubkey, { commitment: "processed" }],
-      }),
-    });
-    const data = await resp.json();
-    const bal = (data.result?.value || 0) / 1e9;
-    ltWalletBal.textContent = bal.toFixed(4) + " SOL";
-  } catch (e) {
-    console.error("Balance fetch failed:", e);
-  }
+  ltWalletDot.className = "dot connected";
+  ltWalletLabel.textContent = "Key Set";
+  ltWalletAddr.textContent = "(Server-side signing)";
+  ltWalletBal.textContent = "";
+  ltConnectBtn.textContent = "✅ Key Saved";
+  ltAddBtn.disabled = false;
+
+  $("lt-private-key").value = "";
+  $("lt-private-key").placeholder = "Key securely set in memory.";
 }
 
 ltConnectBtn.addEventListener("click", connectWallet);
@@ -1780,142 +1745,7 @@ function getLtConfig() {
   };
 }
 
-/* ── Jupiter swap execution ──────────────────────────────────────────── */
-
-async function executeJupiterSwap(swapReq, traderCtx) {
-  const phantom = getPhantom();
-  if (!phantom || !ltWalletPubkey) {
-    traderCtx.ws.send(JSON.stringify({ type: "tx_failed", action: swapReq.action, error: "Wallet not connected" }));
-    addTraderEvent(traderCtx, "error", "Wallet not connected");
-    return;
-  }
-
-  const config = getLtConfig();
-  const isBuy = swapReq.action === "buy";
-  addTraderEvent(traderCtx, swapReq.action, `${isBuy ? "BUY" : "SELL"} signal — executing swap…`);
-
-  try {
-    let quoteParams;
-    if (isBuy) {
-      const amountLamports = Math.round(config.buySize * 1e9);
-      quoteParams = `inputMint=${WSOL}&outputMint=${swapReq.output_mint}&amount=${amountLamports}&slippageBps=${config.slippageBps}`;
-    } else {
-      // Sell ALL tokens — get token balance first
-      const balResp = await fetch("https://api.mainnet-beta.solana.com", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0", id: 1,
-          method: "getTokenAccountsByOwner",
-          params: [ltWalletPubkey, { mint: swapReq.input_mint }, { encoding: "jsonParsed" }],
-        }),
-      });
-      const balData = await balResp.json();
-      const accounts = balData.result?.value || [];
-      let tokenAmount = "0";
-      for (const acc of accounts) {
-        const info = acc.account?.data?.parsed?.info;
-        if (info) tokenAmount = info.tokenAmount?.amount || "0";
-      }
-      if (tokenAmount === "0") {
-        traderCtx.ws.send(JSON.stringify({ type: "tx_failed", action: "sell", error: "No tokens to sell" }));
-        addTraderEvent(traderCtx, "error", "No tokens found to sell");
-        return;
-      }
-      quoteParams = `inputMint=${swapReq.input_mint}&outputMint=${WSOL}&amount=${tokenAmount}&slippageBps=${config.slippageBps}`;
-    }
-
-    // 1. Get Jupiter quote
-    const quoteResp = await fetch(`${JUPITER_QUOTE}?${quoteParams}`);
-    if (!quoteResp.ok) {
-      const errTxt = await quoteResp.text();
-      throw new Error(`Quote failed: ${errTxt}`);
-    }
-    const quote = await quoteResp.json();
-
-    // 2. Get swap transaction
-    const swapResp = await fetch(JUPITER_SWAP, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        quoteResponse: quote,
-        userPublicKey: ltWalletPubkey,
-        wrapAndUnwrapSol: true,
-        computeUnitPriceMicroLamports: config.priorityFeeLamports,
-        dynamicComputeUnitLimit: true,
-      }),
-    });
-    if (!swapResp.ok) {
-      const errTxt = await swapResp.text();
-      throw new Error(`Swap TX build failed: ${errTxt}`);
-    }
-    const swapData = await swapResp.json();
-    const swapTx = swapData.swapTransaction;
-
-    // 3. Deserialise and sign with Phantom
-    const txBuf = Uint8Array.from(atob(swapTx), c => c.charCodeAt(0));
-    const signed = await phantom.signTransaction(
-      // VersionedTransaction from base64
-      (() => {
-        // Use the raw buffer directly — Phantom accepts Uint8Array
-        return { serialize: () => txBuf, _raw: txBuf };
-      })()
-    );
-
-    // 4. Send raw transaction
-    const sendResp = await fetch("https://api.mainnet-beta.solana.com", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0", id: 1,
-        method: "sendRawTransaction",
-        params: [btoa(String.fromCharCode(...(signed.serialize ? signed.serialize() : txBuf))), {
-          skipPreflight: true,
-          maxRetries: 3,
-          preflightCommitment: "processed",
-        }],
-      }),
-    });
-    const sendData = await sendResp.json();
-    if (sendData.error) throw new Error(sendData.error.message || JSON.stringify(sendData.error));
-
-    const txHash = sendData.result;
-    addTraderEvent(traderCtx, swapReq.action, `TX sent: ${txHash.slice(0, 12)}…`);
-
-    // 5. Confirm transaction
-    const inAmount = parseInt(quote.inAmount || "0");
-    const outAmount = parseInt(quote.outAmount || "0");
-
-    if (isBuy) {
-      const outDecimals = quote.outputMint === WSOL ? 9 : 6;
-      const tokensReceived = outAmount / (10 ** outDecimals);
-      const actualPrice = (inAmount / 1e9) / tokensReceived;
-      traderCtx.ws.send(JSON.stringify({
-        type: "tx_confirmed", action: "buy",
-        tx_hash: txHash, tokens_received: tokensReceived, actual_price: actualPrice,
-      }));
-      addLtTradeRow(traderCtx, "BUY", actualPrice, 0, 0, txHash, "confirmed");
-      addTraderEvent(traderCtx, "buy", `BUY confirmed ✓ ${tokensReceived.toFixed(2)} tokens`);
-    } else {
-      const solReceived = outAmount / 1e9;
-      const inDecimals = 6;
-      const tokensSold = inAmount / (10 ** inDecimals);
-      const actualPrice = solReceived / tokensSold;
-      traderCtx.ws.send(JSON.stringify({
-        type: "tx_confirmed", action: "sell",
-        tx_hash: txHash, sol_received: solReceived, actual_price: actualPrice,
-      }));
-      addTraderEvent(traderCtx, "sell", `SELL confirmed ✓ ${solReceived.toFixed(4)} SOL received`);
-    }
-
-    refreshWalletBalance();
-
-  } catch (e) {
-    console.error("Swap execution error:", e);
-    traderCtx.ws.send(JSON.stringify({ type: "tx_failed", action: swapReq.action, error: e.message }));
-    addTraderEvent(traderCtx, "error", `FAILED: ${e.message}`);
-  }
-}
+/* ── Legacy swap handler removed (moves to backend) ───────────────── */
 
 /* ── Trader event log ────────────────────────────────────────────────── */
 
@@ -1955,14 +1785,64 @@ function updateTraderCard(mint) {
   if (!ctx) return;
 
   let card = document.querySelector(`.lt-trader-card[data-mint="${mint}"]`);
+  let isNew = false;
   if (!card) {
     card = document.createElement("div");
     card.className = "lt-trader-card";
     card.dataset.mint = mint;
-    // Remove empty state
+    
+    // Remove empty state if present
     const empty = ltTradersGrid.querySelector(".empty-state");
     if (empty) empty.remove();
+    
+    card.innerHTML = `
+      <div class="lt-card-header">
+        <div><span class="lt-card-name" id="lth-name-${mint}"></span><span class="lt-card-symbol" id="lth-sym-${mint}"></span></div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <div id="lth-trend-${mint}" class="direction-badge" style="font-size:10px; padding:2px 6px; display:none"></div>
+          <div id="lth-regime-${mint}" class="regime-badge" style="font-size:10px; padding:2px 6px; display:none"></div>
+          <div id="lth-status-${mint}"></div>
+        </div>
+      </div>
+      <div class="lt-card-stats" id="lt-stats-${mint}"></div>
+      <div id="lt-upnl-${mint}"></div>
+      <div class="lt-card-chart-container" id="lt-chart-${mint}" style="height:250px; margin:10px 0; border:1px solid var(--border); border-radius:6px; background:#0d1117"></div>
+      <div class="lt-event-log" id="lt-events-${mint}"></div>
+      <div class="lt-card-actions" style="display:flex; gap:8px;">
+        <button class="btn btn-primary btn-xs" style="background:#26a69a; border-color:#26a69a" onclick="manualTrade('${mint}', 'buy')">Buy</button>
+        <button class="btn btn-primary btn-xs" style="background:#ef5350; border-color:#ef5350" onclick="manualTrade('${mint}', 'sell')">Sell</button>
+        <button class="btn btn-danger btn-xs" onclick="stopLiveTrader('${mint}')" style="margin-left:auto;">⏹ Stop</button>
+      </div>
+    `;
     ltTradersGrid.appendChild(card);
+    isNew = true;
+
+    // Init lightweight charts
+    const chart = LightweightCharts.createChart(document.getElementById(`lt-chart-${mint}`), {
+      layout: { background: { type: 'solid', color: 'transparent' }, textColor: '#8b949e', fontSize: 11 },
+      grid: { vertLines: { color: '#30363d33' }, horzLines: { color: '#30363d33' } },
+      rightPriceScale: { borderVisible: false },
+      timeScale: { borderVisible: false, timeVisible: true, secondsVisible: true },
+      crosshair: { mode: 0 }
+    });
+    const cSeries = chart.addCandlestickSeries({
+      upColor: '#26a69a', downColor: '#ef5350', borderVisible: false,
+      wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+      priceFormat: { type: 'custom', minMove: 1, formatter: p => formatMcap(p) }
+    });
+    const vSeries = chart.addHistogramSeries({
+      color: '#5865f222', priceFormat: { type: 'volume' }, priceScaleId: 'vol'
+    });
+    chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
+    
+    ctx.chart = chart;
+    ctx.candleSeries = cSeries;
+    ctx.volSeries = vSeries;
+
+    new ResizeObserver(() => {
+      const el = document.getElementById(`lt-chart-${mint}`);
+      if (el) chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
+    }).observe(document.getElementById(`lt-chart-${mint}`));
   }
 
   const st = ctx.stats || {};
@@ -1972,37 +1852,59 @@ function updateTraderCard(mint) {
 
   const pnlClass = (st.total_pnl_sol || 0) >= 0 ? "pos" : "neg";
   const upnlClass = (ctx.unrealizedPnl || 0) >= 0 ? "pos" : "neg";
+  
   const name = ctx.info?.token_name || mint.slice(0, 8);
   const symbol = ctx.info?.token_symbol ? "$" + ctx.info.token_symbol : "";
+  document.getElementById(`lth-name-${mint}`).textContent = name;
+  document.getElementById(`lth-sym-${mint}`).textContent = symbol;
+  document.getElementById(`lth-status-${mint}`).innerHTML = hasPos ? '<span class="lt-card-status position-open">IN POSITION</span>' : '<span class="lt-card-status running"><span class="lt-live-dot"></span>MONITORING</span>';
 
-  const eventsHtml = ctx.events.slice(0, 5).map(e =>
+  // Badges
+  const tb = document.getElementById(`lth-trend-${mint}`);
+  const rb = document.getElementById(`lth-regime-${mint}`);
+  if (ctx.direction && ctx.direction !== "none") {
+      tb.style.display = "block";
+      const arrow = ctx.direction === "up" ? "▲" : "▼";
+      const tColor = ctx.direction === "up" ? CANDLE_UP : CANDLE_DOWN;
+      tb.style.color = tColor;
+      tb.textContent = `${arrow} ${ctx.direction.toUpperCase()} S:${(ctx.sVal || 0).toFixed(2)}`;
+  } else {
+      tb.style.display = "none";
+  }
+
+  if (ctx.regime && ctx.regime !== "idle") {
+      rb.style.display = "block";
+      rb.textContent = ctx.regime.toUpperCase();
+      rb.style.background = REGIME_COLORS[ctx.regime] || "#5a6071";
+  } else {
+      rb.style.display = "none";
+  }
+
+  document.getElementById(`lt-stats-${mint}`).innerHTML = `
+    <div class="bt-stat"><span class="bt-stat-label">Trades</span><span class="bt-stat-value">${st.total_trades || 0}</span></div>
+    <div class="bt-stat"><span class="bt-stat-label">Win Rate</span><span class="bt-stat-value">${(st.win_rate || 0).toFixed(1)}%</span></div>
+    <div class="bt-stat"><span class="bt-stat-label">PnL</span><span class="bt-stat-value ${pnlClass}">${(st.total_pnl_sol || 0) >= 0 ? "+" : ""}${(st.total_pnl_sol || 0).toFixed(4)}</span></div>
+  `;
+
+  document.getElementById(`lt-upnl-${mint}`).innerHTML = hasPos ? `
+    <div class="lt-card-unrealized">
+      <span>Unrealized PnL</span>
+      <span class="${upnlClass}" style="font-weight:700">${(ctx.unrealizedPnl || 0) >= 0 ? "+" : ""}${(ctx.unrealizedPnl || 0).toFixed(4)} SOL (${(ctx.unrealizedPnlPct || 0) >= 0 ? "+" : ""}${(ctx.unrealizedPnlPct || 0).toFixed(2)}%)</span>
+    </div>
+  ` : "";
+
+  document.getElementById(`lt-events-${mint}`).innerHTML = ctx.events.slice(0, 5).map(e =>
     `<div class="${e.type}">${e.ts} — ${e.msg}</div>`
   ).join("");
-
-  card.innerHTML = `
-    <div class="lt-card-header">
-      <div><span class="lt-card-name">${name}</span><span class="lt-card-symbol">${symbol}</span></div>
-      <div style="display:flex;gap:6px;align-items:center">
-        ${hasPos ? '<span class="lt-card-status position-open">IN POSITION</span>' : '<span class="lt-card-status running"><span class="lt-live-dot"></span>MONITORING</span>'}
-      </div>
-    </div>
-    <div class="lt-card-stats">
-      <div class="bt-stat"><span class="bt-stat-label">Trades</span><span class="bt-stat-value">${st.total_trades || 0}</span></div>
-      <div class="bt-stat"><span class="bt-stat-label">Win Rate</span><span class="bt-stat-value">${(st.win_rate || 0).toFixed(1)}%</span></div>
-      <div class="bt-stat"><span class="bt-stat-label">PnL</span><span class="bt-stat-value ${pnlClass}">${(st.total_pnl_sol || 0) >= 0 ? "+" : ""}${(st.total_pnl_sol || 0).toFixed(4)}</span></div>
-    </div>
-    ${hasPos ? `
-      <div class="lt-card-unrealized">
-        <span>Unrealized PnL</span>
-        <span class="${upnlClass}" style="font-weight:700">${(ctx.unrealizedPnl || 0) >= 0 ? "+" : ""}${(ctx.unrealizedPnl || 0).toFixed(4)} SOL (${(ctx.unrealizedPnlPct || 0) >= 0 ? "+" : ""}${(ctx.unrealizedPnlPct || 0).toFixed(2)}%)</span>
-      </div>
-    ` : ""}
-    <div class="lt-event-log">${eventsHtml}</div>
-    <div class="lt-card-actions">
-      <button class="btn btn-danger btn-xs" onclick="stopLiveTrader('${mint}')">⏹ Stop</button>
-    </div>
-  `;
 }
+
+function manualTrade(mint, action) {
+  const ctx = ltActiveTraders[mint];
+  if (!ctx || ctx.ws.readyState !== WebSocket.OPEN) return;
+  ctx.ws.send(JSON.stringify({ type: "manual_trade", action: action }));
+  addTraderEvent(ctx, "info", `Manual ${action.toUpperCase()} requested…`);
+}
+window.manualTrade = manualTrade;
 
 /* ── Start live trading on a token ───────────────────────────────────── */
 
@@ -2013,7 +1915,7 @@ function startLiveTrader(mint) {
 
   const config = getLtConfig();
   const paramsStr = encodeURIComponent(JSON.stringify(engineParams));
-  const wsUrl = `${LT_WS_BASE}/${mint}?timeframe=${config.timeframe}&wallet=${ltWalletPubkey}&buy_size=${config.buySize}&slippage_bps=${config.slippageBps}&priority_fee=${config.priorityFeeLamports}&params=${paramsStr}`;
+  const wsUrl = `${LT_WS_BASE}/${mint}?timeframe=${config.timeframe}&private_key=${encodeURIComponent(_privateKey)}&buy_size=${config.buySize}&slippage_bps=${config.slippageBps}&priority_fee=${config.priorityFeeLamports}&params=${paramsStr}`;
 
   const ws = new WebSocket(wsUrl);
   const ctx = {
@@ -2026,6 +1928,8 @@ function startLiveTrader(mint) {
     unrealizedPnlPct: 0,
     events: [],
     regime: "idle",
+    direction: "none",
+    sVal: 0,
   };
   ltActiveTraders[mint] = ctx;
   ltStopAllBtn.style.display = "inline-flex";
@@ -2035,7 +1939,7 @@ function startLiveTrader(mint) {
 
   ws.onopen = () => { addTraderEvent(ctx, "info", "Connected — warming up indicators…"); };
 
-  ws.onmessage = (ev) => {
+  ws.onmessage = async (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
 
@@ -2047,10 +1951,76 @@ function startLiveTrader(mint) {
 
     if (msg.type === "historical" && msg.strategy) {
       addTraderEvent(ctx, "info", `Loaded ${msg.candles?.length || 0} historical candles`);
+      if (ctx.candleSeries && msg.candles) {
+        const res = await formatOfflineCandles(mint, msg.candles, config.timeframe);
+        ctx.baseMcap = res.baseMcap;
+        ctx.basePrice = res.basePrice;
+        ctx.lastClose = res.lastClose;
+        ctx.lastTime = res.lastTime;
+        
+        ctx.candleSeries.setData(res.candles);
+        ctx.volSeries.setData(res.candles.map(c => ({ time: c.time, value: c.volume || 0, color: c.color })));
+        if (ctx.chart) ctx.chart.timeScale().fitContent();
+      }
+      if (Array.isArray(msg.strategy) && msg.strategy.length > 0) {
+        const lastS = msg.strategy[msg.strategy.length - 1];
+        ctx.regime = lastS.regime || "idle";
+        ctx.direction = lastS.direction || "none";
+        ctx.sVal = lastS.s || 0;
+        updateTraderCard(mint);
+      }
     }
 
     if (msg.type === "candle" && msg.strategy) {
       const s = msg.strategy;
+      if (ctx.candleSeries && msg.candle) {
+        if (!ctx.baseMcap) {
+          ctx.baseMcap = msg.market_cap_usd || (msg.candle.close * 1e9);
+          ctx.basePrice = msg.candle.close;
+          ctx.lastClose = null;
+          ctx.lastTime = null;
+        }
+
+        let rawOpen = ctx.baseMcap * (msg.candle.open / ctx.basePrice);
+        let high = ctx.baseMcap * (msg.candle.high / ctx.basePrice);
+        let low = ctx.baseMcap * (msg.candle.low / ctx.basePrice);
+        let close = ctx.baseMcap * (msg.candle.close / ctx.basePrice);
+
+        // Gap filling and new candle bridging
+        if (msg.is_new) {
+          const tfSec = timeframeToSeconds(config.timeframe);
+          if (ctx.lastTime && msg.candle.time > ctx.lastTime + tfSec) {
+            const gap = Math.floor((msg.candle.time - ctx.lastTime) / tfSec) - 1;
+            if (gap <= 15) {
+              for (let t = ctx.lastTime + tfSec; t < msg.candle.time; t += tfSec) {
+                ctx.candleSeries.update({ time: t, open: ctx.lastClose, high: ctx.lastClose, low: ctx.lastClose, close: ctx.lastClose, color: CANDLE_FLAT, borderColor: CANDLE_FLAT, wickColor: CANDLE_FLAT });
+                ctx.volSeries.update({ time: t, value: 0, color: "#5865f222" });
+              }
+            }
+          }
+          ctx.currentOpen = ctx.lastClose !== null && ctx.lastClose !== undefined ? ctx.lastClose : rawOpen;
+        }
+
+        let open = ctx.currentOpen !== undefined ? ctx.currentOpen : rawOpen;
+        // Expand high and low locally without breaking the anchored open
+        high = Math.max(open, high, close);
+        low = Math.min(open, low, close);
+
+        let color = CANDLE_FLAT;
+        if (close > open) color = CANDLE_UP;
+        else if (close < open) color = CANDLE_DOWN;
+        else if (ctx.lastClose !== null && ctx.lastClose !== undefined) {
+          if (close > ctx.lastClose) color = CANDLE_UP;
+          else if (close < ctx.lastClose) color = CANDLE_DOWN;
+        }
+
+        ctx.candleSeries.update({ time: msg.candle.time, open, high, low, close, color, borderColor: color, wickColor: color });
+        ctx.volSeries.update({ time: msg.candle.time, value: msg.candle.volume || 0, color: color });
+        
+        ctx.lastClose = close;
+        ctx.lastTime = msg.candle.time;
+      }
+      
       // Update live_trade data
       const lt = s.live_trade || s.forward_test;
       if (lt) {
@@ -2059,12 +2029,26 @@ function startLiveTrader(mint) {
         ctx.unrealizedPnl = lt.unrealized_pnl || 0;
         ctx.unrealizedPnlPct = lt.unrealized_pnl_pct || 0;
 
-        // Check for swap request — execute trade!
-        if (lt.swap_request) {
-          executeJupiterSwap(lt.swap_request, ctx);
-        }
+        // Server signs automatically; track state directly
+        // Swap req execution from frontend deleted
       }
       ctx.regime = s.regime || "idle";
+      ctx.direction = s.direction || "none";
+      ctx.sVal = s.s || 0;
+      updateTraderCard(mint);
+    }
+
+    if (msg.type === "trade_update") {
+      ctx.stats = msg.stats || ctx.stats;
+      ctx.currentTrade = msg.current_trade;
+      if (msg.event === "buy_confirmed" || msg.event === "sell_confirmed") {
+        addTraderEvent(ctx, msg.event.includes("buy") ? "buy" : "sell", `${msg.event.replace("_", " ").toUpperCase()} ✓ ${msg.detail.slice(0, 10)}…`);
+        if (msg.event === "buy_confirmed") {
+          addLtTradeRow(ctx, "BUY", msg.current_trade?.entry_price || 0, 0, 0, msg.detail, "confirmed");
+        }
+      } else if (msg.event === "buy_failed" || msg.event === "sell_failed") {
+        addTraderEvent(ctx, "error", `FAILED: ${msg.detail}`);
+      }
       updateTraderCard(mint);
     }
 

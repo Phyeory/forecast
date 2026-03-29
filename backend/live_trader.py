@@ -2,22 +2,18 @@
 Live Trader — Real on-chain Solana trading using the same StrategyEngine logic
 as ForwardTester.
 
-Architecture:
-  - IMMEDIATE execution: signals execute on the SAME candle they fire
-  - No 1-bar delay — speed is the priority for live trading
-  - Instead of simulating fills, it emits swap requests to the frontend
-  - Frontend signs transactions via Phantom wallet
-  - Jupiter Aggregator V6 API used for optimal routing & minimum slippage
-  - Execution speed is maximised: pre-built transactions, WebSocket comms
-
-Settings (configurable via dashboard):
-  - buy_size_sol: SOL per trade
-  - slippage_bps: slippage tolerance in basis points (for Jupiter)
-  - priority_fee_lamports: priority fee in lamports for faster inclusion
+Architecture (private-key mode):
+  - NO browser wallet required — transactions are signed server-side
+  - Private key is accepted as base58 string via the dashboard API
+  - Full cycle: Jupiter quote → swap TX → sign (solders) → broadcast to RPC
+  - IMMEDIATE execution: signals fire on the SAME candle
+  - Jupiter Aggregator V6 for optimal routing
+  - Configurable slippage, priority fee, buy size
 """
 
 from __future__ import annotations
 import asyncio
+import base64
 import time
 import logging
 import json
@@ -25,15 +21,35 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 import aiohttp
+import base58
+from solders.keypair import Keypair
+from solders.transaction import VersionedTransaction
 
 from strategy_engine import StrategyEngine, Signal, Direction, Regime
 
 logger = logging.getLogger("live-trader")
 
-JUPITER_QUOTE_URL = "https://quote-api.jup.ag/v6/quote"
-JUPITER_SWAP_URL = "https://quote-api.jup.ag/v6/swap"
-WSOL_MINT = "So11111111111111111111111111111111111111112"
+# ── Jupiter & Solana constants ────────────────────────────────────────────────
+JUPITER_QUOTE_URL = "https://public.jupiterapi.com/quote"
+JUPITER_SWAP_URL  = "https://public.jupiterapi.com/swap"
+SOLANA_RPC        = "https://api.mainnet-beta.solana.com"
+WSOL_MINT         = "So11111111111111111111111111111111111111112"
 
+
+def keypair_from_private_key(pk_b58: str) -> Keypair:
+    """
+    Construct a solders Keypair from a base58-encoded private key string.
+    Phantom exports private keys as a 64-byte base58 string (secret + public).
+    """
+    raw = base58.b58decode(pk_b58)
+    if len(raw) == 64:
+        return Keypair.from_bytes(raw)
+    elif len(raw) == 32:
+        return Keypair.from_seed(raw)
+    raise ValueError(f"Invalid private key length: {len(raw)} bytes (expected 32 or 64)")
+
+
+# ── Data classes ──────────────────────────────────────────────────────────────
 
 @dataclass
 class LiveTrade:
@@ -73,37 +89,42 @@ class LiveTraderStats:
         return asdict(self)
 
 
+# ── Main LiveTrader class ─────────────────────────────────────────────────────
+
 class LiveTrader:
     """
     Real on-chain trader wrapping StrategyEngine.
-    IMMEDIATE execution — signals fire and swap requests are emitted
-    on the SAME candle, with zero delay.
 
-    Instead of simulating fills, it:
-      1. Runs StrategyEngine on current candle
-      2. If BUY/EXIT signal fires → immediately creates swap request
-      3. Sends swap request to frontend via WebSocket
-      4. Frontend signs with Phantom and broadcasts
+    Signs and broadcasts all transactions server-side using solders.
+    No browser wallet extension required.
 
-    LONG-ONLY: buys tokens with SOL, sells tokens back to SOL.
+    Flow:
+      1. StrategyEngine fires BUY/EXIT signal on new candle
+      2. Jupiter quote fetched asynchronously
+      3. Swap transaction built by Jupiter
+      4. Transaction signed with private key (solders Keypair)
+      5. Signed TX broadcast directly to Solana RPC
+      6. Result logged and state updated
     """
 
     def __init__(
         self,
         token_mint: str,
-        wallet_pubkey: str,
+        keypair: Keypair,
         buy_size_sol: float = 0.1,
-        slippage_bps: int = 1000,  # 10% default
-        priority_fee_lamports: int = 100_000,  # 0.0001 SOL
+        slippage_bps: int = 1000,
+        priority_fee_lamports: int = 100_000,
         engine_kwargs: Optional[dict] = None,
     ):
         if engine_kwargs is None:
             engine_kwargs = {}
+
         self.engine = StrategyEngine(**engine_kwargs)
         self.token_mint = token_mint
-        self.wallet_pubkey = wallet_pubkey
+        self.keypair = keypair
+        self.wallet_pubkey = str(keypair.pubkey())
         self.buy_size_sol = buy_size_sol
-        self.slippage_bps = slippage_bps
+        self.slippage_bps = min(slippage_bps, 10000)
         self.priority_fee_lamports = priority_fee_lamports
 
         self.stats = LiveTraderStats()
@@ -111,51 +132,45 @@ class LiveTrader:
         self.trade_history: list[LiveTrade] = []
         self.signals_log: list[dict] = []
 
-        # Swap action queue — frontend picks these up
-        self._pending_swap: Optional[dict] = None
-
-        # Track the last known price for unrealised PnL
         self._last_price: float = 0.0
+        self._token_decimals: int = 6  # pump.fun default
+        self._token_balance: int = 0   # raw token units held
 
-        # Token decimals cache
-        self._token_decimals: int = 6  # default for pump.fun tokens
+        # Async swap task tracker (so we don't overlap swaps)
+        self._swap_in_flight: bool = False
 
-    async def get_jupiter_quote(
-        self,
-        input_mint: str,
-        output_mint: str,
-        amount_lamports: int,
-    ) -> Optional[dict]:
-        """Fetch a swap quote from Jupiter V6 API."""
+        # Websocket broadcast callback (set by main.py)
+        self.broadcast_fn = None
+
+    # ── Jupiter helpers ───────────────────────────────────────────────────────
+
+    async def _get_quote(self, input_mint: str, output_mint: str, amount: int) -> Optional[dict]:
+        """Fetch a Jupiter V6 quote."""
         params = {
             "inputMint": input_mint,
             "outputMint": output_mint,
-            "amount": str(amount_lamports),
+            "amount": str(amount),
             "slippageBps": str(self.slippage_bps),
             "onlyDirectRoutes": "false",
             "asLegacyTransaction": "false",
         }
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
+            async with aiohttp.ClientSession() as s:
+                async with s.get(
                     JUPITER_QUOTE_URL,
                     params=params,
-                    timeout=aiohttp.ClientTimeout(total=5),
-                ) as resp:
-                    if resp.status != 200:
-                        text = await resp.text()
-                        logger.error(f"Jupiter quote failed: {resp.status} {text}")
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as r:
+                    if r.status != 200:
+                        logger.error(f"Jupiter quote HTTP {r.status}: {await r.text()}")
                         return None
-                    return await resp.json()
+                    return await r.json()
         except Exception as e:
             logger.error(f"Jupiter quote error: {e}")
             return None
 
-    async def get_jupiter_swap_tx(
-        self,
-        quote: dict,
-    ) -> Optional[str]:
-        """Get serialised swap transaction from Jupiter."""
+    async def _get_swap_tx(self, quote: dict) -> Optional[str]:
+        """Build a versioned swap transaction via Jupiter."""
         body = {
             "quoteResponse": quote,
             "userPublicKey": self.wallet_pubkey,
@@ -163,83 +178,294 @@ class LiveTrader:
             "computeUnitPriceMicroLamports": self.priority_fee_lamports,
             "dynamicComputeUnitLimit": True,
             "asLegacyTransaction": False,
+            "dynamicSlippage": {"maxBps": self.slippage_bps},
         }
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
+            async with aiohttp.ClientSession() as s:
+                async with s.post(
                     JUPITER_SWAP_URL,
                     json=body,
-                    timeout=aiohttp.ClientTimeout(total=5),
-                ) as resp:
-                    if resp.status != 200:
-                        text = await resp.text()
-                        logger.error(f"Jupiter swap failed: {resp.status} {text}")
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as r:
+                    if r.status != 200:
+                        logger.error(f"Jupiter swap HTTP {r.status}: {await r.text()}")
                         return None
-                    data = await resp.json()
+                    data = await r.json()
                     return data.get("swapTransaction")
         except Exception as e:
             logger.error(f"Jupiter swap error: {e}")
             return None
 
+    async def _sign_and_send(self, swap_tx_b64: str) -> Optional[str]:
+        """
+        Sign the base64-encoded versioned transaction and broadcast it to Solana RPC.
+        Returns the transaction signature (tx hash) on success.
+        """
+        try:
+            raw_tx = base64.b64decode(swap_tx_b64)
+            tx = VersionedTransaction.from_bytes(raw_tx)
+
+            # Sign with our keypair
+            signed_tx = VersionedTransaction(tx.message, [self.keypair])
+            signed_bytes = bytes(signed_tx)
+            signed_b64 = base64.b64encode(signed_bytes).decode()
+
+            # Broadcast to Solana RPC
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "sendTransaction",
+                "params": [
+                    signed_b64,
+                    {
+                        "encoding": "base64",
+                        "skipPreflight": True,
+                        "preflightCommitment": "processed",
+                        "maxRetries": 5,
+                    },
+                ],
+            }
+            async with aiohttp.ClientSession() as s:
+                async with s.post(
+                    SOLANA_RPC,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as r:
+                    data = await r.json()
+                    if "error" in data:
+                        logger.error(f"RPC sendTransaction error: {data['error']}")
+                        return None
+                    sig = data.get("result")
+                    logger.info(f"TX broadcast: {sig}")
+                    return sig
+        except Exception as e:
+            logger.error(f"Sign/send error: {e}")
+            return None
+
+    async def _get_sol_balance(self) -> float:
+        """Fetch wallet SOL balance from RPC."""
+        payload = {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "getBalance",
+            "params": [self.wallet_pubkey, {"commitment": "processed"}],
+        }
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(SOLANA_RPC, json=payload,
+                                   timeout=aiohttp.ClientTimeout(total=5)) as r:
+                    data = await r.json()
+                    return float(data.get("result", {}).get("value", 0)) / 1e9
+        except Exception:
+            pass
+        return 0.0
+
+    async def _get_token_balance(self) -> int:
+        """Fetch raw token balance (in smallest units) for our wallet."""
+        payload = {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "getTokenAccountsByOwner",
+            "params": [
+                self.wallet_pubkey,
+                {"mint": self.token_mint},
+                {"encoding": "jsonParsed"},
+            ],
+        }
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(SOLANA_RPC, json=payload,
+                                   timeout=aiohttp.ClientTimeout(total=5)) as r:
+                    data = await r.json()
+                    accounts = data.get("result", {}).get("value", [])
+                    if not accounts:
+                        return 0
+                    parsed = accounts[0]["account"]["data"]["parsed"]
+                    return int(parsed["info"]["tokenAmount"]["amount"])
+        except Exception:
+            pass
+        return 0
+
+    # ── Swap execution ────────────────────────────────────────────────────────
+
+    async def execute_buy(self, reason: str = "signal") -> Optional[str]:
+        """
+        Full buy cycle: quote → swap TX → sign → broadcast.
+        Returns tx signature on success, None on failure.
+        """
+        if self._swap_in_flight:
+            logger.warning("Swap already in flight — skipping buy")
+            return None
+        self._swap_in_flight = True
+        try:
+            amount_lam = int(self.buy_size_sol * 1e9)
+            mint_str = str(self.token_mint)
+
+            # Sanity balance check to avoid confusing RPC simulation errors
+            sol_bal = await self._get_sol_balance()
+            if sol_bal * 1e9 < amount_lam + 5000:  # buy size + rough gas buffer
+                logger.error(f"[BUY FAILED] Insufficient balance: {sol_bal:.4f} SOL but need ~{self.buy_size_sol} SOL")
+                await self._broadcast_status("buy_failed", f"Insufficient SOL ({sol_bal:.4f} available)", reason)
+                return None
+
+            logger.info(f"[BUY] {mint_str[:8]}… {self.buy_size_sol} SOL reason={reason}")
+
+            quote = await self._get_quote(WSOL_MINT, self.token_mint, amount_lam)
+            if not quote:
+                await self._broadcast_status("buy_failed", "Jupiter quote failed", reason)
+                return None
+
+            swap_tx = await self._get_swap_tx(quote)
+            if not swap_tx:
+                await self._broadcast_status("buy_failed", "Jupiter swap TX failed", reason)
+                return None
+
+            sig = await self._sign_and_send(swap_tx)
+            if not sig:
+                await self._broadcast_status("buy_failed", "TX broadcast failed", reason)
+                return None
+
+            # Record trade
+            out_amount = int(quote.get("outAmount", 0))
+            tokens = out_amount / (10 ** self._token_decimals)
+            ct = self.current_trade
+            if ct:
+                ct.tx_hash_buy = sig
+                ct.size_tokens = tokens
+                ct.status = "open"
+            self._token_balance = out_amount
+            self.stats.starting_balance = await self._get_sol_balance()
+
+            await self._broadcast_status("buy_confirmed", sig, reason, tokens=tokens)
+            safe_sig = str(sig)
+            logger.info(f"[BUY OK] sig={safe_sig[:16]}… tokens={tokens:.4f}")
+            return sig
+
+        finally:
+            self._swap_in_flight = False
+
+    async def execute_sell(self, reason: str = "signal") -> Optional[str]:
+        """
+        Full sell cycle: get token balance → quote → swap TX → sign → broadcast.
+        Returns tx signature on success, None on failure.
+        """
+        if self._swap_in_flight:
+            logger.warning("Swap already in flight — skipping sell")
+            return None
+        self._swap_in_flight = True
+        try:
+            # Fetch live token balance to sell exactly what we hold
+            token_balance = await self._get_token_balance()
+            if token_balance <= 0:
+                logger.warning("No token balance to sell")
+                await self._broadcast_status("sell_failed", "No token balance", reason)
+                return None
+
+            mint_str = str(self.token_mint)
+            logger.info(f"[SELL] {mint_str[:8]}… {token_balance} units reason={reason}")
+
+            quote = await self._get_quote(self.token_mint, WSOL_MINT, token_balance)
+            if not quote:
+                await self._broadcast_status("sell_failed", "Jupiter quote failed", reason)
+                return None
+
+            swap_tx = await self._get_swap_tx(quote)
+            if not swap_tx:
+                await self._broadcast_status("sell_failed", "Jupiter swap TX failed", reason)
+                return None
+
+            sig = await self._sign_and_send(swap_tx)
+            if not sig:
+                await self._broadcast_status("sell_failed", "TX broadcast failed", reason)
+                return None
+
+            # Calculate PnL
+            sol_received = int(quote.get("outAmount", 0)) / 1e9
+            if self.current_trade:
+                self.confirm_sell(sig, sol_received, self._last_price)
+
+            self._token_balance = 0
+            await self._broadcast_status("sell_confirmed", sig, reason, sol_received=sol_received)
+            safe_sig = str(sig)
+            logger.info(f"[SELL OK] sig={safe_sig[:16]}… received={sol_received:.6f} SOL")
+            return sig
+
+        finally:
+            self._swap_in_flight = False
+
+    async def _broadcast_status(self, event: str, detail: str, reason: str = "",
+                                 tokens: float = 0, sol_received: float = 0):
+        """Push a status update to the frontend via WebSocket."""
+        if self.broadcast_fn:
+            ct = self.current_trade
+            msg = {
+                "type": "trade_update",
+                "token": self.token_mint,
+                "event": event,
+                "detail": detail,
+                "reason": reason,
+                "tokens": tokens,
+                "sol_received": sol_received,
+                "timestamp": time.time(),
+                "current_trade": ct.to_dict() if ct else None,
+                "stats": self.stats.to_dict(),
+            }
+            try:
+                await self.broadcast_fn(json.dumps(msg))
+            except Exception:
+                pass
+
+    # ── Strategy update loop ──────────────────────────────────────────────────
+
     def update(
         self,
         time_val: int,
-        o: float,
-        h: float,
-        l: float,
-        c: float,
+        o: float, h: float, l: float, c: float,
         volume: float = 0.0,
     ) -> dict:
         """
-        Process one candle through strategy engine + live trader.
-        IMMEDIATE execution — no 1-bar delay.
+        Process one candle through StrategyEngine.
+        If BUY/EXIT signal fires, schedules the swap as a background task.
 
-        Returns dict with strategy results + live_trade state.
-        The 'swap_request' field (if present) tells frontend to execute a swap.
+        Returns strategy result dict for the candle.
         """
         self._last_price = c
         trade_action = None
         opened_trade = None
         swap_request = None
 
-        # ── Step 1: Run strategy engine on this candle ────────────────────
         result = self.engine.update(time_val, o, h, l, c, volume)
         signal = result["signal"]
         regime = result["regime"]
 
-        # ── Step 2: IMMEDIATELY execute signal on this candle ─────────────
-        if signal == Signal.BUY.value and self.current_trade is None:
-            # BUY signal → create swap request RIGHT NOW at current price
+        # BUY signal
+        if signal == Signal.BUY.value and self.current_trade is None and not self._swap_in_flight:
             buy_reason = f"buy_{regime}"
-            amount_lamports = int(self.buy_size_sol * 1e9)
-            swap_request = {
-                "action": "buy",
-                "input_mint": WSOL_MINT,
-                "output_mint": self.token_mint,
-                "amount_lamports": amount_lamports,
-                "slippage_bps": self.slippage_bps,
-                "priority_fee": self.priority_fee_lamports,
-                "reason": buy_reason,
-                "price_at_signal": c,
-                "time": time_val,
-            }
-            self._pending_swap = swap_request
-            # Create placeholder trade (will be updated when tx confirms)
             trade = LiveTrade(
                 token_mint=self.token_mint,
                 entry_time=time_val,
                 entry_price=c,
                 size_sol=self.buy_size_sol,
-                size_tokens=0,  # updated on confirmation
+                size_tokens=0,
                 entry_reason=buy_reason,
+                status="pending",
             )
             self.current_trade = trade
-            self.engine.notify_trade_opened(c, Direction.UP)
             opened_trade = trade
             trade_action = "buy"
+            self.engine.notify_trade_opened(c, Direction.UP)
 
-        elif signal == Signal.EXIT.value and self.current_trade is not None:
-            # EXIT signal → create sell swap request RIGHT NOW
+            # Fire-and-forget swap in background
+            asyncio.ensure_future(self.execute_buy(buy_reason))
+
+            swap_request = {
+                "action": "buy",
+                "token": self.token_mint,
+                "amount_sol": self.buy_size_sol,
+                "reason": buy_reason,
+                "price": c,
+            }
+
+        # EXIT signal
+        elif signal == Signal.EXIT.value and self.current_trade is not None and not self._swap_in_flight:
             exit_reason = "exit_signal"
             if regime == Regime.REVERSAL.value:
                 exit_reason = "reversal_exit"
@@ -252,47 +478,36 @@ class LiveTrader:
             elif self.engine.trailing_stop is not None and c <= self.engine.trailing_stop:
                 exit_reason = "trailing_stop"
 
-            swap_request = {
-                "action": "sell",
-                "input_mint": self.token_mint,
-                "output_mint": WSOL_MINT,
-                "amount_lamports": 0,  # sell ALL tokens (handled by frontend)
-                "slippage_bps": self.slippage_bps,
-                "priority_fee": self.priority_fee_lamports,
-                "reason": exit_reason,
-                "price_at_signal": c,
-                "time": time_val,
-                "sell_all": True,
-            }
-            self._pending_swap = swap_request
             self.current_trade.status = "closing"
             self.current_trade.exit_reason = exit_reason
             trade_action = "exit"
 
-        # ── Step 3: Unrealized PnL ─────────────────────────────────────────
+            asyncio.ensure_future(self.execute_sell(exit_reason))
+
+            swap_request = {
+                "action": "sell",
+                "token": self.token_mint,
+                "reason": exit_reason,
+                "price": c,
+            }
+
+        # Unrealised PnL
         unrealized_pnl = 0.0
         unrealized_pnl_pct = 0.0
-        if self.current_trade is not None and self.current_trade.entry_price > 0:
+        if self.current_trade and self.current_trade.entry_price > 0:
             unrealized_pnl_pct = (c - self.current_trade.entry_price) / self.current_trade.entry_price * 100
             unrealized_pnl = self.current_trade.size_sol * (unrealized_pnl_pct / 100)
 
-        # ── Log executed action ───────────────────────────────────────────
         if trade_action:
-            self.signals_log.append({
-                "time": time_val,
-                "action": trade_action,
-                "price": c,
-                "regime": regime,
-            })
+            self.signals_log.append({"time": time_val, "action": trade_action, "price": c, "regime": regime})
 
-        # ── Build output ──────────────────────────────────────────────────
         trade_label = ""
         if trade_action == "buy" and opened_trade:
             trade_label = opened_trade.entry_reason
         elif trade_action == "exit" and self.current_trade:
             trade_label = self.current_trade.exit_reason or "exit"
 
-        output = {
+        return {
             **result,
             "live_trade": {
                 "balance": round(self.stats.current_balance, 6),
@@ -307,20 +522,37 @@ class LiveTrader:
             },
         }
 
-        return output
+    # ── Manual controls ───────────────────────────────────────────────────────
 
-    def confirm_buy(self, tx_hash: str, tokens_received: float, actual_price: float):
-        """Called when frontend confirms a buy transaction."""
+    async def force_buy(self) -> Optional[str]:
+        """Manually trigger a test buy from the dashboard."""
+        if self.current_trade is not None:
+            return None
+        c = self._last_price or 1.0
+        trade = LiveTrade(
+            token_mint=self.token_mint,
+            entry_time=int(time.time()),
+            entry_price=c,
+            size_sol=self.buy_size_sol,
+            size_tokens=0,
+            entry_reason="manual_test_buy",
+            status="pending",
+        )
+        self.current_trade = trade
+        self.engine.notify_trade_opened(c, Direction.UP)
+        return await self.execute_buy("manual_test_buy")
+
+    async def force_sell(self) -> Optional[str]:
+        """Manually trigger a test sell from the dashboard."""
         if self.current_trade is None:
-            return
-        self.current_trade.tx_hash_buy = tx_hash
-        self.current_trade.size_tokens = tokens_received
-        self.current_trade.entry_price = actual_price
-        self.current_trade.status = "open"
-        logger.info(f"BUY confirmed: {tx_hash[:16]}... got {tokens_received:.4f} tokens @ {actual_price}")
+            return None
+        self.current_trade.status = "closing"
+        self.current_trade.exit_reason = "manual_test_sell"
+        return await self.execute_sell("manual_test_sell")
+
+    # ── Trade confirmation (called internally after TX confirmed) ─────────────
 
     def confirm_sell(self, tx_hash: str, sol_received: float, actual_price: float):
-        """Called when frontend confirms a sell transaction."""
         if self.current_trade is None:
             return
         trade = self.current_trade
@@ -332,7 +564,6 @@ class LiveTrader:
             trade.pnl_pct = (actual_price - trade.entry_price) / trade.entry_price * 100
         trade.status = "closed"
 
-        # Update stats
         self.stats.total_trades += 1
         self.stats.total_pnl_sol += trade.pnl_sol
         if trade.pnl_sol > 0:
@@ -355,14 +586,12 @@ class LiveTrader:
         self.trade_history.append(trade)
         self.current_trade = None
         self.engine.notify_trade_closed()
-        logger.info(f"SELL confirmed: {tx_hash[:16]}... PnL: {trade.pnl_sol:+.6f} SOL ({trade.pnl_pct:+.2f}%)")
+        logger.info(f"Trade closed: PnL={trade.pnl_sol:+.6f} SOL ({trade.pnl_pct:+.2f}%)")
 
     def confirm_failed(self, action: str, error: str):
-        """Called when a swap transaction fails."""
         logger.error(f"Swap FAILED ({action}): {error}")
         if action == "buy" and self.current_trade is not None:
-            # Revert — no trade was opened
             self.current_trade = None
             self.engine.notify_trade_closed()
         elif action == "sell" and self.current_trade is not None:
-            self.current_trade.status = "open"  # revert to open
+            self.current_trade.status = "open"
