@@ -30,8 +30,13 @@ from strategy_engine import StrategyEngine, Signal, Direction, Regime
 logger = logging.getLogger("live-trader")
 
 # ── Jupiter & Solana constants ────────────────────────────────────────────────
-JUPITER_QUOTE_URL = "https://public.jupiterapi.com/quote"
-JUPITER_SWAP_URL  = "https://public.jupiterapi.com/swap"
+# NOTE: Using the newer Swap API v1 (lite-api.jup.ag) instead of the V6 API
+# (public.jupiterapi.com). The V6 on-chain program (JUP6L...) does NOT handle
+# Token-2022 mints correctly in its Route instruction, causing error 6014
+# (IncorrectTokenProgramID). The newer API generates transactions for an
+# updated program that supports Token-2022 natively.
+JUPITER_QUOTE_URL = "https://lite-api.jup.ag/swap/v1/quote"
+JUPITER_SWAP_URL  = "https://lite-api.jup.ag/swap/v1/swap"
 SOLANA_RPC        = "https://api.mainnet-beta.solana.com"
 WSOL_MINT         = "So11111111111111111111111111111111111111112"
 
@@ -124,7 +129,7 @@ class LiveTrader:
         self.keypair = keypair
         self.wallet_pubkey = str(keypair.pubkey())
         self.buy_size_sol = buy_size_sol
-        self.slippage_bps = min(slippage_bps, 10000)
+        self.slippage_bps = slippage_bps
         self.priority_fee_lamports = priority_fee_lamports
 
         self.stats = LiveTraderStats()
@@ -145,56 +150,196 @@ class LiveTrader:
     # ── Jupiter helpers ───────────────────────────────────────────────────────
 
     async def _get_quote(self, input_mint: str, output_mint: str, amount: int) -> Optional[dict]:
-        """Fetch a Jupiter V6 quote."""
+        """Fetch a Jupiter swap quote via the Swap API v1."""
         params = {
             "inputMint": input_mint,
             "outputMint": output_mint,
             "amount": str(amount),
             "slippageBps": str(self.slippage_bps),
-            "onlyDirectRoutes": "false",
-            "asLegacyTransaction": "false",
+            # NOTE: onlyDirectRoutes removed — restricting to direct routes
+            # can force a Pump.fun AMM route that fails on Token-2022 via
+            # the V6 program. Letting Jupiter find the best route (possibly
+            # multi-hop) also avoids problematic single-hop Token-2022
+            # interactions.
+            #
+            # platformFeeBps intentionally omitted — including it (even as
+            # "0") triggers fee-collection code paths that can cause
+            # IncorrectTokenProgramID (error 6014) on Token-2022 mints.
         }
+        logger.info(f"[QUOTE] Fetching quote: {input_mint[:8]}… → {output_mint[:8]}… amount={amount}")
         try:
             async with aiohttp.ClientSession() as s:
                 async with s.get(
                     JUPITER_QUOTE_URL,
                     params=params,
-                    timeout=aiohttp.ClientTimeout(total=8),
+                    timeout=aiohttp.ClientTimeout(total=10),
                 ) as r:
+                    body = await r.text()
                     if r.status != 200:
-                        logger.error(f"Jupiter quote HTTP {r.status}: {await r.text()}")
+                        logger.error(f"[QUOTE FAILED] HTTP {r.status}: {body}")
                         return None
-                    return await r.json()
+                    quote = json.loads(body)
+                    out_amt = quote.get('outAmount', '?')
+                    route_plan = quote.get('routePlan', [])
+                    swaps = [rp.get('swapInfo', {}).get('label', '?') for rp in route_plan]
+                    logger.info(f"[QUOTE OK] outAmount={out_amt} route={'→'.join(swaps)} priceImpact={quote.get('priceImpactPct', '?')}%")
+                    return quote
         except Exception as e:
-            logger.error(f"Jupiter quote error: {e}")
+            logger.error(f"[QUOTE ERROR] {e}")
             return None
 
     async def _get_swap_tx(self, quote: dict) -> Optional[str]:
-        """Build a versioned swap transaction via Jupiter."""
+        """
+        Build a versioned swap transaction via Jupiter.
+
+        NOTE: asLegacyTransaction is intentionally NOT set (defaults to
+        False / versioned transaction).  Legacy transactions do not support
+        the address-lookup-tables that Token-2022 routes require, which is
+        the root cause of IncorrectTokenProgramID (error 6014).
+        """
         body = {
             "quoteResponse": quote,
             "userPublicKey": self.wallet_pubkey,
             "wrapAndUnwrapSol": True,
             "computeUnitPriceMicroLamports": self.priority_fee_lamports,
             "dynamicComputeUnitLimit": True,
-            "asLegacyTransaction": False,
-            "dynamicSlippage": {"maxBps": self.slippage_bps},
+            # asLegacyTransaction intentionally omitted — versioned TXs
+            # handle Token-2022 correctly.
         }
+        logger.info(f"[SWAP TX] Building swap transaction…")
         try:
             async with aiohttp.ClientSession() as s:
                 async with s.post(
                     JUPITER_SWAP_URL,
                     json=body,
-                    timeout=aiohttp.ClientTimeout(total=8),
+                    timeout=aiohttp.ClientTimeout(total=10),
                 ) as r:
+                    resp_body = await r.text()
                     if r.status != 200:
-                        logger.error(f"Jupiter swap HTTP {r.status}: {await r.text()}")
+                        logger.error(f"[SWAP TX FAILED] HTTP {r.status}: {resp_body}")
                         return None
-                    data = await r.json()
-                    return data.get("swapTransaction")
+                    data = json.loads(resp_body)
+                    swap_tx = data.get("swapTransaction")
+                    if swap_tx:
+                        logger.info(f"[SWAP TX OK] Transaction built ({len(swap_tx)} chars b64)")
+                    else:
+                        logger.error(f"[SWAP TX FAILED] No swapTransaction in response: {resp_body[:200]}")
+                    return swap_tx
         except Exception as e:
-            logger.error(f"Jupiter swap error: {e}")
+            logger.error(f"[SWAP TX ERROR] {e}")
             return None
+
+    async def _simulate_tx(self, signed_b64: str) -> dict:
+        """
+        Simulate a signed transaction on-chain BEFORE broadcasting.
+        Returns {"ok": True/False, "error": str|None, "logs": list}.
+        """
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "simulateTransaction",
+            "params": [
+                signed_b64,
+                {
+                    "encoding": "base64",
+                    "commitment": "processed",
+                    "replaceRecentBlockhash": True,
+                },
+            ],
+        }
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(
+                    SOLANA_RPC, json=payload,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as r:
+                    data = await r.json()
+                    result = data.get("result", {}).get("value", {})
+                    err = result.get("err")
+                    logs = result.get("logs", [])
+                    if err:
+                        logger.error(f"[SIMULATE FAILED] err={err}")
+                        for i, log_line in enumerate(logs):
+                            logger.error(f"  sim_log[{i}]: {log_line}")
+                        return {"ok": False, "error": str(err), "logs": logs}
+                    logger.info(f"[SIMULATE OK] {len(logs)} log lines, units={result.get('unitsConsumed', '?')}")
+                    return {"ok": True, "error": None, "logs": logs}
+        except Exception as e:
+            logger.warning(f"[SIMULATE WARN] Simulation call failed ({e}), proceeding anyway…")
+            return {"ok": True, "error": None, "logs": []}  # Don't block on sim failure
+
+    async def _confirm_tx(self, sig: str, timeout_s: int = 30) -> dict:
+        """
+        Poll for transaction confirmation. Returns the transaction status.
+        """
+        logger.info(f"[CONFIRM] Waiting for confirmation of {sig[:16]}… (max {timeout_s}s)")
+        start = time.time()
+        while time.time() - start < timeout_s:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getSignatureStatuses",
+                "params": [[sig], {"searchTransactionHistory": False}],
+            }
+            try:
+                async with aiohttp.ClientSession() as s:
+                    async with s.post(
+                        SOLANA_RPC, json=payload,
+                        timeout=aiohttp.ClientTimeout(total=5),
+                    ) as r:
+                        data = await r.json()
+                        statuses = data.get("result", {}).get("value", [None])
+                        status = statuses[0] if statuses else None
+                        if status is not None:
+                            err = status.get("err")
+                            conf = status.get("confirmationStatus")
+                            slot = status.get("slot")
+                            if err:
+                                logger.error(f"[CONFIRM FAILED] sig={sig[:16]}… err={err} slot={slot}")
+                                # Fetch transaction logs for the failed TX
+                                await self._fetch_tx_logs(sig)
+                                return {"confirmed": False, "error": str(err), "slot": slot}
+                            if conf in ("confirmed", "finalized"):
+                                logger.info(f"[CONFIRM OK] sig={sig[:16]}… status={conf} slot={slot}")
+                                return {"confirmed": True, "error": None, "slot": slot}
+                            logger.debug(f"[CONFIRM] sig={sig[:16]}… status={conf}, waiting…")
+            except Exception as e:
+                logger.warning(f"[CONFIRM] poll error: {e}")
+            await asyncio.sleep(1.5)
+
+        logger.warning(f"[CONFIRM TIMEOUT] sig={sig[:16]}… not confirmed within {timeout_s}s")
+        return {"confirmed": False, "error": "timeout", "slot": None}
+
+    async def _fetch_tx_logs(self, sig: str):
+        """Fetch and log the full transaction logs for a given signature."""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTransaction",
+            "params": [
+                sig,
+                {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0},
+            ],
+        }
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(
+                    SOLANA_RPC, json=payload,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as r:
+                    data = await r.json()
+                    result = data.get("result")
+                    if not result:
+                        logger.warning(f"[TX LOGS] No result for {sig[:16]}… (may not be on-chain yet)")
+                        return
+                    meta = result.get("meta", {})
+                    err = meta.get("err")
+                    logs = meta.get("logMessages", [])
+                    logger.info(f"[TX LOGS] sig={sig[:16]}… err={err}")
+                    for i, log_line in enumerate(logs):
+                        logger.info(f"  tx_log[{i}]: {log_line}")
+        except Exception as e:
+            logger.warning(f"[TX LOGS] Failed to fetch logs: {e}")
 
     async def _sign_and_send(self, swap_tx_b64: str) -> Optional[str]:
         """
@@ -210,7 +355,20 @@ class LiveTrader:
             signed_bytes = bytes(signed_tx)
             signed_b64 = base64.b64encode(signed_bytes).decode()
 
-            # Broadcast to Solana RPC
+            logger.info(f"[SIGN] Transaction signed ({len(signed_bytes)} bytes)")
+
+            # ── Simulate first ────────────────────────────────────────────
+            sim = await self._simulate_tx(signed_b64)
+            if not sim["ok"]:
+                error_detail = sim['error']
+                logger.error(f"[SIGN_AND_SEND] Aborting — simulation failed: {error_detail}")
+                await self._broadcast_status(
+                    "tx_simulation_failed",
+                    f"Simulation failed: {error_detail}",
+                )
+                return None
+
+            # ── Broadcast ─────────────────────────────────────────────────
             payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -219,9 +377,9 @@ class LiveTrader:
                     signed_b64,
                     {
                         "encoding": "base64",
-                        "skipPreflight": True,
+                        "skipPreflight": True,  # We already simulated
                         "preflightCommitment": "processed",
-                        "maxRetries": 5,
+                        "maxRetries": 3,
                     },
                 ],
             }
@@ -233,13 +391,24 @@ class LiveTrader:
                 ) as r:
                     data = await r.json()
                     if "error" in data:
-                        logger.error(f"RPC sendTransaction error: {data['error']}")
+                        rpc_err = data['error']
+                        logger.error(f"[BROADCAST FAILED] RPC error: {rpc_err}")
                         return None
                     sig = data.get("result")
-                    logger.info(f"TX broadcast: {sig}")
-                    return sig
+                    logger.info(f"[BROADCAST OK] sig={sig}")
+                    logger.info(f"[SOLSCAN] https://solscan.io/tx/{sig}")
+
+            # ── Confirm ───────────────────────────────────────────────────
+            confirm_result = await self._confirm_tx(sig)
+            if not confirm_result["confirmed"]:
+                logger.error(
+                    f"[TX FAILED ON-CHAIN] sig={sig[:16]}… error={confirm_result['error']}"
+                )
+                # Still return sig so caller can inspect it
+            return sig
+
         except Exception as e:
-            logger.error(f"Sign/send error: {e}")
+            logger.error(f"[SIGN_AND_SEND ERROR] {e}", exc_info=True)
             return None
 
     async def _get_sol_balance(self) -> float:
@@ -288,42 +457,49 @@ class LiveTrader:
 
     async def execute_buy(self, reason: str = "signal") -> Optional[str]:
         """
-        Full buy cycle: quote → swap TX → sign → broadcast.
+        Full buy cycle: quote → swap TX → simulate → sign → broadcast → confirm.
         Returns tx signature on success, None on failure.
         """
         if self._swap_in_flight:
-            logger.warning("Swap already in flight — skipping buy")
+            logger.warning("[BUY] Swap already in flight — skipping")
             return None
         self._swap_in_flight = True
+        buy_start = time.time()
         try:
             amount_lam = int(self.buy_size_sol * 1e9)
             mint_str = str(self.token_mint)
 
-            # Sanity balance check to avoid confusing RPC simulation errors
+            # Sanity balance check
             sol_bal = await self._get_sol_balance()
-            if sol_bal * 1e9 < amount_lam + 5000:  # buy size + rough gas buffer
+            logger.info(f"[BUY] Starting buy: mint={mint_str[:8]}… size={self.buy_size_sol} SOL balance={sol_bal:.4f} SOL reason={reason}")
+            if sol_bal * 1e9 < amount_lam + 50_000:  # buy size + gas buffer
                 logger.error(f"[BUY FAILED] Insufficient balance: {sol_bal:.4f} SOL but need ~{self.buy_size_sol} SOL")
                 await self._broadcast_status("buy_failed", f"Insufficient SOL ({sol_bal:.4f} available)", reason)
                 return None
 
-            logger.info(f"[BUY] {mint_str[:8]}… {self.buy_size_sol} SOL reason={reason}")
-
+            # Step 1: Quote
             quote = await self._get_quote(WSOL_MINT, self.token_mint, amount_lam)
             if not quote:
+                logger.error(f"[BUY FAILED] Jupiter quote failed for {mint_str[:8]}…")
                 await self._broadcast_status("buy_failed", "Jupiter quote failed", reason)
                 return None
 
+            # Step 2: Build swap TX
             swap_tx = await self._get_swap_tx(quote)
             if not swap_tx:
+                logger.error(f"[BUY FAILED] Jupiter swap TX build failed for {mint_str[:8]}…")
                 await self._broadcast_status("buy_failed", "Jupiter swap TX failed", reason)
                 return None
 
+            # Step 3: Sign, simulate, broadcast, confirm
             sig = await self._sign_and_send(swap_tx)
             if not sig:
-                await self._broadcast_status("buy_failed", "TX broadcast failed", reason)
+                logger.error(f"[BUY FAILED] TX sign/send failed for {mint_str[:8]}…")
+                await self._broadcast_status("buy_failed", "TX sign/send/simulation failed", reason)
                 return None
 
             # Record trade
+            elapsed = time.time() - buy_start
             out_amount = int(quote.get("outAmount", 0))
             tokens = out_amount / (10 ** self._token_decimals)
             ct = self.current_trade
@@ -335,59 +511,74 @@ class LiveTrader:
             self.stats.starting_balance = await self._get_sol_balance()
 
             await self._broadcast_status("buy_confirmed", sig, reason, tokens=tokens)
-            safe_sig = str(sig)
-            logger.info(f"[BUY OK] sig={safe_sig[:16]}… tokens={tokens:.4f}")
+            logger.info(f"[BUY OK] sig={sig} tokens={tokens:.4f} elapsed={elapsed:.1f}s")
+            logger.info(f"[BUY OK] https://solscan.io/tx/{sig}")
             return sig
 
+        except Exception as e:
+            logger.error(f"[BUY ERROR] Unexpected error: {e}", exc_info=True)
+            await self._broadcast_status("buy_failed", f"Unexpected: {e}", reason)
+            return None
         finally:
             self._swap_in_flight = False
 
     async def execute_sell(self, reason: str = "signal") -> Optional[str]:
         """
-        Full sell cycle: get token balance → quote → swap TX → sign → broadcast.
+        Full sell cycle: get token balance → quote → swap TX → simulate → sign → broadcast → confirm.
         Returns tx signature on success, None on failure.
         """
         if self._swap_in_flight:
-            logger.warning("Swap already in flight — skipping sell")
+            logger.warning("[SELL] Swap already in flight — skipping")
             return None
         self._swap_in_flight = True
+        sell_start = time.time()
         try:
             # Fetch live token balance to sell exactly what we hold
             token_balance = await self._get_token_balance()
+            mint_str = str(self.token_mint)
+            logger.info(f"[SELL] Starting sell: mint={mint_str[:8]}… balance={token_balance} units reason={reason}")
             if token_balance <= 0:
-                logger.warning("No token balance to sell")
+                logger.warning(f"[SELL FAILED] No token balance to sell for {mint_str[:8]}…")
                 await self._broadcast_status("sell_failed", "No token balance", reason)
                 return None
 
-            mint_str = str(self.token_mint)
-            logger.info(f"[SELL] {mint_str[:8]}… {token_balance} units reason={reason}")
-
+            # Step 1: Quote
             quote = await self._get_quote(self.token_mint, WSOL_MINT, token_balance)
             if not quote:
+                logger.error(f"[SELL FAILED] Jupiter quote failed for {mint_str[:8]}…")
                 await self._broadcast_status("sell_failed", "Jupiter quote failed", reason)
                 return None
 
+            # Step 2: Build swap TX
             swap_tx = await self._get_swap_tx(quote)
             if not swap_tx:
+                logger.error(f"[SELL FAILED] Jupiter swap TX build failed for {mint_str[:8]}…")
                 await self._broadcast_status("sell_failed", "Jupiter swap TX failed", reason)
                 return None
 
+            # Step 3: Sign, simulate, broadcast, confirm
             sig = await self._sign_and_send(swap_tx)
             if not sig:
-                await self._broadcast_status("sell_failed", "TX broadcast failed", reason)
+                logger.error(f"[SELL FAILED] TX sign/send failed for {mint_str[:8]}…")
+                await self._broadcast_status("sell_failed", "TX sign/send/simulation failed", reason)
                 return None
 
             # Calculate PnL
+            elapsed = time.time() - sell_start
             sol_received = int(quote.get("outAmount", 0)) / 1e9
             if self.current_trade:
                 self.confirm_sell(sig, sol_received, self._last_price)
 
             self._token_balance = 0
             await self._broadcast_status("sell_confirmed", sig, reason, sol_received=sol_received)
-            safe_sig = str(sig)
-            logger.info(f"[SELL OK] sig={safe_sig[:16]}… received={sol_received:.6f} SOL")
+            logger.info(f"[SELL OK] sig={sig} received={sol_received:.6f} SOL elapsed={elapsed:.1f}s")
+            logger.info(f"[SELL OK] https://solscan.io/tx/{sig}")
             return sig
 
+        except Exception as e:
+            logger.error(f"[SELL ERROR] Unexpected error: {e}", exc_info=True)
+            await self._broadcast_status("sell_failed", f"Unexpected: {e}", reason)
+            return None
         finally:
             self._swap_in_flight = False
 
@@ -527,8 +718,10 @@ class LiveTrader:
     async def force_buy(self) -> Optional[str]:
         """Manually trigger a test buy from the dashboard."""
         if self.current_trade is not None:
+            logger.warning("[MANUAL BUY] Already in a trade — ignoring")
             return None
         c = self._last_price or 1.0
+        logger.info(f"[MANUAL BUY] Initiating manual buy at price={c}")
         trade = LiveTrade(
             token_mint=self.token_mint,
             entry_time=int(time.time()),
@@ -540,15 +733,28 @@ class LiveTrader:
         )
         self.current_trade = trade
         self.engine.notify_trade_opened(c, Direction.UP)
-        return await self.execute_buy("manual_test_buy")
+        sig = await self.execute_buy("manual_test_buy")
+        if sig is None:
+            # Buy failed — clean up so future trades aren't blocked
+            logger.warning("[MANUAL BUY] Buy failed — resetting trade state")
+            self.current_trade = None
+            self.engine.notify_trade_closed()
+        return sig
 
     async def force_sell(self) -> Optional[str]:
         """Manually trigger a test sell from the dashboard."""
         if self.current_trade is None:
+            logger.warning("[MANUAL SELL] No position open — ignoring")
             return None
+        logger.info("[MANUAL SELL] Initiating manual sell")
         self.current_trade.status = "closing"
         self.current_trade.exit_reason = "manual_test_sell"
-        return await self.execute_sell("manual_test_sell")
+        sig = await self.execute_sell("manual_test_sell")
+        if sig is None and self.current_trade is not None:
+            # Sell failed — revert status so position isn't stuck
+            logger.warning("[MANUAL SELL] Sell failed — reverting trade status to open")
+            self.current_trade.status = "open"
+        return sig
 
     # ── Trade confirmation (called internally after TX confirmed) ─────────────
 

@@ -1680,8 +1680,8 @@ window.deleteBacktest = deleteBacktest;
    LIVE TRADING — Real on-chain execution via Phantom + Jupiter
    ════════════════════════════════════════════════════════════════════════ */
 
-const JUPITER_QUOTE = "https://quote-api.jup.ag/v6/quote";
-const JUPITER_SWAP  = "https://quote-api.jup.ag/v6/swap";
+const JUPITER_QUOTE = "https://lite-api.jup.ag/swap/v1/quote";
+const JUPITER_SWAP  = "https://lite-api.jup.ag/swap/v1/swap";
 const WSOL = "So11111111111111111111111111111111111111112";
 const SOL_DECIMALS = 9;
 const LT_WS_BASE = `ws://${location.host}/ws/live`;
@@ -2042,12 +2042,20 @@ function startLiveTrader(mint) {
       ctx.stats = msg.stats || ctx.stats;
       ctx.currentTrade = msg.current_trade;
       if (msg.event === "buy_confirmed" || msg.event === "sell_confirmed") {
-        addTraderEvent(ctx, msg.event.includes("buy") ? "buy" : "sell", `${msg.event.replace("_", " ").toUpperCase()} ✓ ${msg.detail.slice(0, 10)}…`);
+        const sig = msg.detail || "";
+        const shortSig = sig.length > 10 ? sig.slice(0, 10) + "…" : sig;
+        const action = msg.event.includes("buy") ? "buy" : "sell";
+        addTraderEvent(ctx, action, `${msg.event.replace("_", " ").toUpperCase()} ✓ ${shortSig}`);
         if (msg.event === "buy_confirmed") {
-          addLtTradeRow(ctx, "BUY", msg.current_trade?.entry_price || 0, 0, 0, msg.detail, "confirmed");
+          addLtTradeRow(ctx, "BUY", msg.current_trade?.entry_price || 0, 0, 0, sig, "confirmed");
+        }
+        if (msg.event === "sell_confirmed" && msg.sol_received) {
+          addTraderEvent(ctx, "sell", `Received ${msg.sol_received.toFixed(6)} SOL`);
         }
       } else if (msg.event === "buy_failed" || msg.event === "sell_failed") {
-        addTraderEvent(ctx, "error", `FAILED: ${msg.detail}`);
+        addTraderEvent(ctx, "error", `❌ ${msg.event.replace("_", " ").toUpperCase()}: ${msg.detail}`);
+      } else if (msg.event === "tx_simulation_failed") {
+        addTraderEvent(ctx, "error", `⚠️ SIMULATION FAILED: ${msg.detail}`);
       }
       updateTraderCard(mint);
     }

@@ -19,7 +19,7 @@ from backtester import run_backtest
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s  %(levelname)-7s  %(message)s",
+    format="%(asctime)s  %(levelname)-7s  [%(name)s]  %(message)s",
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("pump-chart")
