@@ -675,6 +675,17 @@ async def live_trading_ws(
             })
             if not ok:
                 break
+
+            # ── Market-cap safety floor check ─────────────────────────────
+            mcap_usd = trade.get("market_cap_usd", 0)
+            if mcap_usd and await live_trader.update_market_cap(float(mcap_usd)):
+                logger.warning(
+                    f"[LIVE] Market cap floor triggered for {real_mint[:8]}… — "
+                    f"stopping session in 5s (waiting for emergency sell)"
+                )
+                await asyncio.sleep(5)  # grace period for emergency sell TX
+                cancelled.set()
+                break
         return got_trade
 
     async def stream_live():

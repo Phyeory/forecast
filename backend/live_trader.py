@@ -119,6 +119,7 @@ class LiveTrader:
         buy_size_sol: float = 0.1,
         slippage_bps: int = 1000,
         priority_fee_lamports: int = 100_000,
+        min_market_cap_usd: float = 17_000.0,
         engine_kwargs: Optional[dict] = None,
     ):
         if engine_kwargs is None:
@@ -131,6 +132,14 @@ class LiveTrader:
         self.buy_size_sol = buy_size_sol
         self.slippage_bps = slippage_bps
         self.priority_fee_lamports = priority_fee_lamports
+
+        # ── Market-cap safety floor ───────────────────────────────────────
+        # If the live market cap (USD) drops below this value while a
+        # position is open, an emergency sell is triggered and the session
+        # is flagged for shutdown by main.py.
+        self.min_market_cap_usd: float = min_market_cap_usd
+        self._last_market_cap_usd: float = 0.0
+        self.mcap_stop_triggered: bool = False   # set True once triggered
 
         self.stats = LiveTraderStats()
         self.current_trade: Optional[LiveTrade] = None
@@ -604,6 +613,52 @@ class LiveTrader:
             except Exception:
                 pass
 
+    # ── Market-cap safety floor ───────────────────────────────────────────────
+
+    async def update_market_cap(self, market_cap_usd: float) -> bool:
+        """
+        Called every tick with the latest USD market cap.
+
+        Returns True if the mcap floor was breached and the session should
+        be stopped by the caller (main.py cancels the WebSocket loop).
+
+        Behaviour:
+          - If mcap ≥ floor  → nothing happens.
+          - If mcap < floor and NO open position → block new entries by
+            setting mcap_stop_triggered; broadcast warning.
+          - If mcap < floor and position IS open → emergency sell first,
+            then set mcap_stop_triggered; broadcast stop event.
+        """
+        if market_cap_usd <= 0:
+            return False  # No data yet — don't act on 0
+
+        self._last_market_cap_usd = market_cap_usd
+
+        if self.mcap_stop_triggered:
+            return True  # Already handled
+
+        if market_cap_usd >= self.min_market_cap_usd:
+            return False  # All good
+
+        # ── Threshold breached ────────────────────────────────────────────
+        logger.warning(
+            f"[MCAP STOP] Market cap ${market_cap_usd:,.0f} dropped below "
+            f"floor ${self.min_market_cap_usd:,.0f} for {self.token_mint[:8]}…"
+        )
+        self.mcap_stop_triggered = True
+
+        if self.current_trade is not None and not self._swap_in_flight:
+            logger.warning("[MCAP STOP] Position open — triggering emergency sell")
+            self.current_trade.status = "closing"
+            self.current_trade.exit_reason = "mcap_floor_stop"
+            asyncio.ensure_future(self.execute_sell("mcap_floor_stop"))
+
+        await self._broadcast_status(
+            "mcap_stop",
+            f"Market cap ${market_cap_usd:,.0f} below ${self.min_market_cap_usd:,.0f} floor — session stopped",
+        )
+        return True
+
     # ── Strategy update loop ──────────────────────────────────────────────────
 
     def update(
@@ -628,7 +683,7 @@ class LiveTrader:
         regime = result["regime"]
 
         # BUY signal
-        if signal == Signal.BUY.value and self.current_trade is None and not self._swap_in_flight:
+        if signal == Signal.BUY.value and self.current_trade is None and not self._swap_in_flight and not self.mcap_stop_triggered:
             buy_reason = f"buy_{regime}"
             trade = LiveTrade(
                 token_mint=self.token_mint,

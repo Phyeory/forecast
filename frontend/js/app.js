@@ -2056,6 +2056,15 @@ function startLiveTrader(mint) {
         addTraderEvent(ctx, "error", `❌ ${msg.event.replace("_", " ").toUpperCase()}: ${msg.detail}`);
       } else if (msg.event === "tx_simulation_failed") {
         addTraderEvent(ctx, "error", `⚠️ SIMULATION FAILED: ${msg.detail}`);
+      } else if (msg.event === "mcap_stop") {
+        addTraderEvent(ctx, "error", `🛑 MCAP FLOOR: ${msg.detail}`);
+        // Mark card visually and auto-clean up after sell grace period
+        const card = document.querySelector(`.lt-trader-card[data-mint="${mint}"]`);
+        if (card) {
+          card.style.borderColor = "var(--red)";
+          card.style.opacity = "0.7";
+        }
+        setTimeout(() => stopLiveTrader(mint), 8000);
       }
       updateTraderCard(mint);
     }
