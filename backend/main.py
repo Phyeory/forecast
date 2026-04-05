@@ -137,16 +137,21 @@ async def recorder_start(body: dict = Body(...)):
                     trade["price"], trade["sol_amount"], trade["timestamp"],
                     synthetic=is_synthetic,
                 )
+                # Persist every tick (real or synthetic) so the candle row in
+                # the DB always reflects the current accumulated OHLCV state.
+                # INSERT OR REPLACE updates the row in-place for the same
+                # (recording_id, time) key — safe and correct whether the
+                # source emits real trades (PumpPortal) or synthetic polls
+                # (DexScreener, which produces only synthetic ticks).
                 candle_dict = candle.to_dict()
                 ct = candle_dict["time"]
-                if ct != last_candle_time or is_new:
-                    data_store.insert_candle(
-                        rec_id, ct,
-                        candle_dict["open"], candle_dict["high"],
-                        candle_dict["low"], candle_dict["close"],
-                        candle_dict.get("volume", 0),
-                    )
-                    last_candle_time = ct
+                data_store.insert_candle(
+                    rec_id, ct,
+                    candle_dict["open"], candle_dict["high"],
+                    candle_dict["low"], candle_dict["close"],
+                    candle_dict.get("volume", 0),
+                )
+                last_candle_time = ct
         finally:
             ws_client.stop()
             data_store.stop_recording(rec_id)

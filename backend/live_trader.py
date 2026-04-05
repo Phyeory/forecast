@@ -119,7 +119,7 @@ class LiveTrader:
         buy_size_sol: float = 0.1,
         slippage_bps: int = 1000,
         priority_fee_lamports: int = 100_000,
-        min_market_cap_usd: float = 17_000.0,
+        min_market_cap_usd: float = 20_000.0,
         engine_kwargs: Optional[dict] = None,
     ):
         if engine_kwargs is None:
@@ -575,11 +575,12 @@ class LiveTrader:
             # Calculate PnL
             elapsed = time.time() - sell_start
             sol_received = int(quote.get("outAmount", 0)) / 1e9
+            closed_trade = None
             if self.current_trade:
-                self.confirm_sell(sig, sol_received, self._last_price)
+                closed_trade = self.confirm_sell(sig, sol_received, self._last_price)
 
             self._token_balance = 0
-            await self._broadcast_status("sell_confirmed", sig, reason, sol_received=sol_received)
+            await self._broadcast_status("sell_confirmed", sig, reason, sol_received=sol_received, closed_trade=closed_trade)
             logger.info(f"[SELL OK] sig={sig} received={sol_received:.6f} SOL elapsed={elapsed:.1f}s")
             logger.info(f"[SELL OK] https://solscan.io/tx/{sig}")
             return sig
@@ -592,7 +593,7 @@ class LiveTrader:
             self._swap_in_flight = False
 
     async def _broadcast_status(self, event: str, detail: str, reason: str = "",
-                                 tokens: float = 0, sol_received: float = 0):
+                                 tokens: float = 0, sol_received: float = 0, closed_trade=None):
         """Push a status update to the frontend via WebSocket."""
         if self.broadcast_fn:
             ct = self.current_trade
@@ -606,6 +607,7 @@ class LiveTrader:
                 "sol_received": sol_received,
                 "timestamp": time.time(),
                 "current_trade": ct.to_dict() if ct else None,
+                "closed_trade": closed_trade.to_dict() if closed_trade else None,
                 "stats": self.stats.to_dict(),
             }
             try:
@@ -848,6 +850,7 @@ class LiveTrader:
         self.current_trade = None
         self.engine.notify_trade_closed()
         logger.info(f"Trade closed: PnL={trade.pnl_sol:+.6f} SOL ({trade.pnl_pct:+.2f}%)")
+        return trade
 
     def confirm_failed(self, action: str, error: str):
         logger.error(f"Swap FAILED ({action}): {error}")

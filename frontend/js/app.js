@@ -2049,8 +2049,14 @@ function startLiveTrader(mint) {
         if (msg.event === "buy_confirmed") {
           addLtTradeRow(ctx, "BUY", msg.current_trade?.entry_price || 0, 0, 0, sig, "confirmed");
         }
-        if (msg.event === "sell_confirmed" && msg.sol_received) {
-          addTraderEvent(ctx, "sell", `Received ${msg.sol_received.toFixed(6)} SOL`);
+        if (msg.event === "sell_confirmed") {
+          const ct = msg.closed_trade || msg.current_trade;
+          if (ct) {
+            addLtTradeRow(ctx, "SELL", ct.exit_price || 0, ct.pnl_sol || 0, ct.pnl_pct || 0, sig, "confirmed");
+          }
+          if (msg.sol_received) {
+            addTraderEvent(ctx, "sell", `Received ${msg.sol_received.toFixed(6)} SOL`);
+          }
         }
       } else if (msg.event === "buy_failed" || msg.event === "sell_failed") {
         addTraderEvent(ctx, "error", `❌ ${msg.event.replace("_", " ").toUpperCase()}: ${msg.detail}`);
