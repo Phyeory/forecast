@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -7,428 +8,441 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <title>pump-chart · Strategy Dashboard</title>
-  <meta name="description" content="Real-time Solana token charting with physics-based strategy engine, recording, and backtesting" />
+  <meta name="description"
+    content="Real-time Solana token charting with physics-based strategy engine, recording, and backtesting" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" />
+  <link rel="stylesheet"
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" />
   <link rel="stylesheet" href="/static/css/style.css" />
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
+
 <body>
-<div id="app">
+  <div id="app">
 
-  <header id="topbar">
-    <div id="logo">pump<span>chart</span></div>
+    <header id="topbar">
+      <div id="logo">pump<span>chart</span></div>
 
-    <!-- Navigation Tabs -->
-    <nav id="main-nav">
-      <button class="nav-tab active" data-page="live" id="nav-live">📈 Live</button>
-      <button class="nav-tab" data-page="recorder" id="nav-recorder">🔴 Record</button>
-      <button class="nav-tab" data-page="viewer" id="nav-viewer">📂 Viewer</button>
-      <button class="nav-tab" data-page="backtest" id="nav-backtest">🧪 Backtest</button>
-      <button class="nav-tab" data-page="live-trading" id="nav-live-trading">⚡ Live Trading</button>
-    </nav>
+      <!-- Navigation Tabs -->
+      <nav id="main-nav">
+        <button class="nav-tab active" data-page="live" id="nav-live">📈 Live</button>
+        <button class="nav-tab" data-page="recorder" id="nav-recorder">🔴 Record</button>
+        <button class="nav-tab" data-page="viewer" id="nav-viewer">📂 Viewer</button>
+        <button class="nav-tab" data-page="backtest" id="nav-backtest">🧪 Backtest</button>
+        <button class="nav-tab" data-page="live-trading" id="nav-live-trading">⚡ Live Trading</button>
+      </nav>
 
-    <div id="conn-indicator">
-      <div id="dot" class="dot"></div>
-      <span id="conn-label">Idle</span>
-    </div>
-  </header>
-
-  <!-- ═══════════════════════════════════════════════════════════════════ -->
-  <!-- PAGE: LIVE (original chart)                                       -->
-  <!-- ═══════════════════════════════════════════════════════════════════ -->
-  <div id="page-live" class="page active">
-    <div id="live-controls">
-      <form id="address-form" onsubmit="return false">
-        <input id="mint-input" type="text" placeholder="Enter pump.fun token address…" autocomplete="off" spellcheck="false" />
-        <button id="load-btn" type="button">Load Chart</button>
-        <button id="settings-btn" type="button">⚙️</button>
-      </form>
-      <div id="tf-bar">
-        <button class="tf-btn"        data-tf="1s">1s</button>
-        <button class="tf-btn"        data-tf="5s">5s</button>
-        <button class="tf-btn"        data-tf="15s">15s</button>
-        <button class="tf-btn active" data-tf="1m">1m</button>
-        <button class="tf-btn"        data-tf="5m">5m</button>
-        <button class="tf-btn"        data-tf="15m">15m</button>
-        <button class="tf-btn"        data-tf="1h">1h</button>
+      <div id="conn-indicator">
+        <div id="dot" class="dot"></div>
+        <span id="conn-label">Idle</span>
       </div>
-    </div>
+    </header>
 
-    <div id="token-bar" class="hidden">
-      <img id="token-logo" alt="" />
-      <span id="token-name">—</span>
-      <span id="token-symbol"></span>
-      <div style="width:1px;height:24px;background:var(--border)"></div>
-      <div id="ohlc-strip" class="ohlc-strip">
-        <span class="ohlc-item">O <span id="ohlc-open">—</span></span>
-        <span class="ohlc-item">H <span id="ohlc-high">—</span></span>
-        <span class="ohlc-item">L <span id="ohlc-low">—</span></span>
-        <span class="ohlc-item">C <span id="ohlc-close">—</span></span>
-      </div>
-      <div style="width:1px;height:24px;background:var(--border)"></div>
-      <span id="last-price">—</span>
-      <span id="price-change" class="price-change">—</span>
-      <div style="width:1px;height:24px;background:var(--border)"></div>
-      <div class="stat-item">
-        <span class="stat-label">Mkt Cap</span>
-        <span class="stat-value" id="stat-mcap">—</span>
-      </div>
-      <div class="stat-item">
-        <span class="stat-label">Session Vol</span>
-        <span class="stat-value" id="stat-vol">0 SOL</span>
-      </div>
-      <div style="width:1px;height:24px;background:var(--border)"></div>
-      <div id="regime-badge" class="regime-badge">IDLE</div>
-      <div id="direction-badge" class="direction-badge">— NONE</div>
-      <div class="stat-item">
-        <span class="stat-label">Signal S</span>
-        <span class="stat-value" id="signal-strength">0.00</span>
-      </div>
-    </div>
-
-    <div id="main-content">
-      <aside id="strategy-panel">
-        <div class="panel-section">
-          <h3 class="panel-title">📊 Indicators</h3>
-          <div id="indicators-display" class="indicators-grid"></div>
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <!-- PAGE: LIVE (original chart)                                       -->
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <div id="page-live" class="page active">
+      <div id="live-controls">
+        <form id="address-form" onsubmit="return false">
+          <input id="mint-input" type="text" placeholder="Enter pump.fun token address…" autocomplete="off"
+            spellcheck="false" />
+          <button id="load-btn" type="button">Load Chart</button>
+          <button id="settings-btn" type="button">⚙️</button>
+        </form>
+        <div id="tf-bar">
+          <button class="tf-btn" data-tf="1s">1s</button>
+          <button class="tf-btn" data-tf="5s">5s</button>
+          <button class="tf-btn" data-tf="15s">15s</button>
+          <button class="tf-btn active" data-tf="1m">1m</button>
+          <button class="tf-btn" data-tf="5m">5m</button>
+          <button class="tf-btn" data-tf="15m">15m</button>
+          <button class="tf-btn" data-tf="1h">1h</button>
         </div>
-        <div class="panel-section">
-          <h3 class="panel-title">💰 Forward Test</h3>
-          <div id="ft-stats" class="ft-grid"></div>
-        </div>
-      </aside>
+      </div>
 
-      <div id="chart-area">
-        <div id="chart-wrapper">
-          <div id="chart"></div>
-          <div id="trade-feed"></div>
-          <div id="overlay">
-            <div id="overlay-icon">📈</div>
-            <div id="overlay-msg">Enter a pump.fun token address above to start.</div>
+      <div id="token-bar" class="hidden">
+        <img id="token-logo" alt="" />
+        <span id="token-name">—</span>
+        <span id="token-symbol"></span>
+        <div style="width:1px;height:24px;background:var(--border)"></div>
+        <div id="ohlc-strip" class="ohlc-strip">
+          <span class="ohlc-item">O <span id="ohlc-open">—</span></span>
+          <span class="ohlc-item">H <span id="ohlc-high">—</span></span>
+          <span class="ohlc-item">L <span id="ohlc-low">—</span></span>
+          <span class="ohlc-item">C <span id="ohlc-close">—</span></span>
+        </div>
+        <div style="width:1px;height:24px;background:var(--border)"></div>
+        <span id="last-price">—</span>
+        <span id="price-change" class="price-change">—</span>
+        <div style="width:1px;height:24px;background:var(--border)"></div>
+        <div class="stat-item">
+          <span class="stat-label">Mkt Cap</span>
+          <span class="stat-value" id="stat-mcap">—</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">Session Vol</span>
+          <span class="stat-value" id="stat-vol">0 SOL</span>
+        </div>
+        <div style="width:1px;height:24px;background:var(--border)"></div>
+        <div id="regime-badge" class="regime-badge">IDLE</div>
+        <div id="direction-badge" class="direction-badge">— NONE</div>
+        <div class="stat-item">
+          <span class="stat-label">Signal S</span>
+          <span class="stat-value" id="signal-strength">0.00</span>
+        </div>
+      </div>
+
+      <div id="main-content">
+        <aside id="strategy-panel">
+          <div class="panel-section">
+            <h3 class="panel-title">📊 Indicators</h3>
+            <div id="indicators-display" class="indicators-grid"></div>
           </div>
-        </div>
-        <div id="regime-bar-canvas" class="sub-pane-wrapper regime-bar-wrapper"></div>
-        <div id="sub-pane" class="sub-pane-wrapper"></div>
-      </div>
-    </div>
-  </div>
-
-  <!-- ═══════════════════════════════════════════════════════════════════ -->
-  <!-- PAGE: RECORDER                                                    -->
-  <!-- ═══════════════════════════════════════════════════════════════════ -->
-  <div id="page-recorder" class="page">
-    <div class="page-inner">
-      <div class="page-header">
-        <div class="page-header-icon">🔴</div>
-        <div>
-          <h1 class="page-title">Price Recorder</h1>
-          <p class="page-subtitle">Record live price action for any token to use in backtesting later</p>
-        </div>
-      </div>
-
-      <div class="recorder-card glass-card">
-        <div class="recorder-form">
-          <div class="form-group">
-            <label class="form-label">Token Address</label>
-            <input id="rec-mint-input" type="text" class="form-input" placeholder="Enter pump.fun token address…" autocomplete="off" spellcheck="false" />
+          <div class="panel-section">
+            <h3 class="panel-title">💰 Forward Test</h3>
+            <div id="ft-stats" class="ft-grid"></div>
           </div>
-          <div class="form-group">
-            <label class="form-label">Timeframe</label>
-            <select id="rec-tf-select" class="form-select">
-              <option value="1s">1s</option>
-              <option value="5s">5s</option>
-              <option value="15s">15s</option>
-              <option value="1m" selected>1m</option>
-              <option value="5m">5m</option>
-              <option value="15m">15m</option>
-              <option value="1h">1h</option>
-            </select>
-          </div>
-          <div class="form-actions">
-            <button id="rec-start-btn" class="btn btn-record">⏺ Start Recording</button>
-          </div>
-        </div>
+        </aside>
 
-        <!-- Active recording status bar -->
-        <div id="rec-status" class="hidden" style="margin-top:12px;padding:10px 14px;background:rgba(239,83,80,0.12);border:1px solid rgba(239,83,80,0.3);border-radius:8px;display:flex;gap:16px;align-items:center;font-size:13px;">
-          <span style="color:#ef5350;font-weight:600;">🔴 Recording</span>
-          <span id="rec-status-mint" style="color:#d1d5e0;font-weight:600;"></span>
-          <span id="rec-status-tf" class="rec-card-badge"></span>
-          <span id="rec-status-candles" style="color:#5a6071;"></span>
-        </div>
-      </div>
-
-      <!-- Saved recordings list -->
-      <div class="recordings-section">
-        <h2 class="section-title">📂 Saved Recordings</h2>
-        <div id="recordings-list" class="recordings-grid">
-          <div class="empty-state">No recordings yet. Start recording to capture price data.</div>
+        <div id="chart-area">
+          <div id="chart-wrapper">
+            <div id="chart"></div>
+            <div id="trade-feed"></div>
+            <div id="overlay">
+              <div id="overlay-icon">📈</div>
+              <div id="overlay-msg">Enter a pump.fun token address above to start.</div>
+            </div>
+          </div>
+          <div id="regime-bar-canvas" class="sub-pane-wrapper regime-bar-wrapper"></div>
+          <div id="sub-pane" class="sub-pane-wrapper"></div>
         </div>
       </div>
     </div>
-  </div>
 
-  <!-- ═══════════════════════════════════════════════════════════════════ -->
-  <!-- PAGE: VIEWER                                                      -->
-  <!-- ═══════════════════════════════════════════════════════════════════ -->
-  <div id="page-viewer" class="page">
-    <div class="page-inner">
-      <div class="page-header">
-        <div class="page-header-icon">📂</div>
-        <div>
-          <h1 class="page-title">Price Viewer</h1>
-          <p class="page-subtitle">Load and view saved price action recordings</p>
-        </div>
-      </div>
-
-      <div id="viewer-select-area">
-        <div id="viewer-recordings-list" class="recordings-grid">
-          <div class="empty-state">No recordings available. Record some price data first.</div>
-        </div>
-      </div>
-
-      <div id="viewer-chart-area" class="hidden">
-        <div class="viewer-header">
-          <div class="viewer-meta">
-            <span id="viewer-token-name" class="viewer-meta-name"></span>
-            <span id="viewer-token-symbol" class="viewer-meta-symbol"></span>
-            <span id="viewer-meta-tf" class="viewer-meta-badge"></span>
-            <span id="viewer-meta-candles" class="viewer-meta-badge"></span>
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <!-- PAGE: RECORDER                                                    -->
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <div id="page-recorder" class="page">
+      <div class="page-inner">
+        <div class="page-header">
+          <div class="page-header-icon">🔴</div>
+          <div>
+            <h1 class="page-title">Price Recorder</h1>
+            <p class="page-subtitle">Record live price action for any token to use in backtesting later</p>
           </div>
-          <button id="viewer-back-btn" class="btn btn-secondary">← Back to list</button>
         </div>
-        <div id="viewer-chart" class="viewer-chart-container"></div>
+
+        <div class="recorder-card glass-card">
+          <div class="recorder-form">
+            <div class="form-group">
+              <label class="form-label">Token Address</label>
+              <input id="rec-mint-input" type="text" class="form-input" placeholder="Enter pump.fun token address…"
+                autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Timeframe</label>
+              <select id="rec-tf-select" class="form-select">
+                <option value="1s">1s</option>
+                <option value="5s">5s</option>
+                <option value="15s">15s</option>
+                <option value="1m" selected>1m</option>
+                <option value="5m">5m</option>
+                <option value="15m">15m</option>
+                <option value="1h">1h</option>
+              </select>
+            </div>
+            <div class="form-actions">
+              <button id="rec-start-btn" class="btn btn-record">⏺ Start Recording</button>
+            </div>
+          </div>
+
+          <!-- Active recording status bar -->
+          <div id="rec-status" class="hidden"
+            style="margin-top:12px;padding:10px 14px;background:rgba(239,83,80,0.12);border:1px solid rgba(239,83,80,0.3);border-radius:8px;display:flex;gap:16px;align-items:center;font-size:13px;">
+            <span style="color:#ef5350;font-weight:600;">🔴 Recording</span>
+            <span id="rec-status-mint" style="color:#d1d5e0;font-weight:600;"></span>
+            <span id="rec-status-tf" class="rec-card-badge"></span>
+            <span id="rec-status-candles" style="color:#5a6071;"></span>
+          </div>
+        </div>
+
+        <!-- Saved recordings list -->
+        <div class="recordings-section">
+          <h2 class="section-title">📂 Saved Recordings</h2>
+          <div id="recordings-list" class="recordings-grid">
+            <div class="empty-state">No recordings yet. Start recording to capture price data.</div>
+          </div>
+        </div>
       </div>
     </div>
-  </div>
 
-  <!-- ═══════════════════════════════════════════════════════════════════ -->
-  <!-- PAGE: BACKTEST                                                    -->
-  <!-- ═══════════════════════════════════════════════════════════════════ -->
-  <div id="page-backtest" class="page">
-    <div class="page-inner">
-      <div class="page-header">
-        <div class="page-header-icon">🧪</div>
-        <div>
-          <h1 class="page-title">Backtester</h1>
-          <p class="page-subtitle">Run the strategy engine on saved price data and analyze results</p>
-        </div>
-      </div>
-
-      <!-- Backtest controls -->
-      <div id="bt-controls" class="glass-card">
-        <div class="bt-form">
-          <div class="form-group">
-            <label class="form-label">Select Recording</label>
-            <select id="bt-recording-select" class="form-select">
-              <option value="">— Choose a recording —</option>
-            </select>
-          </div>
-          <div class="form-actions">
-            <button id="bt-run-btn" class="btn btn-primary">▶ Run Backtest</button>
-            <button id="bt-run-all-btn" class="btn btn-secondary">⚡ Run All Recordings</button>
-            <button id="bt-params-btn" class="btn btn-secondary">⚙️ Parameters</button>
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <!-- PAGE: VIEWER                                                      -->
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <div id="page-viewer" class="page">
+      <div class="page-inner">
+        <div class="page-header">
+          <div class="page-header-icon">📂</div>
+          <div>
+            <h1 class="page-title">Price Viewer</h1>
+            <p class="page-subtitle">Load and view saved price action recordings</p>
           </div>
         </div>
-        <div id="bt-progress" class="hidden">
-          <div class="progress-bar"><div id="bt-progress-fill" class="progress-fill"></div></div>
-          <span id="bt-progress-label" class="progress-label">Running…</span>
-        </div>
-      </div>
 
-      <!-- Saved backtests -->
-      <div class="backtests-section">
-        <h2 class="section-title">📊 Saved Backtests</h2>
-        <div id="backtests-list" class="backtests-grid">
-          <div class="empty-state">No backtests yet. Select a recording and run a backtest.</div>
-        </div>
-      </div>
-
-      <!-- Backtest result view -->
-      <div id="bt-result-area" class="hidden">
-        <div class="bt-result-header">
-          <div class="bt-result-meta">
-            <span id="bt-result-name" class="bt-result-name"></span>
-            <span id="bt-result-tf" class="viewer-meta-badge"></span>
+        <div id="viewer-select-area">
+          <div id="viewer-recordings-list" class="recordings-grid">
+            <div class="empty-state">No recordings available. Record some price data first.</div>
           </div>
-          <button id="bt-result-back-btn" class="btn btn-secondary">← Back</button>
         </div>
 
-        <!-- Stats cards -->
-        <div id="bt-stats-grid" class="bt-stats-grid"></div>
+        <div id="viewer-chart-area" class="hidden">
+          <div class="viewer-header">
+            <div class="viewer-meta">
+              <span id="viewer-token-name" class="viewer-meta-name"></span>
+              <span id="viewer-token-symbol" class="viewer-meta-symbol"></span>
+              <span id="viewer-meta-tf" class="viewer-meta-badge"></span>
+              <span id="viewer-meta-candles" class="viewer-meta-badge"></span>
+            </div>
+            <button id="viewer-back-btn" class="btn btn-secondary">← Back to list</button>
+          </div>
+          <div id="viewer-chart" class="viewer-chart-container"></div>
+        </div>
+      </div>
+    </div>
 
-        <!-- Backtest chart -->
-        <div id="bt-chart" class="viewer-chart-container"></div>
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <!-- PAGE: BACKTEST                                                    -->
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <div id="page-backtest" class="page">
+      <div class="page-inner">
+        <div class="page-header">
+          <div class="page-header-icon">🧪</div>
+          <div>
+            <h1 class="page-title">Backtester</h1>
+            <p class="page-subtitle">Run the strategy engine on saved price data and analyze results</p>
+          </div>
+        </div>
 
-        <!-- Trades table -->
-        <div class="bt-trades-section">
-          <h3 class="section-title">📋 Trade Log</h3>
-          <div id="bt-trades-table-wrapper" class="trades-table-wrapper">
-            <table id="bt-trades-table" class="trades-table">
+        <!-- Backtest controls -->
+        <div id="bt-controls" class="glass-card">
+          <div class="bt-form">
+            <div class="form-group">
+              <label class="form-label">Select Recording</label>
+              <select id="bt-recording-select" class="form-select">
+                <option value="">— Choose a recording —</option>
+              </select>
+            </div>
+            <div class="form-actions">
+              <button id="bt-run-btn" class="btn btn-primary">▶ Run Backtest</button>
+              <button id="bt-run-all-btn" class="btn btn-secondary">⚡ Run All Recordings</button>
+              <button id="bt-params-btn" class="btn btn-secondary">⚙️ Parameters</button>
+            </div>
+          </div>
+          <div id="bt-progress" class="hidden">
+            <div class="progress-bar">
+              <div id="bt-progress-fill" class="progress-fill"></div>
+            </div>
+            <span id="bt-progress-label" class="progress-label">Running…</span>
+          </div>
+        </div>
+
+        <!-- Saved backtests -->
+        <div class="backtests-section">
+          <h2 class="section-title">📊 Saved Backtests</h2>
+          <div id="backtests-list" class="backtests-grid">
+            <div class="empty-state">No backtests yet. Select a recording and run a backtest.</div>
+          </div>
+        </div>
+
+        <!-- Backtest result view -->
+        <div id="bt-result-area" class="hidden">
+          <div class="bt-result-header">
+            <div class="bt-result-meta">
+              <span id="bt-result-name" class="bt-result-name"></span>
+              <span id="bt-result-tf" class="viewer-meta-badge"></span>
+            </div>
+            <button id="bt-result-back-btn" class="btn btn-secondary">← Back</button>
+          </div>
+
+          <!-- Stats cards -->
+          <div id="bt-stats-grid" class="bt-stats-grid"></div>
+
+          <!-- Backtest chart -->
+          <div id="bt-chart" class="viewer-chart-container"></div>
+
+          <!-- Trades table -->
+          <div class="bt-trades-section">
+            <h3 class="section-title">📋 Trade Log</h3>
+            <div id="bt-trades-table-wrapper" class="trades-table-wrapper">
+              <table id="bt-trades-table" class="trades-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Entry Time</th>
+                    <th>Entry Price</th>
+                    <th>Exit Time</th>
+                    <th>Exit Price</th>
+                    <th>PnL SOL</th>
+                    <th>PnL %</th>
+                    <th>Entry Reason</th>
+                    <th>Exit Reason</th>
+                  </tr>
+                </thead>
+                <tbody id="bt-trades-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <!-- PAGE: LIVE TRADING                                                -->
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <div id="page-live-trading" class="page">
+      <div class="page-inner">
+        <div class="page-header">
+          <div class="page-header-icon">⚡</div>
+          <div>
+            <h1 class="page-title">Live Trading</h1>
+            <p class="page-subtitle">Real on-chain trading with your Phantom wallet — same algorithm, real transactions
+            </p>
+          </div>
+        </div>
+
+        <!-- Wallet Connection (Private Key) -->
+        <div class="glass-card" id="lt-wallet-card">
+          <div class="lt-wallet-row">
+            <div class="lt-wallet-status">
+              <div id="lt-wallet-dot" class="dot error"></div>
+              <span id="lt-wallet-label">Wallet not connected</span>
+              <span id="lt-wallet-addr" class="lt-wallet-addr"></span>
+              <span id="lt-wallet-bal" class="lt-wallet-bal"></span>
+            </div>
+          </div>
+          <div style="margin-top:12px;display:flex;gap:8px">
+            <input id="lt-private-key" type="password" class="form-input" style="flex:1"
+              placeholder="Enter Base58 Private Key (from Phantom export)…" autocomplete="off" spellcheck="false" />
+            <button id="lt-connect-btn" class="btn btn-primary" onclick="connectWallet()">🔑 Set Wallet</button>
+          </div>
+          <div style="margin-top:8px;font-size:11px;color:#888;">
+            * Private key is sent to your local backend only (for server-side signing). Never share this key.
+          </div>
+        </div>
+
+        <!-- Trading Config -->
+        <div class="glass-card" id="lt-config-card">
+          <h3 class="panel-title" style="margin-bottom:12px">⚙️ Trading Configuration</h3>
+          <div class="lt-config-grid">
+            <div class="form-group">
+              <label class="form-label">Buy Size (SOL)</label>
+              <input id="lt-buy-size" type="number" class="form-input" value="0.1" step="0.01" min="0.001" />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Slippage (%)</label>
+              <input id="lt-slippage" type="number" class="form-input" value="10" step="0.5" min="0.1" max="50" />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Priority Fee (SOL)</label>
+              <input id="lt-priority-fee" type="number" class="form-input" value="0.0001" step="0.0001" min="0" />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Timeframe</label>
+              <select id="lt-timeframe" class="form-select">
+                <option value="1s">1s</option>
+                <option value="5s">5s</option>
+                <option value="15s">15s</option>
+                <option value="1m" selected>1m</option>
+                <option value="5m">5m</option>
+                <option value="15m">15m</option>
+                <option value="1h">1h</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- Add Token -->
+        <div class="glass-card" id="lt-add-card">
+          <div class="lt-add-row">
+            <input id="lt-token-input" type="text" class="form-input"
+              placeholder="Enter token address to start live trading…" autocomplete="off" spellcheck="false"
+              style="flex:1" />
+            <button id="lt-add-btn" class="btn btn-record" disabled>⚡ Start Trading</button>
+            <button id="lt-stop-all-btn" class="btn btn-danger" style="display:none">⏹ Stop All</button>
+          </div>
+        </div>
+
+        <!-- Active Traders Grid -->
+        <div class="lt-traders-section">
+          <h2 class="section-title">📊 Active Traders</h2>
+          <div id="lt-traders-grid" class="lt-traders-grid">
+            <div class="empty-state">No active traders. Connect wallet and add tokens above.</div>
+          </div>
+        </div>
+
+        <!-- Trade History -->
+        <div class="lt-history-section">
+          <h2 class="section-title">📋 Trade History</h2>
+          <div id="lt-trades-table-wrapper" class="trades-table-wrapper">
+            <table id="lt-trades-table" class="trades-table">
               <thead>
                 <tr>
                   <th>#</th>
-                  <th>Entry Time</th>
-                  <th>Entry Price</th>
-                  <th>Exit Time</th>
-                  <th>Exit Price</th>
+                  <th>Token</th>
+                  <th>Action</th>
+                  <th>Time</th>
+                  <th>Price</th>
                   <th>PnL SOL</th>
                   <th>PnL %</th>
-                  <th>Entry Reason</th>
-                  <th>Exit Reason</th>
+                  <th>TX Hash</th>
+                  <th>Status</th>
                 </tr>
               </thead>
-              <tbody id="bt-trades-tbody"></tbody>
+              <tbody id="lt-trades-tbody"></tbody>
             </table>
           </div>
         </div>
       </div>
     </div>
-  </div>
 
-  <!-- ═══════════════════════════════════════════════════════════════════ -->
-  <!-- PAGE: LIVE TRADING                                                -->
-  <!-- ═══════════════════════════════════════════════════════════════════ -->
-  <div id="page-live-trading" class="page">
-    <div class="page-inner">
-      <div class="page-header">
-        <div class="page-header-icon">⚡</div>
-        <div>
-          <h1 class="page-title">Live Trading</h1>
-          <p class="page-subtitle">Real on-chain trading with your Phantom wallet — same algorithm, real transactions</p>
+    <!-- Settings Modal (shared) -->
+    <div id="settings-modal" class="hidden">
+      <div class="settings-content">
+        <div class="settings-header">
+          <h2>Strategy Parameters</h2>
+          <button id="close-settings">&times;</button>
         </div>
-      </div>
-
-      <!-- Wallet Connection (Private Key) -->
-      <div class="glass-card" id="lt-wallet-card">
-        <div class="lt-wallet-row">
-          <div class="lt-wallet-status">
-            <div id="lt-wallet-dot" class="dot error"></div>
-            <span id="lt-wallet-label">Wallet not connected</span>
-            <span id="lt-wallet-addr" class="lt-wallet-addr"></span>
-            <span id="lt-wallet-bal" class="lt-wallet-bal"></span>
-          </div>
+        <div class="settings-body" id="settings-form">
         </div>
-        <div style="margin-top:12px;display:flex;gap:8px">
-          <input id="lt-private-key" type="password" class="form-input" style="flex:1" placeholder="Enter Base58 Private Key (from Phantom export)…" autocomplete="off" spellcheck="false" />
-          <button id="lt-connect-btn" class="btn btn-primary" onclick="connectWallet()">🔑 Set Wallet</button>
-        </div>
-        <div style="margin-top:8px;font-size:11px;color:#888;">
-          * Private key is sent to your local backend only (for server-side signing). Never share this key.
-        </div>
-      </div>
-
-      <!-- Trading Config -->
-      <div class="glass-card" id="lt-config-card">
-        <h3 class="panel-title" style="margin-bottom:12px">⚙️ Trading Configuration</h3>
-        <div class="lt-config-grid">
-          <div class="form-group">
-            <label class="form-label">Buy Size (SOL)</label>
-            <input id="lt-buy-size" type="number" class="form-input" value="0.1" step="0.01" min="0.001" />
-          </div>
-          <div class="form-group">
-            <label class="form-label">Slippage (%)</label>
-            <input id="lt-slippage" type="number" class="form-input" value="10" step="0.5" min="0.1" max="50" />
-          </div>
-          <div class="form-group">
-            <label class="form-label">Priority Fee (SOL)</label>
-            <input id="lt-priority-fee" type="number" class="form-input" value="0.0001" step="0.0001" min="0" />
-          </div>
-          <div class="form-group">
-            <label class="form-label">Timeframe</label>
-            <select id="lt-timeframe" class="form-select">
-              <option value="1s">1s</option>
-              <option value="5s">5s</option>
-              <option value="15s">15s</option>
-              <option value="1m" selected>1m</option>
-              <option value="5m">5m</option>
-              <option value="15m">15m</option>
-              <option value="1h">1h</option>
-            </select>
-          </div>
-        </div>
-      </div>
-
-      <!-- Add Token -->
-      <div class="glass-card" id="lt-add-card">
-        <div class="lt-add-row">
-          <input id="lt-token-input" type="text" class="form-input" placeholder="Enter token address to start live trading…" autocomplete="off" spellcheck="false" style="flex:1" />
-          <button id="lt-add-btn" class="btn btn-record" disabled>⚡ Start Trading</button>
-          <button id="lt-stop-all-btn" class="btn btn-danger" style="display:none">⏹ Stop All</button>
-        </div>
-      </div>
-
-      <!-- Active Traders Grid -->
-      <div class="lt-traders-section">
-        <h2 class="section-title">📊 Active Traders</h2>
-        <div id="lt-traders-grid" class="lt-traders-grid">
-          <div class="empty-state">No active traders. Connect wallet and add tokens above.</div>
-        </div>
-      </div>
-
-      <!-- Trade History -->
-      <div class="lt-history-section">
-        <h2 class="section-title">📋 Trade History</h2>
-        <div id="lt-trades-table-wrapper" class="trades-table-wrapper">
-          <table id="lt-trades-table" class="trades-table">
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Token</th>
-                <th>Action</th>
-                <th>Time</th>
-                <th>Price</th>
-                <th>PnL SOL</th>
-                <th>PnL %</th>
-                <th>TX Hash</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody id="lt-trades-tbody"></tbody>
-          </table>
+        <div class="settings-footer">
+          <button id="apply-settings-btn" type="button">Apply</button>
         </div>
       </div>
     </div>
-  </div>
 
-  <!-- Settings Modal (shared) -->
-  <div id="settings-modal" class="hidden">
-    <div class="settings-content">
-      <div class="settings-header">
-        <h2>Strategy Parameters</h2>
-        <button id="close-settings">&times;</button>
-      </div>
-      <div class="settings-body" id="settings-form">
-      </div>
-      <div class="settings-footer">
-        <button id="apply-settings-btn" type="button">Apply</button>
-      </div>
-    </div>
   </div>
-
-</div>
-<!-- Phantom wallet detection diagnostic — runs immediately so it's visible in console before app.js loads -->
-<script>
-(function() {
-  var check = function() {
-    var hasPhantom = !!(window.phantom && window.phantom.solana && window.phantom.solana.isPhantom);
-    var hasSolana  = !!(window.solana && window.solana.isPhantom);
-    console.log('[phantom-check] window.phantom:', window.phantom);
-    console.log('[phantom-check] window.solana:', window.solana);
-    console.log('[phantom-check] isPhantom via phantom.solana:', hasPhantom);
-    console.log('[phantom-check] isPhantom via solana:', hasSolana);
-    if (!hasPhantom && !hasSolana) {
-      console.warn('[phantom-check] ⚠️  Phantom NOT detected. Make sure the extension is installed and enabled in this browser.');
-    } else {
-      console.log('[phantom-check] ✅ Phantom detected and ready.');
-    }
-  };
-  // Check immediately and again after 1s (extension may inject late)
-  check();
-  setTimeout(check, 1000);
-})();
-</script>
-<script src="/static/js/app.js?v=23"></script>
+  <!-- Phantom wallet detection diagnostic — runs immediately so it's visible in console before app.js loads -->
+  <script>
+    (function () {
+      var check = function () {
+        var hasPhantom = !!(window.phantom && window.phantom.solana && window.phantom.solana.isPhantom);
+        var hasSolana = !!(window.solana && window.solana.isPhantom);
+        console.log('[phantom-check] window.phantom:', window.phantom);
+        console.log('[phantom-check] window.solana:', window.solana);
+        console.log('[phantom-check] isPhantom via phantom.solana:', hasPhantom);
+        console.log('[phantom-check] isPhantom via solana:', hasSolana);
+        if (!hasPhantom && !hasSolana) {
+          console.warn('[phantom-check] ⚠️  Phantom NOT detected. Make sure the extension is installed and enabled in this browser.');
+        } else {
+          console.log('[phantom-check] ✅ Phantom detected and ready.');
+        }
+      };
+      // Check immediately and again after 1s (extension may inject late)
+      check();
+      setTimeout(check, 1000);
+    })();
+  </script>
+  <script src="/static/js/app.js?v=26"></script>
 </body>
+
 </html>

@@ -85,9 +85,19 @@ def stop_recording(recording_id: int):
 
 
 def insert_candle(recording_id: int, t: int, o: float, h: float, l: float, c: float, vol: float):
+    """
+    Upsert a single candle row.  We DELETE any existing row for the same
+    (recording_id, time) bucket first so only one row ever exists per bucket.
+    (The candles table has no UNIQUE constraint on those columns, so a bare
+    INSERT OR REPLACE would silently insert a second row instead of replacing.)
+    """
     conn = _get_price_conn()
     conn.execute(
-        "INSERT OR REPLACE INTO candles (recording_id, time, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "DELETE FROM candles WHERE recording_id = ? AND time = ?",
+        (recording_id, t),
+    )
+    conn.execute(
+        "INSERT INTO candles (recording_id, time, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (recording_id, t, o, h, l, c, vol),
     )
     conn.commit()
@@ -119,9 +129,29 @@ def get_recording(recording_id: int) -> Optional[dict]:
 
 
 def get_recording_candles(recording_id: int) -> list[dict]:
+    """
+    Return one completed candle per time bucket, ordered by time.
+
+    Older recordings may have multiple rows per time bucket (one per tick)
+    because the original recorder used INSERT OR REPLACE on a table without a
+    UNIQUE constraint, silently inserting new rows on every tick instead of
+    updating the existing one.  We deduplicate here by taking the row with the
+    highest id (most recently written = most complete accumulated OHLCV state)
+    for each time bucket.
+    """
     conn = _get_price_conn()
     rows = conn.execute(
-        "SELECT time, open, high, low, close, volume FROM candles WHERE recording_id = ? ORDER BY time",
+        """
+        SELECT time, open, high, low, close, volume
+        FROM   candles
+        WHERE  id IN (
+            SELECT MAX(id)
+            FROM   candles
+            WHERE  recording_id = ?
+            GROUP BY time
+        )
+        ORDER BY time
+        """,
         (recording_id,),
     ).fetchall()
     conn.close()

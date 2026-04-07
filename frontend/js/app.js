@@ -1336,14 +1336,21 @@ document.getElementById("rec-start-btn").addEventListener("click", async () => {
 async function formatOfflineCandles(mint, rawCandles, timeframeStr) {
   if (!rawCandles || !rawCandles.length) return { candles: [], currency: "SOL" };
 
-  let basePrice = rawCandles[0].open;
+  // Find first non-zero open price across all candles to use as base
+  let basePrice = 0;
+  for (const c of rawCandles) {
+    if (c.open > 0) { basePrice = c.open; break; }
+    if (c.close > 0) { basePrice = c.close; break; }
+  }
+  if (!basePrice || basePrice <= 0) basePrice = 1; // last-resort fallback
+
   let baseMcap = 0;
   let ccy = "SOL";
 
   try {
     const tInfo = await apiFetch(`/api/token/${mint}`);
-    if (tInfo) {
-      // Determine authentic SOL price to prevent decoupled market cap evaluations
+    if (tInfo && !tInfo.error) {
+      // Determine SOL/USD price
       let solPrice = 160;
       if (tInfo.price_usd && tInfo.price_sol) {
         const pU = parseFloat(tInfo.price_usd);
@@ -1369,44 +1376,53 @@ async function formatOfflineCandles(mint, rawCandles, timeframeStr) {
 
   if (!baseMcap || isNaN(baseMcap) || baseMcap <= 0) baseMcap = basePrice * 1e9;
 
-  const toMcap = (p) => {
-    if (!p) return 0;
-    return baseMcap * (p / basePrice);
+  const toMcap = (p, fallback) => {
+    if (!p || p <= 0 || isNaN(p)) return fallback !== undefined ? fallback : 0;
+    const v = baseMcap * (p / basePrice);
+    if (!isFinite(v) || isNaN(v) || v <= 0) return fallback !== undefined ? fallback : 0;
+    return v;
   };
 
   const tfSec = timeframeToSeconds(timeframeStr);
   const formatted = [];
   let lastTime = null;
   let lastClose = null;
+  const seenTimes = new Set(); // deduplicate by time
 
   for (const c of rawCandles) {
+    // Gap fill
     if (lastTime !== null && lastClose !== null && c.time > lastTime + tfSec) {
       const gap = Math.floor((c.time - lastTime) / tfSec) - 1;
-      if (gap <= 15) { // Fill up to 15 empty candles to preserve continuity/connections
+      if (gap <= 15) {
         for (let t = lastTime + tfSec; t < c.time; t += tfSec) {
-          formatted.push({
-            time: t,
-            open: lastClose, high: lastClose, low: lastClose, close: lastClose,
-            volume: 0,
-            color: CANDLE_FLAT, borderColor: CANDLE_FLAT, wickColor: CANDLE_FLAT
-          });
-          lastTime = t;
+          if (!seenTimes.has(t)) {
+            seenTimes.add(t);
+            formatted.push({
+              time: t,
+              open: lastClose, high: lastClose, low: lastClose, close: lastClose,
+              volume: 0,
+              color: CANDLE_FLAT, borderColor: CANDLE_FLAT, wickColor: CANDLE_FLAT
+            });
+            lastTime = t;
+          }
         }
       }
     }
 
-    let open = toMcap(c.open);
-    let high = toMcap(c.high);
-    let low = toMcap(c.low);
-    const close = toMcap(c.close);
+    if (seenTimes.has(c.time)) continue; // skip duplicate timestamps
+    seenTimes.add(c.time);
 
-    // Crucial for replicating the live charting: bridge open/close 
-    // to strictly form a continuous timeline preventing disjointed dashes
-    if (lastClose !== null) {
-      open = lastClose;
-      high = Math.max(lastClose, high, close);
-      low = Math.min(lastClose, low, close);
-    }
+    const closeVal = toMcap(c.close, lastClose || toMcap(c.open, null));
+    if (closeVal === null || closeVal <= 0) continue; // skip unrenderable candle
+
+    let open = lastClose !== null ? lastClose : toMcap(c.open, closeVal);
+    let high = toMcap(c.high, closeVal);
+    let low = toMcap(c.low, closeVal);
+    const close = closeVal;
+
+    // Ensure OHLC is consistent
+    high = Math.max(open, high, close);
+    low = Math.min(open, low, close);
 
     let color = CANDLE_FLAT;
     if (close > open) color = CANDLE_UP;
@@ -1416,7 +1432,14 @@ async function formatOfflineCandles(mint, rawCandles, timeframeStr) {
       else if (close < lastClose) color = CANDLE_DOWN;
     }
 
-    formatted.push({ ...c, time: c.time, open, high, low, close, volume: c.volume || 0, color, borderColor: color, wickColor: color });
+    // Preserve backtest-specific fields (trade_action, trade_label, regime…) but only pass OHLCV + color to chart
+    formatted.push({
+      ...c,         // keep trade_action/trade_label for marker logic
+      time: c.time,
+      open, high, low, close,
+      volume: c.volume || 0,
+      color, borderColor: color, wickColor: color,
+    });
     lastTime = c.time;
     lastClose = close;
   }
@@ -1681,7 +1704,7 @@ window.deleteBacktest = deleteBacktest;
    ════════════════════════════════════════════════════════════════════════ */
 
 const JUPITER_QUOTE = "https://lite-api.jup.ag/swap/v1/quote";
-const JUPITER_SWAP  = "https://lite-api.jup.ag/swap/v1/swap";
+const JUPITER_SWAP = "https://lite-api.jup.ag/swap/v1/swap";
 const WSOL = "So11111111111111111111111111111111111111112";
 const SOL_DECIMALS = 9;
 const LT_WS_BASE = `ws://${location.host}/ws/live`;
@@ -1695,16 +1718,16 @@ let ltTradeCounter = 0;
 
 /* ── DOM refs ─────────────────────────────────────────────────────────── */
 
-const ltConnectBtn   = $("lt-connect-btn");
-const ltWalletDot    = $("lt-wallet-dot");
-const ltWalletLabel  = $("lt-wallet-label");
-const ltWalletAddr   = $("lt-wallet-addr");
-const ltWalletBal    = $("lt-wallet-bal");
-const ltAddBtn       = $("lt-add-btn");
-const ltStopAllBtn   = $("lt-stop-all-btn");
-const ltTokenInput   = $("lt-token-input");
-const ltTradersGrid  = $("lt-traders-grid");
-const ltTradesTbody  = $("lt-trades-tbody");
+const ltConnectBtn = $("lt-connect-btn");
+const ltWalletDot = $("lt-wallet-dot");
+const ltWalletLabel = $("lt-wallet-label");
+const ltWalletAddr = $("lt-wallet-addr");
+const ltWalletBal = $("lt-wallet-bal");
+const ltAddBtn = $("lt-add-btn");
+const ltStopAllBtn = $("lt-stop-all-btn");
+const ltTokenInput = $("lt-token-input");
+const ltTradersGrid = $("lt-traders-grid");
+const ltTradesTbody = $("lt-trades-tbody");
 
 /* ── Wallet Setup (Private Key) ────────────────────────────────────────── */
 
@@ -1790,11 +1813,11 @@ function updateTraderCard(mint) {
     card = document.createElement("div");
     card.className = "lt-trader-card";
     card.dataset.mint = mint;
-    
+
     // Remove empty state if present
     const empty = ltTradersGrid.querySelector(".empty-state");
     if (empty) empty.remove();
-    
+
     card.innerHTML = `
       <div class="lt-card-header">
         <div><span class="lt-card-name" id="lth-name-${mint}"></span><span class="lt-card-symbol" id="lth-sym-${mint}"></span></div>
@@ -1834,7 +1857,7 @@ function updateTraderCard(mint) {
       color: '#5865f222', priceFormat: { type: 'volume' }, priceScaleId: 'vol'
     });
     chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
-    
+
     ctx.chart = chart;
     ctx.candleSeries = cSeries;
     ctx.volSeries = vSeries;
@@ -1852,7 +1875,7 @@ function updateTraderCard(mint) {
 
   const pnlClass = (st.total_pnl_sol || 0) >= 0 ? "pos" : "neg";
   const upnlClass = (ctx.unrealizedPnl || 0) >= 0 ? "pos" : "neg";
-  
+
   const name = ctx.info?.token_name || mint.slice(0, 8);
   const symbol = ctx.info?.token_symbol ? "$" + ctx.info.token_symbol : "";
   document.getElementById(`lth-name-${mint}`).textContent = name;
@@ -1863,21 +1886,21 @@ function updateTraderCard(mint) {
   const tb = document.getElementById(`lth-trend-${mint}`);
   const rb = document.getElementById(`lth-regime-${mint}`);
   if (ctx.direction && ctx.direction !== "none") {
-      tb.style.display = "block";
-      const arrow = ctx.direction === "up" ? "▲" : "▼";
-      const tColor = ctx.direction === "up" ? CANDLE_UP : CANDLE_DOWN;
-      tb.style.color = tColor;
-      tb.textContent = `${arrow} ${ctx.direction.toUpperCase()} S:${(ctx.sVal || 0).toFixed(2)}`;
+    tb.style.display = "block";
+    const arrow = ctx.direction === "up" ? "▲" : "▼";
+    const tColor = ctx.direction === "up" ? CANDLE_UP : CANDLE_DOWN;
+    tb.style.color = tColor;
+    tb.textContent = `${arrow} ${ctx.direction.toUpperCase()} S:${(ctx.sVal || 0).toFixed(2)}`;
   } else {
-      tb.style.display = "none";
+    tb.style.display = "none";
   }
 
   if (ctx.regime && ctx.regime !== "idle") {
-      rb.style.display = "block";
-      rb.textContent = ctx.regime.toUpperCase();
-      rb.style.background = REGIME_COLORS[ctx.regime] || "#5a6071";
+    rb.style.display = "block";
+    rb.textContent = ctx.regime.toUpperCase();
+    rb.style.background = REGIME_COLORS[ctx.regime] || "#5a6071";
   } else {
-      rb.style.display = "none";
+    rb.style.display = "none";
   }
 
   document.getElementById(`lt-stats-${mint}`).innerHTML = `
@@ -1957,7 +1980,7 @@ function startLiveTrader(mint) {
         ctx.basePrice = res.basePrice;
         ctx.lastClose = res.lastClose;
         ctx.lastTime = res.lastTime;
-        
+
         ctx.candleSeries.setData(res.candles);
         ctx.volSeries.setData(res.candles.map(c => ({ time: c.time, value: c.volume || 0, color: c.color })));
         if (ctx.chart) ctx.chart.timeScale().fitContent();
@@ -2016,11 +2039,11 @@ function startLiveTrader(mint) {
 
         ctx.candleSeries.update({ time: msg.candle.time, open, high, low, close, color, borderColor: color, wickColor: color });
         ctx.volSeries.update({ time: msg.candle.time, value: msg.candle.volume || 0, color: color });
-        
+
         ctx.lastClose = close;
         ctx.lastTime = msg.candle.time;
       }
-      
+
       // Update live_trade data
       const lt = s.live_trade || s.forward_test;
       if (lt) {
@@ -2093,7 +2116,7 @@ function stopLiveTrader(mint) {
   const ctx = ltActiveTraders[mint];
   if (!ctx) return;
   ctx.ws.close();
-  apiFetch("/api/live/stop", { method: "POST", body: JSON.stringify({ mint }) }).catch(() => {});
+  apiFetch("/api/live/stop", { method: "POST", body: JSON.stringify({ mint }) }).catch(() => { });
   delete ltActiveTraders[mint];
   const card = document.querySelector(`.lt-trader-card[data-mint="${mint}"]`);
   if (card) card.remove();
@@ -2140,7 +2163,7 @@ ltStopAllBtn.addEventListener("click", stopAllTraders);
 
 // Page switch handler for live trading
 const origSwitchPage = switchPage;
-switchPage = function(pageId) {
+switchPage = function (pageId) {
   origSwitchPage(pageId);
   if (pageId === "live-trading" && ltWalletConnected) {
     refreshWalletBalance();
@@ -2148,7 +2171,7 @@ switchPage = function(pageId) {
 };
 // Re-bind nav tabs with new switchPage
 navTabs.forEach(tab => {
-  tab.removeEventListener("click", () => {});
+  tab.removeEventListener("click", () => { });
   tab.addEventListener("click", () => switchPage(tab.dataset.page));
 });
 
