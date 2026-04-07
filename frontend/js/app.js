@@ -1931,19 +1931,30 @@ window.manualTrade = manualTrade;
 
 /* ── Start live trading on a token ───────────────────────────────────── */
 
-function startLiveTrader(mint) {
+// Stagger consecutive startLiveTrader calls so N parallel tokens don't all
+// open their WebSockets (and trigger resolve_input) at the exact same moment.
+let _ltConnectCount = 0;
+let _ltConnectResetTimer = null;
+
+function startLiveTrader(mint, _delayOverride = null) {
   if (!ltWalletPubkey) return alert("Connect wallet first");
   if (ltActiveTraders[mint]) return alert("Already trading this token");
   if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)) return alert("Invalid Solana address");
+
+  // Stagger: each successive call within 2s adds 400ms extra delay
+  const delayMs = _delayOverride !== null ? _delayOverride : _ltConnectCount * 400;
+  _ltConnectCount++;
+  clearTimeout(_ltConnectResetTimer);
+  _ltConnectResetTimer = setTimeout(() => { _ltConnectCount = 0; }, 2000);
 
   const config = getLtConfig();
   const paramsStr = encodeURIComponent(JSON.stringify(engineParams));
   const wsUrl = `${LT_WS_BASE}/${mint}?timeframe=${config.timeframe}&private_key=${encodeURIComponent(_privateKey)}&buy_size=${config.buySize}&slippage_bps=${config.slippageBps}&priority_fee=${config.priorityFeeLamports}&params=${paramsStr}`;
 
-  const ws = new WebSocket(wsUrl);
+  // Register the card immediately so the UI shows "Connecting…" right away
   const ctx = {
     mint,
-    ws,
+    ws: null,  // filled in after delay
     info: null,
     stats: {},
     currentTrade: null,
@@ -1956,158 +1967,155 @@ function startLiveTrader(mint) {
   };
   ltActiveTraders[mint] = ctx;
   ltStopAllBtn.style.display = "inline-flex";
-
-  addTraderEvent(ctx, "info", "Connecting…");
+  addTraderEvent(ctx, "info", delayMs > 0 ? `Connecting… (staggered ${delayMs}ms)` : "Connecting…");
   updateTraderCard(mint);
 
-  ws.onopen = () => { addTraderEvent(ctx, "info", "Connected — warming up indicators…"); };
+  setTimeout(() => {
+    if (!ltActiveTraders[mint]) return;  // was stopped before delay elapsed
+    const ws = new WebSocket(wsUrl);
+    ctx.ws = ws;
 
-  ws.onmessage = async (ev) => {
-    let msg;
-    try { msg = JSON.parse(ev.data); } catch { return; }
+    ws.onopen = () => { addTraderEvent(ctx, "info", "Connected — warming up indicators…"); };
 
-    if (msg.type === "token_info") {
-      ctx.info = msg.data;
-      addTraderEvent(ctx, "info", `Token: ${msg.data.name || mint.slice(0, 8)}`);
-      updateTraderCard(mint);
-    }
+    ws.onmessage = async (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
 
-    if (msg.type === "historical" && msg.strategy) {
-      addTraderEvent(ctx, "info", `Loaded ${msg.candles?.length || 0} historical candles`);
-      if (ctx.candleSeries && msg.candles) {
-        const res = await formatOfflineCandles(mint, msg.candles, config.timeframe);
-        ctx.baseMcap = res.baseMcap;
-        ctx.basePrice = res.basePrice;
-        ctx.lastClose = res.lastClose;
-        ctx.lastTime = res.lastTime;
-
-        ctx.candleSeries.setData(res.candles);
-        ctx.volSeries.setData(res.candles.map(c => ({ time: c.time, value: c.volume || 0, color: c.color })));
-        if (ctx.chart) ctx.chart.timeScale().fitContent();
-      }
-      if (Array.isArray(msg.strategy) && msg.strategy.length > 0) {
-        const lastS = msg.strategy[msg.strategy.length - 1];
-        ctx.regime = lastS.regime || "idle";
-        ctx.direction = lastS.direction || "none";
-        ctx.sVal = lastS.s || 0;
+      if (msg.type === "token_info") {
+        ctx.info = msg.data;
+        addTraderEvent(ctx, "info", `Token: ${msg.data.name || mint.slice(0, 8)}`);
         updateTraderCard(mint);
       }
-    }
 
-    if (msg.type === "candle" && msg.strategy) {
-      const s = msg.strategy;
-      if (ctx.candleSeries && msg.candle) {
-        if (!ctx.baseMcap) {
-          ctx.baseMcap = msg.market_cap_usd || (msg.candle.close * 1e9);
-          ctx.basePrice = msg.candle.close;
-          ctx.lastClose = null;
-          ctx.lastTime = null;
+      if (msg.type === "historical" && msg.strategy) {
+        addTraderEvent(ctx, "info", `Loaded ${msg.candles?.length || 0} historical candles`);
+        if (ctx.candleSeries && msg.candles) {
+          const res = await formatOfflineCandles(mint, msg.candles, config.timeframe);
+          ctx.baseMcap = res.baseMcap;
+          ctx.basePrice = res.basePrice;
+          ctx.lastClose = res.lastClose;
+          ctx.lastTime = res.lastTime;
+
+          ctx.candleSeries.setData(res.candles);
+          ctx.volSeries.setData(res.candles.map(c => ({ time: c.time, value: c.volume || 0, color: c.color })));
+          if (ctx.chart) ctx.chart.timeScale().fitContent();
         }
+        if (Array.isArray(msg.strategy) && msg.strategy.length > 0) {
+          const lastS = msg.strategy[msg.strategy.length - 1];
+          ctx.regime = lastS.regime || "idle";
+          ctx.direction = lastS.direction || "none";
+          ctx.sVal = lastS.s || 0;
+          updateTraderCard(mint);
+        }
+      }
 
-        let rawOpen = ctx.baseMcap * (msg.candle.open / ctx.basePrice);
-        let high = ctx.baseMcap * (msg.candle.high / ctx.basePrice);
-        let low = ctx.baseMcap * (msg.candle.low / ctx.basePrice);
-        let close = ctx.baseMcap * (msg.candle.close / ctx.basePrice);
+      if (msg.type === "candle" && msg.strategy) {
+        const s = msg.strategy;
+        if (ctx.candleSeries && msg.candle) {
+          if (!ctx.baseMcap) {
+            ctx.baseMcap = msg.market_cap_usd || (msg.candle.close * 1e9);
+            ctx.basePrice = msg.candle.close;
+            ctx.lastClose = null;
+            ctx.lastTime = null;
+          }
 
-        // Gap filling and new candle bridging
-        if (msg.is_new) {
-          const tfSec = timeframeToSeconds(config.timeframe);
-          if (ctx.lastTime && msg.candle.time > ctx.lastTime + tfSec) {
-            const gap = Math.floor((msg.candle.time - ctx.lastTime) / tfSec) - 1;
-            if (gap <= 15) {
-              for (let t = ctx.lastTime + tfSec; t < msg.candle.time; t += tfSec) {
-                ctx.candleSeries.update({ time: t, open: ctx.lastClose, high: ctx.lastClose, low: ctx.lastClose, close: ctx.lastClose, color: CANDLE_FLAT, borderColor: CANDLE_FLAT, wickColor: CANDLE_FLAT });
-                ctx.volSeries.update({ time: t, value: 0, color: "#5865f222" });
+          let rawOpen = ctx.baseMcap * (msg.candle.open / ctx.basePrice);
+          let high = ctx.baseMcap * (msg.candle.high / ctx.basePrice);
+          let low = ctx.baseMcap * (msg.candle.low / ctx.basePrice);
+          let close = ctx.baseMcap * (msg.candle.close / ctx.basePrice);
+
+          // Gap filling and new candle bridging
+          if (msg.is_new) {
+            const tfSec = timeframeToSeconds(config.timeframe);
+            if (ctx.lastTime && msg.candle.time > ctx.lastTime + tfSec) {
+              const gap = Math.floor((msg.candle.time - ctx.lastTime) / tfSec) - 1;
+              if (gap <= 15) {
+                for (let t = ctx.lastTime + tfSec; t < msg.candle.time; t += tfSec) {
+                  ctx.candleSeries.update({ time: t, open: ctx.lastClose, high: ctx.lastClose, low: ctx.lastClose, close: ctx.lastClose, color: CANDLE_FLAT, borderColor: CANDLE_FLAT, wickColor: CANDLE_FLAT });
+                  ctx.volSeries.update({ time: t, value: 0, color: "#5865f222" });
+                }
               }
             }
+            ctx.currentOpen = ctx.lastClose !== null && ctx.lastClose !== undefined ? ctx.lastClose : rawOpen;
           }
-          ctx.currentOpen = ctx.lastClose !== null && ctx.lastClose !== undefined ? ctx.lastClose : rawOpen;
+
+          let open = ctx.currentOpen !== undefined ? ctx.currentOpen : rawOpen;
+          high = Math.max(open, high, close);
+          low = Math.min(open, low, close);
+
+          let color = CANDLE_FLAT;
+          if (close > open) color = CANDLE_UP;
+          else if (close < open) color = CANDLE_DOWN;
+          else if (ctx.lastClose !== null && ctx.lastClose !== undefined) {
+            if (close > ctx.lastClose) color = CANDLE_UP;
+            else if (close < ctx.lastClose) color = CANDLE_DOWN;
+          }
+
+          ctx.candleSeries.update({ time: msg.candle.time, open, high, low, close, color, borderColor: color, wickColor: color });
+          ctx.volSeries.update({ time: msg.candle.time, value: msg.candle.volume || 0, color: color });
+
+          ctx.lastClose = close;
+          ctx.lastTime = msg.candle.time;
         }
 
-        let open = ctx.currentOpen !== undefined ? ctx.currentOpen : rawOpen;
-        // Expand high and low locally without breaking the anchored open
-        high = Math.max(open, high, close);
-        low = Math.min(open, low, close);
-
-        let color = CANDLE_FLAT;
-        if (close > open) color = CANDLE_UP;
-        else if (close < open) color = CANDLE_DOWN;
-        else if (ctx.lastClose !== null && ctx.lastClose !== undefined) {
-          if (close > ctx.lastClose) color = CANDLE_UP;
-          else if (close < ctx.lastClose) color = CANDLE_DOWN;
+        // Update live_trade data
+        const lt = s.live_trade || s.forward_test;
+        if (lt) {
+          ctx.stats = lt.stats || ctx.stats;
+          ctx.currentTrade = lt.current_trade;
+          ctx.unrealizedPnl = lt.unrealized_pnl || 0;
+          ctx.unrealizedPnlPct = lt.unrealized_pnl_pct || 0;
         }
-
-        ctx.candleSeries.update({ time: msg.candle.time, open, high, low, close, color, borderColor: color, wickColor: color });
-        ctx.volSeries.update({ time: msg.candle.time, value: msg.candle.volume || 0, color: color });
-
-        ctx.lastClose = close;
-        ctx.lastTime = msg.candle.time;
+        ctx.regime = s.regime || "idle";
+        ctx.direction = s.direction || "none";
+        ctx.sVal = s.s || 0;
+        updateTraderCard(mint);
       }
 
-      // Update live_trade data
-      const lt = s.live_trade || s.forward_test;
-      if (lt) {
-        ctx.stats = lt.stats || ctx.stats;
-        ctx.currentTrade = lt.current_trade;
-        ctx.unrealizedPnl = lt.unrealized_pnl || 0;
-        ctx.unrealizedPnlPct = lt.unrealized_pnl_pct || 0;
-
-        // Server signs automatically; track state directly
-        // Swap req execution from frontend deleted
+      if (msg.type === "trade_update") {
+        ctx.stats = msg.stats || ctx.stats;
+        ctx.currentTrade = msg.current_trade;
+        if (msg.event === "buy_confirmed" || msg.event === "sell_confirmed") {
+          const sig = msg.detail || "";
+          const shortSig = sig.length > 10 ? sig.slice(0, 10) + "…" : sig;
+          const action = msg.event.includes("buy") ? "buy" : "sell";
+          addTraderEvent(ctx, action, `${msg.event.replace("_", " ").toUpperCase()} ✓ ${shortSig}`);
+          if (msg.event === "buy_confirmed") {
+            addLtTradeRow(ctx, "BUY", msg.current_trade?.entry_price || 0, 0, 0, sig, "confirmed");
+          }
+          if (msg.event === "sell_confirmed") {
+            const ct = msg.closed_trade || msg.current_trade;
+            if (ct) {
+              addLtTradeRow(ctx, "SELL", ct.exit_price || 0, ct.pnl_sol || 0, ct.pnl_pct || 0, sig, "confirmed");
+            }
+            if (msg.sol_received) {
+              addTraderEvent(ctx, "sell", `Received ${msg.sol_received.toFixed(6)} SOL`);
+            }
+          }
+        } else if (msg.event === "buy_failed" || msg.event === "sell_failed") {
+          addTraderEvent(ctx, "error", `❌ ${msg.event.replace("_", " ").toUpperCase()}: ${msg.detail}`);
+        } else if (msg.event === "tx_simulation_failed") {
+          addTraderEvent(ctx, "error", `⚠️ SIMULATION FAILED: ${msg.detail}`);
+        } else if (msg.event === "mcap_stop") {
+          addTraderEvent(ctx, "error", `🛑 MCAP FLOOR: ${msg.detail}`);
+          const card = document.querySelector(`.lt-trader-card[data-mint="${mint}"]`);
+          if (card) { card.style.borderColor = "var(--red)"; card.style.opacity = "0.7"; }
+          setTimeout(() => stopLiveTrader(mint), 8000);
+        }
+        updateTraderCard(mint);
       }
-      ctx.regime = s.regime || "idle";
-      ctx.direction = s.direction || "none";
-      ctx.sVal = s.s || 0;
+
+      if (msg.type === "ping") {
+        ws.send(JSON.stringify({ type: "pong" }));
+      }
+    };
+
+    ws.onerror = () => { addTraderEvent(ctx, "error", "WebSocket error"); };
+    ws.onclose = () => {
+      addTraderEvent(ctx, "info", "Disconnected");
       updateTraderCard(mint);
-    }
-
-    if (msg.type === "trade_update") {
-      ctx.stats = msg.stats || ctx.stats;
-      ctx.currentTrade = msg.current_trade;
-      if (msg.event === "buy_confirmed" || msg.event === "sell_confirmed") {
-        const sig = msg.detail || "";
-        const shortSig = sig.length > 10 ? sig.slice(0, 10) + "…" : sig;
-        const action = msg.event.includes("buy") ? "buy" : "sell";
-        addTraderEvent(ctx, action, `${msg.event.replace("_", " ").toUpperCase()} ✓ ${shortSig}`);
-        if (msg.event === "buy_confirmed") {
-          addLtTradeRow(ctx, "BUY", msg.current_trade?.entry_price || 0, 0, 0, sig, "confirmed");
-        }
-        if (msg.event === "sell_confirmed") {
-          const ct = msg.closed_trade || msg.current_trade;
-          if (ct) {
-            addLtTradeRow(ctx, "SELL", ct.exit_price || 0, ct.pnl_sol || 0, ct.pnl_pct || 0, sig, "confirmed");
-          }
-          if (msg.sol_received) {
-            addTraderEvent(ctx, "sell", `Received ${msg.sol_received.toFixed(6)} SOL`);
-          }
-        }
-      } else if (msg.event === "buy_failed" || msg.event === "sell_failed") {
-        addTraderEvent(ctx, "error", `❌ ${msg.event.replace("_", " ").toUpperCase()}: ${msg.detail}`);
-      } else if (msg.event === "tx_simulation_failed") {
-        addTraderEvent(ctx, "error", `⚠️ SIMULATION FAILED: ${msg.detail}`);
-      } else if (msg.event === "mcap_stop") {
-        addTraderEvent(ctx, "error", `🛑 MCAP FLOOR: ${msg.detail}`);
-        // Mark card visually and auto-clean up after sell grace period
-        const card = document.querySelector(`.lt-trader-card[data-mint="${mint}"]`);
-        if (card) {
-          card.style.borderColor = "var(--red)";
-          card.style.opacity = "0.7";
-        }
-        setTimeout(() => stopLiveTrader(mint), 8000);
-      }
-      updateTraderCard(mint);
-    }
-
-    if (msg.type === "ping") {
-      ws.send(JSON.stringify({ type: "pong" }));
-    }
-  };
-
-  ws.onerror = () => { addTraderEvent(ctx, "error", "WebSocket error"); };
-  ws.onclose = () => {
-    addTraderEvent(ctx, "info", "Disconnected");
-    updateTraderCard(mint);
-  };
+    };
+  }, delayMs);
 }
 
 /* ── Stop trader ─────────────────────────────────────────────────────── */
@@ -2115,7 +2123,7 @@ function startLiveTrader(mint) {
 function stopLiveTrader(mint) {
   const ctx = ltActiveTraders[mint];
   if (!ctx) return;
-  ctx.ws.close();
+  if (ctx.ws) ctx.ws.close();   // may be null if stopped before stagger delay elapsed
   apiFetch("/api/live/stop", { method: "POST", body: JSON.stringify({ mint }) }).catch(() => { });
   delete ltActiveTraders[mint];
   const card = document.querySelector(`.lt-trader-card[data-mint="${mint}"]`);
@@ -2149,7 +2157,7 @@ ltStopAllBtn.addEventListener("click", stopAllTraders);
   $(id).addEventListener("change", () => {
     const config = getLtConfig();
     for (const ctx of Object.values(ltActiveTraders)) {
-      if (ctx.ws.readyState === WebSocket.OPEN) {
+      if (ctx.ws && ctx.ws.readyState === WebSocket.OPEN) {
         ctx.ws.send(JSON.stringify({
           type: "update_config",
           buy_size: config.buySize,

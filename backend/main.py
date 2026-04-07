@@ -24,6 +24,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("pump-chart")
 
+# Limit how many tokens can run resolve_input / get_historical_candles
+# concurrently.  Without this, N parallel tokens all hammer DexScreener /
+# pump.fun v3 simultaneously, causing timeouts that look like connect failures.
+_resolve_sem = asyncio.Semaphore(8)
+
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
 app = FastAPI(title="pump-chart")
@@ -97,8 +102,15 @@ async def recorder_start(body: dict = Body(...)):
         if rec["mint"] == mint and rec["timeframe"] == timeframe:
             return JSONResponse({"error": "Already recording this coin on this timeframe", "recording_id": rec["recording_id"]}, status_code=409)
 
-    # Resolve token info
-    real_mint, token_info = await resolve_input(mint)
+    # Resolve token info (semaphore: avoid piling up parallel external calls)
+    try:
+        async with _resolve_sem:
+            real_mint, token_info = await asyncio.wait_for(
+                resolve_input(mint), timeout=20.0
+            )
+    except asyncio.TimeoutError:
+        logger.warning(f"[Recorder] resolve_input timed out for {mint[:8]} — using raw mint")
+        real_mint, token_info = mint, None
     token_name = (token_info or {}).get("name", "")
     token_symbol = (token_info or {}).get("symbol", "")
 
@@ -119,8 +131,15 @@ async def recorder_start(body: dict = Body(...)):
         aggregator = CandleAggregator(timeframe)
         last_candle_time = None
 
-        # Seed with historical candles
-        hist = await get_historical_candles(real_mint, timeframe)
+        # Seed with historical candles (also throttled)
+        try:
+            async with _resolve_sem:
+                hist = await asyncio.wait_for(
+                    get_historical_candles(real_mint, timeframe), timeout=15.0
+                )
+        except asyncio.TimeoutError:
+            logger.warning(f"[Recorder] get_historical_candles timed out for {real_mint[:8]}")
+            hist = []
         if hist:
             data_store.insert_candles_batch(rec_id, hist)
             last = hist[-1]
@@ -307,7 +326,16 @@ async def chart_ws(
     logger.info(f"Connect  input={mint[:8]}…  tf={timeframe}")
 
     # Resolve the user input (token mint or pair address) to the actual token mint
-    real_mint, token_info = await resolve_input(mint)
+    # Use the global semaphore so N parallel dashboard connects don't all hit the
+    # external APIs simultaneously (which causes connection timeouts).
+    try:
+        async with _resolve_sem:
+            real_mint, token_info = await asyncio.wait_for(
+                resolve_input(mint), timeout=20.0
+            )
+    except asyncio.TimeoutError:
+        logger.warning(f"resolve_input timed out for {mint[:8]} — using raw mint")
+        real_mint, token_info = mint, None
     if real_mint != mint:
         logger.info(f"Resolved {mint[:8]} -> {real_mint[:8]}")
 
@@ -360,7 +388,14 @@ async def chart_ws(
                 await send({"type": "token_info", "data": info})
         asyncio.create_task(push_metadata())
 
-    hist = await get_historical_candles(real_mint, timeframe)
+    try:
+        async with _resolve_sem:
+            hist = await asyncio.wait_for(
+                get_historical_candles(real_mint, timeframe), timeout=15.0
+            )
+    except asyncio.TimeoutError:
+        logger.warning(f"get_historical_candles timed out for {real_mint[:8]} — skipping history")
+        hist = []
     if hist:
         # Run historical candles through forward tester first
         strategy_results = []
@@ -563,7 +598,14 @@ async def live_trading_ws(
     await websocket.accept()
     logger.info(f"[LIVE] Connect  mint={mint[:8]}…  wallet={wallet_pubkey[:8]}…  tf={timeframe}")
 
-    real_mint, token_info = await resolve_input(mint)
+    try:
+        async with _resolve_sem:
+            real_mint, token_info = await asyncio.wait_for(
+                resolve_input(mint), timeout=20.0
+            )
+    except asyncio.TimeoutError:
+        logger.warning(f"[LIVE] resolve_input timed out for {mint[:8]} — using raw mint")
+        real_mint, token_info = mint, None
     token_name = (token_info or {}).get("name", "")
     token_symbol = (token_info or {}).get("symbol", "")
 
@@ -616,7 +658,14 @@ async def live_trading_ws(
         await send({"type": "token_info", "data": token_info})
 
     # Send historical candles + run through strategy (warm up indicators)
-    hist = await get_historical_candles(real_mint, timeframe)
+    try:
+        async with _resolve_sem:
+            hist = await asyncio.wait_for(
+                get_historical_candles(real_mint, timeframe), timeout=15.0
+            )
+    except asyncio.TimeoutError:
+        logger.warning(f"[LIVE] get_historical_candles timed out for {real_mint[:8]}")
+        hist = []
     if hist:
         strategy_results = []
         for candle in hist:

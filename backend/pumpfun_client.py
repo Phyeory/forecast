@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from typing import AsyncGenerator, Optional
+from collections import defaultdict
 
 import aiohttp
 import websockets
@@ -364,55 +365,186 @@ async def get_historical_candles(
 
 # ---------- Live-trade WebSocket ---------------------------------------------
 
-class PumpFunWSClient:
-    """Yields normalised trade dicts for a given token mint. Auto-reconnects."""
+# ── Shared PumpPortal hub ─────────────────────────────────────────────────
+# A single persistent WebSocket to pumpportal.fun is shared across ALL token
+# subscriptions.  Each mint gets its own asyncio.Queue; the hub fans incoming
+# messages into the correct queue(s).  This avoids the N-connections-per-IP
+# rate limit that causes connection failures when many tokens run in parallel.
 
-    def __init__(self, mint: str):
-        self.mint  = mint
-        self._stop = False
+class _SharedPumpPortalHub:
+    """Process-global multiplexed PumpPortal WebSocket hub."""
 
-    def stop(self):
-        self._stop = True
+    def __init__(self):
+        # mint -> set of asyncio.Queue  (multiple consumers per mint allowed)
+        self._queues: dict[str, set[asyncio.Queue]] = defaultdict(set)
+        self._lock = asyncio.Lock()
+        self._task: Optional[asyncio.Task] = None
+        # mints pending subscription on the next reconnect / live connection
+        self._pending_subscribe: set[str] = set()
+        # reference to the live websockets connection (to send subscribe msgs)
+        self._ws = None
 
-    async def stream(self) -> AsyncGenerator[dict, None]:
+    # ── Internal helpers ──────────────────────────────────────────────────
+
+    async def _subscribe(self, mint: str):
+        """Send a subscribe message if connection is live."""
+        self._pending_subscribe.add(mint)
+        if self._ws is not None:
+            try:
+                await self._ws.send(
+                    json.dumps({"method": "subscribeTokenTrade", "keys": [mint]})
+                )
+                self._pending_subscribe.discard(mint)
+                logger.info(f"[PumpHub] +subscribe {mint[:8]}…")
+            except Exception:
+                pass  # will be re-sent on reconnect
+
+    async def _unsubscribe(self, mint: str):
+        """Send an unsubscribe message if the connection is live."""
+        if self._ws is not None:
+            try:
+                await self._ws.send(
+                    json.dumps({"method": "unsubscribeTokenTrade", "keys": [mint]})
+                )
+                logger.info(f"[PumpHub] -unsubscribe {mint[:8]}…")
+            except Exception:
+                pass
+
+    def _fan_out(self, trade: dict):
+        """Push a normalised trade to every queue watching that mint."""
+        mint = trade.get("mint", "")
+        for q in list(self._queues.get(mint, set())):
+            try:
+                q.put_nowait(trade)
+            except asyncio.QueueFull:
+                pass  # slow consumer — drop rather than back-pressure the hub
+
+    async def _run(self):
         backoff = 0.5
-        while not self._stop:
+        while True:
             try:
                 async with websockets.connect(
                     PUMPPORTAL_WS,
                     ping_interval=20,
                     ping_timeout=15,
-                    open_timeout=10,
-                    max_size=2 ** 20,
+                    open_timeout=15,
+                    max_size=2 ** 22,
                 ) as ws:
+                    self._ws = ws
                     backoff = 0.5
-                    await ws.send(
-                        json.dumps({"method": "subscribeTokenTrade", "keys": [self.mint]})
-                    )
-                    logger.info(f"[WS] Subscribed: {self.mint[:8]}...")
+                    logger.info("[PumpHub] Connected")
+
+                    # Subscribe all currently registered mints
+                    async with self._lock:
+                        all_mints = list(self._queues.keys())
+                        # Also include any that were pending from before
+                        all_mints += list(self._pending_subscribe)
+                        all_mints = list(set(all_mints))
+
+                    if all_mints:
+                        await ws.send(
+                            json.dumps({"method": "subscribeTokenTrade", "keys": all_mints})
+                        )
+                        self._pending_subscribe.clear()
+                        logger.info(f"[PumpHub] Subscribed {len(all_mints)} mints on reconnect")
+
                     async for raw in ws:
-                        if self._stop:
-                            return
                         try:
                             msg = json.loads(raw)
                         except json.JSONDecodeError:
                             continue
                         if "txType" not in msg:
                             continue
-                        msg_mint = msg.get("mint", "")
-                        if msg_mint and msg_mint != self.mint:
-                            continue
-                        trade = self._normalise(msg)
+                        trade = PumpFunWSClient._normalise(msg)
                         if trade:
-                            yield trade
+                            self._fan_out(trade)
+
             except (ConnectionClosed, asyncio.TimeoutError, OSError) as e:
-                logger.warning(f"[WS] {e} — reconnecting in {backoff:.1f}s")
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30)
+                logger.warning(f"[PumpHub] {e} — reconnecting in {backoff:.1f}s")
+            except asyncio.CancelledError:
+                logger.info("[PumpHub] Cancelled")
+                return
             except Exception as e:
-                logger.error(f"[WS] Unexpected: {e}")
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30)
+                logger.error(f"[PumpHub] Unexpected: {e}")
+            finally:
+                self._ws = None
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+
+    # ── Public API ────────────────────────────────────────────────────────
+
+    def _ensure_running(self):
+        """Start the background hub task if not already running."""
+        if self._task is None or self._task.done():
+            try:
+                loop = asyncio.get_running_loop()
+                self._task = loop.create_task(self._run())
+            except RuntimeError:
+                pass  # no event loop yet — will be started on first register
+
+    async def register(self, mint: str) -> asyncio.Queue:
+        """Register a consumer for *mint* and return its dedicated queue."""
+        self._ensure_running()
+        async with self._lock:
+            q: asyncio.Queue = asyncio.Queue(maxsize=512)
+            self._queues[mint].add(q)
+            first_for_mint = len(self._queues[mint]) == 1
+        if first_for_mint:
+            await self._subscribe(mint)
+        return q
+
+    async def unregister(self, mint: str, q: asyncio.Queue):
+        """Remove a consumer queue.  Unsubscribes from PumpPortal when last consumer leaves."""
+        async with self._lock:
+            self._queues[mint].discard(q)
+            last_consumer = len(self._queues[mint]) == 0
+            if last_consumer:
+                del self._queues[mint]
+        if last_consumer:
+            await self._unsubscribe(mint)
+
+
+# Process-global singleton
+_pump_hub = _SharedPumpPortalHub()
+
+
+class PumpFunWSClient:
+    """Yields normalised trade dicts for a given token mint.
+
+    Internally shares a single WebSocket connection to PumpPortal across all
+    concurrent instances via _SharedPumpPortalHub — no per-instance connection
+    is opened.  The public API (stream / stop) is unchanged.
+    """
+
+    def __init__(self, mint: str):
+        self.mint  = mint
+        self._stop = False
+        self._queue: Optional[asyncio.Queue] = None
+
+    def stop(self):
+        self._stop = True
+        # Wake up the stream coroutine if it's blocked on queue.get()
+        if self._queue is not None:
+            try:
+                self._queue.put_nowait(None)  # sentinel
+            except asyncio.QueueFull:
+                pass
+
+    async def stream(self) -> AsyncGenerator[dict, None]:
+        q = await _pump_hub.register(self.mint)
+        self._queue = q
+        try:
+            while not self._stop:
+                try:
+                    item = await asyncio.wait_for(q.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                if item is None:          # stop() sentinel
+                    break
+                yield item
+        finally:
+            self._queue = None
+            await _pump_hub.unregister(self.mint, q)
 
     @staticmethod
     def _normalise(msg: dict) -> Optional[dict]:
