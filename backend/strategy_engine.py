@@ -433,6 +433,7 @@ class StrategyEngine:
         self.close_history: list[float] = []
         self.high_history: list[float] = []
         self.low_history: list[float] = []
+        self.open_history: list[float] = []
 
         # EMA spread tracking
         self.prev_ema_spread: float = 0.0
@@ -443,6 +444,7 @@ class StrategyEngine:
         self.trend_start_price: float = 0.0
         self.trend_start_atr: float = 0.0
         self.trend_start_delta: float = 0.0
+        self.trend_start_bar: int = 0     # Bar index when current trend/continuation began
         self.exhaustion_bar_count: int = 0
         self.trend_bar_count: int = 0     # Bars spent in current TREND regime
 
@@ -505,6 +507,7 @@ class StrategyEngine:
         self.close_history.append(c)
         self.high_history.append(h)
         self.low_history.append(l)
+        self.open_history.append(o)
 
         # EMA
         if self.ema_fast_val is None:
@@ -803,18 +806,20 @@ class StrategyEngine:
         if direction == Direction.DOWN and not self._pre_entry_stable_down:
             return False
 
-        # §11: Single-candle spike filter — block entries triggered by a single
-        # outlier candle (pump/manipulation spike).  If the most recent candle's
-        # body (|close - open|) is larger than spike_atr_multiplier × ATR, the
-        # signal is driven by one anomalous bar, not a real trend buildup.
-        if (self.atr_val and self.atr_val > 0
-                and len(self.close_history) >= 2
-                and len(self.high_history) >= 1):
-            last_open = self.close_history[-2]   # prev close ≈ current open
-            last_close = self.close_history[-1]  # current close
-            candle_body = abs(last_close - last_open)
-            if candle_body > self.spike_atr_multiplier * self.atr_val:
-                return False
+        # §11: Trend-window spike filter — block entries if ANY candle within
+        # the current trend period has a body larger than spike_atr_multiplier × ATR.
+        # This catches outlier pumps that happened mid-trend, not just the last bar.
+        if self.atr_val and self.atr_val > 0 and len(self.open_history) >= 2:
+            spike_threshold = self.spike_atr_multiplier * self.atr_val
+            # Determine how many bars back the current trend started
+            trend_bars_back = max(1, self.bar_count - self.trend_start_bar)
+            # Clamp to available history (never look back more than we have)
+            lookback = min(trend_bars_back, len(self.open_history))
+            for i in range(-lookback, 0):
+                o_i = self.open_history[i]
+                c_i = self.close_history[i]
+                if abs(c_i - o_i) > spike_threshold:
+                    return False
 
         # §10: Entry location filter — reject if mid-range / in value area
         # "value area" = inside an HVN cluster (already tracked)
@@ -1004,6 +1009,7 @@ class StrategyEngine:
                 self.trend_start_price = c
                 self.trend_start_atr = self.atr_val or 0
                 self.trend_start_delta = self.current_profile.cumulative_delta if self.current_profile else 0
+                self.trend_start_bar = self.bar_count
                 self.exhaustion_bar_count = 0
                 self.trend_bar_count = 0
                 self.exhaustion_persist_count = 0
@@ -1102,6 +1108,7 @@ class StrategyEngine:
                         signal = Signal.EXIT
                     self.trend_start_price = c
                     self.trend_start_atr = self.atr_val or 0
+                    self.trend_start_bar = self.bar_count
                     self._start_new_profile(c)
                     self.exhaustion_bar_count = 0
                     return self.regime, signal
@@ -1133,6 +1140,7 @@ class StrategyEngine:
 
                     self.trend_start_price = c
                     self.trend_start_atr = self.atr_val or 0
+                    self.trend_start_bar = self.bar_count
                     self._start_new_profile(c)
                     self.exhaustion_bar_count = 0
                     return self.regime, signal
@@ -1228,6 +1236,7 @@ class StrategyEngine:
                 # Transition to TREND with new direction
                 self.trend_start_price = c
                 self.trend_start_atr = self.atr_val or 0
+                self.trend_start_bar = self.bar_count
                 self._start_new_profile(c)
                 self.exhaustion_bar_count = 0
                 self.trend_bar_count = 0
