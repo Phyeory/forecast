@@ -468,7 +468,6 @@ class StrategyEngine:
         # Trade tracking
         self.in_position = False
         self.entry_price: float = 0.0
-        self.trailing_stop: Optional[float] = None
         self.position_direction: Direction = Direction.NONE
 
         # ── NEW: Rolling buffers for regime filter & confidence ────────
@@ -1269,11 +1268,6 @@ class StrategyEngine:
         if not self.in_position:
             return None
 
-        # 1. Trailing stop loss
-        if self.trailing_stop is not None:
-            if self.position_direction == Direction.UP and c <= self.trailing_stop:
-                return Signal.EXIT
-
         # 2. Prolonged exhaustion (consolidation)
         if self.regime == Regime.EXHAUSTION and self.exhaustion_bar_count >= self.exhaustion_bars_limit:
             return Signal.EXIT
@@ -1288,18 +1282,6 @@ class StrategyEngine:
                 return Signal.EXIT
 
         return None
-
-    def _update_trailing_stop(self, c: float):
-        """Update trailing stop if profit >= 5% (long-only)."""
-        if not self.in_position or self.entry_price <= 0:
-            return
-
-        if self.position_direction == Direction.UP:
-            pnl_pct = (c - self.entry_price) / self.entry_price * 100
-            if pnl_pct >= 5.0:
-                new_stop = self.entry_price * 1.05
-                if self.trailing_stop is None or new_stop > self.trailing_stop:
-                    self.trailing_stop = new_stop
 
     def _update_profile(self, c: float, vol: float, is_buy: bool, time: int):
         """Feed trade into current volume profile."""
@@ -1316,12 +1298,10 @@ class StrategyEngine:
         self.in_position = True
         self.entry_price = entry_price
         self.position_direction = direction
-        self.trailing_stop = None
 
     def notify_trade_closed(self):
         self.in_position = False
         self.entry_price = 0.0
-        self.trailing_stop = None
         self.position_direction = Direction.NONE
 
     def update(
@@ -1365,9 +1345,6 @@ class StrategyEngine:
             if exit_signal:
                 signal = exit_signal
 
-        # Update trailing stop
-        self._update_trailing_stop(c)
-
         return self._build_result(time, c, signal)
 
     def _build_result(self, time: int, price: float, signal: Optional[Signal]) -> dict:
@@ -1406,7 +1383,6 @@ class StrategyEngine:
             "volume_profiles": all_profiles,
             "in_position": self.in_position,
             "entry_price": self.entry_price,
-            "trailing_stop": self.trailing_stop,
             "exhaustion_bars": self.exhaustion_bar_count,
             "in_chop": self._is_chop_zone(price) or self._in_local_chop,
             "trend_bars": self.trend_bar_count,

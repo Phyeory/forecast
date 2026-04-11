@@ -315,7 +315,7 @@ async def delete_backtest_endpoint(backtest_id: int):
 async def chart_ws(
     websocket: WebSocket,
     mint: str,
-    timeframe: str = Query(default="1m"),
+    timeframe: str = Query(default="1s"),
     params: str = Query(default="{}"),
 ):
     if timeframe not in TIMEFRAME_SECONDS:
@@ -573,7 +573,7 @@ async def live_stop_all():
 async def live_trading_ws(
     websocket: WebSocket,
     mint: str,
-    timeframe: str = Query(default="1m"),
+    timeframe: str = Query(default="1s"),
     private_key: str = Query(default=""),
     buy_size: float = Query(default=0.1),
     slippage_bps: int = Query(default=1000),

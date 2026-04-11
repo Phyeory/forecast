@@ -7,7 +7,6 @@ Settings:
   - Priority fee: 0.0001 SOL
   - Bribe fee: 0.00001 SOL
   - Slippage: 10%
-  - Trailing stop: +5% profit → lock stop at entry +5%
 
 Execution model:
   - Signals from candle N are executed at the OPEN of candle N+1 (1-bar delay).
@@ -322,8 +321,6 @@ class ForwardTester:
                 reason = "continuation_exit"
             elif regime == Regime.TREND.value:
                 reason = "trend_exit"
-            elif self.engine.trailing_stop is not None and c <= self.engine.trailing_stop:
-                reason = "trailing_stop"
                 
             self._pending_exit = True
             self._pending_exit_reason = reason

@@ -116,8 +116,8 @@ class LiveTrader:
         self,
         token_mint: str,
         keypair: Keypair,
-        buy_size_sol: float = 0.1,
-        slippage_bps: int = 1000,
+        buy_size_sol: float = 0.01,
+        slippage_bps: int = 1500,
         priority_fee_lamports: int = 100_000,
         min_market_cap_usd: float = 20_000.0,
         engine_kwargs: Optional[dict] = None,
@@ -723,8 +723,6 @@ class LiveTrader:
                 exit_reason = "continuation_exit"
             elif regime == Regime.TREND.value:
                 exit_reason = "trend_exit"
-            elif self.engine.trailing_stop is not None and c <= self.engine.trailing_stop:
-                exit_reason = "trailing_stop"
 
             self.current_trade.status = "closing"
             self.current_trade.exit_reason = exit_reason
