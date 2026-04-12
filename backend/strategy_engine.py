@@ -336,7 +336,7 @@ class StrategyEngine:
         ema_slow: int = 7,
         atr_period: int = 7,
         roc_period: int = 3,
-        warmup: int = 20,
+        warmup: int = 5,
         signal_strong: float = 2.0,
         signal_weak: float = 1.5,
         signal_noise: float = 1.0,
@@ -364,11 +364,14 @@ class StrategyEngine:
         atr_floor_k: float = 0.6,             # ATR floor multiplier (§4)
         ema_cross_persist_bars: int = 2,      # min bars EMA spread increasing (§5)
         exhaustion_s_decay_bars: int = 2,      # bars S must decay for exhaustion (§6)
+        exhaustion_stall_bars: int = 3,        # §6b: bars to check for price stall
+        exhaustion_stall_atr_pct: float = 0.4, # §6b: close range < N×ATR → stalling
         local_range_bars: int = 10,            # lookback for local range (§8)
         local_range_threshold_pct: float = 0.3,# min range % of price (§8)
         sign_flip_threshold: int = 4,          # max sign flips before chop (§8)
-        stability_bars: int = 2,              # required consecutive stability bars (§9) [was 2]
-        spike_atr_multiplier: float = 2.0,    # §11: reject entry if last candle body > N×ATR
+        stability_bars: int = 3,              # required consecutive stability bars (§9) [was 2]
+        spike_atr_multiplier: float = 1.7,    # §11: reject entry if last candle body > N×ATR
+        spike_lookback_bars: int = 5,          # §11: how many recent bars to scan for spikes
     ):
         self.ema_fast_p = ema_fast
         self.ema_slow_p = ema_slow
@@ -406,7 +409,10 @@ class StrategyEngine:
         self.local_range_threshold_pct = local_range_threshold_pct
         self.sign_flip_threshold = sign_flip_threshold
         self.stability_bars = stability_bars
+        self.exhaustion_stall_bars = exhaustion_stall_bars
+        self.exhaustion_stall_atr_pct = exhaustion_stall_atr_pct
         self.spike_atr_multiplier = spike_atr_multiplier
+        self.spike_lookback_bars = spike_lookback_bars
 
         # State
         self.bar_count = 0
@@ -806,15 +812,17 @@ class StrategyEngine:
         if direction == Direction.DOWN and not self._pre_entry_stable_down:
             return False
 
-        # §11: Trend-window spike filter — block entries if ANY candle within
-        # the current trend period has a body larger than spike_atr_multiplier × ATR.
-        # This catches outlier pumps that happened mid-trend, not just the last bar.
+        # §11: Recent spike filter — block entries if any candle within the last
+        # spike_lookback_bars has a body > spike_atr_multiplier × ATR.
+        # Looking back at the whole trend history was too aggressive: on volatile
+        # tokens virtually every trend has one outlier candle somewhere, and the
+        # current ATR (a lagged EMA) doesn't accurately reflect per-bar volatility
+        # from many bars ago.  A short recent window catches genuine pre-entry pumps
+        # without falsely blocking all entries.
         if self.atr_val and self.atr_val > 0 and len(self.open_history) >= 2:
             spike_threshold = self.spike_atr_multiplier * self.atr_val
-            # Determine how many bars back the current trend started
-            trend_bars_back = max(1, self.bar_count - self.trend_start_bar)
-            # Clamp to available history (never look back more than we have)
-            lookback = min(trend_bars_back, len(self.open_history))
+            # Only scan the last spike_lookback_bars candles
+            lookback = min(self.spike_lookback_bars, len(self.open_history))
             for i in range(-lookback, 0):
                 o_i = self.open_history[i]
                 c_i = self.close_history[i]
@@ -947,6 +955,16 @@ class StrategyEngine:
         if len(self._signal_strength_history) >= 2:
             s_decreasing = self._signal_strength_history[-1] < self._signal_strength_history[-2]
 
+        # §6b: Price stall detector — if close range over last N bars is tiny
+        # relative to ATR, price is going nowhere → strong exhaustion signal.
+        price_stalling = False
+        atr_now: float = self.atr_val if self.atr_val is not None else 0.0
+        n_stall = self.exhaustion_stall_bars
+        if atr_now > 0 and len(self.close_history) >= n_stall:
+            stall_window = self.close_history[-n_stall:]
+            close_range = max(stall_window) - min(stall_window)
+            price_stalling = close_range < self.exhaustion_stall_atr_pct * atr_now
+
         # Profile checks
         in_hvn_current = False
         in_hvn_opposite = False
@@ -1028,6 +1046,7 @@ class StrategyEngine:
                 return self.regime, None
 
             # §6: Strengthened exhaustion — require BOTH momentum decay AND S decay
+            # §6b: price_stalling counts as 3 conditions by itself (hard stall evidence)
             spread_shrinking = not self.spread_expanding
             exhaust_conds = [
                 spread_shrinking,
@@ -1036,20 +1055,26 @@ class StrategyEngine:
                 S < self.S_weak,
                 self.momentum_acceleration < 0,  # require decelerating momentum
                 s_decreasing,                    # §6: S must also be decreasing
+                price_stalling,                  # §6b: price going nowhere
+                price_stalling,                  # counts double — stall is decisive
             ]
             met = sum(1 for x in exhaust_conds if x)
 
-            # In chop zones, require ALL 6 conditions (stricter)
-            exhaust_threshold = 5 if in_chop else 3  # §6: s_decreasing is additive, not hard gate
+            # In chop zones, require all 6 standard conditions (stricter).
+            # Normal trend: 3/8 suffices (stall alone = 2pts, stall+decay = 3pts).
+            exhaust_threshold = 6 if in_chop else 3
 
             if met >= exhaust_threshold:
-                # §6: Exhaustion persistence with BOTH decay conditions
-                if momentum_decay and s_decreasing:
+                # §6: Exhaustion persistence — require either price stall OR both decay signals
+                decay_confirmed = (momentum_decay and s_decreasing) or price_stalling
+                if decay_confirmed:
                     self.exhaustion_persist_count += 1
                 else:
                     self.exhaustion_persist_count = 0
 
-                if self.exhaustion_persist_count >= self.exhaustion_persist_bars:
+                # Price stall is so decisive it only needs 1 persistence bar
+                persist_needed = 1 if price_stalling else self.exhaustion_persist_bars
+                if self.exhaustion_persist_count >= persist_needed:
                     self.regime = Regime.EXHAUSTION
                     self.trend_before_exhaustion = self.direction  # Lock original trend
                     self.exhaustion_bar_count = 0
@@ -1064,6 +1089,17 @@ class StrategyEngine:
             # Direction change while in trend → could be rapid reversal
             # §5: require EMA cross to be validated + momentum zero-cross + persistence
             if direction != self.direction and direction != Direction.NONE:
+                # Fast-path: if EMA cross valid AND S already strong in new direction,
+                # this is a real reversal — don't waste bars in EXHAUSTION.
+                if self._ema_cross_valid and S > self.S_strong:
+                    self.prev_direction = self.direction
+                    self.regime = Regime.REVERSAL
+                    self.direction = direction
+                    self.reversal_bar_count = 0
+                    self.trend_reversal_confirm_count = 0
+                    self.exhaustion_persist_count = 0
+                    return self.regime, None
+
                 if roc_zero_cross and self._ema_cross_valid:
                     self.trend_reversal_confirm_count += 1
                     if self.trend_reversal_confirm_count >= self.reversal_confirm_bars:
@@ -1076,8 +1112,8 @@ class StrategyEngine:
                 else:
                     self.trend_reversal_confirm_count = 0
 
-                # EMA cross happened but momentum zero-cross not confirmed yet
-                # → go to exhaustion first (with persistence requirement)
+                # EMA cross happened but momentum not confirmed yet
+                # → go to exhaustion (with persistence requirement)
                 self.exhaustion_persist_count += 1
                 if self.exhaustion_persist_count >= self.exhaustion_persist_bars:
                     self.regime = Regime.EXHAUSTION
