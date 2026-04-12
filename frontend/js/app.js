@@ -63,7 +63,7 @@ let engineParams = {
   confidence_w1: 0.30, confidence_w2: 0.25, confidence_w3: 0.25, confidence_w4: 0.20,
   atr_floor_k: 0.6, ema_cross_persist_bars: 2, exhaustion_s_decay_bars: 2,
   local_range_bars: 10, local_range_threshold_pct: 0.3, sign_flip_threshold: 4,
-  stability_bars: 2,
+  stability_bars: 3,
   spike_atr_multiplier: 2.0,
 };
 
@@ -1541,6 +1541,12 @@ async function deleteBacktest(id, e) {
   loadBacktestsList();
 }
 
+async function deleteAllBacktests() {
+  if (!confirm("Are you sure you want to delete ALL backtests?")) return;
+  await apiFetch(`/api/backtests`, { method: "DELETE" });
+  loadBacktestsList();
+}
+
 document.getElementById("bt-run-btn").addEventListener("click", async () => {
   const recId = document.getElementById("bt-recording-select").value;
   if (!recId) return alert("Select a recording first");
@@ -1698,6 +1704,7 @@ window.loadViewer = loadViewer;
 window.deleteRecording = deleteRecording;
 window.loadBacktestResult = loadBacktestResult;
 window.deleteBacktest = deleteBacktest;
+window.deleteAllBacktests = deleteAllBacktests;
 
 /* ════════════════════════════════════════════════════════════════════════
    LIVE TRADING — Real on-chain execution via Phantom + Jupiter

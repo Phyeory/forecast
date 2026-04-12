@@ -362,6 +362,15 @@ def delete_backtest(backtest_id: int):
     conn.close()
 
 
+def delete_all_backtests():
+    conn = _get_backtest_conn()
+    conn.execute("DELETE FROM backtest_candles")
+    conn.execute("DELETE FROM backtest_trades")
+    conn.execute("DELETE FROM backtests")
+    conn.commit()
+    conn.close()
+
+
 # ── Init on import ───────────────────────────────────────────────────────────
 
 init_price_db()

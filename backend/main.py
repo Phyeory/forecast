@@ -311,6 +311,12 @@ async def delete_backtest_endpoint(backtest_id: int):
     return JSONResponse({"status": "deleted"})
 
 
+@app.delete("/api/backtests")
+async def delete_all_backtests_endpoint():
+    data_store.delete_all_backtests()
+    return JSONResponse({"status": "deleted_all"})
+
+
 @app.websocket("/ws/{mint}")
 async def chart_ws(
     websocket: WebSocket,
