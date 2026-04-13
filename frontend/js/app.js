@@ -66,8 +66,8 @@ let engineParams = {
   stability_bars: 3,
   spike_atr_multiplier: 1.7,
   spike_lookback_bars: 5,
-  exhaustion_stall_bars: 3,
-  exhaustion_stall_atr_pct: 0.4,
+  exhaustion_stall_bars: 4,
+  exhaustion_stall_atr_pct: 0.3,
 };
 
 const $ = id => document.getElementById(id);

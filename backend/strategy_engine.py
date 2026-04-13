@@ -364,8 +364,8 @@ class StrategyEngine:
         atr_floor_k: float = 0.6,             # ATR floor multiplier (§4)
         ema_cross_persist_bars: int = 2,      # min bars EMA spread increasing (§5)
         exhaustion_s_decay_bars: int = 2,      # bars S must decay for exhaustion (§6)
-        exhaustion_stall_bars: int = 3,        # §6b: bars to check for price stall
-        exhaustion_stall_atr_pct: float = 0.4, # §6b: close range < N×ATR → stalling
+        exhaustion_stall_bars: int = 4,        # §6b: bars to check for price stall
+        exhaustion_stall_atr_pct: float = 0.3, # §6b: close range < N×ATR → stalling
         local_range_bars: int = 10,            # lookback for local range (§8)
         local_range_threshold_pct: float = 0.3,# min range % of price (§8)
         sign_flip_threshold: int = 4,          # max sign flips before chop (§8)
