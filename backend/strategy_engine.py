@@ -340,7 +340,7 @@ class StrategyEngine:
         signal_strong: float = 2.0,
         signal_weak: float = 1.5,
         signal_noise: float = 1.0,
-        exhaustion_bars_limit: int = 3, #changed from 7
+        exhaustion_bars_limit: int = 6, #changed from 7
         delta_threshold: float = 0.3,
         kalman_gamma: float = 0.05,
         min_trend_bars: int = 2, # changed from 3
@@ -364,13 +364,13 @@ class StrategyEngine:
         atr_floor_k: float = 0.6,             # ATR floor multiplier (§4)
         ema_cross_persist_bars: int = 2,      # min bars EMA spread increasing (§5)
         exhaustion_s_decay_bars: int = 2,      # bars S must decay for exhaustion (§6)
-        exhaustion_stall_bars: int = 4,        # §6b: bars to check for price stall
-        exhaustion_stall_atr_pct: float = 0.3, # §6b: close range < N×ATR → stalling
+        exhaustion_stall_bars: int = 6,        # §6b: bars to check for price stall
+        exhaustion_stall_atr_pct: float = 0.6, # §6b: close range < N×ATR → stalling
         local_range_bars: int = 10,            # lookback for local range (§8)
         local_range_threshold_pct: float = 0.3,# min range % of price (§8)
         sign_flip_threshold: int = 4,          # max sign flips before chop (§8)
         stability_bars: int = 3,              # required consecutive stability bars (§9) [was 2]
-        spike_atr_multiplier: float = 1.7,    # §11: reject entry if last candle body > N×ATR
+        spike_atr_multiplier: float = 2,    # §11: reject entry if last candle body > N×ATR
         spike_lookback_bars: int = 5,          # §11: how many recent bars to scan for spikes
     ):
         self.ema_fast_p = ema_fast
@@ -1066,7 +1066,7 @@ class StrategyEngine:
 
             if met >= exhaust_threshold:
                 # §6: Exhaustion persistence — require either price stall OR both decay signals
-                decay_confirmed = (momentum_decay and s_decreasing) or price_stalling
+                decay_confirmed = decay_confirmed = momentum_decay and s_decreasing
                 if decay_confirmed:
                     self.exhaustion_persist_count += 1
                 else:
