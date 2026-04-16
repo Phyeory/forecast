@@ -782,8 +782,14 @@ class StrategyEngine:
         accel_up = self.momentum_acceleration > 0
         accel_down = self.momentum_acceleration < 0
 
-        self._pre_entry_stable_up = (m_increasing_up or s_increasing) and accel_up
-        self._pre_entry_stable_down = (m_increasing_down or s_increasing) and accel_down
+        # Flaw-4 fix: require m_hat sign agreement with direction.
+        # s_increasing is direction-agnostic (|m_hat|/ATR growing), so on a
+        # downtrend with growing |m_hat|, s_increasing=True would wrongly
+        # satisfy _pre_entry_stable_up.  The sign check prevents that.
+        m_hat_positive = self.m_hat > 0
+        m_hat_negative = self.m_hat < 0
+        self._pre_entry_stable_up = m_hat_positive and (m_increasing_up or s_increasing) and accel_up
+        self._pre_entry_stable_down = m_hat_negative and (m_increasing_down or s_increasing) and accel_down
         
         # For general dashboard display, true if stable in any direction
         self._pre_entry_stable = self._pre_entry_stable_up or self._pre_entry_stable_down
@@ -1159,15 +1165,16 @@ class StrategyEngine:
                     if direction == Direction.UP and self.trend_before_exhaustion == Direction.DOWN:
                         # it shouldnt be just 1 bar, it should be the exhaustion threshold
                         if self.exhaustion_bar_count >= self.exhaustion_persist_bars:
-                            if not self.in_position and S > self.S_weak and self.momentum_acceleration > 0:
+                            if not self.in_position and S > self.S_weak and self.m_hat > 0:
                                 # §7/§9/§10: Entry gate must pass
                                 if self._passes_entry_gate(c, direction):
                                     entry_conds = [
-                                        S > self.S_strong,
-                                        delta_aligned,
-                                        self._is_leaving_hvn(c, direction),
-                                        self.s_effective > self.s_effective_threshold,
-                                        self.spread_expanding,
+                                        S > self.S_strong,                          # signal strength
+                                        delta_aligned,                              # volume delta confirms
+                                        self._is_leaving_hvn(c, direction),         # not trapped in resistance
+                                        self.momentum_acceleration > 0,             # momentum building
+                                        self._ema_cross_valid,
+                                        self.s_effective > self.s_effective_threshold                      # confirmed EMA direction
                                     ]
                                     if sum(1 for x in entry_conds if x) >= 2:
                                         signal = Signal.BUY
@@ -1251,18 +1258,28 @@ class StrategyEngine:
                 self.direction = new_dir
                 signal = None
                 # Dynamic entry: BUY when core conditions met + enough
-                # confirming signals.  S > S_weak and momentum_acceleration > 0
-                # are hard requirements; the rest are scored (2/5 needed).
+                # confirming signals.  S > S_weak and m_hat > 0 (Flaw-2 fix:
+                # sign check instead of acceleration) are hard requirements;
+                # the rest are scored (2/5 needed).
+                # Flaw-2 fix: replaced momentum_acceleration > 0 with m_hat > 0.
+                # Coming out of EXHAUSTION→REVERSAL, the Kalman filter is still
+                # smoothing out the momentum decay, so acceleration is often negative
+                # for 1-2 bars even though m_hat has already flipped positive.
+                # Checking the sign of m_hat catches the new move immediately.
                 if new_dir == Direction.UP and self.prev_direction == Direction.DOWN:
-                    if not self.in_position and S > self.S_weak and self.momentum_acceleration > 0:
+                    if not self.in_position and S > self.S_weak and self.m_hat > 0:
                         # §7/§9/§10: Entry gate must pass
                         if self._passes_entry_gate(c, new_dir):
+                            # Flaw-1 fix: replaced s_effective (degenerates to S on fresh
+                            # profile) and spread_expanding (already a hard gate above)
+                            # with independent signals.
                             entry_conds = [
-                                S > self.S_strong,
-                                delta_aligned,
-                                self._is_leaving_hvn(c, new_dir),
-                                self.s_effective > self.s_effective_threshold,
-                                self.spread_expanding,
+                                S > self.S_strong,                          # signal strength
+                                delta_aligned,                              # volume delta confirms
+                                self._is_leaving_hvn(c, new_dir),           # not trapped in resistance
+                                self.momentum_acceleration > 0,             # momentum building
+                                self._ema_cross_valid,    
+                                self.s_effective > self.s_effective_threshold,                  # confirmed EMA direction
                             ]
                             if sum(1 for x in entry_conds if x) >= 2:
                                 signal = Signal.BUY
