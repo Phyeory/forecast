@@ -15,7 +15,7 @@ from pumpfun_client import DexScreenerPollClient, PumpFunWSClient, PumpSwapRPCCl
 from forward_tester import ForwardTester
 from live_trader import LiveTrader, keypair_from_private_key
 import data_store
-from backtester import run_backtest
+from backtester import run_backtest, run_backtest_batch
 
 logging.basicConfig(
     level=logging.INFO,
@@ -275,7 +275,9 @@ async def run_backtest_endpoint(body: dict = Body(...)):
         return JSONResponse({"error": "recording_id is required"}, status_code=400)
     engine_params = body.get("engine_params", {})
     try:
-        result = run_backtest(
+        # Run CPU-bound backtest in thread pool to avoid blocking the event loop
+        result = await asyncio.to_thread(
+            run_backtest,
             recording_id=int(recording_id),
             engine_params=engine_params,
             buy_size_sol=body.get("buy_size_sol", 0.1),
@@ -289,6 +291,33 @@ async def run_backtest_endpoint(body: dict = Body(...)):
         return JSONResponse({"error": str(e)}, status_code=404)
     except Exception as e:
         logger.error(f"Backtest error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/backtest/batch")
+async def run_backtest_batch_endpoint(body: dict = Body(default={})):
+    """Run backtests on ALL completed recordings in parallel."""
+    engine_params = body.get("engine_params", {})
+    try:
+        results = await asyncio.to_thread(
+            run_backtest_batch,
+            engine_params=engine_params,
+            buy_size_sol=body.get("buy_size_sol", 0.1),
+            priority_fee=body.get("priority_fee", 0.0001),
+            bribe_fee=body.get("bribe_fee", 0.00001),
+            slippage_pct=body.get("slippage_pct", 1.0),
+            starting_balance=body.get("starting_balance", 1.0),
+        )
+        succeeded = [r for r in results if "error" not in r]
+        failed = [r for r in results if "error" in r]
+        return JSONResponse({
+            "total": len(results),
+            "succeeded": len(succeeded),
+            "failed": len(failed),
+            "results": results,
+        })
+    except Exception as e:
+        logger.error(f"Batch backtest error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 

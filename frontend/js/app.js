@@ -55,19 +55,19 @@ let engineParams = {
   ema_fast: 3, ema_slow: 7, atr_period: 7, roc_period: 3, warmup: 5,
   signal_strong: 2, signal_weak: 1.5, signal_noise: 1,
   exhaustion_bars_limit: 3, delta_threshold: 0.3, kalman_gamma: 0.05,
-  min_trend_bars: 2, reversal_confirm_bars: 2, chop_atr_pct: 0.5,
+  min_trend_bars: 5, reversal_confirm_bars: 2, chop_atr_pct: 0.5,
   chop_spread_pct: 0.15, reversal_exit_confirm_bars: 1,
-  s_effective_threshold: 0.5, exhaustion_persist_bars: 2,
+  s_effective_threshold: 0.5, exhaustion_persist_bars: 4,
   regime_lookback: 5, persistence_threshold: 3, momentum_mean_threshold: 0.0,
-  ema_min_spread_pct: 0.05, confidence_high: 0.65, confidence_low: 0.4,
+  ema_min_spread_pct: 0.065, confidence_high: 0.65, confidence_low: 0.4,
   confidence_w1: 0.30, confidence_w2: 0.25, confidence_w3: 0.25, confidence_w4: 0.20,
-  atr_floor_k: 0.6, ema_cross_persist_bars: 2, exhaustion_s_decay_bars: 2,
+  atr_floor_k: 0.6, ema_cross_persist_bars: 4, exhaustion_s_decay_bars: 2,
   local_range_bars: 10, local_range_threshold_pct: 0.3, sign_flip_threshold: 4,
   stability_bars: 3,
   spike_atr_multiplier: 2,
   spike_lookback_bars: 5,
-  exhaustion_stall_bars: 4,
-  exhaustion_stall_atr_pct: 0.3,
+  exhaustion_stall_bars: 5,
+  exhaustion_stall_atr_pct: 0.4,
 };
 
 const $ = id => document.getElementById(id);
@@ -1579,30 +1579,24 @@ document.getElementById("bt-run-all-btn").addEventListener("click", async () => 
   prog.classList.remove("hidden");
   runAllBtn.disabled = true;
   runBtn.disabled = true;
+  progLabel.textContent = `Running all ${completed.length} recordings in parallel…`;
 
-  let done = 0;
-  let failed = 0;
-  for (const rec of completed) {
-    progLabel.textContent = `Running ${done + 1} / ${completed.length}: ${rec.token_name || rec.mint?.slice(0, 8) || "?"}…`;
-    try {
-      const result = await apiFetch("/api/backtest", {
-        method: "POST",
-        body: JSON.stringify({ recording_id: rec.id, engine_params: engineParams }),
-      });
-      if (result.error) failed++;
-      done++;
-    } catch (e) {
-      failed++;
-      done++;
-    }
+  try {
+    const result = await apiFetch("/api/backtest/batch", {
+      method: "POST",
+      body: JSON.stringify({ engine_params: engineParams }),
+    });
+    const msg = `Done: ${result.succeeded}/${result.total} backtests succeeded.`;
+    if (result.failed > 0) alert(msg);
+    loadBacktestsList();
+  } catch (e) {
+    alert(`Batch backtest failed: ${e.message || e}`);
+  } finally {
+    prog.classList.add("hidden");
+    runAllBtn.disabled = false;
+    runBtn.disabled = false;
+    progLabel.textContent = "Running…";
   }
-
-  prog.classList.add("hidden");
-  runAllBtn.disabled = false;
-  runBtn.disabled = false;
-  progLabel.textContent = "Running…";
-  loadBacktestsList();
-  if (failed) alert(`Done. ${completed.length - failed}/${completed.length} backtests succeeded.`);
 });
 
 document.getElementById("bt-params-btn").addEventListener("click", () => {

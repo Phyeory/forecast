@@ -266,6 +266,7 @@ class ForwardTester:
         l: float,
         c: float,
         volume: float = 0.0,
+        _build_full_result: bool = True,
     ) -> dict:
         """
         Process one candle through strategy engine + forward tester.
@@ -277,6 +278,11 @@ class ForwardTester:
              open visible on the chart.
           2. The strategy engine evaluates THIS full candle and may queue
              a new pending signal for the NEXT candle.
+
+        When _build_full_result=False (backtester fast path), the strategy
+        engine still processes the bar fully, but the expensive result dict
+        construction (volume profiles, unrealised PnL, signal log) is
+        skipped.  Trade execution is unaffected.
         """
         trade_action = None
         closed_trade = None
@@ -301,9 +307,10 @@ class ForwardTester:
             self._pending_exit_reason = ""
 
         # ── Step 2: Run strategy engine on this full candle ───────────────
-        result = self.engine.update(time, o, h, l, c, volume)
-        signal = result["signal"]
-        regime = result["regime"]
+        result = self.engine.update(time, o, h, l, c, volume,
+                                    _build_full_result=_build_full_result)
+        signal = result.get("signal", "none")
+        regime = result.get("regime", "idle")
 
         # ── Step 3: Queue signal for the NEXT candle's open ───────────────
         if signal == Signal.BUY.value and self.current_trade is None and not self._pending_buy:
@@ -326,19 +333,31 @@ class ForwardTester:
             self._pending_exit_reason = reason
             self._pending_buy = False
 
+        # ── Fast path: skip expensive output construction ─────────────────
+        if not _build_full_result:
+            # Return minimal dict — only trade_action is needed by backtester
+            if trade_action:
+                trade_label = ""
+                if trade_action == "buy" and opened_trade:
+                    trade_label = opened_trade.entry_reason
+                elif trade_action == "exit" and closed_trade:
+                    trade_label = closed_trade.exit_reason
+                return {
+                    "forward_test": {
+                        "trade_action": trade_action,
+                        "trade_label": trade_label,
+                    }
+                }
+            return {}
+
         # ── Step 4: Unrealized PnL using realistic delayed/slipped prices ───────
         unrealized_pnl = 0.0
         unrealized_pnl_pct = 0.0
         current_trade = self.current_trade
         if current_trade is not None:
             # Simulate delay and slippage for hypothetical exit right now
-            total_fee = self.priority_fee + self.bribe_fee
-            delay_fraction = 0.000005 / max(total_fee, 1e-9)
-            delay_fraction = max(0.01, min(1.0, delay_fraction))
-            # since we are intra-candle (c is current price), just use c
-            delayed_price_now = c 
             slip = self.slippage_pct / 100.0
-            hypothetical_exit_price = delayed_price_now * (1.0 - slip)
+            hypothetical_exit_price = c * (1.0 - slip)
 
             hypothetical_proceeds = current_trade.size_tokens * hypothetical_exit_price
             hypothetical_proceeds -= self.total_fees_per_trade

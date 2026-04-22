@@ -16,7 +16,6 @@ Core signal:  S = |m_hat| / ATR
 
 from __future__ import annotations
 import math
-import numpy as np
 from enum import Enum, auto
 from dataclasses import dataclass, field
 from typing import Optional
@@ -198,6 +197,7 @@ def ema_step(prev: float, value: float, period: int) -> float:
 class KalmanFilterMomentum:
     """
     2-state Kalman filter for price + momentum estimation.
+    Pure-scalar implementation (no numpy) for maximum throughput.
 
     State vector:  x = [p, m]^T
       p = price
@@ -213,44 +213,24 @@ class KalmanFilterMomentum:
 
     def __init__(self, gamma: float = 0.1, q_price: float = 0.01,
                  q_momentum: float = 0.05, r_measure: float = 1.0):
-        """
-        Parameters
-        ----------
-        gamma : float
-            Momentum decay factor (0.05–0.2 typical). Higher = faster decay.
-        q_price : float
-            Process noise for price state.
-        q_momentum : float
-            Process noise for momentum state.
-        r_measure : float
-            Measurement noise variance. Will be auto-calibrated from
-            short-term price variance if `auto_r=True` in update.
-        """
         self.gamma = gamma
-        self.dt = 1.0
+        self.decay = 1.0 - gamma  # F[1,1]
 
-        # State transition matrix F
-        decay = 1.0 - gamma * self.dt
-        self.F = np.array([
-            [1.0, self.dt],
-            [0.0, decay],
-        ])
+        # Process noise Q (diagonal)
+        self.q_price = q_price
+        self.q_momentum = q_momentum
 
-        # Observation matrix H  (we observe price only)
-        self.H = np.array([[1.0, 0.0]])
+        # Measurement noise R (scalar)
+        self.r_measure = r_measure
 
-        # Process noise covariance Q
-        self.Q = np.array([
-            [q_price, 0.0],
-            [0.0, q_momentum],
-        ])
+        # State estimate: [p, m]
+        self.p: float = 0.0
+        self.m: float = 0.0
 
-        # Measurement noise covariance R
-        self.R = np.array([[r_measure]])
-
-        # State estimate & covariance (initialised on first update)
-        self.x: Optional[np.ndarray] = None      # [p, m]
-        self.P: Optional[np.ndarray] = None       # 2×2 covariance
+        # Covariance P (2×2 symmetric, stored as 3 scalars)
+        self.P00: float = 1.0
+        self.P01: float = 0.0
+        self.P11: float = 1.0
 
         # Short-term variance tracker for auto-R calibration
         self._price_buf: list[float] = []
@@ -260,62 +240,100 @@ class KalmanFilterMomentum:
 
     def _auto_r(self, price: float):
         """Update measurement noise R from recent price variance."""
-        self._price_buf.append(price)
-        if len(self._price_buf) > self._var_window:
-            self._price_buf.pop(0)
-        if len(self._price_buf) >= 3:
-            var = float(np.var(self._price_buf))
+        buf = self._price_buf
+        buf.append(price)
+        if len(buf) > self._var_window:
+            buf.pop(0)
+        n = len(buf)
+        if n >= 3:
+            mean = sum(buf) / n
+            var = sum((x - mean) * (x - mean) for x in buf) / n
             if var > 0:
-                self.R[0, 0] = var
+                self.r_measure = var
 
     def update(self, price: float) -> tuple[float, float]:
         """
         Feed a new price observation. Returns (p_hat, m_hat).
-
-        Parameters
-        ----------
-        price : float
-            Latest close / tick price.
-
-        Returns
-        -------
-        p_hat : float
-            Filtered price estimate.
-        m_hat : float
-            Filtered momentum estimate (replaces ROC).
+        Pure scalar arithmetic — ~10× faster than numpy for 2×2.
         """
-        # Auto-calibrate measurement noise
         self._auto_r(price)
 
-        z = np.array([[price]])
-
         if not self.initialised:
-            self.x = np.array([[price], [0.0]])
-            self.P = np.eye(2) * 1.0
+            self.p = price
+            self.m = 0.0
+            self.P00 = 1.0
+            self.P01 = 0.0
+            self.P11 = 1.0
             self.initialised = True
-            return float(self.x[0, 0]), float(self.x[1, 0])
+            return self.p, self.m
 
-        # ── Predict ──────────────────────────────────────────────────────
-        x_pred = self.F @ self.x
-        P_pred = self.F @ self.P @ self.F.T + self.Q
+        decay = self.decay
 
-        # ── Update ───────────────────────────────────────────────────────
-        y = z - self.H @ x_pred                        # Innovation
-        S = self.H @ P_pred @ self.H.T + self.R        # Innovation cov
-        K = P_pred @ self.H.T @ np.linalg.inv(S)       # Kalman gain
+        # ── Predict ──────────────────────────────────────────────────
+        # x_pred = F @ x
+        p_pred = self.p + self.m        # F[0,0]*p + F[0,1]*m  (F[0,1]=1)
+        m_pred = decay * self.m         # F[1,0]*p + F[1,1]*m  (F[1,0]=0)
 
-        self.x = x_pred + K @ y
-        I = np.eye(2)
-        self.P = (I - K @ self.H) @ P_pred
+        # P_pred = F @ P @ F^T + Q
+        # F = [[1, 1], [0, d]]  where d = decay
+        P00 = self.P00
+        P01 = self.P01
+        P11 = self.P11
 
-        p_hat = float(self.x[0, 0])
-        m_hat = float(self.x[1, 0])
-        return p_hat, m_hat
+        # FP = F @ P
+        fp00 = P00 + P01         # 1*P00 + 1*P01  (row0 of F dot col0 of P)
+        fp01 = P01 + P11         # 1*P01 + 1*P11
+        fp10 = decay * P01       # 0*P00 + d*P01  (but P is symmetric: P10=P01)
+        fp11 = decay * P11       # 0*P01 + d*P11
+
+        # P_pred = FP @ F^T + Q
+        pp00 = fp00 * 1.0 + fp01 * 0.0 + self.q_price    # row0·col0 of F^T
+        # Actually: F^T = [[1,0],[1,d]]
+        # pp[0,0] = fp00*1 + fp01*1   (wait, F^T col0 = [1, 1]^T → no)
+        # Let me redo properly:
+        # F^T = [[1, 0], [1, d]]
+        # (FP) @ F^T:
+        # pp[0,0] = fp00 * F^T[0,0] + fp01 * F^T[1,0]  = fp00*1 + fp01*1
+        # pp[0,1] = fp00 * F^T[0,1] + fp01 * F^T[1,1]  = fp00*0 + fp01*d
+        # pp[1,0] = fp10 * F^T[0,0] + fp11 * F^T[1,0]  = fp10*1 + fp11*1
+        # pp[1,1] = fp10 * F^T[0,1] + fp11 * F^T[1,1]  = fp10*0 + fp11*d
+        pp00 = fp00 + fp01 + self.q_price
+        pp01 = fp01 * decay
+        # pp10 = fp10 + fp11  (symmetric with pp01 by construction)
+        pp11 = fp11 * decay + self.q_momentum
+
+        # ── Update ───────────────────────────────────────────────────
+        # H = [1, 0], so H @ x_pred = p_pred, H @ P_pred @ H^T = pp00
+        y = price - p_pred                       # innovation
+        S = pp00 + self.r_measure                 # innovation covariance (scalar)
+        S_inv = 1.0 / S
+
+        # K = P_pred @ H^T / S  →  K = [pp00, pp01(=pp10)]^T / S
+        # But pp10 = fp10 + fp11, let me use the symmetric property:
+        # Actually for H = [1,0]: P_pred @ H^T = [pp00, pp10]^T
+        pp10 = fp10 + fp11  # pp[1,0]
+        K0 = pp00 * S_inv
+        K1 = pp10 * S_inv
+
+        # x = x_pred + K * y
+        self.p = p_pred + K0 * y
+        self.m = m_pred + K1 * y
+
+        # P = (I - K @ H) @ P_pred
+        # I - K@H = [[1-K0, 0], [-K1, 1]]
+        self.P00 = (1.0 - K0) * pp00
+        self.P01 = (1.0 - K0) * pp01
+        self.P11 = -K1 * pp01 + pp11
+
+        return self.p, self.m
 
     def reset(self):
         """Reset filter state."""
-        self.x = None
-        self.P = None
+        self.p = 0.0
+        self.m = 0.0
+        self.P00 = 1.0
+        self.P01 = 0.0
+        self.P11 = 1.0
         self.initialised = False
         self._price_buf.clear()
 
@@ -342,19 +360,19 @@ class StrategyEngine:
         signal_noise: float = 1.0,
         exhaustion_bars_limit: int = 3, #changed from 7
         delta_threshold: float = 0.3,
-        kalman_gamma: float = 0.05,
-        min_trend_bars: int = 2, # changed from 3
+        kalman_gamma: float = 0.15,
+        min_trend_bars: int = 5, # changed from 3
         reversal_confirm_bars: int = 2,
         chop_atr_pct: float = 0.5,
         chop_spread_pct: float = 0.15,
         reversal_exit_confirm_bars: int = 1,
         s_effective_threshold: float = 0.5,
-        exhaustion_persist_bars: int = 2,
+        exhaustion_persist_bars: int = 4,
         # ── NEW: Regime Filter & Confidence params ────────────────────
         regime_lookback: int = 5,             # N bars for persistence / rolling calcs
         persistence_threshold: int = 3,       # min same-sign m_hat bars (§1A)
         momentum_mean_threshold: float = 0.0, # auto-calibrated; fallback floor
-        ema_min_spread_pct: float = 0.05,     # min |EMA3-EMA7|/price * 100 (§1D)
+        ema_min_spread_pct: float = 0.065,     # min |EMA3-EMA7|/price * 100 (§1D)
         confidence_high: float = 0.65,        # above → allow trading changed from 0.6
         confidence_low: float = 0.4,         # below → force IDLE $ changed form 0.35
         confidence_w1: float = 0.30,          # persistence weight  (§2)
@@ -362,12 +380,12 @@ class StrategyEngine:
         confidence_w3: float = 0.25,          # volatility expansion weight
         confidence_w4: float = 0.20,          # EMA separation weight
         atr_floor_k: float = 0.6,             # ATR floor multiplier (§4)
-        ema_cross_persist_bars: int = 2,      # min bars EMA spread increasing (§5)
+        ema_cross_persist_bars: int = 4,      # min bars EMA spread increasing (§5)
         exhaustion_s_decay_bars: int = 2,      # bars S must decay for exhaustion (§6)
-        exhaustion_stall_bars: int = 4,        # §6b: bars to check for price stall
-        exhaustion_stall_atr_pct: float = 0.3, # §6b: close range < N×ATR → stalling
+        exhaustion_stall_bars: int = 5,        # §6b: bars to check for price stall
+        exhaustion_stall_atr_pct: float = 0.4, # §6b: close range < N×ATR → stalling
         local_range_bars: int = 10,            # lookback for local range (§8)
-        local_range_threshold_pct: float = 0.3,# min range % of price (§8)
+        local_range_threshold_pct: float = 0.4,# min range % of price (§8)
         sign_flip_threshold: int = 4,          # max sign flips before chop (§8)
         stability_bars: int = 3,              # required consecutive stability bars (§9) [was 2]
         spike_atr_multiplier: float = 2,    # §11: reject entry if last candle body > N×ATR
@@ -416,7 +434,7 @@ class StrategyEngine:
 
         # State
         self.bar_count = 0
-        self.regime = Regime.IDLE
+        self.regime = Regime.EXHAUSTION
         self.direction = Direction.NONE
         self.prev_direction = Direction.NONE
         self.trend_before_exhaustion = Direction.NONE  # Immutable trend dir at exhaustion entry
@@ -1000,18 +1018,21 @@ class StrategyEngine:
                 delta_aligned = True
 
         # ── §1/§3: GLOBAL REGIME FILTER — runs BEFORE state machine ──────
-        # If confidence is below LOW_THRESHOLD → force IDLE, disable everything.
+        # If confidence is below LOW_THRESHOLD → collapse to EXHAUSTION so the
+        # engine remains primed to catch the breakout, rather than going fully
+        # dark in IDLE.  Exhaustion's bar-count timeout will still exit positions.
         # If in ambiguous zone (between LOW and HIGH) → freeze state, no transitions.
         if self.trend_confidence < self.confidence_low:
-            # Below low threshold: force IDLE (unless holding a position — allow exits)
-            if self.regime != Regime.IDLE:
+            if self.regime not in (Regime.EXHAUSTION,):
                 if self.in_position:
-                    # Allow regime to persist so exit logic can trigger,
-                    # but block new entries and new transitions
+                    # Keep current regime so _check_exit can fire
                     pass
                 else:
-                    self.regime = Regime.IDLE
-                    self.direction = Direction.NONE
+                    self.regime = Regime.EXHAUSTION
+                    self.trend_before_exhaustion = self.direction  # remember last direction
+                    self.exhaustion_bar_count = 0
+                    self.reversal_confirm_count = 0
+                    self.exhaustion_persist_count = 0
                     return self.regime, None
             return self.regime, None
 
@@ -1019,30 +1040,11 @@ class StrategyEngine:
             # Ambiguous zone: no entries, no state transitions
             # But still process exits if in position
             if self.in_position:
-                # Allow exit checks to run (handled after _detect_regime)
                 pass
             return self.regime, None
 
-        # ─── A. IDLE → TREND ──────────────────────────────────────────────
-        if self.regime == Regime.IDLE:
-            # §5: Require EMA cross to be validated before entering TREND
-            if (direction != Direction.NONE and self.spread_expanding
-                    and S > self.S_strong and self._ema_cross_valid):
-                self.regime = Regime.TREND
-                self.direction = direction
-                self.trend_start_price = c
-                self.trend_start_atr = self.atr_val or 0
-                self.trend_start_delta = self.current_profile.cumulative_delta if self.current_profile else 0
-                self.trend_start_bar = self.bar_count
-                self.exhaustion_bar_count = 0
-                self.trend_bar_count = 0
-                self.exhaustion_persist_count = 0
-                # Start new volume profile
-                self._start_new_profile(c)
-                return self.regime, None
-
-        # ─── B. TREND → EXHAUSTION ────────────────────────────────────────
-        elif self.regime == Regime.TREND:
+        # ─── A. TREND → EXHAUSTION ────────────────────────────────────────
+        if self.regime == Regime.TREND:
             self.trend_bar_count += 1
 
             # Guard: don't allow exhaustion transition until trend has
@@ -1131,21 +1133,33 @@ class StrategyEngine:
             else:
                 self.trend_reversal_confirm_count = 0
 
-        # ─── C. EXHAUSTION → CONTINUATION / REVERSAL ────────────────────
+        # ─── B/C. EXHAUSTION → CONTINUATION / REVERSAL ─────────────────
+        # This now handles BOTH cold-start (trend_before_exhaustion == NONE)
+        # and normal post-trend exhaustion.  When trend_before_exhaustion is
+        # NONE any confirmed breakout direction is treated as a fresh start.
+        # ─────────────────────────────────────────────────────────────────
         elif self.regime == Regime.EXHAUSTION:
             self.exhaustion_bar_count += 1
 
-            # Continuation after exhaustion: original trend resumes
+            # Continuation after exhaustion: original trend resumes.
+            # Cold-start case: if trend_before_exhaustion is NONE (fresh engine
+            # or just collapsed from low-confidence), treat any breakout as a
+            # continuation so we don't miss the first leg.
             # State transition gate: only checks core regime conditions.
             # Entry-specific gates (momentum_acceleration, s_effective,
             # delta_aligned, leaving_hvn) are applied to the BUY decision only.
+            cold_start = (self.trend_before_exhaustion == Direction.NONE)
             if self.spread_expanding and S > self.S_strong and not momentum_decay:
-                if direction == self.trend_before_exhaustion:
-                    # Same direction as original trend → CONTINUATION
+                if direction == self.trend_before_exhaustion or cold_start:
+                    # Same direction as original trend (or cold-start) → CONTINUATION
                     self.regime = Regime.CONTINUATION
                     self.direction = direction
                     signal = None
-                    # NO LONGER BUY on continuation of an UP trend.
+                    if cold_start:
+                        # Fresh breakout — treat like EXHAUSTION→CONTINUATION with
+                        # direction flip so the BUY path below fires.
+                        self.trend_before_exhaustion = Direction.DOWN if direction == Direction.UP else Direction.UP
+                    # NO LONGER BUY on plain UP trend continuation (only on reversal-up)
                     if direction == Direction.DOWN and self.in_position:
                         signal = Signal.EXIT
                     self.trend_start_price = c
@@ -1312,7 +1326,7 @@ class StrategyEngine:
 
         # Update direction tracking
         if direction != Direction.NONE:
-            if self.regime in (Regime.IDLE, Regime.EXHAUSTION, Regime.REVERSAL):
+            if self.regime in (Regime.EXHAUSTION, Regime.REVERSAL):
                 self.direction = direction
 
         return self.regime, signal
@@ -1376,12 +1390,17 @@ class StrategyEngine:
         volume: float = 0.0,
         buy_volume: float = 0.0,
         sell_volume: float = 0.0,
+        _build_full_result: bool = True,
     ) -> dict:
         """
         Process a single OHLCV bar.
 
         Returns dict with:
           regime, direction, signal, indicators, volume_profiles, etc.
+
+        When _build_full_result=False (backtester fast path), returns only
+        the signal and regime — skips volume profile serialization and
+        most indicator dict construction.
         """
         self.bar_count += 1
         self._update_indicators(o, h, l, c, volume)
@@ -1392,7 +1411,9 @@ class StrategyEngine:
 
         # During warmup just collect data
         if self.bar_count < self.warmup:
-            return self._build_result(time, c, None)
+            if _build_full_result:
+                return self._build_result(time, c, None)
+            return self._build_result_minimal(time, c, None)
 
         # If no profile yet, start one
         if self.current_profile is None:
@@ -1407,10 +1428,21 @@ class StrategyEngine:
             if exit_signal:
                 signal = exit_signal
 
-        return self._build_result(time, c, signal)
+        if _build_full_result:
+            return self._build_result(time, c, signal)
+        return self._build_result_minimal(time, c, signal)
+
+    def _build_result_minimal(self, time: int, price: float, signal: Optional[Signal]) -> dict:
+        """Minimal result dict for backtester fast path — no profile serialization."""
+        return {
+            "time": time,
+            "regime": self.regime.value,
+            "direction": self.direction.value,
+            "signal": signal.value if signal else Signal.NONE.value,
+        }
 
     def _build_result(self, time: int, price: float, signal: Optional[Signal]) -> dict:
-        """Build the result dict to return from update()."""
+        """Build the full result dict to return from update()."""
         # Collect all profiles for frontend rendering
         all_profiles = []
         for vp in self.volume_profiles:

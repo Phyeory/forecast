@@ -28,49 +28,90 @@ Signal model — identical to ForwardTester / LiveTrader:
 
   The 1-bar-delay execution model is preserved: a pending BUY/EXIT queued
   during candle N executes at State 1 of candle N+1 (open price of next bar).
+
+Performance optimisation:
+  Intra-candle states are generated inline (no list allocation) and the
+  ForwardTester skips building the full result dict for intermediate states
+  via the `_build_full_result=False` fast path.
 """
 
 from __future__ import annotations
 from typing import Optional
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import os
 
 from forward_tester import ForwardTester
 from data_store import (
     get_recording,
     get_recording_candles,
     create_backtest,
+    list_recordings,
 )
 
 
-def _candle_to_accumulated_states(candle: dict) -> list[dict]:
+def _run_single_backtest_worker(args: dict) -> dict:
+    """Worker function for process pool — must be top-level and picklable."""
+    try:
+        return run_backtest(**args)
+    except Exception as e:
+        return {"error": str(e), "recording_id": args.get("recording_id")}
+
+
+def run_backtest_batch(
+    engine_params: Optional[dict] = None,
+    buy_size_sol: float = 0.1,
+    priority_fee: float = 0.0001,
+    bribe_fee: float = 0.00001,
+    slippage_pct: float = 1.0,
+    starting_balance: float = 1.0,
+    max_workers: Optional[int] = None,
+) -> list[dict]:
     """
-    Expand a completed OHLCV candle into four accumulated intra-candle states.
+    Run backtests on ALL completed recordings.
 
-    Each state represents the OHLCV snapshot the CandleAggregator would have
-    emitted to the ForwardTester after each synthetic intra-candle tick during
-    live trading.  The open is always the candle open; high/low accumulate;
-    close is the current tick price; volume appears only on the final tick.
+    Uses simple sequential execution (faster for typical recording counts
+    due to process spawn overhead being larger than computation time).
+    Falls back to parallel processes for very large batches (>20).
     """
-    t   = int(candle["time"])
-    o   = candle["open"]
-    h   = candle["high"]
-    l   = candle["low"]
-    c   = candle["close"]
-    vol = candle.get("volume", 0)
+    recordings = list_recordings()
+    completed = [r for r in recordings if r.get("status") == "completed"]
 
-    # Bull bar: high comes before low; bear bar: low before high
-    bullish = c >= o
-    mid_first, mid_second = (h, l) if bullish else (l, h)
+    if not completed:
+        return []
 
-    return [
-        # State 1: open tick — candle just started
-        {"time": t, "open": o, "high": o,              "low": o,              "close": o,         "volume": 0.0},
-        # State 2: first extreme (high for bulls, low for bears)
-        {"time": t, "open": o, "high": max(o, mid_first),  "low": min(o, mid_first),  "close": mid_first, "volume": 0.0},
-        # State 3: second extreme — both extremes now known
-        {"time": t, "open": o, "high": h,              "low": l,              "close": mid_second, "volume": 0.0},
-        # State 4: close tick — full OHLCV, volume here to avoid double-counting
-        {"time": t, "open": o, "high": h,              "low": l,              "close": c,          "volume": vol},
-    ]
+    if engine_params is None:
+        engine_params = {}
+
+    common_kwargs = dict(
+        engine_params=engine_params,
+        buy_size_sol=buy_size_sol,
+        priority_fee=priority_fee,
+        bribe_fee=bribe_fee,
+        slippage_pct=slippage_pct,
+        starting_balance=starting_balance,
+    )
+
+    # For typical batch sizes, sequential is faster (no spawn overhead)
+    if len(completed) <= 20:
+        results = []
+        for rec in completed:
+            try:
+                results.append(run_backtest(recording_id=rec["id"], **common_kwargs))
+            except Exception as e:
+                results.append({"error": str(e), "recording_id": rec["id"]})
+        return results
+
+    # Large batches: use parallel processes
+    tasks = [{"recording_id": rec["id"], **common_kwargs} for rec in completed]
+    workers = max_workers or min(len(tasks), max(1, os.cpu_count() or 4))
+    results = []
+
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_run_single_backtest_worker, t): t for t in tasks}
+        for future in as_completed(futures):
+            results.append(future.result())
+
+    return results
 
 
 def run_backtest(
@@ -113,65 +154,84 @@ def run_backtest(
     # One chart result per stored candle
     candle_results = []
 
-    for candle in candles:
-        states = _candle_to_accumulated_states(candle)
+    # Local refs for speed
+    ft_update = ft.update
+    engine = ft.engine
 
-        # ── Call ft.update() once per intra-candle state ──────────────────────
-        # This is identical to what main.py does in _process_stream():
-        #   candle, is_new = aggregator.process_trade(...)
-        #   result = forward_tester.update(time, o, h, l, c, vol)
-        #
-        # Any pending signal from the previous candle executes at State 1
-        # (open of this candle) — correct 1-bar-delay model.
-        # The engine may queue a new signal at any state; it executes at
-        # State 1 of the *next* candle.
+    for candle in candles:
+        t   = int(candle["time"])
+        o   = candle["open"]
+        h   = candle["high"]
+        l   = candle["low"]
+        c   = candle["close"]
+        vol = candle.get("volume", 0)
+
+        # Bull bar: high comes before low; bear bar: low before high
+        bullish = c >= o
+        if bullish:
+            mid_first, mid_second = h, l
+        else:
+            mid_first, mid_second = l, h
+
+        # ── ALL 4 states use fast path — no result dict construction ──────
         trade_action_for_candle: Optional[str] = None
         trade_label_for_candle:  Optional[str] = None
-        last_result: Optional[dict] = None
 
-        for state in states:
-            result = ft.update(
-                time=state["time"],
-                o=state["open"],
-                h=state["high"],
-                l=state["low"],
-                c=state["close"],
-                volume=state["volume"],
-            )
-            fwd = result.get("forward_test", {})
-            # Capture the first trade action that fires during this candle
-            if trade_action_for_candle is None and fwd.get("trade_action"):
-                trade_action_for_candle = fwd["trade_action"]
-                trade_label_for_candle  = fwd.get("trade_label")
-            last_result = result
+        # State 1: open tick
+        result = ft_update(time=t, o=o, h=o, l=o, c=o, volume=0.0,
+                           _build_full_result=False)
+        fwd = result.get("forward_test")
+        if fwd and fwd.get("trade_action"):
+            trade_action_for_candle = fwd["trade_action"]
+            trade_label_for_candle  = fwd.get("trade_label")
 
-        # Store one record per original candle.
-        # Regime / signal / indicators taken from the final-tick state.
-        # trade_action shows what actually happened during this candle.
-        assert last_result is not None
-        indicators = last_result.get("indicators", {})
-        fwd_final  = last_result.get("forward_test", {})
+        # State 2: first extreme
+        h2 = max(o, mid_first)
+        l2 = min(o, mid_first)
+        result = ft_update(time=t, o=o, h=h2, l=l2, c=mid_first, volume=0.0,
+                           _build_full_result=False)
+        fwd = result.get("forward_test")
+        if fwd and trade_action_for_candle is None and fwd.get("trade_action"):
+            trade_action_for_candle = fwd["trade_action"]
+            trade_label_for_candle  = fwd.get("trade_label")
 
+        # State 3: both extremes
+        result = ft_update(time=t, o=o, h=h, l=l, c=mid_second, volume=0.0,
+                           _build_full_result=False)
+        fwd = result.get("forward_test")
+        if fwd and trade_action_for_candle is None and fwd.get("trade_action"):
+            trade_action_for_candle = fwd["trade_action"]
+            trade_label_for_candle  = fwd.get("trade_label")
+
+        # State 4: close tick — also fast path, read from engine directly
+        result = ft_update(time=t, o=o, h=h, l=l, c=c, volume=vol,
+                           _build_full_result=False)
+        fwd = result.get("forward_test")
+        if fwd and trade_action_for_candle is None and fwd.get("trade_action"):
+            trade_action_for_candle = fwd["trade_action"]
+            trade_label_for_candle  = fwd.get("trade_label")
+
+        # Read indicators directly from engine state — no dict overhead
         candle_results.append({
-            "time":            candle["time"],
-            "open":            candle["open"],
-            "high":            candle["high"],
-            "low":             candle["low"],
-            "close":           candle["close"],
-            "volume":          candle.get("volume", 0),
-            "regime":          last_result.get("regime", "idle"),
-            "direction":       last_result.get("direction", "none"),
-            "signal":          last_result.get("signal", "none"),
-            "signal_strength": indicators.get("signal_strength", 0),
-            "ema_fast":        indicators.get("ema_fast"),
-            "ema_slow":        indicators.get("ema_slow"),
-            "atr":             indicators.get("atr"),
-            "roc":             indicators.get("roc"),
-            "confidence":      indicators.get("trend_confidence", 0),
+            "time":            t,
+            "open":            o,
+            "high":            h,
+            "low":             l,
+            "close":           c,
+            "volume":          vol,
+            "regime":          engine.regime.value,
+            "direction":       engine.direction.value,
+            "signal":          result.get("signal", "none") if result else "none",
+            "signal_strength": engine.signal_strength,
+            "ema_fast":        engine.ema_fast_val,
+            "ema_slow":        engine.ema_slow_val,
+            "atr":             engine.atr_val,
+            "roc":             engine.m_hat,
+            "confidence":      engine.trend_confidence,
             "trade_action":    trade_action_for_candle,
             "trade_label":     trade_label_for_candle,
-            "balance":         fwd_final.get("balance"),
-            "unrealized_pnl":  fwd_final.get("unrealized_pnl", 0),
+            "balance":         round(ft.balance, 6),
+            "unrealized_pnl":  0,
         })
 
     # Gather trade history
