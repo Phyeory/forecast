@@ -361,7 +361,7 @@ class StrategyEngine:
         exhaustion_bars_limit: int = 3, #changed from 7
         delta_threshold: float = 0.3,
         kalman_gamma: float = 0.15,
-        min_trend_bars: int = 5, # changed from 3
+        min_trend_bars: int = 3, # changed from 3
         reversal_confirm_bars: int = 2,
         chop_atr_pct: float = 0.5,
         chop_spread_pct: float = 0.15,
@@ -370,26 +370,26 @@ class StrategyEngine:
         exhaustion_persist_bars: int = 4,
         # ── NEW: Regime Filter & Confidence params ────────────────────
         regime_lookback: int = 5,             # N bars for persistence / rolling calcs
-        persistence_threshold: int = 3,       # min same-sign m_hat bars (§1A)
+        persistence_threshold: int = 2,       # min same-sign m_hat bars (§1A)
         momentum_mean_threshold: float = 0.0, # auto-calibrated; fallback floor
-        ema_min_spread_pct: float = 0.065,     # min |EMA3-EMA7|/price * 100 (§1D)
-        confidence_high: float = 0.65,        # above → allow trading changed from 0.6
-        confidence_low: float = 0.4,         # below → force IDLE $ changed form 0.35
+        ema_min_spread_pct: float = 0.08,     # min |EMA3-EMA7|/price * 100 (§1D)
+        confidence_high: float = 0.6,        # above → allow trading changed from 0.6
+        confidence_low: float = 0.42,         # below → force IDLE $ changed form 0.35
         confidence_w1: float = 0.30,          # persistence weight  (§2)
         confidence_w2: float = 0.25,          # normalised momentum weight
         confidence_w3: float = 0.25,          # volatility expansion weight
         confidence_w4: float = 0.20,          # EMA separation weight
         atr_floor_k: float = 0.6,             # ATR floor multiplier (§4)
-        ema_cross_persist_bars: int = 4,      # min bars EMA spread increasing (§5)
+        ema_cross_persist_bars: int = 2,      # min bars EMA spread increasing (§5)
         exhaustion_s_decay_bars: int = 2,      # bars S must decay for exhaustion (§6)
         exhaustion_stall_bars: int = 5,        # §6b: bars to check for price stall
         exhaustion_stall_atr_pct: float = 0.4, # §6b: close range < N×ATR → stalling
         local_range_bars: int = 10,            # lookback for local range (§8)
         local_range_threshold_pct: float = 0.4,# min range % of price (§8)
         sign_flip_threshold: int = 4,          # max sign flips before chop (§8)
-        stability_bars: int = 3,              # required consecutive stability bars (§9) [was 2]
+        stability_bars: int = 2,              # required consecutive stability bars (§9) [was 2]
         spike_atr_multiplier: float = 2,    # §11: reject entry if last candle body > N×ATR
-        spike_lookback_bars: int = 5,          # §11: how many recent bars to scan for spikes
+        spike_lookback_bars: int = 4,          # §11: how many recent bars to scan for spikes
     ):
         self.ema_fast_p = ema_fast
         self.ema_slow_p = ema_slow
