@@ -526,6 +526,9 @@ class StrategyEngine:
         self._pre_entry_stable_down: bool = False
         self._pre_entry_stable: bool = False
 
+        # Fix 3a: track highest close seen during the current EXHAUSTION phase
+        self._exhaustion_phase_high: float = 0.0
+
     def _update_indicators(self, o: float, h: float, l: float, c: float, vol: float):
         """Update EMA, ATR, ROC from new OHLC bar."""
         self.close_history.append(c)
@@ -719,6 +722,21 @@ class StrategyEngine:
             + self.confidence_w3 * vol_expansion
             + self.confidence_w4 * ema_sep_norm
         )
+
+        # Fix 4: Momentum age penalty — long unbroken runs signal exhaustion, not strength
+        if len(self._m_hat_history) >= 2:
+            run_sign = 1 if self._m_hat_history[-1] >= 0 else -1
+            run_length = 0
+            for v in reversed(self._m_hat_history):
+                if (v >= 0 and run_sign == 1) or (v < 0 and run_sign == -1):
+                    run_length += 1
+                else:
+                    break
+            age_ratio = run_length / max(self.regime_lookback, 1)
+            if age_ratio > 2.0:  # run is more than 2× the lookback window
+                age_penalty = min((age_ratio - 2.0) * 0.12, 0.25)
+                self.trend_confidence -= age_penalty
+
         self.trend_confidence = max(0.0, min(1.0, self.trend_confidence))
 
     # ── §5: EMA Cross Sensitivity Reduction ───────────────────────────
@@ -790,10 +808,12 @@ class StrategyEngine:
         m_recent = self._m_hat_history[-(N + 1):]
         s_recent = self._signal_strength_history[-(N + 1):]
 
-        # Upward trajectory: pushing higher (more positive)
-        m_increasing_up = all(m_recent[i + 1] > m_recent[i] for i in range(N))
-        # Downward trajectory: pushing lower (more negative)
-        m_increasing_down = all(m_recent[i + 1] < m_recent[i] for i in range(N))
+        # Upward trajectory: net positive over the window AND current bar still rising.
+        # Strict all-N monotonic increase is too brittle with a Kalman-smoothed m_hat
+        # which oscillates slightly even in strong trends.
+        m_increasing_up   = m_recent[-1] > m_recent[0] and m_recent[-1] > m_recent[-2]
+        # Downward trajectory: net negative over the window AND current bar still falling.
+        m_increasing_down = m_recent[-1] < m_recent[0] and m_recent[-1] < m_recent[-2]
         
         s_increasing = all(s_recent[i + 1] > s_recent[i] for i in range(N))
 
@@ -836,21 +856,15 @@ class StrategyEngine:
         if direction == Direction.DOWN and not self._pre_entry_stable_down:
             return False
 
-        # §11: Recent spike filter — block entries if any candle within the last
-        # spike_lookback_bars has a body > spike_atr_multiplier × ATR.
-        # Looking back at the whole trend history was too aggressive: on volatile
-        # tokens virtually every trend has one outlier candle somewhere, and the
-        # current ATR (a lagged EMA) doesn't accurately reflect per-bar volatility
-        # from many bars ago.  A short recent window catches genuine pre-entry pumps
-        # without falsely blocking all entries.
+        # §11: Spike filter — reject entry if any candle in the recent lookback
+        # window has a body > spike_atr_multiplier × current ATR.
+        # Uses ATR (not avg-body) so it scales with regime volatility and doesn't
+        # reject the legitimate large breakout candle leaving flat chop.
         if self.atr_val and self.atr_val > 0 and len(self.open_history) >= 2:
             spike_threshold = self.spike_atr_multiplier * self.atr_val
-            # Only scan the last spike_lookback_bars candles
             lookback = min(self.spike_lookback_bars, len(self.open_history))
             for i in range(-lookback, 0):
-                o_i = self.open_history[i]
-                c_i = self.close_history[i]
-                if abs(c_i - o_i) > spike_threshold:
+                if abs(self.close_history[i] - self.open_history[i]) > spike_threshold:
                     return False
 
         # §10: Entry location filter — reject if mid-range / in value area
@@ -1033,6 +1047,7 @@ class StrategyEngine:
                     self.exhaustion_bar_count = 0
                     self.reversal_confirm_count = 0
                     self.exhaustion_persist_count = 0
+                    self._exhaustion_phase_high = 0.0  # Fix 3c: reset on collapsing to EXHAUSTION
                     return self.regime, None
             return self.regime, None
 
@@ -1141,6 +1156,10 @@ class StrategyEngine:
         elif self.regime == Regime.EXHAUSTION:
             self.exhaustion_bar_count += 1
 
+            # Fix 3b: track the highest close seen during this exhaustion phase
+            if len(self.close_history) >= 1:
+                self._exhaustion_phase_high = max(self._exhaustion_phase_high, self.close_history[-1])
+
             # Continuation after exhaustion: original trend resumes.
             # Cold-start case: if trend_before_exhaustion is NONE (fresh engine
             # or just collapsed from low-confidence), treat any breakout as a
@@ -1149,17 +1168,34 @@ class StrategyEngine:
             # Entry-specific gates (momentum_acceleration, s_effective,
             # delta_aligned, leaving_hvn) are applied to the BUY decision only.
             cold_start = (self.trend_before_exhaustion == Direction.NONE)
-            if self.spread_expanding and S > self.S_strong and not momentum_decay:
+            # Use S_weak (not S_strong) as the state-transition exit threshold.
+            # S_strong is still scored as +1 condition inside entry_conds, so
+            # strong setups still get rewarded — but moderate trends can also
+            # leave EXHAUSTION without being blocked at the door.
+            if self.spread_expanding and S > self.S_weak and not momentum_decay:
                 if direction == self.trend_before_exhaustion or cold_start:
                     # Same direction as original trend (or cold-start) → CONTINUATION
                     self.regime = Regime.CONTINUATION
                     self.direction = direction
                     signal = None
                     if cold_start:
-                        # Fresh breakout — treat like EXHAUSTION→CONTINUATION with
-                        # direction flip so the BUY path below fires.
+                        # Fresh breakout from cold start: evaluate BUY immediately.
+                        # Set trend_before_exhaustion to opposite so the subsequent
+                        # direction-flip BUY logic recognises this as a reversal-up scenario.
                         self.trend_before_exhaustion = Direction.DOWN if direction == Direction.UP else Direction.UP
-                    # NO LONGER BUY on plain UP trend continuation (only on reversal-up)
+                        if direction == Direction.UP and not self.in_position and S > self.S_weak and self.m_hat > 0:
+                            if self._passes_entry_gate(c, direction):
+                                entry_conds = [
+                                    S > self.S_strong,
+                                    delta_aligned,
+                                    self._is_leaving_hvn(c, direction),
+                                    self.momentum_acceleration > 0,
+                                    self._ema_cross_valid,
+                                    self.s_effective > self.s_effective_threshold,
+                                ]
+                                if sum(1 for x in entry_conds if x) >= 2:
+                                    signal = Signal.BUY
+                    # EXIT on downward move if in position
                     if direction == Direction.DOWN and self.in_position:
                         signal = Signal.EXIT
                     self.trend_start_price = c
@@ -1167,6 +1203,7 @@ class StrategyEngine:
                     self.trend_start_bar = self.bar_count
                     self._start_new_profile(c)
                     self.exhaustion_bar_count = 0
+                    self._exhaustion_phase_high = 0.0  # Fix 3c: reset on leaving EXHAUSTION
                     return self.regime, signal
                 else:
                     # Direction flipped during exhaustion (e.g. DOWN -> UP)!
@@ -1175,23 +1212,30 @@ class StrategyEngine:
                     self.regime = Regime.CONTINUATION
                     self.direction = direction
                     signal = None
-                    
+
                     if direction == Direction.UP and self.trend_before_exhaustion == Direction.DOWN:
                         # it shouldnt be just 1 bar, it should be the exhaustion threshold
                         if self.exhaustion_bar_count >= self.exhaustion_persist_bars:
                             if not self.in_position and S > self.S_weak and self.m_hat > 0:
-                                # §7/§9/§10: Entry gate must pass
-                                if self._passes_entry_gate(c, direction):
-                                    entry_conds = [
-                                        S > self.S_strong,                          # signal strength
-                                        delta_aligned,                              # volume delta confirms
-                                        self._is_leaving_hvn(c, direction),         # not trapped in resistance
-                                        self.momentum_acceleration > 0,             # momentum building
-                                        self._ema_cross_valid,
-                                        self.s_effective > self.s_effective_threshold                      # confirmed EMA direction
-                                    ]
-                                    if sum(1 for x in entry_conds if x) >= 2:
-                                        signal = Signal.BUY
+                                # Fix 3d: retracement guard — require price to have pulled
+                                # back below the exhaustion-phase high before allowing BUY.
+                                price_retrace = (self._exhaustion_phase_high <= 0 or
+                                                 c < self._exhaustion_phase_high * 0.998)
+                                if not price_retrace:
+                                    signal = None  # still enter CONTINUATION but no BUY
+                                else:
+                                    # §7/§9/§10: Entry gate must pass
+                                    if self._passes_entry_gate(c, direction):
+                                        entry_conds = [
+                                            S > self.S_strong,                          # signal strength
+                                            delta_aligned,                              # volume delta confirms
+                                            self._is_leaving_hvn(c, direction),         # not trapped in resistance
+                                            self.momentum_acceleration > 0,             # momentum building
+                                            self._ema_cross_valid,
+                                            self.s_effective > self.s_effective_threshold  # confirmed EMA direction
+                                        ]
+                                        if sum(1 for x in entry_conds if x) >= 2:
+                                            signal = Signal.BUY
                     elif direction == Direction.DOWN and self.in_position:
                         signal = Signal.EXIT
 
@@ -1200,6 +1244,7 @@ class StrategyEngine:
                     self.trend_start_bar = self.bar_count
                     self._start_new_profile(c)
                     self.exhaustion_bar_count = 0
+                    self._exhaustion_phase_high = 0.0  # Fix 3c: reset on leaving EXHAUSTION
                     return self.regime, signal
 
             # Check for direction flip (EMA cross) relative to original trend
@@ -1238,6 +1283,7 @@ class StrategyEngine:
                     self.regime = Regime.REVERSAL
                     self.reversal_bar_count = 0
                     self.reversal_confirm_count = 0
+                    self._exhaustion_phase_high = 0.0  # Fix 3c: reset on leaving EXHAUSTION
                     return self.regime, None
             else:
                 # Conditions not met this bar — reset the confirmation streak
@@ -1316,6 +1362,7 @@ class StrategyEngine:
                 self.trend_before_exhaustion = self.prev_direction  # Original trend before reversal
                 self.exhaustion_bar_count = 0
                 self.reversal_confirm_count = 0
+                self._exhaustion_phase_high = 0.0  # Fix 3c: reset when re-entering EXHAUSTION
                 return self.regime, None
 
         # ─── E. CONTINUATION → TREND ─────────────────────────────────────
