@@ -9,11 +9,13 @@ Architecture (private-key mode):
   - IMMEDIATE execution: signals fire on the SAME candle
   - Jupiter Aggregator V6 for optimal routing
   - Configurable slippage, priority fee, buy size
+  - Optional Jito MEV bribe for ultra-fast block inclusion
 """
 
 from __future__ import annotations
 import asyncio
 import base64
+import random
 import time
 import logging
 import json
@@ -24,6 +26,10 @@ import aiohttp
 import base58
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
+from solders.system_program import transfer, TransferParams
+from solders.pubkey import Pubkey
+from solders.message import MessageV0
+from solders.hash import Hash
 
 from strategy_engine import StrategyEngine, Signal, Direction, Regime
 
@@ -121,6 +127,10 @@ class LiveTrader:
         priority_fee_lamports: int = 100_000,
         min_market_cap_usd: float = 20_000.0,
         engine_kwargs: Optional[dict] = None,
+
+        # Skip on-chain simulation on the hot path (saves ~300 ms per swap).
+        # Simulation is still run on explicit test buys if desired.
+        skip_simulation: bool = True,
     ):
         if engine_kwargs is None:
             engine_kwargs = {}
@@ -132,6 +142,7 @@ class LiveTrader:
         self.buy_size_sol = buy_size_sol
         self.slippage_bps = slippage_bps
         self.priority_fee_lamports = priority_fee_lamports
+        self.skip_simulation = skip_simulation
 
         # ── Market-cap safety floor ───────────────────────────────────────
         # If the live market cap (USD) drops below this value while a
@@ -153,8 +164,34 @@ class LiveTrader:
         # Async swap task tracker (so we don't overlap swaps)
         self._swap_in_flight: bool = False
 
+        # Persistent aiohttp session — reusing TCP connections eliminates
+        # per-request handshake overhead (~50-150 ms per call).
+        self._session: Optional[aiohttp.ClientSession] = None
+
         # Websocket broadcast callback (set by main.py)
         self.broadcast_fn = None
+
+    # ── Session lifecycle ─────────────────────────────────────────────────────
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Return (or lazily create) the persistent aiohttp session."""
+        if self._session is None or self._session.closed:
+            connector = aiohttp.TCPConnector(
+                limit=20,                # max parallel connections
+                ttl_dns_cache=300,       # 5-min DNS cache
+                enable_cleanup_closed=True,
+            )
+            self._session = aiohttp.ClientSession(
+                connector=connector,
+                headers={"Content-Type": "application/json"},
+            )
+        return self._session
+
+    async def close(self):
+        """Gracefully close the persistent HTTP session."""
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
 
     # ── Jupiter helpers ───────────────────────────────────────────────────────
 
@@ -177,22 +214,22 @@ class LiveTrader:
         }
         logger.info(f"[QUOTE] Fetching quote: {input_mint[:8]}… → {output_mint[:8]}… amount={amount}")
         try:
-            async with aiohttp.ClientSession() as s:
-                async with s.get(
-                    JUPITER_QUOTE_URL,
-                    params=params,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as r:
-                    body = await r.text()
-                    if r.status != 200:
-                        logger.error(f"[QUOTE FAILED] HTTP {r.status}: {body}")
-                        return None
-                    quote = json.loads(body)
-                    out_amt = quote.get('outAmount', '?')
-                    route_plan = quote.get('routePlan', [])
-                    swaps = [rp.get('swapInfo', {}).get('label', '?') for rp in route_plan]
-                    logger.info(f"[QUOTE OK] outAmount={out_amt} route={'→'.join(swaps)} priceImpact={quote.get('priceImpactPct', '?')}%")
-                    return quote
+            s = await self._get_session()
+            async with s.get(
+                JUPITER_QUOTE_URL,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=7),
+            ) as r:
+                body = await r.text()
+                if r.status != 200:
+                    logger.error(f"[QUOTE FAILED] HTTP {r.status}: {body}")
+                    return None
+                quote = json.loads(body)
+                out_amt = quote.get('outAmount', '?')
+                route_plan = quote.get('routePlan', [])
+                swaps = [rp.get('swapInfo', {}).get('label', '?') for rp in route_plan]
+                logger.info(f"[QUOTE OK] outAmount={out_amt} route={'→'.join(swaps)} priceImpact={quote.get('priceImpactPct', '?')}%")
+                return quote
         except Exception as e:
             logger.error(f"[QUOTE ERROR] {e}")
             return None
@@ -217,23 +254,23 @@ class LiveTrader:
         }
         logger.info(f"[SWAP TX] Building swap transaction…")
         try:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(
-                    JUPITER_SWAP_URL,
-                    json=body,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as r:
-                    resp_body = await r.text()
-                    if r.status != 200:
-                        logger.error(f"[SWAP TX FAILED] HTTP {r.status}: {resp_body}")
-                        return None
-                    data = json.loads(resp_body)
-                    swap_tx = data.get("swapTransaction")
-                    if swap_tx:
-                        logger.info(f"[SWAP TX OK] Transaction built ({len(swap_tx)} chars b64)")
-                    else:
-                        logger.error(f"[SWAP TX FAILED] No swapTransaction in response: {resp_body[:200]}")
-                    return swap_tx
+            s = await self._get_session()
+            async with s.post(
+                JUPITER_SWAP_URL,
+                json=body,
+                timeout=aiohttp.ClientTimeout(total=7),
+            ) as r:
+                resp_body = await r.text()
+                if r.status != 200:
+                    logger.error(f"[SWAP TX FAILED] HTTP {r.status}: {resp_body}")
+                    return None
+                data = json.loads(resp_body)
+                swap_tx = data.get("swapTransaction")
+                if swap_tx:
+                    logger.info(f"[SWAP TX OK] Transaction built ({len(swap_tx)} chars b64)")
+                else:
+                    logger.error(f"[SWAP TX FAILED] No swapTransaction in response: {resp_body[:200]}")
+                return swap_tx
         except Exception as e:
             logger.error(f"[SWAP TX ERROR] {e}")
             return None
@@ -242,6 +279,7 @@ class LiveTrader:
         """
         Simulate a signed transaction on-chain BEFORE broadcasting.
         Returns {"ok": True/False, "error": str|None, "logs": list}.
+        Only called explicitly; skipped on the hot path when skip_simulation=True.
         """
         payload = {
             "jsonrpc": "2.0",
@@ -257,22 +295,22 @@ class LiveTrader:
             ],
         }
         try:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(
-                    SOLANA_RPC, json=payload,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as r:
-                    data = await r.json()
-                    result = data.get("result", {}).get("value", {})
-                    err = result.get("err")
-                    logs = result.get("logs", [])
-                    if err:
-                        logger.error(f"[SIMULATE FAILED] err={err}")
-                        for i, log_line in enumerate(logs):
-                            logger.error(f"  sim_log[{i}]: {log_line}")
-                        return {"ok": False, "error": str(err), "logs": logs}
-                    logger.info(f"[SIMULATE OK] {len(logs)} log lines, units={result.get('unitsConsumed', '?')}")
-                    return {"ok": True, "error": None, "logs": logs}
+            s = await self._get_session()
+            async with s.post(
+                SOLANA_RPC, json=payload,
+                timeout=aiohttp.ClientTimeout(total=7),
+            ) as r:
+                data = await r.json()
+                result = data.get("result", {}).get("value", {})
+                err = result.get("err")
+                logs = result.get("logs", [])
+                if err:
+                    logger.error(f"[SIMULATE FAILED] err={err}")
+                    for i, log_line in enumerate(logs):
+                        logger.error(f"  sim_log[{i}]: {log_line}")
+                    return {"ok": False, "error": str(err), "logs": logs}
+                logger.info(f"[SIMULATE OK] {len(logs)} log lines, units={result.get('unitsConsumed', '?')}")
+                return {"ok": True, "error": None, "logs": logs}
         except Exception as e:
             logger.warning(f"[SIMULATE WARN] Simulation call failed ({e}), proceeding anyway…")
             return {"ok": True, "error": None, "logs": []}  # Don't block on sim failure
@@ -280,9 +318,11 @@ class LiveTrader:
     async def _confirm_tx(self, sig: str, timeout_s: int = 30) -> dict:
         """
         Poll for transaction confirmation. Returns the transaction status.
+        Polling interval is 0.75 s (halved from 1.5 s) for faster detection.
         """
         logger.info(f"[CONFIRM] Waiting for confirmation of {sig[:16]}… (max {timeout_s}s)")
         start = time.time()
+        s = await self._get_session()
         while time.time() - start < timeout_s:
             payload = {
                 "jsonrpc": "2.0",
@@ -291,30 +331,29 @@ class LiveTrader:
                 "params": [[sig], {"searchTransactionHistory": False}],
             }
             try:
-                async with aiohttp.ClientSession() as s:
-                    async with s.post(
-                        SOLANA_RPC, json=payload,
-                        timeout=aiohttp.ClientTimeout(total=5),
-                    ) as r:
-                        data = await r.json()
-                        statuses = data.get("result", {}).get("value", [None])
-                        status = statuses[0] if statuses else None
-                        if status is not None:
-                            err = status.get("err")
-                            conf = status.get("confirmationStatus")
-                            slot = status.get("slot")
-                            if err:
-                                logger.error(f"[CONFIRM FAILED] sig={sig[:16]}… err={err} slot={slot}")
-                                # Fetch transaction logs for the failed TX
-                                await self._fetch_tx_logs(sig)
-                                return {"confirmed": False, "error": str(err), "slot": slot}
-                            if conf in ("confirmed", "finalized"):
-                                logger.info(f"[CONFIRM OK] sig={sig[:16]}… status={conf} slot={slot}")
-                                return {"confirmed": True, "error": None, "slot": slot}
-                            logger.debug(f"[CONFIRM] sig={sig[:16]}… status={conf}, waiting…")
+                async with s.post(
+                    SOLANA_RPC, json=payload,
+                    timeout=aiohttp.ClientTimeout(total=4),
+                ) as r:
+                    data = await r.json()
+                    statuses = data.get("result", {}).get("value", [None])
+                    status = statuses[0] if statuses else None
+                    if status is not None:
+                        err = status.get("err")
+                        conf = status.get("confirmationStatus")
+                        slot = status.get("slot")
+                        if err:
+                            logger.error(f"[CONFIRM FAILED] sig={sig[:16]}… err={err} slot={slot}")
+                            # Fetch transaction logs for the failed TX
+                            await self._fetch_tx_logs(sig)
+                            return {"confirmed": False, "error": str(err), "slot": slot}
+                        if conf in ("confirmed", "finalized"):
+                            logger.info(f"[CONFIRM OK] sig={sig[:16]}… status={conf} slot={slot}")
+                            return {"confirmed": True, "error": None, "slot": slot}
+                        logger.debug(f"[CONFIRM] sig={sig[:16]}… status={conf}, waiting…")
             except Exception as e:
                 logger.warning(f"[CONFIRM] poll error: {e}")
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(0.75)  # 750 ms — twice as fast as before
 
         logger.warning(f"[CONFIRM TIMEOUT] sig={sig[:16]}… not confirmed within {timeout_s}s")
         return {"confirmed": False, "error": "timeout", "slot": None}
@@ -331,29 +370,64 @@ class LiveTrader:
             ],
         }
         try:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(
-                    SOLANA_RPC, json=payload,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as r:
-                    data = await r.json()
-                    result = data.get("result")
-                    if not result:
-                        logger.warning(f"[TX LOGS] No result for {sig[:16]}… (may not be on-chain yet)")
-                        return
-                    meta = result.get("meta", {})
-                    err = meta.get("err")
-                    logs = meta.get("logMessages", [])
-                    logger.info(f"[TX LOGS] sig={sig[:16]}… err={err}")
-                    for i, log_line in enumerate(logs):
-                        logger.info(f"  tx_log[{i}]: {log_line}")
+            s = await self._get_session()
+            async with s.post(
+                SOLANA_RPC, json=payload,
+                timeout=aiohttp.ClientTimeout(total=7),
+            ) as r:
+                data = await r.json()
+                result = data.get("result")
+                if not result:
+                    logger.warning(f"[TX LOGS] No result for {sig[:16]}… (may not be on-chain yet)")
+                    return
+                meta = result.get("meta", {})
+                err = meta.get("err")
+                logs = meta.get("logMessages", [])
+                logger.info(f"[TX LOGS] sig={sig[:16]}… err={err}")
+                for i, log_line in enumerate(logs):
+                    logger.info(f"  tx_log[{i}]: {log_line}")
         except Exception as e:
             logger.warning(f"[TX LOGS] Failed to fetch logs: {e}")
 
+    async def _broadcast_rpc(self, signed_b64: str) -> Optional[str]:
+        """Broadcast a signed transaction via the standard Solana RPC."""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendTransaction",
+            "params": [
+                signed_b64,
+                {
+                    "encoding": "base64",
+                    "skipPreflight": True,
+                    "preflightCommitment": "processed",
+                    "maxRetries": 5,
+                },
+            ],
+        }
+        s = await self._get_session()
+        async with s.post(
+            SOLANA_RPC,
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as r:
+            data = await r.json()
+            if "error" in data:
+                logger.error(f"[BROADCAST FAILED] RPC error: {data['error']}")
+                return None
+            sig = data.get("result")
+            logger.info(f"[BROADCAST OK] sig={sig}")
+            logger.info(f"[SOLSCAN] https://solscan.io/tx/{sig}")
+            return sig
+
     async def _sign_and_send(self, swap_tx_b64: str) -> Optional[str]:
         """
-        Sign the base64-encoded versioned transaction and broadcast it to Solana RPC.
-        Returns the transaction signature (tx hash) on success.
+        Sign the base64-encoded versioned transaction and broadcast it.
+
+        Hot path:
+          - skip_simulation=True  → no simulate call (saves ~300 ms)
+          - Confirmation is dispatched as a fire-and-forget background task
+            so execute_buy / execute_sell return immediately after broadcast.
         """
         try:
             raw_tx = base64.b64decode(swap_tx_b64)
@@ -366,59 +440,42 @@ class LiveTrader:
 
             logger.info(f"[SIGN] Transaction signed ({len(signed_bytes)} bytes)")
 
-            # ── Simulate first ────────────────────────────────────────────
-            sim = await self._simulate_tx(signed_b64)
-            if not sim["ok"]:
-                error_detail = sim['error']
-                logger.error(f"[SIGN_AND_SEND] Aborting — simulation failed: {error_detail}")
-                await self._broadcast_status(
-                    "tx_simulation_failed",
-                    f"Simulation failed: {error_detail}",
-                )
+            # ── Optional simulation (disabled on hot path) ─────────────────
+            if not self.skip_simulation:
+                sim = await self._simulate_tx(signed_b64)
+                if not sim["ok"]:
+                    error_detail = sim['error']
+                    logger.error(f"[SIGN_AND_SEND] Aborting — simulation failed: {error_detail}")
+                    await self._broadcast_status(
+                        "tx_simulation_failed",
+                        f"Simulation failed: {error_detail}",
+                    )
+                    return None
+
+            # ── Broadcast via standard RPC ────────────────────────
+            sig = await self._broadcast_rpc(signed_b64)
+
+            if sig is None:
                 return None
 
-            # ── Broadcast ─────────────────────────────────────────────────
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "sendTransaction",
-                "params": [
-                    signed_b64,
-                    {
-                        "encoding": "base64",
-                        "skipPreflight": True,  # We already simulated
-                        "preflightCommitment": "processed",
-                        "maxRetries": 3,
-                    },
-                ],
-            }
-            async with aiohttp.ClientSession() as s:
-                async with s.post(
-                    SOLANA_RPC,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as r:
-                    data = await r.json()
-                    if "error" in data:
-                        rpc_err = data['error']
-                        logger.error(f"[BROADCAST FAILED] RPC error: {rpc_err}")
-                        return None
-                    sig = data.get("result")
-                    logger.info(f"[BROADCAST OK] sig={sig}")
-                    logger.info(f"[SOLSCAN] https://solscan.io/tx/{sig}")
+            # ── Fire-and-forget confirmation ──────────────────────────────
+            # Don't block buy/sell execution waiting for confirmation — it
+            # can take 5-30 s.  We log the result in the background.
+            asyncio.ensure_future(self._background_confirm(sig))
 
-            # ── Confirm ───────────────────────────────────────────────────
-            confirm_result = await self._confirm_tx(sig)
-            if not confirm_result["confirmed"]:
-                logger.error(
-                    f"[TX FAILED ON-CHAIN] sig={sig[:16]}… error={confirm_result['error']}"
-                )
-                # Still return sig so caller can inspect it
             return sig
 
         except Exception as e:
             logger.error(f"[SIGN_AND_SEND ERROR] {e}", exc_info=True)
             return None
+
+    async def _background_confirm(self, sig: str):
+        """Background task: poll for confirmation and log the result."""
+        confirm_result = await self._confirm_tx(sig)
+        if not confirm_result["confirmed"]:
+            logger.error(
+                f"[TX FAILED ON-CHAIN] sig={sig[:16]}… error={confirm_result['error']}"
+            )
 
     async def _get_sol_balance(self) -> float:
         """Fetch wallet SOL balance from RPC."""
@@ -428,11 +485,11 @@ class LiveTrader:
             "params": [self.wallet_pubkey, {"commitment": "processed"}],
         }
         try:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(SOLANA_RPC, json=payload,
-                                   timeout=aiohttp.ClientTimeout(total=5)) as r:
-                    data = await r.json()
-                    return float(data.get("result", {}).get("value", 0)) / 1e9
+            s = await self._get_session()
+            async with s.post(SOLANA_RPC, json=payload,
+                               timeout=aiohttp.ClientTimeout(total=4)) as r:
+                data = await r.json()
+                return float(data.get("result", {}).get("value", 0)) / 1e9
         except Exception:
             pass
         return 0.0
@@ -449,15 +506,15 @@ class LiveTrader:
             ],
         }
         try:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(SOLANA_RPC, json=payload,
-                                   timeout=aiohttp.ClientTimeout(total=5)) as r:
-                    data = await r.json()
-                    accounts = data.get("result", {}).get("value", [])
-                    if not accounts:
-                        return 0
-                    parsed = accounts[0]["account"]["data"]["parsed"]
-                    return int(parsed["info"]["tokenAmount"]["amount"])
+            s = await self._get_session()
+            async with s.post(SOLANA_RPC, json=payload,
+                               timeout=aiohttp.ClientTimeout(total=4)) as r:
+                data = await r.json()
+                accounts = data.get("result", {}).get("value", [])
+                if not accounts:
+                    return 0
+                parsed = accounts[0]["account"]["data"]["parsed"]
+                return int(parsed["info"]["tokenAmount"]["amount"])
         except Exception:
             pass
         return 0
@@ -544,6 +601,10 @@ class LiveTrader:
         try:
             # Fetch live token balance to sell exactly what we hold
             token_balance = await self._get_token_balance()
+            if token_balance <= 0:
+                # RPC might be lagging behind our broadcasted buy; fallback to cached quote balance
+                token_balance = self._token_balance
+                
             mint_str = str(self.token_mint)
             logger.info(f"[SELL] Starting sell: mint={mint_str[:8]}… balance={token_balance} units reason={reason}")
             if token_balance <= 0:

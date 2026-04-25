@@ -613,6 +613,7 @@ async def live_trading_ws(
     buy_size: float = Query(default=0.1),
     slippage_bps: int = Query(default=1000),
     priority_fee: int = Query(default=100000),
+    skip_sim: bool = Query(default=True),
     params: str = Query(default="{}"),
 ):
     if timeframe not in TIMEFRAME_SECONDS:
@@ -656,6 +657,7 @@ async def live_trading_ws(
         slippage_bps=slippage_bps,
         priority_fee_lamports=priority_fee,
         engine_kwargs=engine_params,
+        skip_simulation=skip_sim,
     )
 
     cancelled = asyncio.Event()

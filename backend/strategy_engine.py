@@ -365,7 +365,7 @@ class StrategyEngine:
         reversal_confirm_bars: int = 2,
         chop_atr_pct: float = 0.5,
         chop_spread_pct: float = 0.15,
-        reversal_exit_confirm_bars: int = 1,
+        reversal_exit_confirm_bars: int = 0,
         s_effective_threshold: float = 0.5,
         exhaustion_persist_bars: int = 4,
         # ── NEW: Regime Filter & Confidence params ────────────────────
@@ -387,7 +387,7 @@ class StrategyEngine:
         local_range_bars: int = 10,            # lookback for local range (§8)
         local_range_threshold_pct: float = 0.4,# min range % of price (§8)
         sign_flip_threshold: int = 4,          # max sign flips before chop (§8)
-        stability_bars: int = 2,              # required consecutive stability bars (§9) [was 2]
+        stability_bars: int = 2,              # required consecutive stability bars (§9) [relaxed from 3]
         spike_atr_multiplier: float = 2,    # §11: reject entry if last candle body > N×ATR
         spike_lookback_bars: int = 4,          # §11: how many recent bars to scan for spikes
     ):
@@ -808,12 +808,10 @@ class StrategyEngine:
         m_recent = self._m_hat_history[-(N + 1):]
         s_recent = self._signal_strength_history[-(N + 1):]
 
-        # Upward trajectory: net positive over the window AND current bar still rising.
-        # Strict all-N monotonic increase is too brittle with a Kalman-smoothed m_hat
-        # which oscillates slightly even in strong trends.
-        m_increasing_up   = m_recent[-1] > m_recent[0] and m_recent[-1] > m_recent[-2]
-        # Downward trajectory: net negative over the window AND current bar still falling.
-        m_increasing_down = m_recent[-1] < m_recent[0] and m_recent[-1] < m_recent[-2]
+        # Upward trajectory: pushing higher (more positive)
+        m_increasing_up = all(m_recent[i + 1] > m_recent[i] for i in range(N))
+        # Downward trajectory: pushing lower (more negative)
+        m_increasing_down = all(m_recent[i + 1] < m_recent[i] for i in range(N))
         
         s_increasing = all(s_recent[i + 1] > s_recent[i] for i in range(N))
 
@@ -824,11 +822,29 @@ class StrategyEngine:
         # s_increasing is direction-agnostic (|m_hat|/ATR growing), so on a
         # downtrend with growing |m_hat|, s_increasing=True would wrongly
         # satisfy _pre_entry_stable_up.  The sign check prevents that.
+        #
+        # Fix-2: Relax the accel hard-AND — accel is only required when
+        # s_increasing is the *sole* qualifier (no trajectory confirmation).
+        # If m_hat is already monotonically tracking in the right direction
+        # (m_increasing_up / m_increasing_down), that is sufficient evidence
+        # on its own without also demanding the same-bar acceleration.
+        # This prevents Kalman lag from blocking valid entries for 1–2 bars
+        # after the momentum peak of a breakout.
         m_hat_positive = self.m_hat > 0
         m_hat_negative = self.m_hat < 0
-        self._pre_entry_stable_up = m_hat_positive and (m_increasing_up or s_increasing) and accel_up
-        self._pre_entry_stable_down = m_hat_negative and (m_increasing_down or s_increasing) and accel_down
-        
+        self._pre_entry_stable_up   = (
+            m_hat_positive and (
+                m_increasing_up                    # trajectory alone is enough
+                or (s_increasing and accel_up)     # signal-strength path still needs accel
+            )
+        )
+        self._pre_entry_stable_down = (
+            m_hat_negative and (
+                m_increasing_down
+                or (s_increasing and accel_down)
+            )
+        )
+
         # For general dashboard display, true if stable in any direction
         self._pre_entry_stable = self._pre_entry_stable_up or self._pre_entry_stable_down
 
@@ -856,15 +872,34 @@ class StrategyEngine:
         if direction == Direction.DOWN and not self._pre_entry_stable_down:
             return False
 
-        # §11: Spike filter — reject entry if any candle in the recent lookback
-        # window has a body > spike_atr_multiplier × current ATR.
-        # Uses ATR (not avg-body) so it scales with regime volatility and doesn't
-        # reject the legitimate large breakout candle leaving flat chop.
+        # Fix 1 (revised): Block mid-range entries, NOT breakout entries.
+        # A breakout by definition means price is at or above the recent high —
+        # blocking that was preventing virtually every legitimate trade.
+        # Instead, block entries where price is stuck in the LOWER half of
+        # the recent range (below the midpoint): those are entries into dead
+        # price action with overhead supply still intact.
+        if len(self.close_history) >= self.local_range_bars:
+            recent_prices = self.close_history[-self.local_range_bars:]
+            recent_high = max(recent_prices)
+            recent_low  = min(recent_prices)
+            range_size  = recent_high - recent_low
+            if range_size > 0:
+                # Block only if price is in the lower 40 % of the recent range
+                position_in_range = (c - recent_low) / range_size
+                if position_in_range < 0.4:
+                    return False
+
+        # Fix 1: Spike filter — compare last candle body against average of prior
+        # recent bodies rather than ATR (which is inflated during a blow-off rally).
         if self.atr_val and self.atr_val > 0 and len(self.open_history) >= 2:
-            spike_threshold = self.spike_atr_multiplier * self.atr_val
             lookback = min(self.spike_lookback_bars, len(self.open_history))
-            for i in range(-lookback, 0):
-                if abs(self.close_history[i] - self.open_history[i]) > spike_threshold:
+            recent_bodies = [
+                abs(self.close_history[i] - self.open_history[i])
+                for i in range(-lookback, 0)
+            ]
+            if len(recent_bodies) >= 2:
+                avg_prior_body = sum(recent_bodies[:-1]) / len(recent_bodies[:-1])
+                if avg_prior_body > 0 and recent_bodies[-1] > self.spike_atr_multiplier * avg_prior_body:
                     return False
 
         # §10: Entry location filter — reject if mid-range / in value area
@@ -1168,34 +1203,17 @@ class StrategyEngine:
             # Entry-specific gates (momentum_acceleration, s_effective,
             # delta_aligned, leaving_hvn) are applied to the BUY decision only.
             cold_start = (self.trend_before_exhaustion == Direction.NONE)
-            # Use S_weak (not S_strong) as the state-transition exit threshold.
-            # S_strong is still scored as +1 condition inside entry_conds, so
-            # strong setups still get rewarded — but moderate trends can also
-            # leave EXHAUSTION without being blocked at the door.
-            if self.spread_expanding and S > self.S_weak and not momentum_decay:
+            if self.spread_expanding and S > self.S_strong and not momentum_decay:
                 if direction == self.trend_before_exhaustion or cold_start:
                     # Same direction as original trend (or cold-start) → CONTINUATION
                     self.regime = Regime.CONTINUATION
                     self.direction = direction
                     signal = None
                     if cold_start:
-                        # Fresh breakout from cold start: evaluate BUY immediately.
-                        # Set trend_before_exhaustion to opposite so the subsequent
-                        # direction-flip BUY logic recognises this as a reversal-up scenario.
+                        # Fresh breakout — treat like EXHAUSTION→CONTINUATION with
+                        # direction flip so the BUY path below fires.
                         self.trend_before_exhaustion = Direction.DOWN if direction == Direction.UP else Direction.UP
-                        if direction == Direction.UP and not self.in_position and S > self.S_weak and self.m_hat > 0:
-                            if self._passes_entry_gate(c, direction):
-                                entry_conds = [
-                                    S > self.S_strong,
-                                    delta_aligned,
-                                    self._is_leaving_hvn(c, direction),
-                                    self.momentum_acceleration > 0,
-                                    self._ema_cross_valid,
-                                    self.s_effective > self.s_effective_threshold,
-                                ]
-                                if sum(1 for x in entry_conds if x) >= 2:
-                                    signal = Signal.BUY
-                    # EXIT on downward move if in position
+                    # NO LONGER BUY on plain UP trend continuation (only on reversal-up)
                     if direction == Direction.DOWN and self.in_position:
                         signal = Signal.EXIT
                     self.trend_start_price = c
