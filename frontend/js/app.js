@@ -52,7 +52,7 @@ let pendingMarkerData = [];  // raw marker data awaiting market cap resolution
 
 /* Strategy Engine Parameters */
 let engineParams = {
-  ema_fast: 3, ema_slow: 7, atr_period: 7, roc_period: 3, warmup: 5,
+  ema_fast: 3, ema_slow: 7, atr_period: 7, roc_period: 3, warmup: 20,
   signal_strong: 2, signal_weak: 1.5, signal_noise: 1,
   exhaustion_bars_limit: 3, delta_threshold: 0.3, kalman_gamma: 0.26,
   min_trend_bars: 3, reversal_confirm_bars: 2, chop_atr_pct: 10,

@@ -1412,11 +1412,6 @@ class StrategyEngine:
         is_buy = c >= o
         self._update_profile(c, volume, is_buy, time)
 
-        if self.bar_count < self.warmup:
-            if _build_full_result:
-                return self._build_result(time, c, None)
-            return self._build_result_minimal(time, c, None)
-
         if self.current_profile is None:
             self._start_new_profile(c)
 
@@ -1426,6 +1421,9 @@ class StrategyEngine:
             exit_signal = self._check_exit(c)
             if exit_signal:
                 signal = exit_signal
+
+        if self.bar_count < self.warmup:
+            signal = None
 
         if _build_full_result:
             return self._build_result(time, c, signal)
