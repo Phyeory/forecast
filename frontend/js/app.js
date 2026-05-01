@@ -57,7 +57,7 @@ let engineParams = {
   signal_strong: 2, signal_weak: 1.5, signal_noise: 1,
   exhaustion_bars_limit: 3, delta_threshold: 0.3, kalman_gamma: 0.26,
   min_trend_bars: 3, reversal_confirm_bars: 2, chop_atr_pct: 10,
-  chop_spread_pct: 2, reversal_exit_confirm_bars: 0,
+  chop_spread_pct: 2, reversal_exit_confirm_bars: 1,
   s_effective_threshold: 0.5, exhaustion_persist_bars: 4,
   regime_lookback: 5, persistence_threshold: 2, momentum_mean_threshold: 0.0,
   ema_min_spread_pct: 0.08, confidence_high: 0.6, confidence_low: 0.42,
@@ -74,7 +74,7 @@ let engineParams = {
   momentum_peak_bars: 3,
   consolidation_range_pct: 10,
   confidence_very_high: 0.67,
-  ema_macro_period: 100,
+  ema_macro_period: 7,
 };
 
 const $ = id => document.getElementById(id);
@@ -966,7 +966,7 @@ function connect(mint, timeframe) {
     buy_size_sol: parseFloat(document.getElementById("tester-buy-size").value) || 0.1,
     slippage_pct: parseFloat(document.getElementById("tester-slippage").value) || 1.0,
     priority_fee: parseFloat(document.getElementById("tester-priority-fee").value) || 0.0001,
-    bribe_fee: parseFloat(document.getElementById("tester-bribe-fee").value) || 0.00001
+    bribe_fee: parseFloat(document.getElementById("tester-bribe-fee").value) || 0.000
   };
   const testerStr = `&buy_size=${testerConfig.buy_size_sol}&slippage_pct=${testerConfig.slippage_pct}&priority_fee=${testerConfig.priority_fee}&bribe_fee=${testerConfig.bribe_fee}`;
 
@@ -1594,13 +1594,13 @@ document.getElementById("bt-run-btn").addEventListener("click", async () => {
   };
 
   try {
-    const result = await apiFetch("/api/backtest", { 
-      method: "POST", 
-      body: JSON.stringify({ 
-        recording_id: parseInt(recId), 
+    const result = await apiFetch("/api/backtest", {
+      method: "POST",
+      body: JSON.stringify({
+        recording_id: parseInt(recId),
         engine_params: engineParams,
         ...testerConfig
-      }) 
+      })
     });
     if (result.error) { alert(result.error); return; }
     loadBacktestsList();
@@ -1635,7 +1635,7 @@ document.getElementById("bt-run-all-btn").addEventListener("click", async () => 
 
     const result = await apiFetch("/api/backtest/batch", {
       method: "POST",
-      body: JSON.stringify({ 
+      body: JSON.stringify({
         engine_params: engineParams,
         ...testerConfig
       }),

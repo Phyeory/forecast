@@ -360,7 +360,7 @@ class StrategyEngine:
         reversal_confirm_bars: int = 2,
         chop_atr_pct: float = 0.5,
         chop_spread_pct: float = 0.15,
-        reversal_exit_confirm_bars: int = 0,
+        reversal_exit_confirm_bars: int = 1,
         s_effective_threshold: float = 0.5,
         exhaustion_persist_bars: int = 4,
         regime_lookback: int = 5,
@@ -405,7 +405,7 @@ class StrategyEngine:
         confidence_very_high: float = 0.67,
         # ^ When confidence exceeds this, reduce effective stability_bars to 1.
         # ── Macro trend gate ─────────────────────────────────────────────
-        ema_macro_period: int = 100,
+        ema_macro_period: int = 7,
         # ^ Slow EMA lookback used to define the macro trend.  Only BUY when
         #   close >= ema_macro.  Set to 0 to disable.
     ):
