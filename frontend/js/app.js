@@ -12,6 +12,7 @@ const CANDLE_FLAT = "#5a6071";
 /* Colors for indicators */
 const EMA_FAST_COLOR = "#00e5ff";  // Cyan
 const EMA_SLOW_COLOR = "#ff9800";  // Orange
+const EMA_MACRO_COLOR = "#c084fc"; // Purple — macro trend gate
 const ATR_COLOR = "#ef5350";  // Red
 const ROC_COLOR = "#64b5f6";  // Light blue
 const ROC_SIGNAL_COLOR = "#ff9800"; // Orange for signal line
@@ -26,7 +27,7 @@ const REGIME_COLORS = {
 };
 
 let chart, candleSeries, volSeries, ws, reconnectTimer;
-let emaFastSeries, emaSlowSeries;  // EMA overlay lines
+let emaFastSeries, emaSlowSeries, emaMacroSeries;  // EMA overlay lines
 let atrSeries, rocSeries;           // Sub-pane series
 let currentMint = "", currentTf = "1m";
 let reconnectMs = RECONNECT_MS;
@@ -73,6 +74,7 @@ let engineParams = {
   momentum_peak_bars: 3,
   consolidation_range_pct: 10,
   confidence_very_high: 0.67,
+  ema_macro_period: 100,
 };
 
 const $ = id => document.getElementById(id);
@@ -142,6 +144,16 @@ function initChart() {
   emaSlowSeries = chart.addLineSeries({
     color: EMA_SLOW_COLOR,
     lineWidth: 1,
+    priceLineVisible: false,
+    lastValueVisible: false,
+    crosshairMarkerVisible: false,
+    priceFormat: { type: "custom", minMove: 1, formatter: v => formatMcap(v) },
+  });
+
+  emaMacroSeries = chart.addLineSeries({
+    color: EMA_MACRO_COLOR,
+    lineWidth: 1,
+    lineStyle: 1,  // dashed
     priceLineVisible: false,
     lastValueVisible: false,
     crosshairMarkerVisible: false,
@@ -783,6 +795,7 @@ function processHistoricalStrategy(results, candles) {
 
   const emaFastData = [];
   const emaSlowData = [];
+  const emaMacroData = [];
 
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
@@ -796,6 +809,9 @@ function processHistoricalStrategy(results, candles) {
       }
       if (r.indicators.ema_slow) {
         emaSlowData.push({ time: candle.time, value: toMarketCapValue(r.indicators.ema_slow) });
+      }
+      if (r.indicators.ema_macro) {
+        emaMacroData.push({ time: candle.time, value: toMarketCapValue(r.indicators.ema_macro) });
       }
       if (r.indicators.roc !== null && r.indicators.roc !== undefined) {
         rocHistory.push({ time: candle.time, value: r.indicators.roc });
@@ -816,9 +832,9 @@ function processHistoricalStrategy(results, candles) {
       const signal = ft.trade_action;
       const signalLabel = ft.trade_label;
       const closedTrade = ft.closed_trade;
-      // Always use candle open for visual label — the fill price (entry/exit_price)
-      // includes delay + slippage and would render outside the candle's range.
-      const rawExecPrice = candle?.open ?? candle?.close;
+      // Always use the real exact calculated price if available (with delay and slippage);
+      // fallback to candle open if not available.
+      const rawExecPrice = ft.opened_trade?.entry_price || ft.closed_trade?.exit_price || (candle?.open ?? candle?.close);
 
       if (chartBaseMcap) {
         const mcapExecPrice = toMarketCapValue(rawExecPrice);
@@ -839,6 +855,7 @@ function processHistoricalStrategy(results, candles) {
   // Set EMA data on chart
   if (emaFastData.length) emaFastSeries.setData(emaFastData);
   if (emaSlowData.length) emaSlowSeries.setData(emaSlowData);
+  if (emaMacroData.length) emaMacroSeries.setData(emaMacroData);
 
   // Update markers
   updateMarkers();
@@ -871,6 +888,9 @@ function processLiveStrategy(result, candle, mcapCandle) {
     if (result.indicators.ema_slow && candle) {
       emaSlowSeries.update({ time: candle.time, value: toMarketCapValue(result.indicators.ema_slow) });
     }
+    if (result.indicators.ema_macro && candle) {
+      emaMacroSeries.update({ time: candle.time, value: toMarketCapValue(result.indicators.ema_macro) });
+    }
     if (result.indicators.roc !== null && result.indicators.roc !== undefined) {
       rocHistory.push({ time: candle?.time, value: result.indicators.roc });
       if (rocHistory.length > 300) rocHistory.shift();
@@ -884,13 +904,11 @@ function processLiveStrategy(result, candle, mcapCandle) {
   regimeHistory.push(result.regime || "idle");
   if (regimeHistory.length > 300) regimeHistory.shift();
 
-  // Use candle open for the visual label price — entry/exit_price include
-  // delay + slippage and would render outside the candle's visible range.
-  if (result.forward_test && mcapCandle) {
+  if (result.forward_test && mcapCandle && candle) {
     const ft = result.forward_test;
     if (ft.trade_action === "buy" || ft.trade_action === "exit") {
-      // candle.open is the reference price that sits within the candle range.
-      const mcapExecPrice = mcapCandle.open;
+      const rawExecPrice = ft.opened_trade?.entry_price || ft.closed_trade?.exit_price || candle.open;
+      const mcapExecPrice = (ft.opened_trade || ft.closed_trade) ? toMarketCapValue(rawExecPrice) : mcapCandle.open;
 
       addSignalMarker(
         mcapCandle.time,
@@ -944,10 +962,16 @@ function connect(mint, timeframe) {
   if (emaSlowSeries) emaSlowSeries.setData([]);
   showOverlay("⏳", "Connecting…");
   setDot("connecting", "Connecting…");
+  const testerConfig = {
+    buy_size_sol: parseFloat(document.getElementById("tester-buy-size").value) || 0.1,
+    slippage_pct: parseFloat(document.getElementById("tester-slippage").value) || 1.0,
+    priority_fee: parseFloat(document.getElementById("tester-priority-fee").value) || 0.0001,
+    bribe_fee: parseFloat(document.getElementById("tester-bribe-fee").value) || 0.00001
+  };
+  const testerStr = `&buy_size=${testerConfig.buy_size_sol}&slippage_pct=${testerConfig.slippage_pct}&priority_fee=${testerConfig.priority_fee}&bribe_fee=${testerConfig.bribe_fee}`;
 
   const paramsStr = encodeURIComponent(JSON.stringify(engineParams));
-  ws = new WebSocket(`${WS_BASE}/${mint}?timeframe=${timeframe}&params=${paramsStr}`);
-
+  ws = new WebSocket(`${WS_BASE}/${mint}?timeframe=${timeframe}&params=${paramsStr}${testerStr}`);
   ws.onopen = () => {
     reconnectMs = RECONNECT_MS;
     setDot("connected", "Live");
@@ -1561,8 +1585,23 @@ document.getElementById("bt-run-btn").addEventListener("click", async () => {
   const prog = document.getElementById("bt-progress");
   prog.classList.remove("hidden");
   document.getElementById("bt-run-btn").disabled = true;
+
+  const testerConfig = {
+    buy_size_sol: parseFloat(document.getElementById("tester-buy-size").value) || 0.1,
+    slippage_pct: parseFloat(document.getElementById("tester-slippage").value) || 1.0,
+    priority_fee: parseFloat(document.getElementById("tester-priority-fee").value) || 0.0001,
+    bribe_fee: parseFloat(document.getElementById("tester-bribe-fee").value) || 0.00001
+  };
+
   try {
-    const result = await apiFetch("/api/backtest", { method: "POST", body: JSON.stringify({ recording_id: parseInt(recId), engine_params: engineParams }) });
+    const result = await apiFetch("/api/backtest", { 
+      method: "POST", 
+      body: JSON.stringify({ 
+        recording_id: parseInt(recId), 
+        engine_params: engineParams,
+        ...testerConfig
+      }) 
+    });
     if (result.error) { alert(result.error); return; }
     loadBacktestsList();
     loadBacktestResult(result.backtest_id);
@@ -1587,9 +1626,19 @@ document.getElementById("bt-run-all-btn").addEventListener("click", async () => 
   progLabel.textContent = `Running all ${completed.length} recordings in parallel…`;
 
   try {
+    const testerConfig = {
+      buy_size_sol: parseFloat(document.getElementById("tester-buy-size").value) || 0.1,
+      slippage_pct: parseFloat(document.getElementById("tester-slippage").value) || 1.0,
+      priority_fee: parseFloat(document.getElementById("tester-priority-fee").value) || 0.0001,
+      bribe_fee: parseFloat(document.getElementById("tester-bribe-fee").value) || 0.00001
+    };
+
     const result = await apiFetch("/api/backtest/batch", {
       method: "POST",
-      body: JSON.stringify({ engine_params: engineParams }),
+      body: JSON.stringify({ 
+        engine_params: engineParams,
+        ...testerConfig
+      }),
     });
     const msg = `Done: ${result.succeeded}/${result.total} backtests succeeded.`;
     if (result.failed > 0) alert(msg);

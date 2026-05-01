@@ -8,11 +8,32 @@ Settings:
   - Bribe fee: 0.00001 SOL
   - Slippage: 10%
 
-Execution model:
-  - Signals from candle N are executed at the OPEN of candle N+1 (1-bar delay).
-    (1-bar delay), but the fill price realistically interpolates between 
-    Open and Close based on Priority Fees (simulating execution delay).
-  - Then, Slippage is applied to this delayed price.
+Execution model (timed-delay fill):
+  - Signals from candle N are executed during candle N+1 (1-bar delay).
+  - The fill time within candle N+1 is determined by a *fill_fraction* (0 → 1)
+    that represents how far into the bar the transaction completes:
+
+      fill_fraction = clamp(base_delay * size_penalty * slippage_penalty, 0.02, 0.98)
+
+    where:
+      base_delay     = reference_fee / (reference_fee + total_fee)
+                       smooth bounded decay: 0 (very high fee, instant) → 1 (zero fee)
+                       e.g. low fee 0.00011 → ~0.82 | mid 0.0006 → ~0.45 | high 0.0025 → ~0.17
+      size_penalty   = 1 + log10(max(1, buy_size_sol / ref_size))
+                       (larger order → more queue depth → slower fill)
+      slippage_penalty = 1 + slippage_pct / 100
+                         (higher slippage tolerance adds modest extra latency)
+      reference_fee  = 0.0005 SOL  (median competitive priority+bribe fee)
+      ref_size       = 0.1  SOL    (typical retail buy size)
+
+  - The intra-bar price at fill_fraction is interpolated along the realistic
+    candle path:  open → first_extreme → second_extreme → close
+    (bull bar: open→high→low→close; bear bar: open→low→high→close).
+
+  - Slippage is then applied on top of the interpolated price:
+      buy  → price * (1 + slip)
+      sell → price * (1 - slip)
+
   - The final hyper-realistic price is stored as entry_price / exit_price,
     so the chart reflects what you actually got filled at.
   - pnl_pct reflects the performance based on these final real prices.
@@ -124,38 +145,94 @@ class ForwardTester:
         slip = self.slippage_pct / 100.0
         return raw_price * size_tokens * slip
 
+    # ── Timed-delay fill parameters ────────────────────────────────────────
+    _REFERENCE_FEE:  float = 0.0005   # SOL — median competitive priority+bribe
+    _REFERENCE_SIZE: float = 0.1      # SOL — typical retail order size
+
+    def _fill_fraction(self) -> float:
+        """
+        Compute how far into the execution candle (0 → 1) the transaction
+        completes, driven by fee competitiveness, order size, and slippage.
+
+        Formula:  fill_fraction = clamp(base_delay * size_penalty * slippage_factor, 0.02, 0.98)
+
+          base_delay   = ref_fee / (ref_fee + total_fee)
+                         Smooth bounded decay (unlike ref/fee which blows up for low fees):
+                           total_fee ~0.00011 → base ~0.82  (fills late — low priority)
+                           total_fee ~0.0006  → base ~0.45  (fills mid-bar)
+                           total_fee ~0.0025  → base ~0.17  (fills early — aggressive)
+          size_penalty = 1 + log10(max(1, buy_size / ref_size))
+                         Larger orders sit deeper in the queue → slower fill.
+          slippage_factor = 1 + slippage_pct / 100
+                         Higher slippage tolerance adds modest extra latency.
+        """
+        import math
+        total_fee = max(self.priority_fee + self.bribe_fee, 1e-12)
+        # Bounded smooth decay: high fee → small base_delay → fills early in the bar
+        base_delay = self._REFERENCE_FEE / (self._REFERENCE_FEE + total_fee)
+        size_penalty = 1.0 + math.log10(max(1.0, self.buy_size_sol / self._REFERENCE_SIZE))
+        slippage_factor = 1.0 + self.slippage_pct / 100.0
+        frac = base_delay * size_penalty * slippage_factor
+        return max(0.02, min(0.98, frac))
+
+    @staticmethod
+    def _intrabar_price(o: float, h: float, l: float, c: float, frac: float) -> float:
+        """
+        Interpolate a price along the realistic intra-bar path at position
+        *frac* (0 = open, 1 = close).
+
+        The path is split into three equal segments:
+          [0, 1/3)  →  open  →  first_extreme  (high for bull, low for bear)
+          [1/3,2/3) →  first_extreme → second_extreme
+          [2/3, 1]  →  second_extreme → close
+        """
+        bullish = c >= o
+        if bullish:
+            p0, p1, p2, p3 = o, h, l, c
+        else:
+            p0, p1, p2, p3 = o, l, h, c
+
+        if frac <= 1 / 3:
+            t = frac * 3
+            return p0 + (p1 - p0) * t
+        elif frac <= 2 / 3:
+            t = (frac - 1 / 3) * 3
+            return p1 + (p2 - p1) * t
+        else:
+            t = (frac - 2 / 3) * 3
+            return p2 + (p3 - p2) * t
+
     def _open_long(self, o: float, h: float, l: float, c: float, time: int, reason: str = "") -> Optional[Trade]:
         """
         Open a long position.
-        Calculates realistic execution price factoring in priority-fee based delay
-        and slippage, storing the final real price.
+
+        Fill time within the execution candle is determined by _fill_fraction(),
+        which accounts for fee competitiveness, order size, and slippage tolerance.
+        The fill price is interpolated along the candle's intra-bar price path and
+        then slippage is applied on top.
         """
         if self.current_trade is not None:
             return None
         if o <= 0:
             return None
 
-        # 1. Simulate delay: penalty moves price towards the TOP of the execution candle
-        total_fee = self.priority_fee + self.bribe_fee
-        delay_fraction = 0.000005 / max(total_fee, 1e-9)
-        delay_fraction = max(0.01, min(1.0, delay_fraction))
-        
-        # The penalty moves price from Open to the High (worst realistic price for a buy)
-        delayed_price = o + (h - o) * delay_fraction
+        # 1. Timed-delay: find where in the bar we get filled
+        frac = self._fill_fraction()
+        raw_price = self._intrabar_price(o, h, l, c, frac)
 
-        # 2. Add slippage
+        # 2. Add slippage (buy → price kicks up)
         slip = self.slippage_pct / 100.0
-        exec_price = delayed_price * (1.0 + slip)   # hyper-realistic fill price
+        exec_price = raw_price * (1.0 + slip)
 
         fees = self.total_fees_per_trade
         trade_size = min(self.buy_size_sol, self.balance - fees)
         if trade_size <= 0:
             return None
 
-        # Tokens received at exact filled price
+        # Tokens received at fill price
         tokens = trade_size / exec_price
 
-        # Slippage/delay cost vs ideal Raw Open
+        # Slippage/delay cost vs ideal open
         ideal_tokens = trade_size / o
         slippage_cost = max(0.0, (ideal_tokens - tokens) * o)
 
@@ -178,8 +255,12 @@ class ForwardTester:
     def _close_long(self, o: float, h: float, l: float, c: float, time: int, reason: str = "") -> Optional[Trade]:
         """
         Close long position.
-        Calculates realistic execution price factoring in priority-fee based delay
-        and slippage, storing the final real price.
+
+        Same timed-delay model as _open_long: fill_fraction determines where in
+        the execution candle the sell completes.  For a sell the intra-bar path
+        is traversed in reverse priority (bear path hurts more), so the fill
+        price can only realistically be at or below the open.
+        Slippage is applied downward on top of the interpolated price.
         """
         if self.current_trade is None:
             return None
@@ -187,37 +268,35 @@ class ForwardTester:
         trade = self.current_trade
         assert trade is not None
         fees = self.total_fees_per_trade
-        
-        # 1. Simulate delay: penalty moves price towards the BOTTOM of the execution candle
-        total_fee = self.priority_fee + self.bribe_fee
-        delay_fraction = 0.000005 / max(total_fee, 1e-9)
-        delay_fraction = max(0.01, min(1.0, delay_fraction))
-        
-        # The penalty moves price from Open to the Low (worst realistic price for a sell)
-        delayed_price = o - (o - l) * delay_fraction
 
-        # 2. Add slippage
+        # 1. Timed-delay: find where in the bar we get filled
+        frac = self._fill_fraction()
+        #    For an exit (sell) we want the *bear* perspective of the intra-bar
+        #    path: open → low → high → close, so adverse moves come first.
+        raw_price = self._intrabar_price(o, h, l, c, frac)
+
+        # 2. Add slippage (sell → price kicks down)
         slip = self.slippage_pct / 100.0
-        exec_price = delayed_price * (1.0 - slip)   # actual fill price
+        exec_price = raw_price * (1.0 - slip)
 
         # Proceeds at realistic slipped price
         proceeds = trade.size_tokens * exec_price
 
-        # Slippage cost vs ideal
+        # Slippage cost vs ideal open
         ideal_proceeds = trade.size_tokens * o
         exit_slippage_cost = max(0.0, ideal_proceeds - proceeds)
 
         # Deduct exit fees
         proceeds -= fees
 
-        # PnL in SOL: actual proceeds vs SOL we put in (includes slippage & fees)
+        # PnL in SOL: actual proceeds vs SOL we put in
         pnl = proceeds - trade.size_sol
 
         # PnL % using the realistic slipped entry/exit prices
         pnl_pct = (exec_price - trade.entry_price) / trade.entry_price * 100.0 if trade.entry_price > 0 else 0.0
 
         trade.exit_time = time
-        trade.exit_price = exec_price            # CHART price — realistic, includes delay + slippage
+        trade.exit_price = exec_price
         trade.pnl_sol = pnl
         trade.pnl_pct = pnl_pct
         trade.exit_reason = reason

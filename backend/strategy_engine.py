@@ -404,6 +404,10 @@ class StrategyEngine:
         # ── FIX-C: high-confidence stability relaxation ────────────────
         confidence_very_high: float = 0.67,
         # ^ When confidence exceeds this, reduce effective stability_bars to 1.
+        # ── Macro trend gate ─────────────────────────────────────────────
+        ema_macro_period: int = 100,
+        # ^ Slow EMA lookback used to define the macro trend.  Only BUY when
+        #   close >= ema_macro.  Set to 0 to disable.
     ):
         self.ema_fast_p = ema_fast
         self.ema_slow_p = ema_slow
@@ -456,6 +460,9 @@ class StrategyEngine:
         # FIX-C parameters
         self.confidence_very_high = confidence_very_high
 
+        # Macro trend gate parameter
+        self.ema_macro_period = ema_macro_period
+
         # State
         self.bar_count = 0
         self.regime = Regime.EXHAUSTION
@@ -466,6 +473,7 @@ class StrategyEngine:
         # Indicator state
         self.ema_fast_val: Optional[float] = None
         self.ema_slow_val: Optional[float] = None
+        self.ema_macro_val: Optional[float] = None  # macro trend EMA
         self.atr_val: Optional[float] = None
         self.m_hat: float = 0.0
         self.prev_m_hat: float = 0.0
@@ -553,6 +561,13 @@ class StrategyEngine:
         else:
             self.ema_fast_val = ema_step(self.ema_fast_val, c, self.ema_fast_p)
             self.ema_slow_val = ema_step(self.ema_slow_val, c, self.ema_slow_p)
+
+        # Macro trend EMA (slow; used as a buy-side gate)
+        if self.ema_macro_period > 0:
+            if self.ema_macro_val is None:
+                self.ema_macro_val = c
+            else:
+                self.ema_macro_val = ema_step(self.ema_macro_val, c, self.ema_macro_period)
 
         # EMA spread
         self.prev_ema_spread = self.ema_spread
@@ -876,7 +891,12 @@ class StrategyEngine:
     # ── §7 + §10: Unified Entry Gate ─────────────────────────────────────────
 
     def _passes_entry_gate(self, c: float, direction: Direction) -> bool:
-        """FIX-A + FIX-B applied here in addition to existing checks."""
+        """FIX-A + FIX-B + macro-trend gate applied here in addition to existing checks."""
+
+        # ── Macro trend gate: block BUY when price is below the slow EMA ──
+        if direction == Direction.UP:
+            if self.ema_macro_val is not None and c < self.ema_macro_val:
+                return False
 
         # §3: Confidence must be above HIGH_THRESHOLD
         if self.trend_confidence < self.confidence_high:
@@ -1452,6 +1472,7 @@ class StrategyEngine:
             "indicators": {
                 "ema_fast": self.ema_fast_val,
                 "ema_slow": self.ema_slow_val,
+                "ema_macro": self.ema_macro_val,
                 "atr": self.atr_val,
                 "atr_floor": self.atr_floor,
                 "roc": self.m_hat,

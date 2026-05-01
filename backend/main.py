@@ -352,6 +352,10 @@ async def chart_ws(
     mint: str,
     timeframe: str = Query(default="1s"),
     params: str = Query(default="{}"),
+    buy_size: float = Query(default=0.1),
+    slippage_pct: float = Query(default=1.0),
+    priority_fee: float = Query(default=0.0001),
+    bribe_fee: float = Query(default=0.00001),
 ):
     if timeframe not in TIMEFRAME_SECONDS:
         await websocket.close(code=4000, reason="Unknown timeframe")
@@ -399,10 +403,10 @@ async def chart_ws(
     # Initialize forward tester
     forward_tester = ForwardTester(
         starting_balance=1.0,
-        buy_size_sol=0.1,
-        priority_fee=0.0001,
-        bribe_fee=0.00001,
-        slippage_pct=1.0,
+        buy_size_sol=buy_size,
+        priority_fee=priority_fee,
+        bribe_fee=bribe_fee,
+        slippage_pct=slippage_pct,
         engine_kwargs=engine_params,
     )
 
@@ -706,15 +710,12 @@ async def live_trading_ws(
     if hist:
         strategy_results = []
         for candle in hist:
-            result = live_trader.update(
+            result = live_trader.update_historical_candle(
                 time_val=int(candle["time"]),
                 o=candle["open"], h=candle["high"],
                 l=candle["low"], c=candle["close"],
                 volume=candle.get("volume", 0),
             )
-            # Strip swap_requests from historical warmup
-            if result.get("live_trade", {}).get("swap_request"):
-                result["live_trade"]["swap_request"] = None
             strategy_results.append(result)
 
         await send({"type": "historical", "candles": hist, "strategy": strategy_results})
@@ -745,6 +746,7 @@ async def live_trading_ws(
                 o=candle_dict["open"], h=candle_dict["high"],
                 l=candle_dict["low"], c=candle_dict["close"],
                 volume=candle_dict.get("volume", 0),
+                is_new=is_new,
             )
 
             trade_payload = None if is_synthetic else {

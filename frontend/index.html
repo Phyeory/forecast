@@ -417,6 +417,28 @@
         </div>
         <div class="settings-body" id="settings-form">
         </div>
+        <hr style="border: 0; border-top: 1px solid var(--border); margin: 0;">
+        <div class="settings-header" style="border-bottom: none; padding-bottom: 0;">
+          <h2>Tester Configuration</h2>
+        </div>
+        <div class="settings-body" style="padding-top: 10px;">
+          <div class="param-group">
+            <label class="param-label">Buy Size (SOL)</label>
+            <input id="tester-buy-size" type="number" class="param-input" value="0.1" step="0.01" min="0.001" />
+          </div>
+          <div class="param-group">
+            <label class="param-label">Slippage (%)</label>
+            <input id="tester-slippage" type="number" class="param-input" value="1.0" step="0.1" min="0.0" />
+          </div>
+          <div class="param-group">
+            <label class="param-label">Priority Fee (SOL)</label>
+            <input id="tester-priority-fee" type="number" class="param-input" value="0.0001" step="0.00001" min="0" />
+          </div>
+          <div class="param-group">
+            <label class="param-label">Bribe Fee (SOL)</label>
+            <input id="tester-bribe-fee" type="number" class="param-input" value="0.00001" step="0.00001" min="0" />
+          </div>
+        </div>
         <div class="settings-footer">
           <button id="apply-settings-btn" type="button">Apply</button>
         </div>
@@ -445,7 +467,7 @@
       setTimeout(check, 1000);
     })();
   </script>
-  <script src="/static/js/app.js?v=31"></script>
+  <script src="/static/js/app.js?v=32"></script>
 </body>
 
 </html>
