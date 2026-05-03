@@ -375,14 +375,14 @@ class StrategyEngine:
         confidence_w3: float = 0.25,
         confidence_w4: float = 0.20,
         atr_floor_k: float = 0.6,
-        ema_cross_persist_bars: int = 2,
+        ema_cross_persist_bars: int = 3, #might consider changing to 3
         exhaustion_s_decay_bars: int = 2,
         exhaustion_stall_bars: int = 5,
         exhaustion_stall_atr_pct: float = 0.4,
         local_range_bars: int = 10,
         local_range_threshold_pct: float = 0.4,
         sign_flip_threshold: int = 4,
-        stability_bars: int = 2,
+        stability_bars: int = 3, #might change to 3
         spike_atr_multiplier: float = 2,
         spike_lookback_bars: int = 4,
         # ── FIX-A: new top-blast parameters ──────────────────────────
@@ -405,7 +405,7 @@ class StrategyEngine:
         confidence_very_high: float = 0.67,
         # ^ When confidence exceeds this, reduce effective stability_bars to 1.
         # ── Macro trend gate ─────────────────────────────────────────────
-        ema_macro_period: int = 7,
+        ema_macro_period: int = 20,
         # ^ Slow EMA lookback used to define the macro trend.  Only BUY when
         #   close >= ema_macro.  Set to 0 to disable.
     ):

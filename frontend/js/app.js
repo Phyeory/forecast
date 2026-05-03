@@ -62,9 +62,9 @@ let engineParams = {
   regime_lookback: 5, persistence_threshold: 2, momentum_mean_threshold: 0.0,
   ema_min_spread_pct: 0.08, confidence_high: 0.6, confidence_low: 0.42,
   confidence_w1: 0.30, confidence_w2: 0.25, confidence_w3: 0.25, confidence_w4: 0.20,
-  atr_floor_k: 0.6, ema_cross_persist_bars: 2, exhaustion_s_decay_bars: 2,
+  atr_floor_k: 0.6, ema_cross_persist_bars: 3, exhaustion_s_decay_bars: 2,
   local_range_bars: 10, local_range_threshold_pct: 0.4, sign_flip_threshold: 4,
-  stability_bars: 2,
+  stability_bars: 3,
   spike_atr_multiplier: 2,
   spike_lookback_bars: 4,
   exhaustion_stall_bars: 5,
@@ -74,7 +74,7 @@ let engineParams = {
   momentum_peak_bars: 3,
   consolidation_range_pct: 10,
   confidence_very_high: 0.67,
-  ema_macro_period: 7,
+  ema_macro_period: 20,
 };
 
 const $ = id => document.getElementById(id);
