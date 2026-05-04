@@ -65,6 +65,7 @@ def run_backtest_batch(
     slippage_pct: float = 1.0,
     starting_balance: float = 1.0,
     max_workers: Optional[int] = None,
+    batch_id: Optional[str] = None,
 ) -> list[dict]:
     """
     Run backtests on ALL completed recordings.
@@ -89,6 +90,7 @@ def run_backtest_batch(
         bribe_fee=bribe_fee,
         slippage_pct=slippage_pct,
         starting_balance=starting_balance,
+        batch_id=batch_id,
     )
 
     # For typical batch sizes, sequential is faster (no spawn overhead)
@@ -122,6 +124,7 @@ def run_backtest(
     bribe_fee: float = 0.00001,
     slippage_pct: float = 1.0,
     starting_balance: float = 1.0,
+    batch_id: Optional[str] = None,
 ) -> dict:
     """
     Run a full backtest on a saved recording.
@@ -249,6 +252,7 @@ def run_backtest(
         stats=stats,
         candle_results=candle_results,
         trades=trades,
+        batch_id=batch_id,
     )
 
     return {

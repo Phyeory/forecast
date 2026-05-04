@@ -55,17 +55,17 @@ let pendingMarkerData = [];  // raw marker data awaiting market cap resolution
 let engineParams = {
   ema_fast: 3, ema_slow: 7, atr_period: 7, roc_period: 3, warmup: 20,
   signal_strong: 2, signal_weak: 1.5, signal_noise: 1,
-  exhaustion_bars_limit: 3, delta_threshold: 0.3, kalman_gamma: 0.26,
+  exhaustion_bars_limit: 3, delta_threshold: 0.3, kalman_gamma: 0.45,
   min_trend_bars: 3, reversal_confirm_bars: 2, chop_atr_pct: 10,
   chop_spread_pct: 2, reversal_exit_confirm_bars: 1,
   s_effective_threshold: 0.5, exhaustion_persist_bars: 4,
   regime_lookback: 5, persistence_threshold: 2, momentum_mean_threshold: 0.0,
   ema_min_spread_pct: 0.08, confidence_high: 0.6, confidence_low: 0.42,
   confidence_w1: 0.30, confidence_w2: 0.25, confidence_w3: 0.25, confidence_w4: 0.20,
-  atr_floor_k: 0.6, ema_cross_persist_bars: 3, exhaustion_s_decay_bars: 2,
-  local_range_bars: 10, local_range_threshold_pct: 0.4, sign_flip_threshold: 4,
+  atr_floor_k: 0.3, ema_cross_persist_bars: 3, exhaustion_s_decay_bars: 2,
+  local_range_bars: 10, local_range_threshold_pct: 0.4, sign_flip_threshold: 1,
   stability_bars: 3,
-  spike_atr_multiplier: 2,
+  spike_atr_multiplier: 1.7,
   spike_lookback_bars: 4,
   exhaustion_stall_bars: 5,
   exhaustion_stall_atr_pct: 0.4,
@@ -1547,10 +1547,66 @@ async function loadBacktestsList() {
   const list = await apiFetch("/api/backtests");
   const el = document.getElementById("backtests-list");
   if (!list.length) { el.innerHTML = `<div class="empty-state">No backtests yet.</div>`; return; }
-  el.innerHTML = list.map(bt => {
-    const pnlClass = bt.total_pnl >= 0 ? "pos" : "neg";
-    const pnlSign = bt.total_pnl >= 0 ? "+" : "";
-    return `
+
+  const singleTests = [];
+  const batches = {};
+
+  for (const bt of list) {
+    if (bt.batch_id) {
+      if (!batches[bt.batch_id]) batches[bt.batch_id] = [];
+      batches[bt.batch_id].push(bt);
+    } else {
+      singleTests.push(bt);
+    }
+  }
+
+  let html = "";
+
+  const batchGroups = Object.entries(batches).sort((a, b) => b[1][0].created_at - a[1][0].created_at);
+  for (const [bId, bItems] of batchGroups) {
+    let totalTrades = 0;
+    let winningTrades = 0;
+    let totalPnl = 0;
+
+    for (const bt of bItems) {
+      const trades = bt.total_trades || 0;
+      totalTrades += trades;
+      winningTrades += Math.round(trades * (bt.win_rate || 0) / 100);
+      totalPnl += (bt.total_pnl || 0);
+    }
+
+    const overallWinRate = totalTrades > 0 ? (winningTrades / totalTrades * 100) : 0;
+    const pnlClass = totalPnl >= 0 ? "pos" : "neg";
+    const pnlSign = totalPnl >= 0 ? "+" : "";
+
+    html += `
+    <div class="backtest-card batch-folder" onclick="toggleBatchFolder('${bId}')" style="border-left: 4px solid #5865f2; cursor: pointer;">
+      <div class="bt-card-header">
+        <div><span class="bt-card-name">📁 Batch Run</span> <span class="rec-card-symbol">${bItems.length} coins</span></div>
+        <div class="rec-card-badges"><span class="rec-card-badge">Batch</span></div>
+      </div>
+      <div class="bt-card-stats">
+        <div class="bt-stat"><span class="bt-stat-label">Total Trades</span><span class="bt-stat-value">${totalTrades}</span></div>
+        <div class="bt-stat"><span class="bt-stat-label">Win Rate</span><span class="bt-stat-value">${overallWinRate.toFixed(1)}%</span></div>
+        <div class="bt-stat"><span class="bt-stat-label">Total PnL</span><span class="bt-stat-value ${pnlClass}">${pnlSign}${totalPnl.toFixed(4)} SOL</span></div>
+      </div>
+      <div class="rec-card-details" style="margin-top:8px"><span>🕐 ${fmtTs(bItems[0].created_at)}</span></div>
+      <div class="bt-card-actions"><button class="btn btn-danger btn-xs" onclick="deleteBatch('${bId}', event)">🗑 Delete Batch</button></div>
+    </div>
+    <div id="batch-items-${bId}" class="batch-items-container hidden" style="margin-left:20px; border-left: 2px dashed #30363d; padding-left:10px; margin-bottom: 10px; display: none;">
+      ${bItems.map(bt => renderSingleBacktestCard(bt)).join("")}
+    </div>
+    `;
+  }
+
+  html += singleTests.map(bt => renderSingleBacktestCard(bt)).join("");
+  el.innerHTML = html;
+}
+
+function renderSingleBacktestCard(bt) {
+  const pnlClass = bt.total_pnl >= 0 ? "pos" : "neg";
+  const pnlSign = bt.total_pnl >= 0 ? "+" : "";
+  return `
     <div class="backtest-card" onclick="loadBacktestResult(${bt.id})">
       <div class="bt-card-header">
         <div><span class="bt-card-name">${bt.token_name || bt.mint?.slice(0, 8)}</span> <span class="rec-card-symbol">${bt.token_symbol ? '$' + bt.token_symbol : ''}</span></div>
@@ -1558,13 +1614,34 @@ async function loadBacktestsList() {
       </div>
       <div class="bt-card-stats">
         <div class="bt-stat"><span class="bt-stat-label">Trades</span><span class="bt-stat-value">${bt.total_trades}</span></div>
-        <div class="bt-stat"><span class="bt-stat-label">Win Rate</span><span class="bt-stat-value">${bt.win_rate.toFixed(1)}%</span></div>
-        <div class="bt-stat"><span class="bt-stat-label">PnL</span><span class="bt-stat-value ${pnlClass}">${pnlSign}${bt.total_pnl.toFixed(4)}</span></div>
+        <div class="bt-stat"><span class="bt-stat-label">Win Rate</span><span class="bt-stat-value">${(bt.win_rate || 0).toFixed(1)}%</span></div>
+        <div class="bt-stat"><span class="bt-stat-label">PnL</span><span class="bt-stat-value ${pnlClass}">${pnlSign}${(bt.total_pnl || 0).toFixed(4)}</span></div>
       </div>
       <div class="rec-card-details" style="margin-top:8px"><span>🕐 ${fmtTs(bt.created_at)}</span></div>
       <div class="bt-card-actions"><button class="btn btn-danger btn-xs" onclick="deleteBacktest(${bt.id}, event)">🗑</button></div>
     </div>`;
-  }).join("");
+}
+
+window.toggleBatchFolder = function (bId) {
+  const el = document.getElementById(`batch-items-${bId}`);
+  if (el) {
+    if (el.style.display === "none" || el.classList.contains("hidden")) {
+      el.style.display = "flex";
+      el.style.flexDirection = "column";
+      el.style.gap = "12px";
+      el.classList.remove("hidden");
+    } else {
+      el.style.display = "none";
+      el.classList.add("hidden");
+    }
+  }
+};
+
+async function deleteBatch(bId, e) {
+  if (e) e.stopPropagation();
+  if (!confirm("Delete this entire batch?")) return;
+  await apiFetch(`/api/backtests/batch/${bId}`, { method: "DELETE" });
+  loadBacktestsList();
 }
 
 async function deleteBacktest(id, e) {
@@ -1756,6 +1833,7 @@ window.deleteRecording = deleteRecording;
 window.loadBacktestResult = loadBacktestResult;
 window.deleteBacktest = deleteBacktest;
 window.deleteAllBacktests = deleteAllBacktests;
+window.deleteBatch = deleteBatch;
 
 /* ════════════════════════════════════════════════════════════════════════
    LIVE TRADING — Real on-chain execution via Phantom + Jupiter

@@ -298,6 +298,7 @@ async def run_backtest_endpoint(body: dict = Body(...)):
 async def run_backtest_batch_endpoint(body: dict = Body(default={})):
     """Run backtests on ALL completed recordings in parallel."""
     engine_params = body.get("engine_params", {})
+    batch_id = str(int(time.time() * 1000))
     try:
         results = await asyncio.to_thread(
             run_backtest_batch,
@@ -307,6 +308,7 @@ async def run_backtest_batch_endpoint(body: dict = Body(default={})):
             bribe_fee=body.get("bribe_fee", 0.00001),
             slippage_pct=body.get("slippage_pct", 1.0),
             starting_balance=body.get("starting_balance", 1.0),
+            batch_id=batch_id,
         )
         succeeded = [r for r in results if "error" not in r]
         failed = [r for r in results if "error" in r]
@@ -344,6 +346,12 @@ async def delete_backtest_endpoint(backtest_id: int):
 async def delete_all_backtests_endpoint():
     data_store.delete_all_backtests()
     return JSONResponse({"status": "deleted_all"})
+
+
+@app.delete("/api/backtests/batch/{batch_id}")
+async def delete_backtest_batch_endpoint(batch_id: str):
+    data_store.delete_batch(batch_id)
+    return JSONResponse({"status": "deleted"})
 
 
 @app.websocket("/ws/{mint}")

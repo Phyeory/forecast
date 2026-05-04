@@ -200,7 +200,8 @@ def init_backtest_db():
             total_pnl       REAL DEFAULT 0,
             max_drawdown    REAL DEFAULT 0,
             final_balance   REAL DEFAULT 1.0,
-            summary_json    TEXT DEFAULT '{}'
+            summary_json    TEXT DEFAULT '{}',
+            batch_id        TEXT
         );
 
         CREATE TABLE IF NOT EXISTS backtest_candles (
@@ -248,19 +249,25 @@ def init_backtest_db():
         CREATE INDEX IF NOT EXISTS idx_bt_candles ON backtest_candles(backtest_id, time);
         CREATE INDEX IF NOT EXISTS idx_bt_trades  ON backtest_trades(backtest_id);
     """)
+
+    try:
+        conn.execute("ALTER TABLE backtests ADD COLUMN batch_id TEXT;")
+    except sqlite3.OperationalError:
+        pass
+    
     conn.close()
 
 
 def create_backtest(recording_id: int, mint: str, token_name: str, token_symbol: str,
                     timeframe: str, engine_params: dict, stats: dict,
-                    candle_results: list[dict], trades: list[dict]) -> int:
+                    candle_results: list[dict], trades: list[dict], batch_id: Optional[str] = None) -> int:
     """Save a complete backtest run."""
     conn = _get_backtest_conn()
     cur = conn.execute(
         """INSERT INTO backtests
            (recording_id, mint, token_name, token_symbol, timeframe, engine_params,
-            created_at, total_trades, win_rate, total_pnl, max_drawdown, final_balance, summary_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            created_at, total_trades, win_rate, total_pnl, max_drawdown, final_balance, summary_json, batch_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             recording_id, mint, token_name, token_symbol, timeframe,
             json.dumps(engine_params), time.time(),
@@ -270,6 +277,7 @@ def create_backtest(recording_id: int, mint: str, token_name: str, token_symbol:
             stats.get("max_drawdown_pct", 0),
             stats.get("current_balance", 1.0),
             json.dumps(stats),
+            batch_id,
         ),
     )
     bt_id = cur.lastrowid
@@ -358,6 +366,15 @@ def delete_backtest(backtest_id: int):
     conn.execute("DELETE FROM backtest_candles WHERE backtest_id = ?", (backtest_id,))
     conn.execute("DELETE FROM backtest_trades WHERE backtest_id = ?", (backtest_id,))
     conn.execute("DELETE FROM backtests WHERE id = ?", (backtest_id,))
+    conn.commit()
+    conn.close()
+
+
+def delete_batch(batch_id: str):
+    conn = _get_backtest_conn()
+    conn.execute("DELETE FROM backtest_candles WHERE backtest_id IN (SELECT id FROM backtests WHERE batch_id = ?)", (batch_id,))
+    conn.execute("DELETE FROM backtest_trades WHERE backtest_id IN (SELECT id FROM backtests WHERE batch_id = ?)", (batch_id,))
+    conn.execute("DELETE FROM backtests WHERE batch_id = ?", (batch_id,))
     conn.commit()
     conn.close()
 
