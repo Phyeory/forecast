@@ -405,7 +405,7 @@ class StrategyEngine:
         confidence_very_high: float = 0.67,
         # ^ When confidence exceeds this, reduce effective stability_bars to 1.
         # ── Macro trend gate ─────────────────────────────────────────────
-        ema_macro_period: int = 20,
+        ema_macro_period: int = 7,
         # ^ Slow EMA lookback used to define the macro trend.  Only BUY when
         #   close >= ema_macro.  Set to 0 to disable.
     ):

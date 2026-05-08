@@ -56,7 +56,7 @@ let engineParams = {
   ema_fast: 3, ema_slow: 7, atr_period: 7, roc_period: 3, warmup: 20,
   signal_strong: 2, signal_weak: 1.5, signal_noise: 1,
   exhaustion_bars_limit: 3, delta_threshold: 0.3, kalman_gamma: 0.45,
-  min_trend_bars: 3, reversal_confirm_bars: 2, chop_atr_pct: 10,
+  min_trend_bars: 4, reversal_confirm_bars: 2, chop_atr_pct: 10,
   chop_spread_pct: 2, reversal_exit_confirm_bars: 1,
   s_effective_threshold: 0.5, exhaustion_persist_bars: 4,
   regime_lookback: 5, persistence_threshold: 2, momentum_mean_threshold: 0.0,
@@ -74,7 +74,7 @@ let engineParams = {
   momentum_peak_bars: 3,
   consolidation_range_pct: 10,
   confidence_very_high: 0.67,
-  ema_macro_period: 20,
+  ema_macro_period: 7,
 };
 
 const $ = id => document.getElementById(id);
