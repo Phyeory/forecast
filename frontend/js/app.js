@@ -73,7 +73,7 @@ let engineParams = {
   overextension_k: 0.04,
   momentum_peak_bars: 3,
   consolidation_range_pct: 10,
-  confidence_very_high: 0.67,
+  confidence_very_high: 0.7,
   ema_macro_period: 7,
 };
 
