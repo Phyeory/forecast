@@ -696,6 +696,17 @@ async def live_trading_ws(
     aggregator = CandleAggregator(timeframe)
     last_sent_price = None
 
+    # ── Auto-record candles so backtests replay identical data ─────────────
+    # The live trader and a standalone recorder would use separate
+    # CandleAggregator instances fed from separate WebSocket connections,
+    # causing subtle OHLCV differences.  By recording directly from the
+    # live trader's own aggregator, the backtester sees the exact same
+    # candle data.
+    rec_id = data_store.create_recording(
+        real_mint, timeframe, token_name, token_symbol
+    )
+    logger.info(f"[LIVE] Auto-recording candles → recording {rec_id}")
+
     async def send(obj: dict) -> bool:
         try:
             await websocket.send_json(obj)
@@ -716,6 +727,9 @@ async def live_trading_ws(
         logger.warning(f"[LIVE] get_historical_candles timed out for {real_mint[:8]}")
         hist = []
     if hist:
+        # Seed the auto-recording with the same historical candles
+        data_store.insert_candles_batch(rec_id, hist)
+
         strategy_results = []
         for candle in hist:
             result = live_trader.update_historical_candle(
@@ -745,6 +759,16 @@ async def live_trading_ws(
             )
             candle_dict = candle.to_dict()
             current_price = candle_dict["close"]
+
+            # Persist candle to the auto-recording (same as standalone recorder)
+            ct = candle_dict["time"]
+            data_store.insert_candle(
+                rec_id, ct,
+                candle_dict["open"], candle_dict["high"],
+                candle_dict["low"], candle_dict["close"],
+                candle_dict.get("volume", 0),
+            )
+
             if last_sent_price is not None and current_price == last_sent_price and not is_new:
                 continue
             last_sent_price = current_price
@@ -850,6 +874,9 @@ async def live_trading_ws(
     finally:
         cancelled.set()
         ws_client.stop()
+        # Finalize the auto-recording so it's available for backtesting
+        data_store.stop_recording(rec_id)
+        logger.info(f"[LIVE] Finalized recording {rec_id}")
         if real_mint in _active_live_traders:
             del _active_live_traders[real_mint]
         logger.info(f"[LIVE] Disconnect  mint={real_mint[:8]}…")
