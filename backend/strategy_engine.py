@@ -350,12 +350,12 @@ class StrategyEngine:
         atr_period: int = 7,
         roc_period: int = 3,
         warmup: int = 5,
-        signal_strong: float = 2.0,
-        signal_weak: float = 1.5,
+        signal_strong: float = 1.73,
+        signal_weak: float = 0.96,
         signal_noise: float = 1.0,
         exhaustion_bars_limit: int = 3,
         delta_threshold: float = 0.3,
-        kalman_gamma: float = 0.15,
+        kalman_gamma: float = 0.103,
         min_trend_bars: int = 3,
         reversal_confirm_bars: int = 2,
         chop_atr_pct: float = 0.5,
@@ -366,9 +366,9 @@ class StrategyEngine:
         regime_lookback: int = 5,
         persistence_threshold: int = 2,
         momentum_mean_threshold: float = 0.0,
-        ema_min_spread_pct: float = 0.08,
+        ema_min_spread_pct: float = 0.02,
         # FIX-B: raised from 0.60 → 0.62 to tighten consolidation gate
-        confidence_high: float = 0.6,
+        confidence_high: float = 0.79,
         confidence_low: float = 0.42,
         confidence_w1: float = 0.30,
         confidence_w2: float = 0.25,
@@ -384,25 +384,25 @@ class StrategyEngine:
         sign_flip_threshold: int = 4,
         stability_bars: int = 3, #might change to 3
         spike_atr_multiplier: float = 2,
-        spike_lookback_bars: int = 4,
+        spike_lookback_bars: int = 3,
         # ── FIX-A: new top-blast parameters ──────────────────────────
-        body_baseline_bars: int = 15,
+        body_baseline_bars: int = 20,
         # ^ Long window for body average — anchors comparison to calm bars,
         #   not the recent pump bars.  Must be >> spike_lookback_bars.
-        overextension_k: float = 0.04,
+        overextension_k: float = 0.072,
         # ^ If close > p_hat * (1 + k) AND S > S_strong, price is a blow-off
         #   (both overextended AND signal already peaked).  0.04 = 4% above
         #   Kalman estimate.  Smaller values block valid mid-trend entries due
         #   to normal Kalman lag.
-        momentum_peak_bars: int = 3,
+        momentum_peak_bars: int = 2,
         # ^ If |m_hat| has been declining for this many consecutive bars,
         #   we are past the momentum peak → block BUY regardless of S.
         # ── FIX-B: consolidation range gate parameter ─────────────────
-        consolidation_range_pct: float = 2,
+        consolidation_range_pct: float = 1.5,
         # ^ If N-bar range < this % of price AND price is in mid 35–65%
         #   of that range, it's a box / consolidation → block entry.
         # ── FIX-C: high-confidence stability relaxation ────────────────
-        confidence_very_high: float = 0.67,
+        confidence_very_high: float = 0.833,
         # ^ When confidence exceeds this, reduce effective stability_bars to 1.
         # ── Macro trend gate ─────────────────────────────────────────────
         ema_macro_period: int = 7,
