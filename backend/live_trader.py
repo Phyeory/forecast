@@ -909,6 +909,13 @@ class LiveTrader:
         self._last_price = c
         result = self._process_completed_candle(time_val, o, h, l, c, volume)
         self._last_engine_result = result
+        
+        # Clear pending signals during historical warmup to prevent stale
+        # signals from triggering an immediate buy when live trades commence.
+        self._pending_buy = False
+        self._pending_buy_reason = ""
+        self._pending_exit = False
+        self._pending_exit_reason = ""
 
         unrealized_pnl = 0.0
         unrealized_pnl_pct = 0.0
