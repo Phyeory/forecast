@@ -33,21 +33,21 @@ def col(t,c): return f"{c}{t}{X}"
 
 # ── Baseline params (conservative starting point) ───────────────────────────
 _BASELINE = {
-    "ema_fast":3,"ema_slow":7,"atr_period":7,"roc_period":3,"warmup":5,
-    "signal_strong":2.2,"signal_weak":0.8,"signal_noise":1.125,
+    "ema_fast":3,"ema_slow":7,"atr_period":7,"roc_period":3,"warmup":10,
+    "signal_strong":3.5,"signal_weak":0.8,"signal_noise":1.0535714285714286,
     "exhaustion_bars_limit":1,"delta_threshold":0.3,"kalman_gamma":0.23,
-    "min_trend_bars":3,"reversal_confirm_bars":1,"chop_atr_pct":0.5,
+    "min_trend_bars":2,"reversal_confirm_bars":1,"chop_atr_pct":0.3,
     "chop_spread_pct":0.15,"reversal_exit_confirm_bars":1,
     "s_effective_threshold":0.35,"exhaustion_persist_bars":5,"regime_lookback":5,
-    "persistence_threshold":3,"ema_min_spread_pct":0.02,
-    "confidence_high":0.785,"confidence_low":0.46,
+    "persistence_threshold":2,"ema_min_spread_pct":0.02,
+    "confidence_high":0.785,"confidence_low":0.45571428571428574,
     "confidence_w1":0.3,"confidence_w2":0.25,"confidence_w3":0.25,"confidence_w4":0.2,
-    "atr_floor_k":0.6,"ema_cross_persist_bars":3,"exhaustion_s_decay_bars":2,
-    "exhaustion_stall_bars":3,"exhaustion_stall_atr_pct":0.35,"local_range_bars":12,
+    "atr_floor_k":0.6,"ema_cross_persist_bars":3,"exhaustion_s_decay_bars":1,
+    "exhaustion_stall_bars":3,"exhaustion_stall_atr_pct":0.35,"local_range_bars":13,
     "local_range_threshold_pct":0.7,"sign_flip_threshold":2,"stability_bars":5,
-    "spike_atr_multiplier":1.2,"spike_lookback_bars":5,"body_baseline_bars":10,
+    "spike_atr_multiplier":1.2,"spike_lookback_bars":5,"body_baseline_bars":20,
     "overextension_k":0.17,"momentum_peak_bars":2,"consolidation_range_pct":1.7,
-    "confidence_very_high":0.852,"ema_macro_period":5,
+    "confidence_very_high":0.8448571428571429,"ema_macro_period":5,
 }
 
 _best_json = os.path.join(os.path.dirname(__file__), "best_params.json")
@@ -89,12 +89,12 @@ SPACE = {
     # Exit fast when momentum fades — don't ride it back down
     "reversal_confirm_bars":        (1, 1, 1, True),  # force 1 bar
     "reversal_exit_confirm_bars":   (1, 1, 1, True),  # force 1 bar
-    "exhaustion_bars_limit":        (1, 2, 1, True),  # very short exhaustion window
+    "exhaustion_bars_limit":        (1, 1, 1, True),  # force 1 bar
     "exhaustion_persist_bars":      (1, 2, 1, True),  # exit trigger sensitivity
-    "exhaustion_s_decay_bars":      (1, 2, 1, True),  # how fast signal must decay
-    "exhaustion_stall_bars":        (1, 3, 1, True),  # stall = exit signal
-    "exhaustion_stall_atr_pct":     (0.1, 0.4, 0.05, False),  # tight stall threshold
-    "momentum_peak_bars":           (1, 2, 1, True),  # detect peak quickly
+    "exhaustion_s_decay_bars":      (1, 1, 1, True),  # how fast signal must decay
+    "exhaustion_stall_bars":        (1, 2, 1, True),  # stall = exit signal
+    "exhaustion_stall_atr_pct":     (0.1, 0.3, 0.05, False),  # tight stall threshold
+    "momentum_peak_bars":           (1, 1, 1, True),  # force 1 bar
 
     # ── ANTI-GAMBLING / CHOP FILTERS (C) ────────────────────────────────────
     # Aggressively block sideways/choppy markets
@@ -197,10 +197,9 @@ def _score(wr: float, trades: int, pnl: float, coins_w: int, total: int, max_dd:
         base *= max(0.1, pnl_per_trade / 0.0035)
 
     # ── Hard penalty: Massive Drawdown penalty ──────────────────────────────
-    # A max drawdown above 10% across the batch indicates holding major losers.
-    # Tightened to penalize earlier since we want to avoid big losses.
-    if max_dd > 1.5:
-        dd_penalty = max(0.01, 1.0 - ((max_dd - 10.0) / 15.0))  # Scales down to near 0 at 25% DD
+    # A max drawdown above 5% across the batch indicates holding losers (bag holding cross-trend).
+    if max_dd > 5.0:
+        dd_penalty = max(0.001, 1.0 - ((max_dd - 5.0) / 10.0))  # Scales down to near 0 rapidly
         base *= dd_penalty
 
     return round(base, 4)
