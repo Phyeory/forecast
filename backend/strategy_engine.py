@@ -349,40 +349,40 @@ class StrategyEngine:
         ema_slow: int = 7,
         atr_period: int = 7,
         roc_period: int = 3,
-        warmup: int = 10,
-        signal_strong: float = 3.5,
+        warmup: int = 30,
+        signal_strong: float = 4.4,
         signal_weak: float = 0.8,
         signal_noise: float = 1.0535714285714286,
         exhaustion_bars_limit: int = 1,
         delta_threshold: float = 0.3,
-        kalman_gamma: float = 0.23,
-        min_trend_bars: int = 2,
+        kalman_gamma: float = 0.27,
+        min_trend_bars: int = 3,
         reversal_confirm_bars: int = 1,
         chop_atr_pct: float = 0.3,
-        chop_spread_pct: float = 0.15,
+        chop_spread_pct: float = 0.05,
         reversal_exit_confirm_bars: int = 1,
         s_effective_threshold: float = 0.35,
-        exhaustion_persist_bars: int = 5,
-        regime_lookback: int = 5,
+        exhaustion_persist_bars: int = 3,
+        regime_lookback: int = 6,
         persistence_threshold: int = 2,
         momentum_mean_threshold: float = 0.0,
         ema_min_spread_pct: float = 0.02,
         # FIX-B: raised from 0.60 → 0.62 to tighten consolidation gate
         confidence_high: float = 0.785,
-        confidence_low: float = 0.45571428571428574,
+        confidence_low: float = 0.53,
         confidence_w1: float = 0.3,
         confidence_w2: float = 0.25,
         confidence_w3: float = 0.25,
         confidence_w4: float = 0.2,
         atr_floor_k: float = 0.6,
-        ema_cross_persist_bars: int = 3, #might consider changing to 3
+        ema_cross_persist_bars: int = 2,
         exhaustion_s_decay_bars: int = 1,
         exhaustion_stall_bars: int = 3,
         exhaustion_stall_atr_pct: float = 0.35,
-        local_range_bars: int = 13,
+        local_range_bars: int = 20,
         local_range_threshold_pct: float = 0.7,
-        sign_flip_threshold: int = 2,
-        stability_bars: int = 5,
+        sign_flip_threshold: int = 1,
+        stability_bars: int = 3,
         spike_atr_multiplier: float = 1.2,
         spike_lookback_bars: int = 5,
         # ── FIX-A: new top-blast parameters ──────────────────────────
@@ -394,20 +394,23 @@ class StrategyEngine:
         #   (both overextended AND signal already peaked).  0.04 = 4% above
         #   Kalman estimate.  Smaller values block valid mid-trend entries due
         #   to normal Kalman lag.
-        momentum_peak_bars: int = 2,  # tuned
+        momentum_peak_bars: int = 1,  # tuned
         # ^ If |m_hat| has been declining for this many consecutive bars,
         #   we are past the momentum peak → block BUY regardless of S.
         # ── FIX-B: consolidation range gate parameter ─────────────────
-        consolidation_range_pct: float = 1.7,
+        consolidation_range_pct: float = 1.5999999999999999,
         # ^ If N-bar range < this % of price AND price is in mid 35–65%
         #   of that range, it's a box / consolidation → block entry.
         # ── FIX-C: high-confidence stability relaxation ────────────────
-        confidence_very_high: float = 0.8448571428571429,
+        confidence_very_high: float = 0.84,
         # ^ When confidence exceeds this, reduce effective stability_bars to 1.
         # ── Macro trend gate ─────────────────────────────────────────────
         ema_macro_period: int = 5,
         # ^ Slow EMA lookback used to define the macro trend.  Only BUY when
         #   close >= ema_macro.  Set to 0 to disable.
+        # ── Stoploss ─────────────────────────────────────────────────────
+        stoploss_pct: float = 0.0,
+        # ^ Hard stop loss percentage from entry price. Set to 0.0 to disable.
     ):
         self.ema_fast_p = ema_fast
         self.ema_slow_p = ema_slow
@@ -462,6 +465,8 @@ class StrategyEngine:
 
         # Macro trend gate parameter
         self.ema_macro_period = ema_macro_period
+
+        self.stoploss_pct = stoploss_pct
 
         # State
         self.bar_count = 0
@@ -1384,6 +1389,14 @@ class StrategyEngine:
     def _check_exit(self, c: float) -> Optional[Signal]:
         if not self.in_position:
             return None
+
+        if self.stoploss_pct > 0.0:
+            if self.position_direction == Direction.UP:
+                if c <= self.entry_price * (1.0 - self.stoploss_pct / 100.0):
+                    return Signal.EXIT
+            elif self.position_direction == Direction.DOWN:
+                if c >= self.entry_price * (1.0 + self.stoploss_pct / 100.0):
+                    return Signal.EXIT
 
         if self.regime == Regime.EXHAUSTION and self.exhaustion_bar_count >= self.exhaustion_bars_limit:
             return Signal.EXIT

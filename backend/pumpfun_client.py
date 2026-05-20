@@ -420,7 +420,7 @@ class _SharedPumpPortalHub:
                 pass  # slow consumer — drop rather than back-pressure the hub
 
     async def _run(self):
-        backoff = 0.5
+        backoff = 0.1
         while True:
             try:
                 async with websockets.connect(
@@ -431,7 +431,7 @@ class _SharedPumpPortalHub:
                     max_size=2 ** 22,
                 ) as ws:
                     self._ws = ws
-                    backoff = 0.5
+                    backoff = 0.1
                     logger.info("[PumpHub] Connected")
 
                     # Subscribe all currently registered mints
@@ -469,7 +469,6 @@ class _SharedPumpPortalHub:
             finally:
                 self._ws = None
             await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 30)
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -782,7 +781,7 @@ class PumpSwapRPCClient:
         }
 
     async def stream(self) -> AsyncGenerator[dict, None]:
-        backoff = 0.5
+        backoff = 0.1
         while not self._stop:
             try:
                 async with aiohttp.ClientSession() as http_session:
@@ -810,7 +809,7 @@ class PumpSwapRPCClient:
                         base_sub = base_ack.get("result")
                         quote_sub = quote_ack.get("result")
                         logger.info(f"[PumpSwapRPC] Watching pool {self.pair_address[:8]}...")
-                        backoff = 0.5
+                        backoff = 0.1
                         dirty = False
                         last_note_at = 0.0
                         next_mcap_refresh = time.time() + 1.0
@@ -876,4 +875,3 @@ class PumpSwapRPCClient:
             except Exception as e:
                 logger.error(f"[PumpSwapRPC] Unexpected: {e} — reconnecting in {backoff:.1f}s")
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 10)
