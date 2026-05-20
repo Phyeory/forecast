@@ -1,2 +1,8 @@
 backend/data/backtest_data.db
 backend/data/price_data.db
+
+# Python bytecode/cache and testing cache files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/

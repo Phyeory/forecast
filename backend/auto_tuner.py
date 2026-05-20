@@ -97,20 +97,20 @@ def col(t, c): return f"{c}{t}{X}"
 # ── Baseline params ───────────────────────────────────────────────────────────
 _BASELINE = {
     "ema_fast": 3, "ema_slow": 7, "atr_period": 7, "roc_period": 3, "warmup": 30,
-    "signal_strong": 3.5, "signal_weak": 0.8, "signal_noise": 1.0535714285714286,
-    "exhaustion_bars_limit": 1, "delta_threshold": 0.3, "kalman_gamma": 0.23,
-    "min_trend_bars": 2, "reversal_confirm_bars": 1, "chop_atr_pct": 0.3,
-    "chop_spread_pct": 0.15, "reversal_exit_confirm_bars": 1,
-    "s_effective_threshold": 0.35, "exhaustion_persist_bars": 5, "regime_lookback": 5,
+    "signal_strong": 4.4, "signal_weak": 0.8, "signal_noise": 1.0535714285714286,
+    "exhaustion_bars_limit": 1, "delta_threshold": 0.3, "kalman_gamma": 0.27,
+    "min_trend_bars": 3, "reversal_confirm_bars": 1, "chop_atr_pct": 0.3,
+    "chop_spread_pct": 0.05, "reversal_exit_confirm_bars": 1,
+    "s_effective_threshold": 0.35, "exhaustion_persist_bars": 3, "regime_lookback": 6,
     "persistence_threshold": 2, "ema_min_spread_pct": 0.02,
-    "confidence_high": 0.785, "confidence_low": 0.45571428571428574,
+    "confidence_high": 0.785, "confidence_low": 0.53,
     "confidence_w1": 0.3, "confidence_w2": 0.25, "confidence_w3": 0.25, "confidence_w4": 0.2,
-    "atr_floor_k": 0.6, "ema_cross_persist_bars": 3, "exhaustion_s_decay_bars": 1,
-    "exhaustion_stall_bars": 3, "exhaustion_stall_atr_pct": 0.35, "local_range_bars": 13,
-    "local_range_threshold_pct": 0.7, "sign_flip_threshold": 2, "stability_bars": 5,
+    "atr_floor_k": 0.6, "ema_cross_persist_bars": 2, "exhaustion_s_decay_bars": 1,
+    "exhaustion_stall_bars": 3, "exhaustion_stall_atr_pct": 0.35, "local_range_bars": 20,
+    "local_range_threshold_pct": 0.7, "sign_flip_threshold": 1, "stability_bars": 3,
     "spike_atr_multiplier": 1.2, "spike_lookback_bars": 5, "body_baseline_bars": 20,
-    "overextension_k": 0.17, "momentum_peak_bars": 1, "consolidation_range_pct": 1.7,
-    "confidence_very_high": 0.8448571428571429, "ema_macro_period": 5,
+    "overextension_k": 0.17, "momentum_peak_bars": 1, "consolidation_range_pct": 1.6,
+    "confidence_very_high": 0.84, "ema_macro_period": 5,
 }
 
 _best_json = os.path.join(os.path.dirname(__file__), "best_params.json")

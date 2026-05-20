@@ -1456,7 +1456,8 @@ class StrategyEngine:
                 signal = exit_signal
 
         # Belt-and-suspenders: never emit a signal during the warmup window
-        if self.bar_count <= self.warmup:
+        # or early in the recording when data is insufficient.
+        if self.bar_count <= max(self.warmup, 60):
             signal = None
 
         if _build_full_result:
