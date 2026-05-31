@@ -12,6 +12,30 @@ from websockets.exceptions import ConnectionClosed
 
 logger = logging.getLogger(__name__)
 
+# ── Global Solana RPC rate limiter ────────────────────────────────────────────
+# All PumpSwapRPCClient instances share this semaphore so that at most
+# _RPC_CONCURRENCY requests hit api.mainnet-beta.solana.com at the same time.
+# This prevents 429 errors when monitoring 5+ coins simultaneously.
+_RPC_CONCURRENCY = 3          # max parallel RPC calls across ALL coins
+_RPC_MIN_INTERVAL = 0.4       # minimum seconds between any two RPC calls
+_rpc_semaphore: Optional[asyncio.Semaphore] = None
+_rpc_last_call_ts: float = 0.0
+_rpc_lock: Optional[asyncio.Lock] = None
+
+
+def _get_rpc_semaphore() -> asyncio.Semaphore:
+    global _rpc_semaphore
+    if _rpc_semaphore is None:
+        _rpc_semaphore = asyncio.Semaphore(_RPC_CONCURRENCY)
+    return _rpc_semaphore
+
+
+def _get_rpc_lock() -> asyncio.Lock:
+    global _rpc_lock
+    if _rpc_lock is None:
+        _rpc_lock = asyncio.Lock()
+    return _rpc_lock
+
 PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
 PUMP_API_V3   = "https://frontend-api-v3.pump.fun"
 DEXSCREENER   = "https://api.dexscreener.com"
@@ -635,8 +659,173 @@ class DexScreenerPollClient:
                 await asyncio.sleep(self.poll_seconds)
 
 
+
+# ── Shared Solana RPC WebSocket hub ──────────────────────────────────────────
+# A single persistent WebSocket to api.mainnet-beta.solana.com is shared across
+# ALL PumpSwapRPCClient instances.  Each vault account gets one subscription;
+# notifications are fanned out to the correct client queues.
+# This eliminates the N-connections-per-IP 429 that occurs with 5+ coins.
+
+class _SharedSolanaWSHub:
+    """Process-global multiplexed Solana RPC WebSocket hub."""
+
+    def __init__(self):
+        # subscription_id (int) → queue set
+        self._sub_to_queues: dict[int, set[asyncio.Queue]] = defaultdict(set)
+        # account_pubkey → subscription_id (filled once ack received)
+        self._account_to_sub: dict[str, int] = {}
+        # account_pubkey → set of queues (registered before ack)
+        self._account_to_queues: dict[str, set[asyncio.Queue]] = defaultdict(set)
+        # pending subscribe requests: request_id → account_pubkey
+        self._req_to_account: dict[int, str] = {}
+        self._next_req_id = 100
+        self._lock = asyncio.Lock()
+        self._task: Optional[asyncio.Task] = None
+        self._ws = None
+
+    def _ensure_running(self):
+        if self._task is None or self._task.done():
+            try:
+                loop = asyncio.get_running_loop()
+                self._task = loop.create_task(self._run())
+            except RuntimeError:
+                pass
+
+    async def _send_subscribe(self, account: str):
+        """Send accountSubscribe for *account* on the live WS (if available)."""
+        if self._ws is None:
+            return
+        req_id = self._next_req_id
+        self._next_req_id += 1
+        self._req_to_account[req_id] = account
+        try:
+            await self._ws.send(json.dumps({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "method": "accountSubscribe",
+                "params": [account, {"encoding": "base64", "commitment": "processed"}],
+            }))
+            logger.debug(f"[SolanaHub] subscribed account {account[:8]} req={req_id}")
+        except Exception as e:
+            logger.debug(f"[SolanaHub] subscribe send failed: {e}")
+            self._req_to_account.pop(req_id, None)
+
+    async def _run(self):
+        backoff = 1.0
+        while True:
+            try:
+                async with websockets.connect(
+                    SOLANA_RPC_WS,
+                    ping_interval=20,
+                    ping_timeout=15,
+                    open_timeout=10,
+                    max_size=2 ** 22,
+                ) as ws:
+                    self._ws = ws
+                    backoff = 1.0
+                    logger.info("[SolanaHub] Connected")
+
+                    # Re-subscribe all known accounts
+                    async with self._lock:
+                        accounts_to_resub = list(self._account_to_queues.keys())
+                        self._account_to_sub.clear()
+                        self._req_to_account.clear()
+
+                    for account in accounts_to_resub:
+                        await self._send_subscribe(account)
+
+                    async for raw in ws:
+                        try:
+                            msg = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+
+                        # Handle subscription acknowledgement
+                        msg_id = msg.get("id")
+                        if msg_id is not None and "result" in msg:
+                            account = self._req_to_account.pop(msg_id, None)
+                            if account is not None:
+                                sub_id = msg["result"]
+                                async with self._lock:
+                                    self._account_to_sub[account] = sub_id
+                                    # Move queues from account map to sub map
+                                    qs = self._account_to_queues.get(account, set())
+                                    self._sub_to_queues[sub_id] = set(qs)
+                                logger.debug(f"[SolanaHub] ack account {account[:8]} → sub {sub_id}")
+                            continue
+
+                        # Handle account notification
+                        if msg.get("method") != "accountNotification":
+                            continue
+                        params = msg.get("params", {})
+                        sub_id = params.get("subscription")
+                        value = params.get("result", {}).get("value") or {}
+                        data = value.get("data")
+                        if not data or sub_id is None:
+                            continue
+
+                        raw_data = base64.b64decode(data[0])
+                        amount = _decode_spl_token_amount(raw_data)
+
+                        async with self._lock:
+                            queues = list(self._sub_to_queues.get(sub_id, set()))
+                        for q in queues:
+                            try:
+                                q.put_nowait((sub_id, amount))
+                            except asyncio.QueueFull:
+                                pass
+
+            except (ConnectionClosed, asyncio.TimeoutError, OSError) as e:
+                logger.warning(f"[SolanaHub] {e} — reconnecting in {backoff:.1f}s")
+            except asyncio.CancelledError:
+                logger.info("[SolanaHub] Cancelled")
+                return
+            except Exception as e:
+                logger.error(f"[SolanaHub] Unexpected: {e} — reconnecting in {backoff:.1f}s")
+            finally:
+                self._ws = None
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+
+    async def subscribe(self, account: str, queue: asyncio.Queue):
+        """Start delivering notifications for *account* to *queue*."""
+        self._ensure_running()
+        async with self._lock:
+            self._account_to_queues[account].add(queue)
+            # If already acked, also add to the sub map immediately
+            sub_id = self._account_to_sub.get(account)
+            if sub_id is not None:
+                self._sub_to_queues[sub_id].add(queue)
+        # Subscribe if this is the first queue for this account
+        if self._ws is not None:
+            await self._send_subscribe(account)
+
+    async def unsubscribe(self, account: str, queue: asyncio.Queue):
+        """Remove *queue* from notifications for *account*."""
+        async with self._lock:
+            self._account_to_queues[account].discard(queue)
+            sub_id = self._account_to_sub.get(account)
+            if sub_id is not None:
+                self._sub_to_queues[sub_id].discard(queue)
+            # If no more consumers, forget the subscription entirely
+            if not self._account_to_queues[account]:
+                del self._account_to_queues[account]
+                if sub_id is not None:
+                    self._account_to_sub.pop(account, None)
+                    self._sub_to_queues.pop(sub_id, None)
+
+
+# Process-global singleton
+_solana_hub = _SharedSolanaWSHub()
+
+
 class PumpSwapRPCClient:
-    """Stream live PumpSwap spot price by watching the pool vault token accounts."""
+    """Stream live PumpSwap spot price by watching the pool vault token accounts.
+
+    Uses a single shared Solana RPC WebSocket (_solana_hub) so that any number
+    of coins can be monitored without opening multiple connections and hitting
+    the public RPC's 429 / connection-limit.
+    """
 
     def __init__(self, pair_address: str):
         self.pair_address = pair_address
@@ -655,18 +844,55 @@ class PumpSwapRPCClient:
         self._stop = True
 
     async def _rpc(self, session: aiohttp.ClientSession, method: str, params: list) -> dict:
+        """Execute a Solana JSON-RPC call with global rate-limiting and 429 retry."""
+        global _rpc_last_call_ts
         payload = {
             "jsonrpc": "2.0",
             "id": 1,
             "method": method,
             "params": params,
         }
-        async with session.post(SOLANA_RPC_HTTP, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as r:
-            r.raise_for_status()
-            data = await r.json(content_type=None)
-            if "error" in data:
-                raise RuntimeError(f"RPC {method}: {data['error']}")
-            return data["result"]
+        max_attempts = 4
+        backoff = 1.0
+        for attempt in range(max_attempts):
+            async with _get_rpc_semaphore():
+                # Enforce a minimum gap between consecutive RPC calls
+                async with _get_rpc_lock():
+                    now = time.time()
+                    wait = _RPC_MIN_INTERVAL - (now - _rpc_last_call_ts)
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+                    _rpc_last_call_ts = time.time()
+
+                try:
+                    async with session.post(
+                        SOLANA_RPC_HTTP, json=payload,
+                        timeout=aiohttp.ClientTimeout(total=10)
+                    ) as r:
+                        if r.status == 429:
+                            retry_after = float(r.headers.get("Retry-After", backoff))
+                            logger.warning(
+                                f"[RPC] 429 Too Many Requests on {method} — "
+                                f"retrying in {retry_after:.1f}s (attempt {attempt+1}/{max_attempts})"
+                            )
+                            await asyncio.sleep(retry_after)
+                            backoff = min(backoff * 2, 30)
+                            continue
+                        r.raise_for_status()
+                        data = await r.json(content_type=None)
+                        if "error" in data:
+                            raise RuntimeError(f"RPC {method}: {data['error']}")
+                        return data["result"]
+                except (aiohttp.ClientResponseError, RuntimeError):
+                    raise
+                except Exception as e:
+                    if attempt < max_attempts - 1:
+                        logger.warning(f"[RPC] {method} error ({e}), retry {attempt+1}")
+                        await asyncio.sleep(backoff)
+                        backoff = min(backoff * 2, 30)
+                    else:
+                        raise
+        raise RuntimeError(f"RPC {method}: exceeded {max_attempts} attempts")
 
     async def _load_pool(self, session: aiohttp.ClientSession):
         result = await self._rpc(session, "getAccountInfo", [self.pair_address, {"encoding": "base64", "commitment": "processed"}])
@@ -697,18 +923,6 @@ class PumpSwapRPCClient:
         self._pool = pool
         self._base_amount_raw = _decode_spl_token_amount(base_vault_data)
         self._quote_amount_raw = _decode_spl_token_amount(quote_vault_data)
-
-    async def _refresh_vaults(self, session: aiohttp.ClientSession):
-        assert self._pool is not None
-        accounts = await self._rpc(session, "getMultipleAccounts", [[
-            self._pool["pool_base_token_account"],
-            self._pool["pool_quote_token_account"],
-        ], {"encoding": "base64", "commitment": "processed"}])
-        vals = accounts.get("value") or []
-        if len(vals) != 2 or any(v is None for v in vals):
-            raise RuntimeError("Missing vault account data")
-        self._base_amount_raw = _decode_spl_token_amount(base64.b64decode(vals[0]["data"][0]))
-        self._quote_amount_raw = _decode_spl_token_amount(base64.b64decode(vals[1]["data"][0]))
 
     async def _refresh_market_caps(self, session: aiohttp.ClientSession):
         pair = await _ds_pair(session, self.pair_address)
@@ -781,7 +995,7 @@ class PumpSwapRPCClient:
         }
 
     async def stream(self) -> AsyncGenerator[dict, None]:
-        backoff = 0.1
+        backoff = 1.0
         while not self._stop:
             try:
                 async with aiohttp.ClientSession() as http_session:
@@ -791,87 +1005,84 @@ class PumpSwapRPCClient:
                     if first:
                         yield first
 
-                    async with websockets.connect(SOLANA_RPC_WS, ping_interval=20, ping_timeout=15, open_timeout=10, max_size=2 ** 20) as ws:
-                        await ws.send(json.dumps({
-                            "jsonrpc": "2.0",
-                            "id": 1,
-                            "method": "accountSubscribe",
-                            "params": [self._pool["pool_base_token_account"], {"encoding": "base64", "commitment": "processed"}],
-                        }))
-                        base_ack = json.loads(await ws.recv())
-                        await ws.send(json.dumps({
-                            "jsonrpc": "2.0",
-                            "id": 2,
-                            "method": "accountSubscribe",
-                            "params": [self._pool["pool_quote_token_account"], {"encoding": "base64", "commitment": "processed"}],
-                        }))
-                        quote_ack = json.loads(await ws.recv())
-                        base_sub = base_ack.get("result")
-                        quote_sub = quote_ack.get("result")
-                        logger.info(f"[PumpSwapRPC] Watching pool {self.pair_address[:8]}...")
-                        backoff = 0.1
-                        dirty = False
-                        last_note_at = 0.0
-                        next_mcap_refresh = time.time() + 1.0
+                    assert self._pool is not None
+                    base_account = self._pool["pool_base_token_account"]
+                    quote_account = self._pool["pool_quote_token_account"]
+
+                    # Use the shared hub — no new WS connection opened here
+                    queue: asyncio.Queue = asyncio.Queue(maxsize=512)
+                    await _solana_hub.subscribe(base_account, queue)
+                    await _solana_hub.subscribe(quote_account, queue)
+
+                    logger.info(f"[PumpSwapRPC] Watching pool {self.pair_address[:8]}… (shared WS)")
+                    backoff = 1.0
+                    last_emit_ts = time.time()
+                    next_mcap_refresh = time.time() + 5.0
+                    dirty = False
+
+                    try:
                         while not self._stop:
-                            try:
-                                raw = await asyncio.wait_for(ws.recv(), timeout=0.2)
-                            except asyncio.TimeoutError:
-                                now = time.time()
-                                if now >= next_mcap_refresh:
-                                    try:
-                                        await self._refresh_market_caps(http_session)
-                                    except Exception as e:
-                                        logger.debug(f"[PumpSwapRPC] market-cap refresh failed: {e}")
-                                    next_mcap_refresh = now + 1.0
-                                if dirty and (time.time() - last_note_at) >= 0.05:
-                                    trade = self._current_trade()
+                            now = time.time()
+
+                            # Periodic market-cap refresh
+                            if now >= next_mcap_refresh:
+                                try:
+                                    await self._refresh_market_caps(http_session)
+                                except Exception as e:
+                                    logger.debug(f"[PumpSwapRPC] mcap refresh: {e}")
+                                next_mcap_refresh = now + 5.0
+
+                            # Drain all pending notifications from shared hub
+                            drained = False
+                            while True:
+                                try:
+                                    _sub_id, amount = queue.get_nowait()
+                                    # Map sub_id → base or quote
+                                    async with _solana_hub._lock:
+                                        base_sub = _solana_hub._account_to_sub.get(base_account)
+                                        quote_sub = _solana_hub._account_to_sub.get(quote_account)
+                                    if _sub_id == base_sub:
+                                        self._base_amount_raw = amount
+                                        dirty = True
+                                    elif _sub_id == quote_sub:
+                                        self._quote_amount_raw = amount
+                                        dirty = True
+                                    drained = True
+                                except asyncio.QueueEmpty:
+                                    break
+
+                            if dirty and drained:
+                                trade = self._current_trade()
+                                if trade:
                                     dirty = False
-                                    if trade:
-                                        yield trade
-                                elif self._last_emit_ts and (time.time() - self._last_emit_ts) >= 1.0:
-                                    heartbeat = self._current_trade(force=True)
-                                    if heartbeat:
-                                        yield heartbeat
-                                continue
-                            if self._stop:
-                                return
-                            try:
-                                msg = json.loads(raw)
-                            except json.JSONDecodeError:
-                                continue
-                            if msg.get("method") != "accountNotification":
-                                continue
-                            params = msg.get("params", {})
-                            sub_id = params.get("subscription")
-                            value = params.get("result", {}).get("value") or {}
-                            data = value.get("data")
-                            if not data:
-                                continue
-                            raw_data = base64.b64decode(data[0])
-                            amount = _decode_spl_token_amount(raw_data)
-                            if sub_id == base_sub:
-                                self._base_amount_raw = amount
-                                dirty = True
-                                last_note_at = time.time()
-                            elif sub_id == quote_sub:
-                                self._quote_amount_raw = amount
-                                dirty = True
-                                last_note_at = time.time()
-            except (ConnectionClosed, asyncio.TimeoutError, OSError) as e:
-                logger.warning(f"[PumpSwapRPC] {e} — reconnecting in {backoff:.1f}s")
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 10)
+                                    last_emit_ts = now
+                                    yield trade
+                            elif (now - last_emit_ts) >= 1.0:
+                                # Heartbeat so callers know we're alive
+                                heartbeat = self._current_trade(force=True)
+                                if heartbeat:
+                                    last_emit_ts = now
+                                    yield heartbeat
+
+                            await asyncio.sleep(0.05)
+                    finally:
+                        await _solana_hub.unsubscribe(base_account, queue)
+                        await _solana_hub.unsubscribe(quote_account, queue)
+
             except RuntimeError as e:
                 msg = str(e)
                 if "Missing mint or vault accounts" in msg or "Pool account not found" in msg:
-                    # Token is not on PumpSwap (still on bonding curve or not migrated).
-                    # Stop retrying — this will never succeed.
                     logger.warning(f"[PumpSwapRPC] Token not on PumpSwap ({msg}). Stopping.")
                     return
                 logger.error(f"[PumpSwapRPC] RuntimeError: {e} — reconnecting in {backoff:.1f}s")
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 10)
+                backoff = min(backoff * 2, 30)
+            except (ConnectionClosed, asyncio.TimeoutError, OSError) as e:
+                logger.warning(f"[PumpSwapRPC] {e} — reconnecting in {backoff:.1f}s")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30)
             except Exception as e:
                 logger.error(f"[PumpSwapRPC] Unexpected: {e} — reconnecting in {backoff:.1f}s")
                 await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30)
+

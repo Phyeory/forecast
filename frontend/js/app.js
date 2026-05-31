@@ -54,27 +54,27 @@ let pendingMarkerData = [];  // raw marker data awaiting market cap resolution
 /* Strategy Engine Parameters */
 let engineParams = {
   ema_fast: 3, ema_slow: 7, atr_period: 7, roc_period: 3, warmup: 30,
-  signal_strong: 4.4, signal_weak: 0.8, signal_noise: 1.0535714285714286,
-  exhaustion_bars_limit: 1, delta_threshold: 0.3, kalman_gamma: 0.27,
-  min_trend_bars: 3, reversal_confirm_bars: 1, chop_atr_pct: 0.3,
-  chop_spread_pct: 0.05, reversal_exit_confirm_bars: 1,
-  s_effective_threshold: 0.35, exhaustion_persist_bars: 3,
+  signal_strong: 4, signal_weak: 1.5, signal_noise: 1.1535714285714287,
+  exhaustion_bars_limit: 1, delta_threshold: 0.3, kalman_gamma: 0.1,
+  min_trend_bars: 4, reversal_confirm_bars: 2, chop_atr_pct: 0.3,
+  chop_spread_pct: 0.05, reversal_exit_confirm_bars: 0,
+  s_effective_threshold: 0.35, exhaustion_persist_bars: 4,
   regime_lookback: 6, persistence_threshold: 2, momentum_mean_threshold: 0.0,
-  ema_min_spread_pct: 0.02, confidence_high: 0.785, confidence_low: 0.53,
+  ema_min_spread_pct: 0.02, confidence_high: 0.79, confidence_low: 0.23,
   confidence_w1: 0.3, confidence_w2: 0.25, confidence_w3: 0.25, confidence_w4: 0.2,
-  atr_floor_k: 0.6, ema_cross_persist_bars: 2, exhaustion_s_decay_bars: 1,
-  local_range_bars: 20, local_range_threshold_pct: 0.7, sign_flip_threshold: 1,
+  atr_floor_k: 0, ema_cross_persist_bars: 2, exhaustion_s_decay_bars: 1,
+  local_range_bars: 80, local_range_threshold_pct: 0.8, sign_flip_threshold: 1,
   stability_bars: 3,
   spike_atr_multiplier: 1.2,
-  spike_lookback_bars: 5,
-  exhaustion_stall_bars: 3,
-  exhaustion_stall_atr_pct: 0.35,
-  body_baseline_bars: 20,
+  spike_lookback_bars: 9,
+  exhaustion_stall_bars: 6,
+  exhaustion_stall_atr_pct: 3,
+  body_baseline_bars: 15,
   overextension_k: 0.17,
   momentum_peak_bars: 1,
-  consolidation_range_pct: 1.5999999999999999,
-  confidence_very_high: 0.84,
-  ema_macro_period: 5,
+  consolidation_range_pct: 5,
+  confidence_very_high: 0.805,
+  ema_macro_period: 7,
   stoploss_pct: 0.0,
 };
 
@@ -1160,6 +1160,10 @@ tfBtns.forEach(btn => {
 
 function renderSettings() {
   settingsForm.innerHTML = "";
+  // Hint text for specific params
+  const paramHints = {
+    stoploss_pct: "0 = off  |  negative = hard stop (e.g. -10 exits if -10% from entry)  |  positive = trail stop (e.g. 10: arms at +10% gain, then sells if price falls back to entry)",
+  };
   for (const [key, val] of Object.entries(engineParams)) {
     const group = document.createElement("div");
     group.className = "param-group";
@@ -1175,6 +1179,16 @@ function renderSettings() {
     else { input.type = "number"; input.step = "0.01"; }
 
     group.append(label, input);
+
+    // Append hint if available, and span full width for readability
+    if (paramHints[key]) {
+      const hint = document.createElement("span");
+      hint.className = "param-hint";
+      hint.textContent = paramHints[key];
+      group.append(hint);
+      group.classList.add("full-width");
+    }
+
     settingsForm.append(group);
   }
 }

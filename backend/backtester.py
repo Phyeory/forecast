@@ -49,6 +49,19 @@ from data_store import (
 )
 
 
+import multiprocessing
+
+_pool: ProcessPoolExecutor | None = None
+
+def _get_pool(max_workers: int) -> ProcessPoolExecutor:
+    global _pool
+    if multiprocessing.current_process().name != 'MainProcess':
+        raise RuntimeError("Cannot spawn process pool from a child process")
+    if _pool is None:
+        _pool = ProcessPoolExecutor(max_workers=max_workers)
+    return _pool
+
+
 def _run_single_backtest_worker(args: dict) -> dict:
     """Worker function for process pool — must be top-level and picklable."""
     try:
@@ -108,10 +121,10 @@ def run_backtest_batch(
     workers = max_workers or min(len(tasks), max(1, os.cpu_count() or 4))
     results = []
 
-    with ProcessPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_run_single_backtest_worker, t): t for t in tasks}
-        for future in as_completed(futures):
-            results.append(future.result())
+    pool = _get_pool(workers)
+    futures = {pool.submit(_run_single_backtest_worker, t): t for t in tasks}
+    for future in as_completed(futures):
+        results.append(future.result())
 
     return results
 

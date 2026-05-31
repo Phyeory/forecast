@@ -231,6 +231,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .param-label { font-size: 11px; color: var(--muted); font-weight: 600; }
 .param-input { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 6px; font-size: 13px; font-family: var(--mono); outline: none; }
 .param-input:focus { border-color: var(--accent); }
+.param-hint { font-size: 10px; color: var(--muted); line-height: 1.4; font-style: italic; }
+.param-group.full-width { grid-column: 1 / -1; }
 
 /* ═══════════════════════════════════════════════════════════════════════ */
 /* Glass card component                                                  */
