@@ -562,6 +562,8 @@ class StrategyEngine:
         self._momentum_peak_declining_count: int = 0
         # ^ counts consecutive bars where |m_hat| decreased
 
+        self.no_motion_count: int = 0
+
     # ── Indicators ────────────────────────────────────────────────────────────
 
     def _update_indicators(self, o: float, h: float, l: float, c: float, vol: float):
@@ -640,6 +642,12 @@ class StrategyEngine:
         self._m_hat_history.append(self.m_hat)
         if len(self._m_hat_history) > N * 2:
             self._m_hat_history = self._m_hat_history[-(N * 2):]
+
+        # No motion tracking
+        if len(self.close_history) >= 2 and c == self.close_history[-2] and vol == 0:
+            self.no_motion_count += 1
+        else:
+            self.no_motion_count = 0
 
         self._abs_m_hat_history.append(abs(self.m_hat))
         if len(self._abs_m_hat_history) > N * 2:
@@ -1443,6 +1451,9 @@ class StrategyEngine:
             if (self.reversal_bar_count >= self.reversal_exit_confirm_bars
                     and self.signal_strength > self.S_noise):
                 return Signal.EXIT
+
+        if self.no_motion_count >= 60:
+            return Signal.EXIT
 
         return None
 

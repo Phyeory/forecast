@@ -12,13 +12,10 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from candle_aggregator import CandleAggregator, TIMEFRAME_SECONDS
 from pumpfun_client import DexScreenerPollClient, PumpFunWSClient, PumpSwapRPCClient, get_historical_candles, get_token_info, resolve_input, SUB_MINUTE_TFS, NewPairsStream
-from sniper_session import SniperSession
-from strategy_engine_v2 import NewPairSniperScanner
 from forward_tester import ForwardTester
 from live_trader import LiveTrader, keypair_from_private_key
 import data_store
 from backtester import run_backtest, run_backtest_batch
-from market_data_fetcher import ASSET_CATALOGUE, create_market_recording
 
 logging.basicConfig(
     level=logging.INFO,
@@ -361,53 +358,6 @@ async def delete_backtest_batch_endpoint(batch_id: str):
     return JSONResponse({"status": "deleted"})
 
 
-# ── Market Data API ──────────────────────────────────────────────────────────
-
-@app.get("/api/market-data/catalogue")
-async def market_data_catalogue():
-    """Return the list of supported market assets."""
-    items = []
-    for key, info in ASSET_CATALOGUE.items():
-        items.append({
-            "key":         key,
-            "name":        info["name"],
-            "symbol":      info["symbol"],
-            "category":    info["category"],
-            "description": info["description"],
-        })
-    return JSONResponse({"assets": items})
-
-
-@app.post("/api/market-data/fetch")
-async def market_data_fetch(body: dict = Body(...)):
-    """
-    Download market OHLCV data and save it as a completed recording.
-    Body: { asset_key, timeframe, lookback_candles }
-    Returns: { recording_id, asset_key, name, symbol, timeframe, candle_count }
-    """
-    asset_key       = body.get("asset_key", "").strip()
-    timeframe       = body.get("timeframe", "5m")
-    lookback_candles = int(body.get("lookback_candles", 500))
-
-    if not asset_key:
-        return JSONResponse({"error": "asset_key is required"}, status_code=400)
-    if asset_key not in ASSET_CATALOGUE:
-        return JSONResponse({"error": f"Unknown asset: {asset_key}. Valid: {list(ASSET_CATALOGUE)}"}, status_code=400)
-
-    try:
-        result = await asyncio.to_thread(
-            create_market_recording,
-            asset_key=asset_key,
-            timeframe=timeframe,
-            lookback_candles=lookback_candles,
-        )
-        logger.info(f"[MarketData] Created recording {result['recording_id']} for {asset_key} ({result['candle_count']} candles)")
-        return JSONResponse(result)
-    except Exception as e:
-        logger.error(f"[MarketData] Fetch error for {asset_key}: {e}")
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
 @app.websocket("/ws/{mint}")
 async def chart_ws(
     websocket: WebSocket,
@@ -630,8 +580,16 @@ async def chart_ws(
             cancelled.set()
             ws_client.stop()
 
+    async def shutdown():
+        await cancelled.wait()
+        ws_client.stop()
+        try:
+            await websocket.close(code=1000, reason="Session stopped")
+        except Exception:
+            pass
+
     try:
-        await asyncio.gather(stream_live(), keepalive(), listen())
+        await asyncio.gather(stream_live(), keepalive(), listen(), shutdown())
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
     finally:
@@ -894,6 +852,14 @@ async def live_trading_ws(
             await asyncio.sleep(15)
             if not await send({"type": "ping"}):
                 break
+            if await live_trader.check_no_motion():
+                logger.warning(
+                    f"[LIVE] No motion stop triggered for {real_mint[:8]}… — "
+                    f"stopping session in 5s"
+                )
+                await asyncio.sleep(5)
+                cancelled.set()
+                break
 
     # Allow LiveTrader to push trade updates directly to this WS
     live_trader.broadcast_fn = websocket.send_text
@@ -934,8 +900,16 @@ async def live_trading_ws(
             cancelled.set()
             ws_client.stop()
 
+    async def shutdown():
+        await cancelled.wait()
+        ws_client.stop()
+        try:
+            await websocket.close(code=1000, reason="Session stopped")
+        except Exception:
+            pass
+
     try:
-        await asyncio.gather(stream_live(), keepalive(), listen())
+        await asyncio.gather(stream_live(), keepalive(), listen(), shutdown())
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
     finally:
@@ -947,369 +921,6 @@ async def live_trading_ws(
         if real_mint in _active_live_traders:
             del _active_live_traders[real_mint]
         logger.info(f"[LIVE] Disconnect  mint={real_mint[:8]}…")
-
-
-# ── Sniper state ────────────────────────────────────────────────────────────
-# Active scanning sessions keyed by a unique session_id
-_active_sniper_sessions: dict[str, dict] = {}
-_sniper_ws_clients: dict[str, list] = {}  # session_id -> list of websocket send fns
-
-
-def _sniper_session_id() -> str:
-    import uuid
-    return str(uuid.uuid4())[:8]
-
-
-@app.get("/api/sniper/status")
-async def sniper_status():
-    """List all active sniper sessions."""
-    sessions = []
-    for sid, info in _active_sniper_sessions.items():
-        coin_sessions_list = info.get("coin_sessions", [])
-        sessions.append({
-            "session_id": sid,
-            "mode": info["mode"],
-            "scanner_config": info.get("scanner_config", {}),
-            "active_coins": len([s for s in coin_sessions_list if not s.cancelled.is_set()]),
-            "total_coins": len(coin_sessions_list),
-            "coin_sessions": [s.to_summary() for s in coin_sessions_list],
-        })
-    return JSONResponse({"sessions": sessions, "count": len(sessions)})
-
-
-@app.post("/api/sniper/stop")
-async def sniper_stop(body: dict = Body(default={})):
-    """Stop a specific sniper scanning session."""
-    session_id = body.get("session_id", "")
-    if not session_id or session_id not in _active_sniper_sessions:
-        return JSONResponse({"error": "No active sniper session with that id"}, status_code=404)
-    info = _active_sniper_sessions[session_id]
-    info["cancelled"].set()
-    # Stop all coin sub-sessions
-    for s in info.get("coin_sessions", []):
-        s.stop()
-    del _active_sniper_sessions[session_id]
-    return JSONResponse({"status": "stopped", "session_id": session_id})
-
-
-@app.post("/api/sniper/stop_all")
-async def sniper_stop_all():
-    """Stop all active sniper sessions."""
-    for sid, info in list(_active_sniper_sessions.items()):
-        info["cancelled"].set()
-        for s in info.get("coin_sessions", []):
-            s.stop()
-    _active_sniper_sessions.clear()
-    return JSONResponse({"status": "all_stopped"})
-
-
-@app.get("/api/sniper/sessions/{session_id}/trades")
-async def sniper_trade_history(session_id: str):
-    """Get all trade history for coin sub-sessions within a sniper session."""
-    if session_id not in _active_sniper_sessions:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    info = _active_sniper_sessions[session_id]
-    all_trades = []
-    for s in info.get("coin_sessions", []):
-        all_trades.extend([t.to_dict() for t in s.trade_history])
-    all_trades.sort(key=lambda t: t.get("entry_time", 0), reverse=True)
-    return JSONResponse({"trades": all_trades, "count": len(all_trades)})
-
-
-@app.websocket("/sniper-ws")
-async def sniper_ws(
-    websocket: WebSocket,
-    mode: str = Query(default="paper"),
-    buy_size: float = Query(default=0.05),
-    slippage_pct: float = Query(default=15.0),
-    priority_fee: float = Query(default=0.0001),
-    bribe_fee: float = Query(default=0.00001),
-    starting_balance: float = Query(default=1.0),
-    max_coin_duration: float = Query(default=300.0),
-    # Scanner config
-    snipe_min_score: float = Query(default=65.0),
-    min_initial_sol: float = Query(default=1.0),
-    require_socials: bool = Query(default=False),
-    min_initial_buy_sol: float = Query(default=0.3),
-    max_concurrent_coins: int = Query(default=5),
-    engine_params: str = Query(default="{}"),
-    # Live mode
-    private_key: str = Query(default=""),
-    slippage_bps: int = Query(default=1500),
-    priority_fee_lamports: int = Query(default=100_000),
-):
-    """
-    Sniper WebSocket Hub.
-
-    Connects to PumpPortal's new-token stream, scores each new pair with
-    NewPairSniperScanner, and for qualifying pairs:
-      - PAPER mode: spawns a SniperSession that simulates trades
-      - LIVE mode:  spawns a SniperSession that executes real on-chain swaps
-
-    All events are broadcast back to this WebSocket:
-      { type: "new_pair",     ... }   — new pair detected
-      { type: "scored",       ... }   — pair scored (snipeable or not)
-      { type: "sniper_update", ... }  — per-coin candle/trade update
-      { type: "session_summary", ... } — periodic stats summary
-    """
-    if mode not in ("paper", "live"):
-        await websocket.close(code=4000, reason="mode must be 'paper' or 'live'")
-        return
-
-    keypair = None
-    if mode == "live":
-        if not private_key:
-            await websocket.close(code=4001, reason="private_key required for live mode")
-            return
-        try:
-            keypair = keypair_from_private_key(private_key)
-        except ValueError as e:
-            await websocket.close(code=4002, reason=f"Invalid private key: {e}")
-            return
-
-    try:
-        extra_engine_params = json.loads(engine_params)
-    except Exception:
-        extra_engine_params = {}
-
-    await websocket.accept()
-    logger.info(f"[Sniper WS] Connected  mode={mode}  score_threshold={snipe_min_score}")
-
-    session_id = _sniper_session_id()
-    cancelled  = asyncio.Event()
-    coin_sessions: list[SniperSession] = []
-
-    _active_sniper_sessions[session_id] = {
-        "mode":           mode,
-        "cancelled":      cancelled,
-        "coin_sessions":  coin_sessions,
-        "scanner_config": {
-            "snipe_min_score":    snipe_min_score,
-            "min_initial_sol":    min_initial_sol,
-            "require_socials":    require_socials,
-            "min_initial_buy_sol": min_initial_buy_sol,
-            "max_concurrent_coins": max_concurrent_coins,
-        },
-        "session": type('obj', (object,), {"to_summary": lambda: {}})(),
-    }
-
-    scanner = NewPairSniperScanner(
-        snipe_min_score=snipe_min_score,
-        min_initial_sol=min_initial_sol,
-        require_socials=require_socials,
-        min_initial_buy_sol=min_initial_buy_sol,
-    )
-
-    async def send(obj: dict) -> bool:
-        try:
-            await websocket.send_json(obj)
-            return True
-        except Exception:
-            return False
-
-    await send({
-        "type":       "connected",
-        "session_id": session_id,
-        "mode":       mode,
-        "message":    f"Sniper active — scanning for new pairs (score >= {snipe_min_score})",
-    })
-
-    async def broadcast_coin_update(msg: dict):
-        """Relay per-coin sniper updates to the dashboard WS."""
-        await send(msg)
-
-    async def _launch_coin_session(token_event: dict, score_result: dict):
-        """Resolve token info then spin up a SniperSession for the qualifying coin."""
-        mint = token_event["mint"]
-
-        # Rate-gate: don't exceed max_concurrent_coins active at once
-        active = [s for s in coin_sessions if not s.cancelled.is_set()]
-        if len(active) >= max_concurrent_coins:
-            logger.info(f"[Sniper] Max concurrent coins ({max_concurrent_coins}) reached — skipping {mint[:8]}")  
-            await send({"type": "skipped", "mint": mint, "reason": "max_concurrent_coins reached"})
-            return
-
-        # Resolve live data source
-        try:
-            async with _resolve_sem:
-                real_mint, token_info = await asyncio.wait_for(
-                    resolve_input(mint), timeout=10.0
-                )
-        except Exception:
-            real_mint, token_info = mint, None
-
-        token_info = token_info or {
-            "mint": real_mint,
-            "name": token_event.get("name", ""),
-            "symbol": token_event.get("symbol", ""),
-            "_live_source": "pumpfun_rpc",
-            "pair_address": real_mint,
-        }
-
-        # Merge sniper-specific engine defaults with caller overrides
-        sniper_engine_defaults = {
-            "warmup": 1,
-            "roc_period": 1,
-            "roc_threshold": 1.5,
-            "vol_spike_mult": 0.0,  # Do not block snipes if tick 2 volume is smaller than tick 1
-            "buy_vol_min_pct": 51.0,
-            "take_profit_pct": 35.0,
-            "hard_stop_pct": 25.0,
-            "trailing_stop_pct": 15.0,
-            "trail_activate_pct": 20.0,
-            "max_hold_bars": 120,
-            "enable_dip_recovery": True,
-            "dip_threshold_pct": 15.0,     # Don't buy minor chops, only 15%+ dumps
-            "dip_roc_recovery": 2.0,       # Requires 2% bullish thrust to confirm the bottom
-            "dip_buy_pressure": 60.0,      # High buy pressure (60%+) required
-            "dip_hard_stop_pct": 10.0,     # Tighter stop (10%) if the dip fails and rugs
-            "rsi_overbought": 100.0,  # Never block early pumps due to RSI
-        }
-        sniper_engine_defaults.update(extra_engine_params)
-
-        session = SniperSession(
-            mint=real_mint,
-            token_info=token_info,
-            engine_kwargs=sniper_engine_defaults,
-            mode=mode,
-            buy_size_sol=buy_size,
-            slippage_pct=slippage_pct,
-            priority_fee=priority_fee,
-            bribe_fee=bribe_fee,
-            starting_balance=starting_balance,
-            max_duration_s=max_coin_duration,
-            timeframe="1s",
-            broadcast_fn=broadcast_coin_update,
-            keypair=keypair,
-            slippage_bps=slippage_bps,
-            priority_fee_lamports=priority_fee_lamports,
-        )
-        coin_sessions.append(session)
-
-        await send({
-            "type":         "coin_session_started",
-            "mint":         real_mint,
-            "token_name":   token_info.get("name", ""),
-            "token_symbol": token_info.get("symbol", ""),
-            "score":        score_result["score"],
-            "mode":         mode,
-        })
-
-        # Run the session in the background
-        asyncio.create_task(session.run())
-
-    async def scan_new_pairs():
-        """Stream new pairs from PumpPortal and score/launch sessions."""
-        stream = NewPairsStream()
-        try:
-            async for token_event in stream.stream():
-                if cancelled.is_set():
-                    break
-
-                score_result = scanner.score_new_pair(token_event)
-                mint = token_event.get("mint", "")
-
-                # Always push the scored event so the UI can show what we're seeing
-                await send({
-                    "type":        "scored",
-                    "mint":        mint,
-                    "name":        token_event.get("name", ""),
-                    "symbol":      token_event.get("symbol", ""),
-                    "score":       score_result["score"],
-                    "snipeable":   score_result["snipeable"],
-                    "reasons":     score_result["reasons"],
-                    "failures":    score_result["failures"],
-                    "initial_buy_sol": score_result["initial_buy_sol"],
-                    "market_cap_sol":  score_result["market_cap_sol"],
-                    "has_socials":     score_result["has_socials"],
-                    "twitter":         score_result["twitter"],
-                    "telegram":        score_result["telegram"],
-                    "timestamp":   token_event.get("timestamp", 0),
-                })
-
-                if score_result["snipeable"] and mint:
-                    logger.info(
-                        f"[Sniper] QUALIFYING PAIR  {token_event.get('name','?')} ({mint[:8]})  "
-                        f"score={score_result['score']}  mode={mode}"
-                    )
-                    asyncio.create_task(_launch_coin_session(token_event, score_result))
-
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.error(f"[Sniper] scan_new_pairs error: {e}", exc_info=True)
-        finally:
-            stream.stop()
-
-    async def periodic_summary():
-        """Push a session summary every 30 seconds."""
-        while not cancelled.is_set():
-            await asyncio.sleep(30)
-            active_sessions = [s for s in coin_sessions if not s.cancelled.is_set()]
-            total_trades = sum(s.stats.total_trades for s in coin_sessions)
-            total_pnl    = sum(s.stats.total_pnl_sol for s in coin_sessions)
-            wins         = sum(s.stats.winning_trades for s in coin_sessions)
-            losses       = sum(s.stats.losing_trades for s in coin_sessions)
-            await send({
-                "type":           "session_summary",
-                "session_id":     session_id,
-                "mode":           mode,
-                "active_coins":   len(active_sessions),
-                "total_coins":    len(coin_sessions),
-                "total_trades":   total_trades,
-                "total_pnl_sol":  round(total_pnl, 6),
-                "wins":           wins,
-                "losses":         losses,
-                "win_rate":       round(wins / total_trades * 100, 1) if total_trades > 0 else 0,
-            })
-
-    async def listen():
-        """Listen for control messages from the frontend (stop, config etc)."""
-        try:
-            while not cancelled.is_set():
-                data = await websocket.receive_text()
-                try:
-                    msg = json.loads(data)
-                except Exception:
-                    continue
-                msg_type = msg.get("type", "")
-                if msg_type == "stop":
-                    cancelled.set()
-                    break
-                elif msg_type == "stop_coin":
-                    stop_mint = msg.get("mint", "")
-                    for s in coin_sessions:
-                        if s.mint == stop_mint:
-                            s.stop()
-                elif msg_type == "pong":
-                    pass
-        except WebSocketDisconnect:
-            pass
-        finally:
-            cancelled.set()
-
-    async def keepalive():
-        while not cancelled.is_set():
-            await asyncio.sleep(15)
-            if not await send({"type": "ping"}):
-                break
-
-    try:
-        await asyncio.gather(
-            scan_new_pairs(),
-            periodic_summary(),
-            keepalive(),
-            listen(),
-        )
-    except (WebSocketDisconnect, asyncio.CancelledError):
-        pass
-    finally:
-        cancelled.set()
-        for s in coin_sessions:
-            s.stop()
-        if session_id in _active_sniper_sessions:
-            del _active_sniper_sessions[session_id]
-        logger.info(f"[Sniper WS] Disconnected  session={session_id}")
 
 
 if __name__ == "__main__":
