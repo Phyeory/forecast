@@ -79,6 +79,7 @@ def run_backtest_batch(
     starting_balance: float = 1.0,
     max_workers: Optional[int] = None,
     batch_id: Optional[str] = None,
+    engine_version: int = 1,
 ) -> list[dict]:
     """
     Run backtests on ALL completed recordings.
@@ -104,6 +105,7 @@ def run_backtest_batch(
         slippage_pct=slippage_pct,
         starting_balance=starting_balance,
         batch_id=batch_id,
+        engine_version=engine_version,
     )
 
     # For typical batch sizes, sequential is faster (no spawn overhead)
@@ -138,6 +140,7 @@ def run_backtest(
     slippage_pct: float = 1.0,
     starting_balance: float = 1.0,
     batch_id: Optional[str] = None,
+    engine_version: int = 1,
 ) -> dict:
     """
     Run a full backtest on a saved recording.
@@ -165,6 +168,7 @@ def run_backtest(
         bribe_fee=bribe_fee,
         slippage_pct=slippage_pct,
         engine_kwargs=engine_params,
+        engine_version=engine_version,
     )
 
     # One chart result per stored candle

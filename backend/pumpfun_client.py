@@ -99,6 +99,25 @@ async def _ds_search(session: aiohttp.ClientSession, query: str) -> Optional[dic
         logger.debug(f"_ds_search: {e}")
         return None
 
+async def _ds_token(session: aiohttp.ClientSession, mint: str) -> Optional[dict]:
+    """Return an exact Solana pair by token mint address."""
+    try:
+        async with session.get(
+            f"{DEXSCREENER}/latest/dex/tokens/{mint}",
+            headers=_HDR_DS,
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as r:
+            if r.status != 200:
+                return None
+            data = await r.json(content_type=None)
+            pairs = [p for p in (data.get("pairs") or []) if p.get("chainId") == "solana"]
+            if not pairs:
+                return None
+            return pairs[0]
+    except Exception as e:
+        logger.debug(f"_ds_token: {e}")
+        return None
+
 
 async def _ds_pair(session: aiohttp.ClientSession, pair_address: str) -> Optional[dict]:
     """Return an exact Solana pair by pair address."""
@@ -658,6 +677,48 @@ class DexScreenerPollClient:
                     logger.warning(f"[DexScreenerPoll] {e}")
                 await asyncio.sleep(self.poll_seconds)
 
+class PumpFunPollClient:
+    """Poll Pump.fun v3 frontend API for real-time market cap when WS is paywalled."""
+
+    def __init__(self, mint: str, poll_seconds: float = 0.5):
+        self.mint = mint
+        self.poll_seconds = poll_seconds
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    async def stream(self) -> AsyncGenerator[dict, None]:
+        async with aiohttp.ClientSession() as session:
+            while not self._stop:
+                try:
+                    info = await _v3_coin(session, self.mint)
+                    if info:
+                        mcap_usd = float(info.get("usd_market_cap") or 0)
+                        if mcap_usd > 0:
+                            price_sol = float(info.get("price_sol") or 0)
+                            price_usd = float(info.get("price_usd") or 0)
+                            sol_usd = price_usd / price_sol if price_sol > 0 else 0
+                            mcap_sol = mcap_usd / sol_usd if sol_usd > 0 else 0
+                            
+                            yield {
+                                "mint": self.mint,
+                                "tx_type": "update",
+                                "sol_amount": 0.0,
+                                "token_amount": 0.0,
+                                "price": price_sol,
+                                "timestamp": time.time(),
+                                "trader": "",
+                                "tx_hash": "",
+                                "market_cap_sol": mcap_sol,
+                                "market_cap_usd": mcap_usd,
+                                "synthetic": True,
+                            }
+                except Exception as e:
+                    logger.warning(f"[PumpFunPoll] {e}")
+                
+                await asyncio.sleep(self.poll_seconds)
+
 
 
 # ── Shared Solana RPC WebSocket hub ──────────────────────────────────────────
@@ -1086,3 +1147,199 @@ class PumpSwapRPCClient:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30)
 
+
+class PumpFunRPCClient:
+    """Stream live Pump.fun spot price by natively watching the bonding curve PDA.
+    Provides 0-second latency directly from the Solana RPC WebSocket, bypassing all paywalls.
+    """
+
+    def __init__(self, mint: str):
+        self.mint = mint
+        self._stop = False
+        self._curve_pubkey = self._get_bonding_curve(mint)
+        self._last_emitted: Optional[tuple[int, int]] = None
+        self._market_cap_sol = 0.0
+
+    @staticmethod
+    def _get_bonding_curve(mint_str: str) -> str:
+        from solders.pubkey import Pubkey
+        PUMP_PROGRAM = Pubkey.from_string("6EF8rrecthR5Dkzon8Nwu78hRvfX9PNXQjCEwX1qZhN")
+        mint_pk = Pubkey.from_string(mint_str)
+        pda, _ = Pubkey.find_program_address([b"bonding-curve", bytes(mint_pk)], PUMP_PROGRAM)
+        return str(pda)
+
+    def stop(self):
+        self._stop = True
+
+    @staticmethod
+    def _decode_curve(data_b64: str) -> Optional[dict]:
+        import base64
+        try:
+            raw = base64.b64decode(data_b64)
+            if len(raw) < 41:
+                return None
+            v_tok = int.from_bytes(raw[8:16], "little")
+            v_sol = int.from_bytes(raw[16:24], "little")
+            return {"v_tok": v_tok, "v_sol": v_sol}
+        except Exception:
+            return None
+
+    async def stream(self) -> AsyncGenerator[dict, None]:
+        if not self._curve_pubkey:
+            return
+
+        queue = asyncio.Queue(maxsize=512)
+        await _solana_hub.subscribe(self._curve_pubkey, queue)
+        logger.info(f"[PumpFunRPC] Watching native bonding curve: {self._curve_pubkey[:8]}… for mint {self.mint[:8]}…")
+
+        try:
+            while not self._stop:
+                try:
+                    update = await asyncio.wait_for(queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+
+                if self._stop:
+                    break
+
+                data_str = update["account"]["data"][0]
+                curve = self._decode_curve(data_str)
+                if not curve:
+                    continue
+
+                v_tok = curve["v_tok"]
+                v_sol = curve["v_sol"]
+
+                state_tuple = (v_tok, v_sol)
+                if self._last_emitted == state_tuple:
+                    continue
+                self._last_emitted = state_tuple
+
+                if v_tok <= 0:
+                    continue
+
+                price_sol = (v_sol / 1e9) / (v_tok / 1e6)
+                sol_amount = 0.0
+                token_amount = 0.0
+
+                # ── Estimate vol from curve changes ──
+                if hasattr(self, "_prev_v_tok") and self._prev_v_tok:
+                    tok_diff = abs(v_tok - self._prev_v_tok) / 1e6
+                    sol_diff = abs(v_sol - self._prev_v_sol) / 1e9
+                    token_amount = tok_diff
+                    sol_amount = sol_diff
+                else:
+                    # Initial synthetic burst to ensure volume starts pumping
+                    sol_amount = 0.1
+                    token_amount = 0.1 / price_sol
+
+                self._prev_v_tok = v_tok
+                self._prev_v_sol = v_sol
+
+                # Reconstruct market cap
+                total_supply_tok = 1_000_000_000
+                mcap_sol = price_sol * total_supply_tok
+                # Base approximation at $150/sol since sol_usd isn't guaranteed natively 
+                mcap_usd = mcap_sol * 150.0  
+
+                yield {
+                    "mint": self.mint,
+                    "tx_type": "update",
+                    "sol_amount": sol_amount,
+                    "token_amount": token_amount,
+                    "price": price_sol,
+                    "timestamp": time.time(),
+                    "trader": "",
+                    "tx_hash": "",
+                    "market_cap_sol": mcap_sol,
+                    "market_cap_usd": mcap_usd,
+                    "synthetic": True,
+                }
+        finally:
+            await _solana_hub.unsubscribe(self._curve_pubkey, queue)
+
+# ── New-Pair Stream (for sniper scanner) ──────────────────────────────────────
+
+class NewPairsStream:
+    """
+    Subscribe to PumpPortal's 'subscribeNewToken' feed.
+    Yields normalised dicts for every new token created on pump.fun.
+
+    Each yielded dict contains:
+        mint, name, symbol, twitter, telegram, website,
+        initialBuy (lamports), marketCapSol, vSolInBondingCurve,
+        creator, timestamp, uri
+    """
+
+    def __init__(self):
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    async def stream(self) -> AsyncGenerator[dict, None]:
+        backoff = 1.0
+        while not self._stop:
+            try:
+                async with websockets.connect(
+                    PUMPPORTAL_WS,
+                    ping_interval=20,
+                    ping_timeout=15,
+                    open_timeout=15,
+                    max_size=2 ** 22,
+                ) as ws:
+                    await ws.send(json.dumps({"method": "subscribeNewToken"}))
+                    backoff = 1.0
+                    logger.info("[NewPairsStream] Connected — subscribed to new token events")
+
+                    async for raw in ws:
+                        if self._stop:
+                            break
+                        try:
+                            msg = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+
+                        if not isinstance(msg, dict):
+                            continue
+                        if "mint" not in msg:
+                            continue
+
+                        # Normalise timestamp
+                        ts_raw = msg.get("timestamp") or msg.get("blockTime")
+                        if ts_raw:
+                            ts = float(ts_raw) / 1000.0 if float(ts_raw) > 1_000_000_000_000 else float(ts_raw)
+                        else:
+                            ts = time.time()
+
+                        yield {
+                            "mint":                    msg.get("mint", ""),
+                            "name":                    msg.get("name", ""),
+                            "symbol":                  msg.get("symbol", ""),
+                            "twitter":                 msg.get("twitter", "") or "",
+                            "telegram":                msg.get("telegram", "") or "",
+                            "website":                 msg.get("website", "") or "",
+                            "uri":                     msg.get("uri", "") or "",
+                            # solAmount = SOL spent on initial buy (already in SOL)
+                            "solAmount":               float(msg.get("solAmount", 0) or 0),
+                            # initialBuy = tokens received (raw token units) — kept for reference
+                            "initialBuy":              float(msg.get("initialBuy", 0) or 0),
+                            # vSolInBondingCurve already in SOL
+                            "marketCapSol":            float(msg.get("marketCapSol", 0) or 0),
+                            "vSolInBondingCurve":      float(msg.get("vSolInBondingCurve", 0) or 0),
+                            "vTokensInBondingCurve":   float(msg.get("vTokensInBondingCurve", 0) or 0),
+                            "creator":                 msg.get("traderPublicKey", "") or msg.get("creator", ""),
+                            "bondingCurveKey":         msg.get("bondingCurveKey", ""),
+                            "timestamp":               ts,
+                        }
+
+            except asyncio.CancelledError:
+                logger.info("[NewPairsStream] Cancelled")
+                return
+            except (ConnectionClosed, asyncio.TimeoutError, OSError) as e:
+                logger.warning(f"[NewPairsStream] {e} — reconnecting in {backoff:.1f}s")
+            except Exception as e:
+                logger.error(f"[NewPairsStream] Unexpected: {e}")
+            if not self._stop:
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30)

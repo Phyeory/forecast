@@ -45,7 +45,8 @@
     "consolidation_range_pct": 5.0,
     "confidence_very_high": 0.81,
     "ema_macro_period": 7,
-    "stoploss_pct": 0.0
+    "stoploss_pct": 0.0,
+    "takeprofit_pct": 0.0
   },
   "win_rate": 55.88235294117647,
   "total_trades": 102,

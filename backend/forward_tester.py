@@ -43,6 +43,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 from strategy_engine import StrategyEngine, Signal, Direction, Regime
+from strategy_engine_v2 import StrategyEngineV2
 
 
 @dataclass
@@ -95,10 +96,14 @@ class ForwardTester:
         bribe_fee: float = 0.00001,
         slippage_pct: float = 10.0,
         engine_kwargs: Optional[dict] = None,
+        engine_version: int = 1,
     ):
         if engine_kwargs is None:
             engine_kwargs = {}
-        self.engine = StrategyEngine(**engine_kwargs)
+        if engine_version == 2:
+            self.engine = StrategyEngineV2(**engine_kwargs)
+        else:
+            self.engine = StrategyEngine(**engine_kwargs)
         self.balance = starting_balance
         self.buy_size_sol = buy_size_sol
         self.priority_fee = priority_fee

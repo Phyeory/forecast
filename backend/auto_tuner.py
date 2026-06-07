@@ -137,6 +137,7 @@ _BASELINE = {
     "spike_atr_multiplier": 1.2, "spike_lookback_bars": 7, "body_baseline_bars": 30,
     "overextension_k": 0.17, "momentum_peak_bars": 1, "consolidation_range_pct": 5.0,
     "confidence_very_high": 0.81, "ema_macro_period": 7, "stoploss_pct": 0.0,
+    "takeprofit_pct": 0.0,
 }
 
 _best_json = os.path.join(os.path.dirname(__file__), "best_params.json")

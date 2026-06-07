@@ -51,32 +51,66 @@ let lastRegime = "idle";
 let forwardTestStats = null;
 let pendingMarkerData = [];  // raw marker data awaiting market cap resolution
 
-/* Strategy Engine Parameters */
-let engineParams = {
+/* Strategy Engine Parameters — V1 (Physics-based regime detection) */
+let engineParamsV1 = {
   ema_fast: 3, ema_slow: 7, atr_period: 7, roc_period: 3, warmup: 30,
   signal_strong: 4, signal_weak: 1.5, signal_noise: 1.1535714285714287,
-  exhaustion_bars_limit: 1, delta_threshold: 0.3, kalman_gamma: 0.1,
+  exhaustion_bars_limit: 1, delta_threshold: 0.3, kalman_gamma: 0.145,
   min_trend_bars: 4, reversal_confirm_bars: 2, chop_atr_pct: 0.3,
   chop_spread_pct: 0.05, reversal_exit_confirm_bars: 0,
-  s_effective_threshold: 0.35, exhaustion_persist_bars: 4,
+  s_effective_threshold: 0.35, exhaustion_persist_bars: 6,
   regime_lookback: 6, persistence_threshold: 2, momentum_mean_threshold: 0.0,
   ema_min_spread_pct: 0.02, confidence_high: 0.79, confidence_low: 0.23,
   confidence_w1: 0.3, confidence_w2: 0.25, confidence_w3: 0.25, confidence_w4: 0.2,
   atr_floor_k: 0, ema_cross_persist_bars: 2, exhaustion_s_decay_bars: 1,
-  local_range_bars: 80, local_range_threshold_pct: 0.8, sign_flip_threshold: 1,
+  local_range_bars: 80, local_range_threshold_pct: 5, sign_flip_threshold: 1,
   stability_bars: 3,
   spike_atr_multiplier: 1.2,
   spike_lookback_bars: 9,
   exhaustion_stall_bars: 6,
   exhaustion_stall_atr_pct: 3,
-  body_baseline_bars: 15,
+  body_baseline_bars: 14,
   overextension_k: 0.17,
   momentum_peak_bars: 1,
   consolidation_range_pct: 5,
-  confidence_very_high: 0.805,
+  confidence_very_high: 0.84,
   ema_macro_period: 7,
   stoploss_pct: 0.0,
+  takeprofit_pct: 15,
 };
+
+/* Strategy Engine Parameters — V2 (Momentum Breakout Scalper) */
+let engineParamsV2 = {
+  vwap_period: 20,
+  breakout_pct: 2.0,
+  vol_ma_period: 20,
+  vol_spike_mult: 2.0,
+  roc_period: 5,
+  roc_min_pct: 1.0,
+  roc_exit_bars: 3,
+  ema_fast: 5,
+  ema_slow: 13,
+  ema_macro: 21,
+  rsi_period: 14,
+  rsi_overbought: 0.0,
+  trailing_stop_pct: 5.0,
+  hard_stop_pct: 8.0,
+  max_hold_bars: 60,
+  take_profit_pct: 0.0,
+  warmup: 25,
+  cooldown_bars: 3,
+  atr_period: 14,
+};
+
+/* Engine version: 1 = V1 (Physics), 2 = V2 (Momentum) */
+let engineVersion = 1;
+
+/* Active params getter — returns the params for the current engine version */
+function getEngineParams() {
+  return engineVersion === 2 ? engineParamsV2 : engineParamsV1;
+}
+/* Legacy compat — direct references to `engineParams` throughout the file */
+let engineParams = engineParamsV1;
 
 const $ = id => document.getElementById(id);
 const mintInput = $("mint-input");
@@ -971,8 +1005,9 @@ function connect(mint, timeframe) {
   };
   const testerStr = `&buy_size=${testerConfig.buy_size_sol}&slippage_pct=${testerConfig.slippage_pct}&priority_fee=${testerConfig.priority_fee}&bribe_fee=${testerConfig.bribe_fee}`;
 
+  engineParams = getEngineParams();
   const paramsStr = encodeURIComponent(JSON.stringify(engineParams));
-  ws = new WebSocket(`${WS_BASE}/${mint}?timeframe=${timeframe}&params=${paramsStr}${testerStr}`);
+  ws = new WebSocket(`${WS_BASE}/${mint}?timeframe=${timeframe}&params=${paramsStr}${testerStr}&engine_version=${engineVersion}`);
   ws.onopen = () => {
     reconnectMs = RECONNECT_MS;
     setDot("connected", "Live");
@@ -1160,9 +1195,29 @@ tfBtns.forEach(btn => {
 
 function renderSettings() {
   settingsForm.innerHTML = "";
+  engineParams = getEngineParams();
+
+  // Update engine badge in settings modal
+  const badge = document.getElementById("settings-engine-badge");
+  if (badge) {
+    badge.textContent = engineVersion === 2 ? "V2" : "V1";
+    badge.className = engineVersion === 2 ? "engine-badge v2" : "engine-badge";
+  }
+
   // Hint text for specific params
   const paramHints = {
     stoploss_pct: "0 = off  |  negative = hard stop (e.g. -10 exits if -10% from entry)  |  positive = trail stop (e.g. 10: arms at +10% gain, then sells if price falls back to entry)",
+    takeprofit_pct: "Take profit at this % gain (0 = disabled, exits position when price hits entry * (1 + pct/100))",
+    breakout_pct: "Buy when price > VWAP × (1 + breakout_pct/100)",
+    vol_spike_mult: "Volume must exceed this × average volume to confirm entry",
+    roc_min_pct: "Minimum Rate of Change % to trigger a buy signal",
+    trailing_stop_pct: "Trail a stop this % below peak since entry (activates once in profit)",
+    hard_stop_pct: "Fixed stop loss: exit if price drops this % from entry",
+    max_hold_bars: "Maximum bars to hold a position (0 = disabled)",
+    take_profit_pct: "Take profit at this % gain (0 = disabled, use trailing stop)",
+    cooldown_bars: "After an exit, wait this many bars before re-entering",
+    roc_exit_bars: "Exit if ROC stays negative for this many consecutive bars",
+    rsi_overbought: "Block entries when RSI exceeds this threshold",
   };
   for (const [key, val] of Object.entries(engineParams)) {
     const group = document.createElement("div");
@@ -1198,6 +1253,33 @@ settingsBtn.addEventListener("click", () => {
   settingsModal.classList.remove("hidden");
 });
 
+/* ── Engine Version Toggle ────────────────────────────────────────────── */
+const engineVersionCb = document.getElementById("engine-version-cb");
+if (engineVersionCb) {
+  engineVersionCb.addEventListener("change", () => {
+    engineVersion = engineVersionCb.checked ? 2 : 1;
+    engineParams = getEngineParams();
+    console.log(`[engine] Switched to V${engineVersion}`);
+
+    // Update settings modal badge if open
+    const badge = document.getElementById("settings-engine-badge");
+    if (badge) {
+      badge.textContent = engineVersion === 2 ? "V2" : "V1";
+      badge.className = engineVersion === 2 ? "engine-badge v2" : "engine-badge";
+    }
+
+    // Re-render settings if the modal is visible
+    if (!settingsModal.classList.contains("hidden")) {
+      renderSettings();
+    }
+
+    // Reconnect the live chart with the new engine version
+    if (currentMint) {
+      connect(currentMint, currentTf);
+    }
+  });
+}
+
 closeSettingsBtn.addEventListener("click", () => {
   settingsModal.classList.add("hidden");
 });
@@ -1207,6 +1289,7 @@ settingsModal.addEventListener("click", (e) => {
 });
 
 applySettingsBtn.addEventListener("click", () => {
+  engineParams = getEngineParams();
   const inputs = settingsForm.querySelectorAll(".param-input");
   inputs.forEach(inp => {
     const key = inp.dataset.key;
@@ -1690,7 +1773,8 @@ document.getElementById("bt-run-btn").addEventListener("click", async () => {
       method: "POST",
       body: JSON.stringify({
         recording_id: parseInt(recId),
-        engine_params: engineParams,
+        engine_params: getEngineParams(),
+        engine_version: engineVersion,
         ...testerConfig
       })
     });
@@ -1728,7 +1812,8 @@ document.getElementById("bt-run-all-btn").addEventListener("click", async () => 
     const result = await apiFetch("/api/backtest/batch", {
       method: "POST",
       body: JSON.stringify({
-        engine_params: engineParams,
+        engine_params: getEngineParams(),
+        engine_version: engineVersion,
         ...testerConfig
       }),
     });
@@ -2099,8 +2184,8 @@ function startLiveTrader(mint, _delayOverride = null) {
   _ltConnectResetTimer = setTimeout(() => { _ltConnectCount = 0; }, 2000);
 
   const config = getLtConfig();
-  const paramsStr = encodeURIComponent(JSON.stringify(engineParams));
-  const wsUrl = `${LT_WS_BASE}/${mint}?timeframe=${config.timeframe}&private_key=${encodeURIComponent(_privateKey)}&buy_size=${config.buySize}&slippage_bps=${config.slippageBps}&priority_fee=${config.priorityFeeLamports}&params=${paramsStr}`;
+  const paramsStr = encodeURIComponent(JSON.stringify(getEngineParams()));
+  const wsUrl = `${LT_WS_BASE}/${mint}?timeframe=${config.timeframe}&private_key=${encodeURIComponent(_privateKey)}&buy_size=${config.buySize}&slippage_bps=${config.slippageBps}&priority_fee=${config.priorityFeeLamports}&params=${paramsStr}&engine_version=${engineVersion}`;
 
   // Register the card immediately so the UI shows "Connecting…" right away
   const ctx = {
@@ -2334,6 +2419,869 @@ navTabs.forEach(tab => {
   tab.addEventListener("click", () => switchPage(tab.dataset.page));
 });
 
+
 window.stopLiveTrader = stopLiveTrader;
 window.stopAllTraders = stopAllTraders;
 
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Market Data Module — fetch OHLCV data for Index Futures, Crypto, Equities
+   ══════════════════════════════════════════════════════════════════════════ */
+
+let mdSelectedAsset = null;   // currently selected asset key (e.g. "ES=F")
+let mdCatalogue = [];         // full list from /api/market-data/catalogue
+let mdFetching = false;
+
+// Category → CSS class mapping
+const MD_CATEGORY_CLASS = {
+  "Index Futures": "futures",
+  "Crypto Perpetuals": "crypto",
+  "Equities": "equity",
+};
+
+// ── Per-category parameter presets ──────────────────────────────────────────
+//
+// Each preset is a full override of engineParamsV1 defaults tuned for the
+// specific market microstructure.  Notes:
+//
+//  Index Futures (ES=F / NQ=F, 5-min bars):
+//    - Smooth auction-market flow → signals are "clean", so lower S_strong.
+//    - Slower EMAs track trend better in a continuous two-way market.
+//    - Longer warmup to properly seed Kalman filter on higher-priced data.
+//    - No hard stop — regime EXIT is reliable; use trailing at +1.5%.
+//
+//  Crypto Large-Cap (BTC / SOL, 5-min bars):
+//    - More volatile than equities but far less spiky than memecoins.
+//    - Medium signal thresholds.  Faster Kalman gamma to adapt quickly.
+//    - Moderate trailing stop.
+//
+//  Equities (TSLA / NVDA, 5-min bars):
+//    - Intra-day sessions → shorter lookback windows.
+//    - Similar to Futures but wider ATR floor and overextension guard.
+//    - Trailing stop tuned for typical equity volatility.
+//
+const MD_PARAMS_PRESETS = {
+
+  "Index Futures": {
+    _presetName: "Index Futures",
+    _presetDesc: "Tuned for ES/NQ 5-min continuous auction flow",
+    // EMAs
+    ema_fast: 5,
+    ema_slow: 15,
+    ema_macro_period: 20,
+    // ATR / signal
+    atr_period: 10,
+    roc_period: 3,
+    warmup: 50,
+    signal_strong: 2.5,
+    signal_weak: 1.0,
+    signal_noise: 0.7,
+    // Kalman
+    kalman_gamma: 0.08,
+    // Trend / exhaustion
+    min_trend_bars: 3,
+    exhaustion_bars_limit: 2,
+    exhaustion_persist_bars: 3,
+    exhaustion_stall_bars: 4,
+    exhaustion_stall_atr_pct: 2.0,
+    exhaustion_s_decay_bars: 1,
+    // Reversal
+    reversal_confirm_bars: 2,
+    reversal_exit_confirm_bars: 1,
+    // Confidence
+    confidence_high: 0.70,
+    confidence_low: 0.20,
+    confidence_very_high: 0.78,
+    confidence_w1: 0.35,
+    confidence_w2: 0.25,
+    confidence_w3: 0.25,
+    confidence_w4: 0.15,
+    // Chop / range
+    chop_atr_pct: 0.2,
+    chop_spread_pct: 0.03,
+    local_range_bars: 60,
+    local_range_threshold_pct: 0.5,
+    sign_flip_threshold: 2,
+    // Entry gates
+    s_effective_threshold: 0.30,
+    ema_min_spread_pct: 0.015,
+    ema_cross_persist_bars: 2,
+    stability_bars: 2,
+    // Anti-blowoff
+    body_baseline_bars: 20,
+    overextension_k: 0.08,
+    momentum_peak_bars: 2,
+    consolidation_range_pct: 0.3,
+    // Regime
+    regime_lookback: 8,
+    persistence_threshold: 2,
+    momentum_mean_threshold: 0.0,
+    atr_floor_k: 0.5,
+    delta_threshold: 0.2,
+    // Spike filter
+    spike_atr_multiplier: 2.0,
+    spike_lookback_bars: 10,
+    // Risk
+    stoploss_pct: 1.5,    // +1.5% trailing stop
+    takeprofit_pct: 0.0,  // let regime engine decide exit
+  },
+
+  "Crypto Perpetuals": {
+    _presetName: "Crypto Large-Cap",
+    _presetDesc: "Tuned for BTC/SOL 5-min perp flow",
+    // EMAs
+    ema_fast: 4,
+    ema_slow: 10,
+    ema_macro_period: 14,
+    // ATR / signal
+    atr_period: 8,
+    roc_period: 3,
+    warmup: 40,
+    signal_strong: 3.0,
+    signal_weak: 1.2,
+    signal_noise: 0.85,
+    // Kalman — faster to track crypto momentum
+    kalman_gamma: 0.12,
+    // Trend / exhaustion
+    min_trend_bars: 3,
+    exhaustion_bars_limit: 1,
+    exhaustion_persist_bars: 4,
+    exhaustion_stall_bars: 3,
+    exhaustion_stall_atr_pct: 2.5,
+    exhaustion_s_decay_bars: 1,
+    // Reversal
+    reversal_confirm_bars: 2,
+    reversal_exit_confirm_bars: 0,
+    // Confidence
+    confidence_high: 0.75,
+    confidence_low: 0.22,
+    confidence_very_high: 0.80,
+    confidence_w1: 0.30,
+    confidence_w2: 0.28,
+    confidence_w3: 0.27,
+    confidence_w4: 0.15,
+    // Chop / range
+    chop_atr_pct: 0.25,
+    chop_spread_pct: 0.04,
+    local_range_bars: 70,
+    local_range_threshold_pct: 0.6,
+    sign_flip_threshold: 1,
+    // Entry gates
+    s_effective_threshold: 0.35,
+    ema_min_spread_pct: 0.018,
+    ema_cross_persist_bars: 2,
+    stability_bars: 2,
+    // Anti-blowoff
+    body_baseline_bars: 25,
+    overextension_k: 0.12,
+    momentum_peak_bars: 1,
+    consolidation_range_pct: 0.5,
+    // Regime
+    regime_lookback: 7,
+    persistence_threshold: 2,
+    momentum_mean_threshold: 0.0,
+    atr_floor_k: 0.55,
+    delta_threshold: 0.25,
+    // Spike filter
+    spike_atr_multiplier: 1.5,
+    spike_lookback_bars: 8,
+    // Risk
+    stoploss_pct: 2.5,    // +2.5% trailing stop
+    takeprofit_pct: 0.0,
+  },
+
+  "Equities": {
+    _presetName: "High-Volume Equities",
+    _presetDesc: "Tuned for TSLA/NVDA intra-day 5-min sessions",
+    // EMAs
+    ema_fast: 5,
+    ema_slow: 13,
+    ema_macro_period: 21,
+    // ATR / signal
+    atr_period: 9,
+    roc_period: 3,
+    warmup: 45,
+    signal_strong: 2.8,
+    signal_weak: 1.1,
+    signal_noise: 0.75,
+    // Kalman
+    kalman_gamma: 0.10,
+    // Trend / exhaustion
+    min_trend_bars: 3,
+    exhaustion_bars_limit: 2,
+    exhaustion_persist_bars: 3,
+    exhaustion_stall_bars: 4,
+    exhaustion_stall_atr_pct: 2.0,
+    exhaustion_s_decay_bars: 1,
+    // Reversal
+    reversal_confirm_bars: 2,
+    reversal_exit_confirm_bars: 0,
+    // Confidence
+    confidence_high: 0.72,
+    confidence_low: 0.21,
+    confidence_very_high: 0.79,
+    confidence_w1: 0.32,
+    confidence_w2: 0.26,
+    confidence_w3: 0.26,
+    confidence_w4: 0.16,
+    // Chop / range — equities chop a lot in low-volume periods
+    chop_atr_pct: 0.22,
+    chop_spread_pct: 0.035,
+    local_range_bars: 50,
+    local_range_threshold_pct: 0.55,
+    sign_flip_threshold: 2,
+    // Entry gates
+    s_effective_threshold: 0.32,
+    ema_min_spread_pct: 0.016,
+    ema_cross_persist_bars: 2,
+    stability_bars: 2,
+    // Anti-blowoff — equities can gap hard on news
+    body_baseline_bars: 22,
+    overextension_k: 0.10,
+    momentum_peak_bars: 2,
+    consolidation_range_pct: 0.4,
+    // Regime
+    regime_lookback: 7,
+    persistence_threshold: 2,
+    momentum_mean_threshold: 0.0,
+    atr_floor_k: 0.52,
+    delta_threshold: 0.22,
+    // Spike filter
+    spike_atr_multiplier: 1.8,
+    spike_lookback_bars: 9,
+    // Risk
+    stoploss_pct: 2.0,    // +2.0% trailing stop
+    takeprofit_pct: 0.0,
+  },
+};
+
+// Per-asset overrides applied on top of the category preset
+// (only define keys that differ from the category preset)
+const MD_PARAMS_ASSET_OVERRIDES = {
+  "NQ=F": {
+    // NASDAQ is more volatile than S&P — slightly wider thresholds
+    signal_strong: 2.8,
+    overextension_k: 0.10,
+    stoploss_pct: 2.0,
+  },
+  "SOL-USD": {
+    // SOL is more volatile than BTC — faster Kalman, tighter stop
+    kalman_gamma: 0.15,
+    signal_strong: 3.5,
+    stoploss_pct: 3.0,
+  },
+  "TSLA": {
+    // TSLA is very high-beta — extra overextension guard
+    overextension_k: 0.13,
+    momentum_peak_bars: 1,
+    stoploss_pct: 2.5,
+  },
+  "NVDA": {
+    // NVDA is volatile but more institution-driven
+    signal_strong: 2.6,
+    stoploss_pct: 1.8,
+  },
+};
+
+// Active preset state
+let mdActivePreset = null;      // { _presetName, _presetDesc, ...params }
+let mdActiveParams = null;     // final merged params (category + asset override)
+
+function mdGetParamsForAsset(assetKey) {
+  const assetInfo = mdCatalogue.find(a => a.key === assetKey);
+  if (!assetInfo) return null;
+  const category = assetInfo.category;
+  const categoryPreset = MD_PARAMS_PRESETS[category] || {};
+  const assetOverride = MD_PARAMS_ASSET_OVERRIDES[assetKey] || {};
+  return { ...categoryPreset, ...assetOverride };
+}
+
+function mdApplyParams(params) {
+  // Push into the global V1 engine params so the existing settings modal
+  // and runBacktest() both see the correct values.
+  const { _presetName, _presetDesc, ...engineKeys } = params;
+  Object.assign(engineParamsV1, engineKeys);
+  // If V1 is the active engine, sync the legacy alias too
+  if (engineVersion === 1) {
+    Object.assign(engineParams, engineKeys);
+  }
+  // Persist to the settings form fields so the modal shows updated values
+  mdSyncSettingsForm(engineKeys);
+}
+
+function mdSyncSettingsForm(params) {
+  // Update any visible input in the settings form that matches a key
+  for (const [key, val] of Object.entries(params)) {
+    const inputEl = document.querySelector(`#settings-form [data-param="${key}"]`);
+    if (inputEl) inputEl.value = val;
+  }
+}
+
+function mdRenderPresetBadge() {
+  let badge = $("md-preset-badge");
+  if (!badge) return;
+  if (!mdActivePreset) {
+    badge.classList.add("hidden");
+    return;
+  }
+  badge.classList.remove("hidden");
+  badge.innerHTML = `
+    <span class="md-preset-icon">⚙</span>
+    <span class="md-preset-text">
+      <strong>${mdActivePreset._presetName}</strong>
+      <span>${mdActivePreset._presetDesc}</span>
+    </span>
+    <button class="btn btn-secondary btn-xs md-preset-edit-btn" id="md-preset-edit-btn">
+      ✏ Customise
+    </button>
+  `;
+  const editBtn = $("md-preset-edit-btn");
+  if (editBtn) editBtn.addEventListener("click", () => {
+    // Open existing settings modal — params are already loaded
+    if (settingsModal) settingsModal.classList.remove("hidden");
+  });
+}
+
+async function mdLoadCatalogue() {
+  try {
+    const res = await fetch("/api/market-data/catalogue");
+    const data = await res.json();
+    mdCatalogue = data.assets || [];
+    mdRenderAssets();
+  } catch (e) {
+    const grid = $("md-asset-grid");
+    if (grid) grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1;color:#ef5350">Failed to load asset catalogue</div>`;
+  }
+}
+
+function mdRenderAssets() {
+  const grid = $("md-asset-grid");
+  if (!grid) return;
+  if (!mdCatalogue.length) {
+    grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1">No assets available</div>`;
+    return;
+  }
+
+  grid.innerHTML = "";
+  for (const asset of mdCatalogue) {
+    const catClass = MD_CATEGORY_CLASS[asset.category] || "equity";
+    const hasOverride = !!MD_PARAMS_ASSET_OVERRIDES[asset.key];
+    const card = document.createElement("div");
+    card.className = `md-asset-card ${catClass}`;
+    card.dataset.key = asset.key;
+    card.title = asset.description;
+    card.innerHTML = `
+      <div class="md-asset-check">✓</div>
+      <div class="md-asset-symbol">${asset.symbol}</div>
+      <div class="md-asset-name">${asset.name}</div>
+      <span class="md-asset-cat">${asset.category}</span>
+      ${hasOverride ? `<span class="md-asset-tuned" title="Has asset-specific parameter tuning">★ tuned</span>` : ""}
+    `;
+    card.addEventListener("click", () => mdSelectAsset(asset.key));
+    grid.appendChild(card);
+  }
+}
+
+function mdSelectAsset(key) {
+  mdSelectedAsset = key;
+
+  // Update card visual state
+  document.querySelectorAll(".md-asset-card").forEach(card => {
+    card.classList.toggle("selected", card.dataset.key === key);
+  });
+
+  // Load preset params for this asset
+  const params = mdGetParamsForAsset(key);
+  if (params) {
+    mdActivePreset = params;
+    mdActiveParams = params;
+    mdApplyParams(params);
+    mdRenderPresetBadge();
+  }
+
+  // Enable buttons
+  const fetchBtn = $("md-fetch-btn");
+  const fetchRunBtn = $("md-fetch-and-run-btn");
+  if (fetchBtn) fetchBtn.disabled = false;
+  if (fetchRunBtn) fetchRunBtn.disabled = false;
+
+  // Show which preset was loaded
+  const assetInfo = mdCatalogue.find(a => a.key === key) || {};
+  mdShowStatus(`✓ Loaded ${params?._presetName || ""} parameters for ${assetInfo.name || key}`);
+  setTimeout(mdHideStatus, 4000);
+}
+
+function mdShowStatus(label) {
+  const status = $("md-status");
+  const labelEl = $("md-status-label");
+  if (status) status.classList.remove("hidden");
+  if (labelEl) labelEl.textContent = label;
+}
+
+function mdHideStatus() {
+  const status = $("md-status");
+  if (status) status.classList.add("hidden");
+}
+
+function mdSetFetching(active) {
+  mdFetching = active;
+  const fetchBtn = $("md-fetch-btn");
+  const fetchRunBtn = $("md-fetch-and-run-btn");
+  const icon = $("md-fetch-icon");
+  const label = $("md-fetch-label");
+  if (fetchBtn) fetchBtn.disabled = active || !mdSelectedAsset;
+  if (fetchRunBtn) fetchRunBtn.disabled = active || !mdSelectedAsset;
+  if (icon) icon.textContent = active ? "⏳" : "⬇";
+  if (label) label.textContent = active ? "Downloading…" : "Download Data";
+}
+
+async function mdFetchData(andRunBacktest = false) {
+  if (!mdSelectedAsset || mdFetching) return;
+
+  const tf = ($("md-tf-select") || {}).value || "5m";
+  const lookback = parseInt(($("md-lookback") || {}).value || "500", 10);
+
+  mdSetFetching(true);
+  const assetInfo = mdCatalogue.find(a => a.key === mdSelectedAsset) || {};
+  mdShowStatus(`Downloading ${assetInfo.name || mdSelectedAsset} [${tf}, ${lookback} candles]…`);
+
+  try {
+    const res = await fetch("/api/market-data/fetch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ asset_key: mdSelectedAsset, timeframe: tf, lookback_candles: lookback }),
+    });
+    const result = await res.json();
+
+    if (!res.ok || result.error) {
+      mdShowStatus(`❌ Error: ${result.error || "Unknown error"}`);
+      mdSetFetching(false);
+      return;
+    }
+
+    const { recording_id, candle_count, name, symbol } = result;
+    mdShowStatus(`✅ Downloaded ${candle_count} candles for ${symbol} (${name}) — Recording #${recording_id}`);
+
+    // Refresh the recording selector
+    await loadRecordings();
+    const btSelect = $("bt-recording-select");
+    if (btSelect) btSelect.value = String(recording_id);
+
+    if (andRunBacktest) {
+      mdShowStatus(`✅ Downloaded ${candle_count} candles — running backtest with ${mdActivePreset?._presetName || "custom"} params…`);
+      await new Promise(r => setTimeout(r, 300));
+
+      // Build engine params to pass — use the active preset merged with any
+      // user edits that happened via the settings modal after preset load
+      const { _presetName, _presetDesc, ...paramsToSend } = (mdActiveParams || {});
+      // Merge with whatever is in the global engineParamsV1 (includes modal edits)
+      const finalParams = { ...paramsToSend, ...engineParamsV1 };
+
+      await runBacktestWithParams(recording_id, finalParams);
+      mdShowStatus(`✅ Backtest complete for ${symbol} using ${mdActivePreset?._presetName || "custom"} parameters`);
+    } else {
+      setTimeout(mdHideStatus, 5000);
+    }
+
+  } catch (e) {
+    mdShowStatus(`❌ Network error: ${e.message}`);
+  } finally {
+    mdSetFetching(false);
+  }
+}
+
+// Extended runBacktest that accepts an explicit engine params override
+async function runBacktestWithParams(recordingId, overrideParams) {
+  const progress = $("bt-progress");
+  const progressFill = $("bt-progress-fill");
+  const progressLabel = $("bt-progress-label");
+  if (progress) progress.classList.remove("hidden");
+  if (progressLabel) progressLabel.textContent = "Running backtest…";
+
+  try {
+    const testerCfg = {
+      buy_size_sol: parseFloat(($("tester-buy-size") || {}).value || "0.1"),
+      slippage_pct: parseFloat(($("tester-slippage") || {}).value || "1.0"),
+      priority_fee: parseFloat(($("tester-priority-fee") || {}).value || "0.0001"),
+      bribe_fee: parseFloat(($("tester-bribe-fee") || {}).value || "0.00001"),
+    };
+
+    const res = await fetch("/api/backtest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        recording_id: recordingId,
+        engine_params: overrideParams,
+        engine_version: engineVersion,
+        ...testerCfg,
+      }),
+    });
+    const result = await res.json();
+    if (!res.ok || result.error) {
+      console.error("Backtest error:", result.error);
+      return;
+    }
+    await loadBacktests();
+    // Auto-open the result
+    const bt = await fetch(`/api/backtests/${result.backtest_id}`).then(r => r.json());
+    if (bt && !bt.error) showBacktestResult(bt);
+  } finally {
+    if (progress) progress.classList.add("hidden");
+  }
+}
+
+// Wire up Market Data buttons
+document.addEventListener("DOMContentLoaded", () => {
+  const fetchBtn = $("md-fetch-btn");
+  const fetchRunBtn = $("md-fetch-and-run-btn");
+  if (fetchBtn) fetchBtn.addEventListener("click", () => mdFetchData(false));
+  if (fetchRunBtn) fetchRunBtn.addEventListener("click", () => mdFetchData(true));
+});
+
+// Load catalogue when switching to Backtest page
+(function patchSwitchPageForMd() {
+  const _prev = switchPage;
+  switchPage = function (pageId) {
+    _prev(pageId);
+    if (pageId === "backtest" && mdCatalogue.length === 0) {
+      mdLoadCatalogue();
+    }
+  };
+  navTabs.forEach(tab => { tab.onclick = () => switchPage(tab.dataset.page); });
+})();
+
+// Load immediately if starting on backtest page
+if (document.querySelector(".nav-tab.active[data-page='backtest']")) {
+  mdLoadCatalogue();
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════
+   SNIPER PAGE
+   ═══════════════════════════════════════════════════════════════════════ */
+
+let sniperWs = null;
+let sniperMode = "paper";
+let sniperRunning = false;
+let sniperFeedItems = [];
+let sniperPositions = {};
+let sniperTradeLog = [];
+let sniperTotalStats = { trades: 0, pnl: 0, wins: 0, losses: 0 };
+
+// ── Mode toggle ────────────────────────────────────────────────────────
+document.querySelectorAll(".sniper-mode-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    if (sniperRunning) return;
+    sniperMode = btn.dataset.mode;
+    document.querySelectorAll(".sniper-mode-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    const keyRow = document.getElementById("sniper-live-key-row");
+    if (keyRow) keyRow.style.display = sniperMode === "live" ? "block" : "none";
+  });
+});
+
+// ── Start / Stop ────────────────────────────────────────────────────────
+(function initSniperButtons() {
+  const startBtn = document.getElementById("sniper-start-btn");
+  const stopBtn = document.getElementById("sniper-stop-btn");
+  if (startBtn) startBtn.addEventListener("click", sniperStart);
+  if (stopBtn) stopBtn.addEventListener("click", sniperStop);
+})();
+
+function sniperStart() {
+  if (sniperRunning) return;
+
+  const buySize = parseFloat(document.getElementById("sniper-buy-size")?.value || "0.05");
+  const minScore = parseFloat(document.getElementById("sniper-min-score")?.value || "55");
+  const maxCoins = parseInt(document.getElementById("sniper-max-coins")?.value || "5");
+  const maxDuration = parseFloat(document.getElementById("sniper-max-duration")?.value || "300");
+  const minSol = parseFloat(document.getElementById("sniper-min-sol")?.value || "1.0");
+  const slippage = parseFloat(document.getElementById("sniper-slippage")?.value || "15");
+  const privateKey = document.getElementById("sniper-private-key")?.value || "";
+
+  if (sniperMode === "live" && !privateKey) { alert("Private key required for live mode"); return; }
+
+  // Reset
+  sniperFeedItems = []; sniperPositions = {}; sniperTradeLog = [];
+  sniperTotalStats = { trades: 0, pnl: 0, wins: 0, losses: 0 };
+  renderSniperFeed(); renderSniperPositions(); renderSniperTradeLog();
+
+  const params = new URLSearchParams({
+    mode: sniperMode,
+    buy_size: buySize,
+    slippage_pct: slippage,
+    snipe_min_score: minScore,
+    min_initial_sol: minSol,
+    max_concurrent_coins: maxCoins,
+    max_coin_duration: maxDuration,
+    starting_balance: 10.0,
+    ...(sniperMode === "live" && privateKey ? { private_key: privateKey } : {}),
+  });
+
+  sniperWs = new WebSocket(`ws://${location.host}/sniper-ws?${params}`);
+
+  sniperWs.onopen = () => {
+    sniperRunning = true;
+    document.getElementById("sniper-start-btn").style.display = "none";
+    document.getElementById("sniper-stop-btn").style.display = "";
+    document.getElementById("sniper-status-bar")?.classList.remove("hidden");
+    document.getElementById("sniper-status-mode").textContent = sniperMode.toUpperCase();
+  };
+
+  sniperWs.onmessage = e => {
+    try { handleSniperMsg(JSON.parse(e.data)); } catch (err) { }
+  };
+
+  sniperWs.onclose = () => {
+    sniperRunning = false;
+    document.getElementById("sniper-start-btn").style.display = "";
+    document.getElementById("sniper-stop-btn").style.display = "none";
+    document.getElementById("sniper-status-bar")?.classList.add("hidden");
+  };
+
+  sniperWs.onerror = err => console.error("[Sniper] WS error", err);
+}
+
+function sniperStop() {
+  if (sniperWs) {
+    try { sniperWs.send(JSON.stringify({ type: "stop" })); } catch (e) { }
+    sniperWs.close(); sniperWs = null;
+  }
+  sniperRunning = false;
+  document.getElementById("sniper-start-btn").style.display = "";
+  document.getElementById("sniper-stop-btn").style.display = "none";
+  document.getElementById("sniper-status-bar")?.classList.add("hidden");
+}
+
+// ── Message handler ─────────────────────────────────────────────────────
+function handleSniperMsg(msg) {
+  if (msg.type === "ping") {
+    try { sniperWs?.send(JSON.stringify({ type: "pong" })); } catch (e) { }
+    return;
+  }
+  if (msg.type === "connected") {
+    const el = document.getElementById("sniper-status-session");
+    if (el) el.textContent = `Session: ${msg.session_id}`;
+    return;
+  }
+  if (msg.type === "scored") { addSniperFeedItem(msg); return; }
+  if (msg.type === "coin_session_started") { onSniperCoinStarted(msg); return; }
+  if (msg.type === "sniper_update") { handleSniperCoinUpdate(msg); return; }
+  if (msg.type === "session_summary") { updateSniperStatusBar(msg); return; }
+}
+
+function onSniperCoinStarted(msg) {
+  sniperPositions[msg.mint] = {
+    mint: msg.mint,
+    name: msg.token_name || msg.mint.slice(0, 8),
+    symbol: msg.token_symbol || "",
+    mode: msg.mode,
+    score: msg.score,
+    status: "watching",
+    gain_pct: 0,
+  };
+  renderSniperPositions();
+}
+
+function handleSniperCoinUpdate(msg) {
+  const mint = msg.mint;
+  const ind = msg.strategy?.indicators || {};
+  const ct = msg.current_trade;
+  const stats = msg.stats;
+
+  if (!sniperPositions[mint]) {
+    sniperPositions[mint] = { mint, name: msg.token_name || mint.slice(0, 8), symbol: msg.token_symbol || "", mode: msg.mode, status: "watching" };
+  }
+  const pos = sniperPositions[mint];
+  pos.name = msg.token_name || pos.name;
+  pos.symbol = msg.token_symbol || pos.symbol;
+  pos.gain_pct = ind.gain_pct ?? pos.gain_pct ?? 0;
+  pos.current_trade = ct;
+  pos.stats = stats;
+  pos.mcap_usd = msg.market_cap_usd;
+
+  if (msg.event === "bought") pos.status = "in_position";
+  if (msg.event === "sold") {
+    pos.status = "closed";
+    if (msg.trade_history?.length) {
+      const last = msg.trade_history[msg.trade_history.length - 1];
+      if (last && !sniperTradeLog.find(t => t.entry_time === last.entry_time && t.mint === mint)) {
+        sniperTradeLog.unshift({ ...last, name: pos.name, symbol: pos.symbol, mint });
+        renderSniperTradeLog();
+      }
+    }
+  }
+  if (msg.event === "session_ended") {
+    pos.status = "ended";
+    (msg.trade_history || []).forEach(t => {
+      if (!sniperTradeLog.find(x => x.entry_time === t.entry_time && x.mint === mint)) {
+        sniperTradeLog.unshift({ ...t, name: pos.name, symbol: pos.symbol, mint });
+      }
+    });
+    renderSniperTradeLog();
+    setTimeout(() => { delete sniperPositions[mint]; renderSniperPositions(); }, 5000);
+  }
+
+  // Aggregate PnL
+  if (stats) {
+    let tp = 0, tt = 0, tw = 0, tl = 0;
+    Object.values(sniperPositions).forEach(p => {
+      if (p.stats) { tp += p.stats.total_pnl_sol || 0; tt += p.stats.total_trades || 0; tw += p.stats.winning_trades || 0; tl += p.stats.losing_trades || 0; }
+    });
+    sniperTotalStats = { pnl: tp, trades: tt, wins: tw, losses: tl };
+    updateSniperStatusBar();
+  }
+
+  renderSniperPositions();
+}
+
+function updateSniperStatusBar(summary) {
+  const st = sniperTotalStats;
+  const pnlEl = document.getElementById("sniper-status-pnl");
+  if (pnlEl) {
+    pnlEl.textContent = `${st.pnl >= 0 ? "+" : ""}${st.pnl.toFixed(4)} SOL`;
+    pnlEl.style.color = st.pnl >= 0 ? "#26a69a" : "#ef5350";
+  }
+  const trEl = document.getElementById("sniper-status-trades");
+  if (trEl) trEl.textContent = st.trades;
+  const wrEl = document.getElementById("sniper-status-winrate");
+  if (wrEl) wrEl.textContent = st.trades > 0 ? `${(st.wins / st.trades * 100).toFixed(1)}%` : "—";
+  const actEl = document.getElementById("sniper-status-active");
+  if (actEl) {
+    const active = Object.values(sniperPositions).filter(p => ["in_position", "watching"].includes(p.status)).length;
+    actEl.textContent = summary?.active_coins ?? active;
+  }
+}
+
+// ── Feed ───────────────────────────────────────────────────────────────
+function addSniperFeedItem(msg) {
+  sniperFeedItems.unshift(msg);
+  if (sniperFeedItems.length > 60) sniperFeedItems.pop();
+  renderSniperFeed();
+}
+
+function renderSniperFeed() {
+  const feed = document.getElementById("sniper-feed");
+  if (!feed) return;
+  if (!sniperFeedItems.length) {
+    feed.innerHTML = `<div class="empty-state">Start the sniper to see new pairs\u2026</div>`;
+    return;
+  }
+  feed.innerHTML = sniperFeedItems.map(item => {
+    const score = item.score || 0;
+    const tier = score >= 70 ? "high" : score >= 50 ? "med" : "low";
+    const sniped = item.snipeable;
+    const socials = item.has_socials ? `<span class="sniper-social-badge">\ud83d\udd17</span>` : "";
+    const mcap = item.market_cap_sol ? `${item.market_cap_sol.toFixed(0)} SOL` : "";
+    const iBuy = item.initial_buy_sol ? `${item.initial_buy_sol.toFixed(3)} SOL` : "";
+    const age = item.timestamp ? `${Math.max(0, Math.round(Date.now() / 1000 - item.timestamp))}s` : "";
+    return `
+      <div class="sniper-feed-card ${sniped ? "sniped" : "rejected"}">
+        <span class="sniper-score-pill ${tier}">${score.toFixed(0)}</span>
+        <div class="sniper-feed-meta">
+          <div class="sniper-feed-name">${sniperEsc(item.name || item.mint?.slice(0, 8))}
+            <span style="color:var(--muted);font-size:10px">${sniperEsc(item.symbol || "")}</span></div>
+          <div class="sniper-feed-detail">${mcap} \u00b7 ${iBuy} \u00b7 ${age}</div>
+        </div>
+        ${socials}
+        ${sniped ? '<span style="color:#26a69a;font-size:11px;font-weight:700">\ud83c\udfaf</span>' : ""}
+      </div>`;
+  }).join("");
+}
+
+// ── Positions ───────────────────────────────────────────────────────────
+function renderSniperPositions() {
+  const container = document.getElementById("sniper-positions");
+  if (!container) return;
+  const entries = Object.values(sniperPositions).filter(p => p.status !== "ended");
+  if (!entries.length) {
+    container.innerHTML = `<div class="empty-state">No active positions</div>`;
+    return;
+  }
+  container.innerHTML = entries.map(pos => {
+    const gainPct = pos.gain_pct || 0;
+    const gainCls = gainPct > 0 ? "win" : gainPct < 0 ? "loss" : "";
+    const gainCol = gainPct > 0 ? "#26a69a" : gainPct < 0 ? "#ef5350" : "#d1d5e0";
+    const stats = pos.stats || {};
+    const mcap = pos.mcap_usd ? `$${fmtLarge(pos.mcap_usd)}` : "\u2014";
+    const inPos = pos.status === "in_position" && pos.current_trade;
+    return `
+      <div class="sniper-pos-card ${gainCls}">
+        <div class="sniper-pos-header">
+          <div>
+            <span class="sniper-pos-name">${sniperEsc(pos.name)}</span>
+            <span style="color:var(--muted);font-size:11px;margin-left:4px">${sniperEsc(pos.symbol)}</span>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center">
+            <span class="sniper-pos-mode ${pos.mode}">${pos.mode}</span>
+            <span style="font-size:10px;color:var(--muted)">${pos.status}</span>
+          </div>
+        </div>
+        <div class="sniper-pos-stats">
+          <div class="sniper-pos-stat">
+            <span class="sniper-pos-stat-label">MCap</span>
+            <span class="sniper-pos-stat-value">${mcap}</span>
+          </div>
+          <div class="sniper-pos-stat">
+            <span class="sniper-pos-stat-label">Trades</span>
+            <span class="sniper-pos-stat-value">${stats.total_trades || 0}</span>
+          </div>
+          <div class="sniper-pos-stat">
+            <span class="sniper-pos-stat-label">Win %</span>
+            <span class="sniper-pos-stat-value">${stats.win_rate ? stats.win_rate.toFixed(1) + "%" : "\u2014"}</span>
+          </div>
+        </div>
+        ${inPos ? `
+          <div class="sniper-pos-pnl">
+            <span style="color:var(--muted)">Unrealized</span>
+            <span style="color:${gainCol};font-weight:700">${gainPct >= 0 ? "+" : ""}${gainPct.toFixed(2)}%</span>
+          </div>` : ""}
+        ${stats.total_pnl_sol !== undefined ? `
+          <div class="sniper-pos-pnl" style="margin-top:4px">
+            <span style="color:var(--muted)">Session PnL</span>
+            <span style="color:${(stats.total_pnl_sol || 0) >= 0 ? "#26a69a" : "#ef5350"};font-weight:700">
+              ${(stats.total_pnl_sol || 0) >= 0 ? "+" : ""}${(stats.total_pnl_sol || 0).toFixed(4)} SOL
+            </span>
+          </div>` : ""}
+        <div class="sniper-pos-actions">
+          <button class="btn btn-xs btn-secondary" onclick="sniperStopCoin('${pos.mint}')">&#x23F9; Stop</button>
+        </div>
+      </div>`;
+  }).join("");
+}
+
+function sniperStopCoin(mint) {
+  if (sniperWs) try { sniperWs.send(JSON.stringify({ type: "stop_coin", mint })); } catch (e) { }
+}
+
+// ── Trade log ───────────────────────────────────────────────────────────
+function renderSniperTradeLog() {
+  const tbody = document.getElementById("sniper-trades-tbody");
+  if (!tbody) return;
+  if (!sniperTradeLog.length) {
+    tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:20px">No completed trades yet</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = sniperTradeLog.slice(0, 100).map((t, i) => {
+    const cls = (t.pnl_sol || 0) >= 0 ? "trade-pnl-pos" : "trade-pnl-neg";
+    const sign = (t.pnl_sol || 0) >= 0 ? "+" : "";
+    const eTime = t.entry_time ? new Date(t.entry_time * 1000).toLocaleTimeString() : "\u2014";
+    const xTime = t.exit_time ? new Date(t.exit_time * 1000).toLocaleTimeString() : "\u2014";
+    return `<tr>
+      <td>${i + 1}</td>
+      <td>${sniperEsc(t.name || t.mint?.slice(0, 8) || "\u2014")} <span style="color:var(--muted)">${sniperEsc(t.symbol || "")}</span></td>
+      <td><span class="sniper-pos-mode ${t.mode || "paper"}" style="font-size:9px;padding:1px 5px;border-radius:3px">${t.mode || "paper"}</span></td>
+      <td>${eTime}</td>
+      <td>${xTime}</td>
+      <td class="${cls}">${sign}${(t.pnl_sol || 0).toFixed(4)}</td>
+      <td class="${cls}">${sign}${(t.pnl_pct || 0).toFixed(2)}%</td>
+      <td style="color:var(--muted)">${sniperEsc(t.entry_reason || "\u2014")}</td>
+      <td style="color:var(--muted)">${sniperEsc(t.exit_reason || "\u2014")}</td>
+    </tr>`;
+  }).join("");
+}
+
+function sniperEsc(str) {
+  if (!str) return "";
+  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
