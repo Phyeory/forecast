@@ -31,20 +31,9 @@
         <button class="nav-tab" data-page="backtest" id="nav-backtest">🧪 Backtest</button>
         <button class="nav-tab" data-page="live-trading" id="nav-live-trading">⚡ Live Trading</button>
         <button class="nav-tab" data-page="sniper" id="nav-sniper">🎯 Sniper</button>
+        <button class="nav-tab" data-page="polymarket" id="nav-polymarket" onclick="window.location.href='/static/polymarket.html'">🔮 PRISM</button>
       </nav>
 
-      <!-- Engine Version Toggle -->
-      <div id="engine-toggle" class="engine-toggle">
-        <span class="engine-toggle-label">Engine</span>
-        <div class="toggle-switch" id="engine-version-toggle"
-          title="Switch between Strategy Engine V1 (Physics-based) and V2 (Momentum Scalper)">
-          <input type="checkbox" id="engine-version-cb" />
-          <label for="engine-version-cb" class="toggle-slider">
-            <span class="toggle-v1">V1</span>
-            <span class="toggle-v2">V2</span>
-          </label>
-        </div>
-      </div>
 
       <div id="conn-indicator">
         <div id="dot" class="dot"></div>
@@ -234,70 +223,6 @@
           <div>
             <h1 class="page-title">Backtester</h1>
             <p class="page-subtitle">Run the strategy engine on saved price data and analyze results</p>
-          </div>
-        </div>
-
-        <!-- ── Market Data Fetcher ───────────────────────────────────────── -->
-        <div class="glass-card md-panel" id="md-panel">
-          <div class="md-panel-header">
-            <div class="md-panel-title">
-              <span class="md-panel-icon">🌍</span>
-              <div>
-                <h3>Market Data</h3>
-                <p>Download historical OHLCV data for traditional assets and run backtests with the same physics-based
-                  engine</p>
-              </div>
-            </div>
-            <div class="md-legend">
-              <span class="md-badge md-badge-futures">Index Futures</span>
-              <span class="md-badge md-badge-crypto">Crypto Perps</span>
-              <span class="md-badge md-badge-equity">Equities</span>
-            </div>
-          </div>
-
-          <!-- Asset grid -->
-          <div id="md-asset-grid" class="md-asset-grid">
-            <!-- Populated by JS from /api/market-data/catalogue -->
-            <div class="empty-state" style="grid-column:1/-1">Loading assets…</div>
-          </div>
-
-          <!-- Controls row -->
-          <div class="md-controls">
-            <div class="form-group" style="flex:0 0 auto; min-width:140px;">
-              <label class="form-label">Timeframe</label>
-              <select id="md-tf-select" class="form-select">
-                <option value="1m">1m</option>
-                <option value="5m" selected>5m</option>
-                <option value="15m">15m</option>
-                <option value="1h">1h</option>
-                <option value="1d">1d</option>
-              </select>
-            </div>
-            <div class="form-group" style="flex:0 0 auto; min-width:160px;">
-              <label class="form-label">Lookback (candles)</label>
-              <input id="md-lookback" type="number" class="form-input" value="500" min="50" max="1000" step="50" />
-            </div>
-            <div class="md-fetch-actions">
-              <button id="md-fetch-btn" class="btn btn-primary md-fetch-btn" disabled>
-                <span id="md-fetch-icon">⬇</span>
-                <span id="md-fetch-label">Download Data</span>
-              </button>
-              <button id="md-fetch-and-run-btn" class="btn btn-secondary md-fetch-btn" disabled>
-                ⚡ Fetch &amp; Run Backtest
-              </button>
-            </div>
-          </div>
-
-          <!-- Status bar -->
-          <!-- Active preset indicator -->
-          <div id="md-preset-badge" class="md-preset-badge hidden"></div>
-
-          <!-- Status bar -->
-          <div id="md-status" class="md-status hidden">
-            <div id="md-status-bar" class="md-status-bar">
-              <div id="md-status-fill" class="md-status-fill"></div>
-            </div>
-            <span id="md-status-label" class="md-status-label">Fetching…</span>
           </div>
         </div>
 
@@ -503,51 +428,47 @@
         </div>
 
         <!-- Mode + Config -->
-        <div class="glass-card" id="sniper-config-card">
-          <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:16px">
-            <h3 class="panel-title" style="margin:0">⚙️ Sniper Configuration</h3>
+        <div class="glass-card" id="sniper-config-card" style="margin-bottom: 24px;">
+
+          <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:20px">
             <!-- Mode Toggle -->
             <div style="display:flex;align-items:center;gap:10px;margin-left:auto">
               <span style="font-size:12px;color:#888;font-weight:600">MODE</span>
-              <div class="sniper-mode-toggle" id="sniper-mode-toggle">
-                <button class="sniper-mode-btn active" id="sniper-mode-paper" data-mode="paper">📋 Paper</button>
-                <button class="sniper-mode-btn" id="sniper-mode-live" data-mode="live">⚡ Live</button>
+              <div class="sniper-mode-toggle" id="sniper-mode-toggle"
+                style="background: var(--bg); padding: 4px; border-radius: 8px; display: flex; gap: 4px;">
+                <button class="sniper-mode-btn active" id="sniper-mode-paper" data-mode="paper"
+                  style="border-radius: 6px; padding: 6px 12px; font-weight: 600;">📋 Paper</button>
+                <button class="sniper-mode-btn" id="sniper-mode-live" data-mode="live"
+                  style="border-radius: 6px; padding: 6px 12px; font-weight: 600;">⚡ Live</button>
               </div>
             </div>
           </div>
 
-          <div class="lt-config-grid">
+          <div
+            style="font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px;">
+            CONFIGURATION</div>
+          <div class="lt-config-grid" style="grid-template-columns: repeat(4, 1fr);">
             <div class="form-group">
-              <label class="form-label">Buy Size (SOL)</label>
+              <label class="form-label">SIZE (SOL)</label>
               <input id="sniper-buy-size" type="number" class="form-input" value="0.05" step="0.01" min="0.001" />
             </div>
             <div class="form-group">
-              <label class="form-label">Min Quality Score</label>
-              <input id="sniper-min-score" type="number" class="form-input" value="65" step="1" min="10" max="100"
-                title="0-100. Higher = stricter filter." />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Max Concurrent Coins</label>
-              <input id="sniper-max-coins" type="number" class="form-input" value="5" step="1" min="1" max="20" />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Max Coin Duration (s)</label>
-              <input id="sniper-max-duration" type="number" class="form-input" value="300" step="30" min="30" />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Min Initial SOL</label>
-              <input id="sniper-min-sol" type="number" class="form-input" value="1.0" step="0.1" min="0.1"
-                title="Minimum virtual SOL in bonding curve at launch" />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Slippage (%)</label>
+              <label class="form-label">SLIPPAGE (%)</label>
               <input id="sniper-slippage" type="number" class="form-input" value="15" step="0.5" min="1" max="50" />
+            </div>
+            <div class="form-group">
+              <label class="form-label">PRIORITY FEE (SOL)</label>
+              <input id="sniper-priority-fee" type="number" class="form-input" value="0.0001" step="0.0001" />
+            </div>
+            <div class="form-group">
+              <label class="form-label">MAX COINS</label>
+              <input id="sniper-max-coins" type="number" class="form-input" value="5" step="1" min="1" max="20" />
             </div>
           </div>
 
           <!-- Live mode: private key (hidden unless live mode) -->
-          <div id="sniper-live-key-row" style="display:none;margin-top:12px">
-            <label class="form-label">Private Key (live mode)</label>
+          <div id="sniper-live-key-row" style="display:none; margin-top:16px;">
+            <label class="form-label">PRIVATE KEY (LIVE MODE)</label>
             <div style="display:flex;gap:8px;margin-top:4px">
               <input id="sniper-private-key" type="password" class="form-input" style="flex:1"
                 placeholder="Base58 private key…" autocomplete="off" spellcheck="false" />
@@ -556,31 +477,36 @@
               shared.</div>
           </div>
 
-          <div class="form-actions" style="margin-top:16px">
-            <button id="sniper-start-btn" class="btn btn-record">🎯 Start Sniper</button>
-            <button id="sniper-stop-btn" class="btn btn-danger" style="display:none">⏹ Stop Sniper</button>
+          <div class="form-actions"
+            style="margin-top:20px; display: flex; gap: 12px; border-top: 1px solid var(--border); padding-top: 20px;">
+            <button id="sniper-start-btn" class="btn btn-record" style="min-width: 140px; justify-content: center;">
+              <span class="sniper-pulse-indicator" id="sniper-pulse"
+                style="display: none; box-shadow: none; margin-right: 4px;"></span> 🎯 Start Sniper
+            </button>
+            <button id="sniper-stop-btn" class="btn btn-danger"
+              style="display:none; min-width: 140px; justify-content: center;">⏹ Stop Sniper</button>
           </div>
         </div>
 
         <!-- Status Bar -->
         <div id="sniper-status-bar" class="hidden"
-          style="margin-bottom:12px;padding:10px 16px;background:rgba(99,217,94,0.08);border:1px solid rgba(99,217,94,0.25);border-radius:10px;display:flex;gap:20px;align-items:center;flex-wrap:wrap;font-size:13px">
-          <span style="color:#63d95e;font-weight:700">🟢 SCANNING</span>
-          <span id="sniper-status-session">—</span>
-          <span>Active: <b id="sniper-status-active">0</b> coins</span>
+          style="margin-bottom:24px;padding:12px 20px;background:var(--surface);border:1px solid var(--border);border-radius:10px;display:flex;gap:24px;align-items:center;flex-wrap:wrap;font-size:13px;font-family:var(--mono);">
+          <span style="color:var(--green);font-weight:700">🟢 SCANNING</span>
+          <span>Active: <b id="sniper-status-active">0</b></span>
           <span>Trades: <b id="sniper-status-trades">0</b></span>
-          <span>PnL: <b id="sniper-status-pnl" style="color:#63d95e">+0.000 SOL</b></span>
+          <span>PnL: <b id="sniper-status-pnl" style="color:var(--green)">+0.000 SOL</b></span>
           <span>Win Rate: <b id="sniper-status-winrate">—</b></span>
-          <span style="margin-left:auto;color:#556;font-size:11px" id="sniper-status-mode">paper</span>
+          <span style="margin-left:auto;color:var(--muted);font-size:11px;text-transform:uppercase;"
+            id="sniper-status-mode">paper</span>
         </div>
 
         <!-- Live pair feed -->
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
 
           <!-- Left: New pairs feed -->
           <div>
-            <h2 class="section-title">📡 New Pairs Feed</h2>
-            <div id="sniper-feed" style="display:flex;flex-direction:column;gap:6px;max-height:380px;overflow-y:auto">
+            <h2 class="section-title">📡 Tracking Radar</h2>
+            <div id="sniper-feed" style="display:flex;flex-direction:column;gap:8px;max-height:380px;overflow-y:auto">
               <div class="empty-state">Start the sniper to see new pairs…</div>
             </div>
           </div>
@@ -596,8 +522,8 @@
         </div>
 
         <!-- Trade History -->
-        <div class="lt-history-section" style="margin-top:24px">
-          <h2 class="section-title">📋 Sniper Trade History</h2>
+        <div class="lt-history-section" style="margin-top:32px">
+          <h2 class="section-title">📋 Operations Ledger</h2>
           <div class="trades-table-wrapper">
             <table class="trades-table">
               <thead>
@@ -605,15 +531,20 @@
                   <th>#</th>
                   <th>Token</th>
                   <th>Mode</th>
-                  <th>Entry</th>
-                  <th>Exit</th>
+                  <th>Status</th>
+                  <th>Action</th>
                   <th>PnL SOL</th>
                   <th>PnL %</th>
                   <th>Entry Reason</th>
-                  <th>Exit Reason</th>
+                  <th>Exit Log</th>
                 </tr>
               </thead>
-              <tbody id="sniper-trades-tbody"></tbody>
+              <tbody id="sniper-trades-tbody">
+                <tr id="sniper-history-empty">
+                  <td colspan="9" style="text-align: center; color: var(--muted); padding: 20px;">No historical trades
+                    recorded in current session.</td>
+                </tr>
+              </tbody>
             </table>
           </div>
         </div>
@@ -680,7 +611,8 @@
       setTimeout(check, 1000);
     })();
   </script>
-  <script src="/static/js/app.js?v=83"></script>
+  <script src="/static/js/app.js?v=87"></script>
+  <script src="/static/js/sniper.js"></script>
 </body>
 
 </html>

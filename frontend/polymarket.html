@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PRISM - Polymarket Bot</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <style>
+        .prism-dashboard {
+            padding: 20px;
+            color: #ddd;
+            display: flex;
+            gap: 20px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        .controls-panel {
+            flex: 0 0 350px;
+            background: #222;
+            padding: 20px;
+            border-radius: 8px;
+        }
+        .content-panel {
+            flex: 1;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+        .stat-card {
+            background: #2a2a2a;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .stat-card h3 { margin: 0 0 10px 0; color: #888; font-size: 0.9em; }
+        .stat-card .val { font-size: 1.5em; font-weight: bold; color: #fff; }
+        
+        table.prism-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+            background: #2a2a2a;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        table.prism-table th, table.prism-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #333;
+        }
+        table.prism-table th {
+            background: #1a1a1a;
+            color: #aaa;
+            font-weight: normal;
+        }
+        table.prism-table tr:hover { background: #333; }
+        .buy { color: #4caf50; }
+        .sell { color: #f44336; }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            color: #aaa;
+            font-size: 0.9em;
+        }
+        .form-group input, .form-group select {
+            width: 100%;
+            padding: 8px;
+            background: #111;
+            border: 1px solid #444;
+            color: #fff;
+            border-radius: 4px;
+        }
+        .btn {
+            display: block;
+            width: 100%;
+            padding: 10px;
+            background: #333;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        .btn:hover { background: #444; }
+        .btn-success { background: #2e7d32; }
+        .btn-success:hover { background: #1b5e20; }
+        .btn-danger { background: #c62828; }
+        .btn-danger:hover { background: #b71c1c; }
+
+        .bot-status {
+            text-align: center;
+            margin-bottom: 20px;
+            padding: 10px;
+            background: #111;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        .bot-status.running { color: #4caf50; border: 1px solid #4caf50; }
+        .bot-status.stopped { color: #f44336; border: 1px solid #f44336; }
+    </style>
+</head>
+<body>
+    <header id="topbar" style="background:#111; padding:10px; display:flex; gap:20px; align-items:center;">
+        <div id="logo" style="color:#00ff88; font-weight:bold; font-size:1.2rem;">pump<span style="color:#fff;">chart</span></div>
+        <nav id="main-nav" style="display:flex; gap:5px;">
+            <button class="nav-tab" style="background:transparent; border:none; color:#888; cursor:pointer;" onclick="window.location.href='/'">📈 Live</button>
+            <button class="nav-tab active" style="background:#333; border:none; border-radius:4px; padding:5px 10px; color:#fff;" onclick="window.location.href='/static/polymarket.html'">🔮 PRISM</button>
+        </nav>
+    </header>
+
+    <div class="prism-dashboard">
+        <aside class="controls-panel">
+            <h2>PRISM Controls</h2>
+            
+            <div id="status-indicator" class="bot-status stopped">Status: STOPPED</div>
+
+            <button class="btn btn-success" id="btn-start" onclick="startBot()">▶ Start Bot</button>
+            <button class="btn btn-danger" id="btn-stop" onclick="stopBot()">⏹ Stop Bot</button>
+            
+            <hr style="border-color: #333; margin: 20px 0;">
+
+            <h3>Parameters</h3>
+            
+            <div class="form-group">
+                <label>Mode</label>
+                <select id="cfg-mode">
+                    <option value="paper">Paper Trading (Dry Run)</option>
+                    <option value="live">Live Trading (Real Money)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Bankroll (USDC)</label>
+                <input type="number" id="cfg-bankroll" value="500">
+            </div>
+            <div class="form-group">
+                <label>PRISM Threshold (Z-Score) [default 2.0]</label>
+                <input type="number" step="0.1" id="cfg-gate" value="2.0">
+            </div>
+            <div class="form-group">
+                <label>Kelly Fraction [default 0.25]</label>
+                <input type="number" step="0.05" id="cfg-kelly" value="0.25">
+            </div>
+            <div class="form-group">
+                <label>Max Spread [default 0.04]</label>
+                <input type="number" step="0.01" id="cfg-spread" value="0.04">
+            </div>
+            <div class="form-group">
+                <label>OU Reversion Window [default 200]</label>
+                <input type="number" id="cfg-ou" value="200">
+            </div>
+            
+            <hr style="border-color: #333; margin: 20px 0;">
+            <h3>Connectivity</h3>
+            
+            <div class="form-group">
+                <label>HTTP Proxy (optional, fixes geo-block)</label>
+                <input type="text" id="cfg-proxy" placeholder="http://1.2.3.4:8080">
+            </div>
+            <div class="form-group">
+                <label>Private Key (required for LIVE)</label>
+                <input type="password" id="cfg-pk" placeholder="Polygon Wallet Private Key">
+            </div>
+
+            <button class="btn" style="background:#2196f3;" onclick="saveConfig()">💾 Save Configuration</button>
+            <p style="font-size: 0.8em; color: #888; text-align:center;">Stop & Start the bot to apply new configs.</p>
+
+        </aside>
+
+        <main class="content-panel">
+            <h2>Live Paper Trading Decisions</h2>
+            
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <h3>Snapshots Processed</h3>
+                    <div class="val" id="stat-snapshots">0</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Trades Taken</h3>
+                    <div class="val" id="stat-trades">0</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Total Exposure</h3>
+                    <div class="val" id="stat-exposure">$0.00</div>
+                </div>
+            </div>
+
+            <h3>Recent Trades (Filled)</h3>
+            <table class="prism-table">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Question</th>
+                        <th>Outcome</th>
+                        <th>Side</th>
+                        <th>Price</th>
+                        <th>Size (USDC)</th>
+                        <th>Combined Z</th>
+                    </tr>
+                </thead>
+                <tbody id="trades-tbody">
+                    <tr><td colspan="7" style="text-align:center;">Loading trades...</td></tr>
+                </tbody>
+            </table>
+        </main>
+    </div>
+
+    <script>
+        async function fetchConfig() {
+            try {
+                const res = await fetch('/api/polymarket/config');
+                const data = await res.json();
+                
+                const ind = document.getElementById('status-indicator');
+                if (data.status === 'running') {
+                    ind.className = 'bot-status running';
+                    ind.innerText = 'Status: RUNNING';
+                    document.getElementById('btn-start').disabled = true;
+                    document.getElementById('btn-start').style.opacity = '0.5';
+                    document.getElementById('btn-stop').disabled = false;
+                    document.getElementById('btn-stop').style.opacity = '1';
+                } else {
+                    ind.className = 'bot-status stopped';
+                    ind.innerText = 'Status: STOPPED';
+                    document.getElementById('btn-start').disabled = false;
+                    document.getElementById('btn-start').style.opacity = '1';
+                    document.getElementById('btn-stop').disabled = true;
+                    document.getElementById('btn-stop').style.opacity = '0.5';
+                }
+
+                if (data.config) {
+                    document.getElementById('cfg-mode').value = data.config.mode || 'paper';
+                    document.getElementById('cfg-bankroll').value = data.config.bankroll || 500;
+                    document.getElementById('cfg-gate').value = data.config.prism_gate_z || 2.0;
+                    document.getElementById('cfg-kelly').value = data.config.kelly_fraction || 0.25;
+                    document.getElementById('cfg-spread').value = data.config.max_spread || 0.04;
+                    document.getElementById('cfg-ou').value = data.config.ou_window || 200;
+                    document.getElementById('cfg-proxy').value = data.config.http_proxy || '';
+                    document.getElementById('cfg-pk').value = data.config.private_key || '';
+                }
+            } catch (err) {
+                console.error("Failed to load config", err);
+            }
+        }
+
+        async function saveConfig() {
+            const config = {
+                mode: document.getElementById('cfg-mode').value,
+                bankroll: parseFloat(document.getElementById('cfg-bankroll').value),
+                prism_gate_z: parseFloat(document.getElementById('cfg-gate').value),
+                kelly_fraction: parseFloat(document.getElementById('cfg-kelly').value),
+                max_spread: parseFloat(document.getElementById('cfg-spread').value),
+                ou_window: parseInt(document.getElementById('cfg-ou').value),
+                http_proxy: document.getElementById('cfg-proxy').value,
+                private_key: document.getElementById('cfg-pk').value
+            };
+
+            await fetch('/api/polymarket/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config)
+            });
+            alert("Configuration saved! If bot is running, stop and start it to apply.");
+        }
+
+        async function startBot() {
+            await saveConfig(); // Auto-save latest changes before start
+            await fetch('/api/polymarket/start', { method: 'POST' });
+            fetchConfig();
+        }
+
+        async function stopBot() {
+            await fetch('/api/polymarket/stop', { method: 'POST' });
+            fetchConfig();
+        }
+
+        async function fetchPrismLogs() {
+            try {
+                const res = await fetch('/api/polymarket/logs');
+                const data = await res.json();
+                
+                if (data.error) {
+                    document.getElementById('trades-tbody').innerHTML = `<tr><td colspan="7" style="text-align:center;color:#da4453;">${data.error}</td></tr>`;
+                    return;
+                }
+
+                document.getElementById('stat-snapshots').innerText = data.total_snapshots;
+                document.getElementById('stat-trades').innerText = data.total_trades;
+                document.getElementById('stat-exposure').innerText = `$${parseFloat(data.total_exposure).toFixed(2)}`;
+
+                const tbody = document.getElementById('trades-tbody');
+                tbody.innerHTML = '';
+
+                if (data.trades.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;">No trades taken yet.</td></tr>';
+                } else {
+                    data.trades.forEach(t => {
+                        const date = new Date(t.ts * 1000).toLocaleString();
+                        const sideClass = t.order_side === 'BUY' ? 'buy' : 'sell';
+                        const tr = document.createElement('tr');
+                        tr.innerHTML = `
+                            <td>${date}</td>
+                            <td>${t.question}</td>
+                            <td>${t.outcome}</td>
+                            <td class="${sideClass}">${t.order_side}</td>
+                            <td>$${t.order_price.toFixed(4)}</td>
+                            <td>$${t.order_usdc.toFixed(2)}</td>
+                            <td>${t.z_combined.toFixed(2)}</td>
+                        `;
+                        tbody.appendChild(tr);
+                    });
+                }
+            } catch (err) {
+                console.error("Failed to load PRISM logs", err);
+            }
+        }
+
+        // Fetch loops
+        fetchConfig();
+        fetchPrismLogs();
+        setInterval(fetchConfig, 3000);
+        setInterval(fetchPrismLogs, 5000);
+    </script>
+</body>
+</html>

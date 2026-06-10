@@ -623,7 +623,7 @@ class PumpFunWSClient:
                 "timestamp":      ts,
                 "trader":         msg.get("traderPublicKey", ""),
                 "tx_hash":        msg.get("signature", ""),
-                "market_cap_sol": float(msg.get("marketCapSol", 0)),
+                "market_cap_sol": float(msg.get("marketCapSol", 0)) if float(msg.get("marketCapSol", 0)) > 0 else (price * 1_000_000_000),
             }
         except Exception:
             return None

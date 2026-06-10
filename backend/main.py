@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 import time
+import subprocess
+import sys
 from pathlib import Path
 
 import uvicorn
@@ -78,6 +80,93 @@ async def serve_js(filename: str):
 async def token_info_endpoint(mint: str):
     _, info = await resolve_input(mint)
     return JSONResponse(info) if info else JSONResponse({"error": "not found"}, status_code=404)
+
+
+_prism_process = None
+PRISM_DIRECTORY = Path(__file__).parent / "polymarket"
+PRISM_CONFIG_PATH = PRISM_DIRECTORY / "prism_config.json"
+PRISM_LOG_PATH = PRISM_DIRECTORY / "prism_decisions.jsonl"
+
+@app.get("/api/polymarket/config")
+async def get_pm_config():
+    config = {
+        "mode": "paper",
+        "bankroll": 500,
+        "prism_gate_z": 2.0,
+        "max_spread": 0.04,
+        "kelly_fraction": 0.25,
+        "ou_window": 200,
+        "http_proxy": "",
+        "private_key": ""
+    }
+    if PRISM_CONFIG_PATH.exists():
+        try:
+            with open(PRISM_CONFIG_PATH, "r") as f:
+                config.update(json.load(f))
+        except: pass
+        
+    status = "running" if _prism_process and _prism_process.poll() is None else "stopped"
+    return {"status": status, "config": config}
+
+@app.post("/api/polymarket/config")
+async def save_pm_config(body: dict = Body(...)):
+    with open(PRISM_CONFIG_PATH, "w") as f:
+        json.dump(body, f)
+    return {"success": True}
+
+@app.post("/api/polymarket/start")
+async def start_pm():
+    global _prism_process
+    if _prism_process and _prism_process.poll() is None:
+        return {"error": "Already running"}
+        
+    script_path = PRISM_DIRECTORY / "prism.py"
+    _prism_process = subprocess.Popen([sys.executable, str(script_path)], cwd=str(PRISM_DIRECTORY))
+    return {"success": True}
+
+@app.post("/api/polymarket/stop")
+async def stop_pm():
+    global _prism_process
+    if _prism_process and _prism_process.poll() is None:
+        _prism_process.terminate()
+        try:
+            _prism_process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            _prism_process.kill()
+    _prism_process = None
+    return {"success": True}
+
+@app.get("/api/polymarket/logs")
+async def get_polymarket_logs():
+    """Endpoint for the PRISM UI to pull the latest JSONL decisions."""
+    if not PRISM_LOG_PATH.exists():
+        return JSONResponse({"error": "No PRISM logs found yet. Start the bot first."})
+    
+    try:
+        decisions = []
+        with open(PRISM_LOG_PATH, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    decisions.append(json.loads(line))
+                    
+        trades = [d for d in decisions if d.get("placed") == True]
+        
+        # Sort trades newest first, return top 50
+        trades.sort(key=lambda x: x["ts"], reverse=True)
+        trades_response = trades[:50]
+        
+        total_exposure = sum(t.get("order_usdc", 0) for t in trades)
+        
+        return JSONResponse({
+            "total_snapshots": len(decisions),
+            "total_trades": len(trades),
+            "total_exposure": total_exposure,
+            "trades": trades_response
+        })
+    except Exception as e:
+        logger.error(f"Failed parsing PRISM log: {e}")
+        return JSONResponse({"error": "Failed to parse PRISM logs."})
 
 
 # ── Active recorder state ────────────────────────────────────────────────────
