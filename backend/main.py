@@ -5,19 +5,23 @@ import time
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from candle_aggregator import CandleAggregator, TIMEFRAME_SECONDS
 from pumpfun_client import DexScreenerPollClient, PumpFunWSClient, PumpSwapRPCClient, get_historical_candles, get_token_info, resolve_input, SUB_MINUTE_TFS, NewPairsStream
 from forward_tester import ForwardTester
 from live_trader import LiveTrader, keypair_from_private_key
 import data_store
-from backtester import run_backtest, run_backtest_batch
+from backtester import run_backtest, run_backtest_batch, score_batch
+from sniper.sniper_router import router as sniper_router, set_engine as set_sniper_engine
+from sniper.sniper_engine import SniperEngine, SniperConfig
+from axiom_scanner import AxiomScanner, ScannerFilters, ScanResult
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,8 +45,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount sniper router
+app.include_router(sniper_router)
+
 if FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+
+
+@app.on_event("startup")
+async def startup_sniper():
+    """Initialize and start the SniperEngine on app startup."""
+    import os
+    config = SniperConfig(
+        mode=os.environ.get("SNIPER_MODE", "forward_test"),
+        fee_threshold_sol=float(os.environ.get("SNIPER_FEE_THRESHOLD_SOL", "0.1")),
+        max_concurrent_positions=int(os.environ.get("SNIPER_MAX_POSITIONS", "3")),
+        daily_loss_limit_sol=float(os.environ.get("SNIPER_DAILY_LOSS_LIMIT_SOL", "2.0")),
+        min_forward_trades_for_live=int(os.environ.get("SNIPER_MIN_FORWARD_TRADES_FOR_LIVE", "200")),
+    )
+    engine = SniperEngine(config=config)
+    app.state.sniper = engine
+    set_sniper_engine(engine)
+    # Do not auto-start; wait for /api/sniper/start
+    logger.info(f"[Sniper] Initialized (mode={config.mode}, fee_threshold={config.fee_threshold_sol} SOL). Not started yet.")
 
 
 @app.get("/")
@@ -447,6 +472,146 @@ async def delete_backtest_batch_endpoint(batch_id: str):
     return JSONResponse({"status": "deleted"})
 
 
+# ── Confidence Auto-Tuner ────────────────────────────────────────────────────
+
+@app.post("/api/backtest/autotune")
+async def autotune_confidence(body: dict = Body(...)):
+    """
+    Coordinate-descent hill-climb on confidence_high, confidence_low,
+    and confidence_very_high — one at a time, in that order.
+
+    For each parameter the algorithm:
+      1. Tries +0.01 and -0.01 from the current best value.
+      2. Moves in whichever direction improved the aggregate win-rate.
+      3. Keeps stepping until neither direction improves (convergence).
+      4. Moves to the next parameter.
+
+    Progress is streamed as newline-delimited JSON so the UI can update
+    live.  Results are NOT saved to the backtest DB.
+    """
+    import json as _json
+
+    engine_params  = dict(body.get("engine_params", {}))
+    engine_version = int(body.get("engine_version", 1))
+    tester_cfg = dict(
+        buy_size_sol     = float(body.get("buy_size_sol",     0.1)),
+        priority_fee     = float(body.get("priority_fee",     0.0001)),
+        bribe_fee        = float(body.get("bribe_fee",        0.00001)),
+        slippage_pct     = float(body.get("slippage_pct",     1.0)),
+        starting_balance = float(body.get("starting_balance", 1.0)),
+        engine_version   = engine_version,
+    )
+
+    STEP         = 0.01
+    MIN_TRADES   = 5          # ignore configs that produce too few trades
+    MAX_ITERS    = 60         # safety cap per parameter
+    PARAMS_ORDER = ["confidence_high", "confidence_low", "confidence_very_high"]
+
+    async def _score(params: dict) -> tuple[float, int]:
+        wr, trades, _ = await asyncio.to_thread(
+            score_batch, engine_params=params, **tester_cfg
+        )
+        return wr, trades
+
+    async def stream():
+        best_params = dict(engine_params)
+
+        def emit(obj: dict) -> str:
+            return _json.dumps(obj) + "\n"
+
+        # Baseline score
+        base_wr, base_trades = await _score(best_params)
+        yield emit({
+            "type":        "baseline",
+            "win_rate":    round(base_wr, 3),
+            "total_trades": base_trades,
+            "params":      {p: round(best_params.get(p, 0.5), 4) for p in PARAMS_ORDER},
+        })
+
+        overall_best_wr = base_wr
+
+        for param in PARAMS_ORDER:
+            current_val = best_params.get(param, 0.5)
+            best_val    = current_val
+            best_wr     = overall_best_wr
+            direction   = None   # +1 = up, -1 = down, None = undecided
+
+            yield emit({
+                "type":      "param_start",
+                "param":     param,
+                "value":     round(best_val, 4),
+                "win_rate":  round(best_wr, 3),
+            })
+
+            for iteration in range(MAX_ITERS):
+                # Decide which candidates to try this iteration
+                if direction is None:
+                    candidates = [
+                        (round(best_val + STEP, 4), +1),
+                        (round(best_val - STEP, 4), -1),
+                    ]
+                else:
+                    candidates = [(round(best_val + direction * STEP, 4), direction)]
+
+                improved_this_iter = False
+                for candidate_val, cdir in candidates:
+                    # Clamp to [0.01, 0.99] and skip if same as current
+                    candidate_val = round(max(0.01, min(0.99, candidate_val)), 4)
+                    if abs(candidate_val - best_val) < 1e-6:
+                        continue
+
+                    test_params = dict(best_params)
+                    test_params[param] = candidate_val
+
+                    wr, trades = await _score(test_params)
+
+                    is_better = trades >= MIN_TRADES and wr > best_wr
+                    yield emit({
+                        "type":          "trial",
+                        "param":         param,
+                        "value":         candidate_val,
+                        "win_rate":      round(wr, 3),
+                        "total_trades":  trades,
+                        "best_win_rate": round(best_wr, 3),
+                        "improved":      is_better,
+                    })
+
+                    if is_better:
+                        best_wr  = wr
+                        best_val = candidate_val
+                        direction = cdir
+                        improved_this_iter = True
+                        best_params[param] = best_val
+                        yield emit({
+                            "type":         "improvement",
+                            "param":        param,
+                            "value":        round(best_val, 4),
+                            "win_rate":     round(best_wr, 3),
+                            "total_trades": trades,
+                        })
+                        break   # Step one more iteration in this direction
+
+                if not improved_this_iter:
+                    # Neither direction helped → converged for this param
+                    break
+
+            overall_best_wr = best_wr
+            yield emit({
+                "type":        "param_done",
+                "param":       param,
+                "final_value": round(best_val, 4),
+                "win_rate":    round(best_wr, 3),
+            })
+
+        yield emit({
+            "type":         "done",
+            "final_params": {p: round(best_params.get(p, 0.5), 4) for p in PARAMS_ORDER},
+            "win_rate":     round(overall_best_wr, 3),
+        })
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+
 @app.websocket("/ws/{mint}")
 async def chart_ws(
     websocket: WebSocket,
@@ -726,6 +891,318 @@ async def live_stop_all():
         info["cancelled"].set()
     _active_live_traders.clear()
     return JSONResponse({"status": "all_stopped"})
+
+
+# ── Axiom Scanner — auto-discover & subscribe trending coins ─────────────
+_axiom_scanner: Optional[AxiomScanner] = None
+_scanner_private_key: str = ""          # stored in memory only
+_scanner_engine_params: dict = {}       # strategy engine params for scanner sessions
+_scanner_buy_size: float = 0.01         # SOL per trade for scanner sessions
+_scanner_timeframe: str = "1s"          # candle timeframe for scanner sessions
+_scanner_slippage_bps: int = 1500
+_scanner_priority_fee: int = 100_000
+
+
+async def _scanner_auto_subscribe(result: ScanResult):
+    """
+    Callback fired when AxiomScanner approves a token.
+    Spins up a headless live-trader session (no WebSocket frontend required).
+    """
+    global _scanner_private_key, _scanner_engine_params
+    mint = result.mint
+
+    if mint in _active_live_traders:
+        logger.info(f"[Scanner] {result.symbol} ({mint[:8]}…) already has active trader — skipping")
+        return
+
+    if not _scanner_private_key:
+        logger.warning(f"[Scanner] Cannot subscribe {result.symbol} — no private key configured")
+        return
+
+    try:
+        keypair = keypair_from_private_key(_scanner_private_key)
+    except ValueError as e:
+        logger.error(f"[Scanner] Invalid private key: {e}")
+        return
+
+    logger.info(
+        f"[Scanner] Auto-subscribing {result.symbol} ({mint[:8]}…) "
+        f"| mcap=${result.market_cap_usd:,.0f} | txns_1h={result.txns_1h}"
+    )
+
+    # Resolve token for live data source
+    try:
+        async with _resolve_sem:
+            real_mint, token_info = await asyncio.wait_for(
+                resolve_input(mint), timeout=20.0
+            )
+    except asyncio.TimeoutError:
+        logger.warning(f"[Scanner] resolve_input timed out for {mint[:8]}")
+        real_mint, token_info = mint, None
+
+    token_name = (token_info or {}).get("name", result.name)
+    token_symbol = (token_info or {}).get("symbol", result.symbol)
+
+    live_trader = LiveTrader(
+        token_mint=real_mint,
+        keypair=keypair,
+        buy_size_sol=_scanner_buy_size,
+        slippage_bps=_scanner_slippage_bps,
+        priority_fee_lamports=_scanner_priority_fee,
+        engine_kwargs=_scanner_engine_params.copy(),
+        skip_simulation=True,
+    )
+
+    cancelled = asyncio.Event()
+    _active_live_traders[real_mint] = {
+        "trader": live_trader,
+        "token_name": token_name,
+        "token_symbol": token_symbol,
+        "timeframe": _scanner_timeframe,
+        "cancelled": cancelled,
+        "wallet": str(keypair.pubkey()),
+        "source": "axiom_scanner",    # tag so UI knows this was auto-discovered
+    }
+
+    # Resolve live data source
+    live_source = (token_info or {}).get("_live_source", "pumpportal")
+    live_query = (token_info or {}).get("pair_address") or real_mint
+    if live_source == "solana_rpc" and (token_info or {}).get("pair_address"):
+        ws_client = PumpSwapRPCClient(live_query)
+    elif live_source == "dexscreener":
+        ws_client = DexScreenerPollClient(live_query, poll_seconds=0.5)
+    else:
+        ws_client = PumpFunWSClient(real_mint)
+
+    aggregator = CandleAggregator(_scanner_timeframe)
+
+    # Auto-record candles
+    rec_id = data_store.create_recording(
+        real_mint, _scanner_timeframe, token_name, token_symbol
+    )
+    logger.info(f"[Scanner] Auto-recording candles → recording {rec_id}")
+
+    # Fetch historical candles to warm up indicators
+    try:
+        async with _resolve_sem:
+            hist = await asyncio.wait_for(
+                get_historical_candles(real_mint, _scanner_timeframe), timeout=15.0
+            )
+    except asyncio.TimeoutError:
+        hist = []
+    if hist:
+        data_store.insert_candles_batch(rec_id, hist)
+        for candle in hist:
+            live_trader.update_historical_candle(
+                time_val=int(candle["time"]),
+                o=candle["open"], h=candle["high"],
+                l=candle["low"], c=candle["close"],
+                volume=candle.get("volume", 0),
+            )
+        last = hist[-1]
+        aggregator.process_trade(last["close"], 0.0, float(last["time"]))
+        logger.info(f"[Scanner] Warmed up {len(hist)} historical candles for {real_mint[:8]}")
+
+    async def _headless_stream():
+        """Run the live trader without a WebSocket frontend."""
+        last_sent_price = None
+        got_trade = False
+        async for trade in ws_client.stream():
+            if cancelled.is_set():
+                break
+            got_trade = True
+            is_synthetic = bool(trade.get("synthetic"))
+            candle, is_new = aggregator.process_trade(
+                trade["price"], trade["sol_amount"], trade["timestamp"],
+                synthetic=is_synthetic,
+            )
+            candle_dict = candle.to_dict()
+            current_price = candle_dict["close"]
+
+            # Persist candle
+            ct = candle_dict["time"]
+            data_store.insert_candle(
+                rec_id, ct,
+                candle_dict["open"], candle_dict["high"],
+                candle_dict["low"], candle_dict["close"],
+                candle_dict.get("volume", 0),
+            )
+
+            if last_sent_price is not None and current_price == last_sent_price and not is_new:
+                continue
+            last_sent_price = current_price
+
+            live_trader.update(
+                time_val=candle_dict["time"],
+                o=candle_dict["open"], h=candle_dict["high"],
+                l=candle_dict["low"], c=candle_dict["close"],
+                volume=candle_dict.get("volume", 0),
+                is_new=is_new,
+            )
+
+            # Market-cap safety floor check
+            mcap_usd = trade.get("market_cap_usd", 0)
+            if mcap_usd and await live_trader.update_market_cap(float(mcap_usd)):
+                logger.warning(
+                    f"[Scanner] Market cap floor triggered for {real_mint[:8]}… — "
+                    f"stopping session in 5s"
+                )
+                await asyncio.sleep(5)
+                cancelled.set()
+                break
+
+        # Fallback to PumpPortal if primary client yielded nothing
+        if not got_trade and not cancelled.is_set() and not isinstance(ws_client, PumpFunWSClient):
+            logger.warning(f"[Scanner] Primary client yielded no trades for {real_mint[:8]}… — fallback")
+            fallback = PumpFunWSClient(real_mint)
+            try:
+                async for trade in fallback.stream():
+                    if cancelled.is_set():
+                        break
+                    is_synthetic = bool(trade.get("synthetic"))
+                    candle, is_new = aggregator.process_trade(
+                        trade["price"], trade["sol_amount"], trade["timestamp"],
+                        synthetic=is_synthetic,
+                    )
+                    candle_dict = candle.to_dict()
+                    current_price = candle_dict["close"]
+                    ct = candle_dict["time"]
+                    data_store.insert_candle(
+                        rec_id, ct,
+                        candle_dict["open"], candle_dict["high"],
+                        candle_dict["low"], candle_dict["close"],
+                        candle_dict.get("volume", 0),
+                    )
+                    if last_sent_price is not None and current_price == last_sent_price and not is_new:
+                        continue
+                    last_sent_price = current_price
+                    live_trader.update(
+                        time_val=candle_dict["time"],
+                        o=candle_dict["open"], h=candle_dict["high"],
+                        l=candle_dict["low"], c=candle_dict["close"],
+                        volume=candle_dict.get("volume", 0),
+                        is_new=is_new,
+                    )
+            finally:
+                fallback.stop()
+
+    async def _no_motion_check():
+        """Periodic no-motion check for headless sessions."""
+        while not cancelled.is_set():
+            await asyncio.sleep(15)
+            if await live_trader.check_no_motion():
+                logger.warning(f"[Scanner] No motion stop for {real_mint[:8]}… — stopping in 5s")
+                await asyncio.sleep(5)
+                cancelled.set()
+                break
+
+    async def _run_headless():
+        """Complete headless session lifecycle."""
+        try:
+            await asyncio.gather(_headless_stream(), _no_motion_check())
+        except asyncio.CancelledError:
+            pass
+        finally:
+            cancelled.set()
+            ws_client.stop()
+            data_store.stop_recording(rec_id)
+            if real_mint in _active_live_traders:
+                del _active_live_traders[real_mint]
+            if _axiom_scanner:
+                _axiom_scanner.unsubscribe_mint(mint)
+            await live_trader.close()
+            logger.info(f"[Scanner] Session ended for {token_symbol} ({real_mint[:8]}…)")
+
+    # Fire and forget the headless session
+    asyncio.create_task(_run_headless())
+
+
+@app.post("/api/scanner/start")
+async def scanner_start(body: dict = Body(...)):
+    """Start the Axiom auto-scanner."""
+    global _axiom_scanner, _scanner_private_key, _scanner_engine_params
+    global _scanner_buy_size, _scanner_timeframe, _scanner_slippage_bps, _scanner_priority_fee
+
+    private_key = body.get("private_key", "").strip()
+    if not private_key:
+        return JSONResponse({"error": "private_key is required"}, status_code=400)
+
+    # Validate key
+    try:
+        kp = keypair_from_private_key(private_key)
+        wallet = str(kp.pubkey())
+    except ValueError as e:
+        return JSONResponse({"error": f"Invalid private key: {e}"}, status_code=400)
+
+    _scanner_private_key = private_key
+    _scanner_engine_params = body.get("engine_params", {})
+    _scanner_buy_size = float(body.get("buy_size", 0.01))
+    _scanner_timeframe = body.get("timeframe", "1s")
+    _scanner_slippage_bps = int(body.get("slippage_bps", 1500))
+    _scanner_priority_fee = int(body.get("priority_fee", 100_000))
+
+    # Build filter config
+    filter_overrides = body.get("filters", {})
+    filters = ScannerFilters()
+    if filter_overrides:
+        for key, val in filter_overrides.items():
+            if hasattr(filters, key):
+                expected_type = type(getattr(filters, key))
+                try:
+                    setattr(filters, key, expected_type(val))
+                except (ValueError, TypeError):
+                    pass
+
+    if _axiom_scanner and _axiom_scanner._running:
+        await _axiom_scanner.stop()
+
+    _axiom_scanner = AxiomScanner(filters=filters)
+    _axiom_scanner.on_token_approved = _scanner_auto_subscribe
+    await _axiom_scanner.start()
+
+    return JSONResponse({
+        "status": "started",
+        "wallet": wallet,
+        "buy_size": _scanner_buy_size,
+        "timeframe": _scanner_timeframe,
+        "filters": filters.to_dict(),
+    })
+
+
+@app.post("/api/scanner/stop")
+async def scanner_stop():
+    """Stop the Axiom auto-scanner."""
+    global _axiom_scanner
+    if _axiom_scanner:
+        await _axiom_scanner.stop()
+        _axiom_scanner = None
+    return JSONResponse({"status": "stopped"})
+
+
+@app.get("/api/scanner/status")
+async def scanner_status():
+    """Get current scanner status and recent results."""
+    if not _axiom_scanner:
+        return JSONResponse({"running": False, "scanner": None})
+    return JSONResponse(_axiom_scanner.get_status())
+
+
+@app.post("/api/scanner/filters")
+async def scanner_update_filters(body: dict = Body(...)):
+    """Update scanner filters on the fly."""
+    if not _axiom_scanner:
+        return JSONResponse({"error": "Scanner not running"}, status_code=400)
+    _axiom_scanner.update_filters(body)
+    return JSONResponse({"status": "updated", "filters": _axiom_scanner.filters.to_dict()})
+
+
+@app.post("/api/scanner/clear_cooldowns")
+async def scanner_clear_cooldowns():
+    """Clear token cooldowns to force re-evaluation."""
+    if not _axiom_scanner:
+        return JSONResponse({"error": "Scanner not running"}, status_code=400)
+    _axiom_scanner.clear_cooldowns()
+    return JSONResponse({"status": "cooldowns_cleared"})
 
 
 @app.websocket("/ws/live/{mint}")
@@ -1009,6 +1486,9 @@ async def live_trading_ws(
         logger.info(f"[LIVE] Finalized recording {rec_id}")
         if real_mint in _active_live_traders:
             del _active_live_traders[real_mint]
+        # Unsubscribe from scanner cooldown so it can be re-evaluated later
+        if _axiom_scanner:
+            _axiom_scanner.unsubscribe_mint(real_mint)
         logger.info(f"[LIVE] Disconnect  mint={real_mint[:8]}…")
 
 

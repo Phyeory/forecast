@@ -51,6 +51,91 @@ from data_store import (
 
 import multiprocessing
 
+
+def score_batch(
+    engine_params: Optional[dict] = None,
+    buy_size_sol: float = 0.1,
+    priority_fee: float = 0.0001,
+    bribe_fee: float = 0.00001,
+    slippage_pct: float = 1.0,
+    starting_balance: float = 1.0,
+    engine_version: int = 1,
+) -> tuple[float, int, int]:
+    """
+    Run ALL completed recordings through the engine without saving to DB.
+
+    Returns:
+        (win_rate_pct, total_trades, total_wins)
+
+    Used by the confidence auto-tuner to score candidate parameters
+    quickly without polluting the backtest database.
+    """
+    recordings = list_recordings()
+    completed = [r for r in recordings if r.get("status") == "completed"]
+
+    if not completed:
+        return 0.0, 0, 0
+
+    if engine_params is None:
+        engine_params = {}
+
+    total_trades = 0
+    winning_trades = 0
+
+    for rec in completed:
+        try:
+            candles = get_recording_candles(rec["id"])
+            if not candles:
+                continue
+
+            ft = ForwardTester(
+                starting_balance=starting_balance,
+                buy_size_sol=buy_size_sol,
+                priority_fee=priority_fee,
+                bribe_fee=bribe_fee,
+                slippage_pct=slippage_pct,
+                engine_kwargs=engine_params,
+                engine_version=engine_version,
+            )
+
+            ft_update = ft.update
+
+            for candle in candles:
+                t   = int(candle["time"])
+                o   = candle["open"]
+                h   = candle["high"]
+                l   = candle["low"]
+                c   = candle["close"]
+                vol = candle.get("volume", 0)
+
+                bullish = c >= o
+                if bullish:
+                    mid_first, mid_second = h, l
+                else:
+                    mid_first, mid_second = l, h
+
+                # Replicate the 4-state tick expansion used in run_backtest
+                ft_update(time=t, o=o, h=o, l=o, c=o, volume=0.0,
+                          _build_full_result=False)
+                h2 = max(o, mid_first)
+                l2 = min(o, mid_first)
+                ft_update(time=t, o=o, h=h2, l=l2, c=mid_first, volume=0.0,
+                          _build_full_result=False)
+                ft_update(time=t, o=o, h=h, l=l, c=mid_second, volume=0.0,
+                          _build_full_result=False)
+                ft_update(time=t, o=o, h=h, l=l, c=c, volume=vol,
+                          _build_full_result=False)
+
+            stats = ft.stats
+            total_trades  += stats.total_trades
+            winning_trades += stats.winning_trades
+
+        except Exception:
+            continue
+
+    win_rate = winning_trades / total_trades * 100.0 if total_trades > 0 else 0.0
+    return win_rate, total_trades, winning_trades
+
 _pool: ProcessPoolExecutor | None = None
 
 def _get_pool(max_workers: int) -> ProcessPoolExecutor:

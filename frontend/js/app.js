@@ -56,14 +56,14 @@ let engineParamsV1 = {
   ema_fast: 3, ema_slow: 7, atr_period: 7, roc_period: 3, warmup: 30,
   signal_strong: 4, signal_weak: 1.5, signal_noise: 1.1535714285714287,
   exhaustion_bars_limit: 1, delta_threshold: 0.3, kalman_gamma: 0.145,
-  min_trend_bars: 4, reversal_confirm_bars: 2, chop_atr_pct: 0.3,
+  min_trend_bars: 3, reversal_confirm_bars: 2, chop_atr_pct: 0.3,
   chop_spread_pct: 0.05, reversal_exit_confirm_bars: 0,
   s_effective_threshold: 0.35, exhaustion_persist_bars: 6,
   regime_lookback: 6, persistence_threshold: 2, momentum_mean_threshold: 0.0,
-  ema_min_spread_pct: 0.02, confidence_high: 0.79, confidence_low: 0.23,
+  ema_min_spread_pct: 0.02, confidence_high: 0.79, confidence_low: 0.19,
   confidence_w1: 0.3, confidence_w2: 0.25, confidence_w3: 0.25, confidence_w4: 0.2,
   atr_floor_k: 0, ema_cross_persist_bars: 2, exhaustion_s_decay_bars: 1,
-  local_range_bars: 80, local_range_threshold_pct: 5, sign_flip_threshold: 1,
+  local_range_bars: 80, local_range_threshold_pct: 5, sign_flip_threshold: 0,
   stability_bars: 3,
   spike_atr_multiplier: 1.2,
   spike_lookback_bars: 9,
@@ -73,9 +73,9 @@ let engineParamsV1 = {
   overextension_k: 0.17,
   momentum_peak_bars: 1,
   consolidation_range_pct: 0,
-  confidence_very_high: 0.834,
+  confidence_very_high: 0.86,
   ema_macro_period: 7,
-  stoploss_pct: -30,
+  stoploss_pct: 0,
   takeprofit_pct: 15,
 };
 
@@ -1787,6 +1787,233 @@ document.getElementById("bt-params-btn").addEventListener("click", () => {
   settingsModal.classList.remove("hidden");
 });
 
+/* ── Confidence Auto-Tuner ───────────────────────────────────────────── */
+{
+  const CONFIDENCE_PARAMS = ["confidence_high", "confidence_low", "confidence_very_high"];
+  let _autotuneAbort = null;   // AbortController for cancel
+  let _autotuneFinalParams = null;
+
+  // ── helpers ──────────────────────────────────────────────────────────
+
+  function _atLog(msg, color = "#5a6071") {
+    const log = document.getElementById("bt-autotune-log");
+    if (!log) return;
+    const row = document.createElement("div");
+    row.style.cssText = `color:${color};line-height:1.5;white-space:pre;`;
+    row.textContent = msg;
+    log.appendChild(row);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function _atSetParamCard(param, value, winRate, active) {
+    const valEl = document.getElementById(`bp-val-${param}`);
+    const wrEl = document.getElementById(`bp-wr-${param}`);
+    const card = document.getElementById(`bp-${param}`);
+    if (valEl) valEl.textContent = value !== null ? value.toFixed(4) : "—";
+    if (wrEl) wrEl.textContent = winRate !== null ? `WR ${winRate.toFixed(2)}%` : "—";
+    if (card) {
+      card.style.background = active
+        ? "rgba(88,101,242,0.12)"
+        : "rgba(12,14,18,0.95)";
+      card.style.borderLeft = active
+        ? "3px solid rgba(124,77,255,0.7)"
+        : "3px solid transparent";
+    }
+  }
+
+  function _atSetStatus(text, color = "#818cf8") {
+    const badge = document.getElementById("bt-autotune-status-badge");
+    if (badge) { badge.textContent = text; badge.style.color = color; }
+  }
+
+  function _atReset() {
+    document.getElementById("bt-autotune-log").innerHTML = "";
+    document.getElementById("bt-autotune-footer").style.display = "none";
+    document.getElementById("bt-autotune-result-label").textContent = "";
+    CONFIDENCE_PARAMS.forEach(p => _atSetParamCard(p, null, null, false));
+    _atSetStatus("RUNNING", "#818cf8");
+  }
+
+  // ── main runner ───────────────────────────────────────────────────────
+
+  async function runAutoTune() {
+    const panel = document.getElementById("bt-autotune-panel");
+    const tuneBtn = document.getElementById("bt-autotune-btn");
+    const cancelBtn = document.getElementById("bt-autotune-cancel-btn");
+
+    if (!panel) return;
+
+    _atReset();
+    panel.style.display = "block";
+    tuneBtn.disabled = true;
+    _autotuneFinalParams = null;
+
+    const testerConfig = {
+      buy_size_sol: parseFloat(document.getElementById("tester-buy-size").value) || 0.1,
+      slippage_pct: parseFloat(document.getElementById("tester-slippage").value) || 1.0,
+      priority_fee: parseFloat(document.getElementById("tester-priority-fee").value) || 0.0001,
+      bribe_fee: parseFloat(document.getElementById("tester-bribe-fee").value) || 0.00001,
+    };
+
+    _autotuneAbort = new AbortController();
+
+    try {
+      const response = await fetch("/api/backtest/autotune", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          engine_params: getEngineParams(),
+          engine_version: engineVersion,
+          ...testerConfig,
+        }),
+        signal: _autotuneAbort.signal,
+      });
+
+      if (!response.ok) {
+        _atLog(`✗ Server error: ${response.status}`, "#ef5350");
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop();                         // keep incomplete line
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let evt;
+          try { evt = JSON.parse(line); } catch { continue; }
+          _handleAutotuneEvent(evt);
+        }
+      }
+
+    } catch (err) {
+      if (err.name === "AbortError") {
+        _atLog("⏹  Cancelled by user.", "#ff9800");
+        _atSetStatus("CANCELLED", "#ff9800");
+      } else {
+        _atLog(`✗ Error: ${err.message}`, "#ef5350");
+        _atSetStatus("ERROR", "#ef5350");
+      }
+    } finally {
+      tuneBtn.disabled = false;
+      _autotuneAbort = null;
+    }
+  }
+
+  // ── event handler ─────────────────────────────────────────────────────
+
+  function _handleAutotuneEvent(evt) {
+    switch (evt.type) {
+
+      case "baseline":
+        _atLog(
+          `📊 Baseline  WR=${evt.win_rate.toFixed(2)}%  trades=${evt.total_trades}`,
+          "#5a6071"
+        );
+        // seed the param cards with their starting values
+        CONFIDENCE_PARAMS.forEach(p => {
+          const v = (evt.params || {})[p];
+          if (v !== undefined) _atSetParamCard(p, v, evt.win_rate, false);
+        });
+        break;
+
+      case "param_start": {
+        const nice = evt.param.replace(/_/g, " ");
+        _atLog(`\n⟶  Tuning ${nice}  (start=${evt.value.toFixed(4)}, WR=${evt.win_rate.toFixed(2)}%)`, "#818cf8");
+        CONFIDENCE_PARAMS.forEach(p => _atSetParamCard(
+          p,
+          engineParamsV1[p] ?? null,
+          null,
+          p === evt.param
+        ));
+        break;
+      }
+
+      case "trial": {
+        const arrow = evt.value > (engineParamsV1[evt.param] ?? 0) ? "↑" : "↓";
+        const tag = evt.improved ? "✓ improved" : "✗";
+        const color = evt.improved ? "#26a69a" : "#5a6071";
+        _atLog(
+          `  ${arrow} ${evt.param}=${evt.value.toFixed(4)}  WR=${evt.win_rate.toFixed(2)}%  [${tag}]`,
+          color
+        );
+        break;
+      }
+
+      case "improvement":
+        _atSetParamCard(evt.param, evt.value, evt.win_rate, true);
+        _atLog(
+          `  ★ New best  ${evt.param}=${evt.value.toFixed(4)}  WR=${evt.win_rate.toFixed(2)}%  trades=${evt.total_trades}`,
+          "#26a69a"
+        );
+        break;
+
+      case "param_done":
+        _atSetParamCard(evt.param, evt.final_value, evt.win_rate, false);
+        _atLog(
+          `✔  ${evt.param} converged → ${evt.final_value.toFixed(4)}  (WR=${evt.win_rate.toFixed(2)}%)`,
+          "#c084fc"
+        );
+        break;
+
+      case "done": {
+        _atSetStatus("DONE", "#26a69a");
+        _autotuneFinalParams = evt.final_params;
+        const lines = CONFIDENCE_PARAMS.map(
+          p => `${p}=${(evt.final_params[p] || 0).toFixed(4)}`
+        ).join("   ");
+        _atLog(`\n🏁 Finished  WR=${evt.win_rate.toFixed(2)}%\n   ${lines}`, "#c084fc");
+
+        const footer = document.getElementById("bt-autotune-footer");
+        const label = document.getElementById("bt-autotune-result-label");
+        if (footer) { footer.style.display = "flex"; }
+        if (label) { label.textContent = `Best WR ${evt.win_rate.toFixed(2)}% — apply to engine?`; }
+
+        // Dim all param active highlights
+        CONFIDENCE_PARAMS.forEach(p => {
+          const v = (evt.final_params || {})[p];
+          _atSetParamCard(p, v ?? null, evt.win_rate, false);
+        });
+        break;
+      }
+    }
+  }
+
+  // ── wire up buttons ───────────────────────────────────────────────────
+
+  document.getElementById("bt-autotune-btn").addEventListener("click", runAutoTune);
+
+  document.getElementById("bt-autotune-cancel-btn").addEventListener("click", () => {
+    if (_autotuneAbort) _autotuneAbort.abort();
+  });
+
+  document.getElementById("bt-autotune-apply-btn").addEventListener("click", () => {
+    if (!_autotuneFinalParams) return;
+    const params = _autotuneFinalParams;
+    CONFIDENCE_PARAMS.forEach(p => {
+      if (params[p] !== undefined) {
+        engineParamsV1[p] = params[p];
+        engineParams[p] = params[p];   // keep legacy ref in sync
+      }
+    });
+    // Sync to settings modal inputs if they're open
+    ["confidence_high", "confidence_low", "confidence_very_high"].forEach(p => {
+      const inp = document.getElementById(`param-${p}`);
+      if (inp) inp.value = params[p];
+    });
+    const applied = CONFIDENCE_PARAMS.map(p => `${p.split("_").pop()}=${params[p]?.toFixed(4)}`).join(" · ");
+    _atLog(`\n✅ Applied to engine: ${applied}`, "#26a69a");
+    document.getElementById("bt-autotune-footer").style.display = "none";
+  });
+}
+
 async function loadBacktestResult(id) {
   const bt = await apiFetch(`/api/backtests/${id}`);
   if (!bt || bt.error) return alert("Failed to load backtest");
@@ -2289,6 +2516,11 @@ function startLiveTrader(mint, _delayOverride = null) {
           const card = document.querySelector(`.lt-trader-card[data-mint="${mint}"]`);
           if (card) { card.style.borderColor = "var(--red)"; card.style.opacity = "0.7"; }
           setTimeout(() => stopLiveTrader(mint), 8000);
+        } else if (msg.event === "no_motion_stop") {
+          addTraderEvent(ctx, "error", `🕐 NO MOTION: ${msg.detail}`);
+          const card = document.querySelector(`.lt-trader-card[data-mint="${mint}"]`);
+          if (card) { card.style.borderColor = "var(--red)"; card.style.opacity = "0.7"; }
+          setTimeout(() => stopLiveTrader(mint), 8000);
         }
         updateTraderCard(mint);
       }
@@ -2328,7 +2560,204 @@ function stopAllTraders() {
   }
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   Axiom Auto-Scanner — toggle + status polling
+   ══════════════════════════════════════════════════════════════════════════ */
+
+let _scannerRunning = false;
+let _scannerPollTimer = null;
+
+function getScannerFilters() {
+  return {
+    min_txns_1h: parseInt($("scanner-min-txns").value) || 1000,
+    min_liquidity_usd: parseFloat($("scanner-min-liq").value) || 10000,
+    min_market_cap_usd: parseFloat($("scanner-min-mcap").value) || 50000,
+    max_market_cap_usd: parseFloat($("scanner-max-mcap").value) || 50000000,
+    max_rugcheck_score: parseInt($("scanner-max-risk").value) || 500,
+    min_lp_locked_pct: parseFloat($("scanner-min-lp").value) || 90,
+    pump_amm_only: $("scanner-pump-amm-only").checked,
+    block_bundle_risk: $("scanner-block-bundle").checked,
+    block_insider_risk: $("scanner-block-insider").checked,
+    scan_interval_seconds: parseInt($("scanner-interval").value) || 120,
+  };
+}
+
+async function toggleScanner() {
+  if (!ltWalletConnected) {
+    alert("Connect your wallet first before enabling the scanner.");
+    return;
+  }
+  if (_scannerRunning) {
+    await stopScanner();
+  } else {
+    await startScanner();
+  }
+}
+
+async function startScanner() {
+  const config = getLtConfig();
+  const body = {
+    private_key: _privateKey,
+    buy_size: config.buySize,
+    timeframe: config.timeframe,
+    slippage_bps: config.slippageBps,
+    priority_fee: config.priorityFeeLamports,
+    engine_params: getEngineParams(),
+    filters: getScannerFilters(),
+  };
+
+  try {
+    const res = await apiFetch("/api/scanner/start", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    if (res.error) { alert("Scanner error: " + res.error); return; }
+    _scannerRunning = true;
+    setScannerVisualState(true);
+    startScannerPoll();
+  } catch (e) {
+    alert("Failed to start scanner: " + e);
+  }
+}
+
+async function stopScanner() {
+  try {
+    await apiFetch("/api/scanner/stop", { method: "POST" });
+  } catch (e) { /* ignore */ }
+  _scannerRunning = false;
+  setScannerVisualState(false);
+  stopScannerPoll();
+}
+
+function setScannerVisualState(on) {
+  const track = document.querySelector(".scanner-toggle-track");
+  const thumb = $("scanner-toggle-thumb");
+  const badge = $("scanner-badge");
+  const statusBar = $("scanner-status-bar-wrap");
+  const approvedFeed = $("scanner-approved-feed");
+  const statusText = $("scanner-toggle-status-text");
+
+  if (on) {
+    if (track) track.style.background = "#5865f2";
+    if (thumb) thumb.style.transform = "translateX(24px)";
+    badge.style.display = "inline-block";
+    statusBar.style.display = "grid";
+    approvedFeed.style.display = "block";
+    statusText.textContent = "ON";
+    statusText.style.color = "#26a69a";
+  } else {
+    if (track) track.style.background = "var(--border)";
+    if (thumb) thumb.style.transform = "translateX(0)";
+    badge.style.display = "none";
+    statusBar.style.display = "none";
+    approvedFeed.style.display = "none";
+    statusText.textContent = "OFF";
+    statusText.style.color = "#888";
+    // Reset stat counters
+    $("scanner-stat-scans").textContent = "0";
+    $("scanner-stat-approved").textContent = "0";
+    $("scanner-stat-subscribed").textContent = "0";
+    $("scanner-stat-lastscan").textContent = "—";
+  }
+}
+
+function startScannerPoll() {
+  stopScannerPoll();
+  _scannerPollTimer = setInterval(pollScannerStatus, 10_000);
+  // Also poll immediately
+  pollScannerStatus();
+}
+
+function stopScannerPoll() {
+  if (_scannerPollTimer) { clearInterval(_scannerPollTimer); _scannerPollTimer = null; }
+}
+
+async function pollScannerStatus() {
+  if (!_scannerRunning) return;
+  try {
+    const data = await apiFetch("/api/scanner/status");
+    if (!data || !data.running) {
+      // Scanner stopped on server side
+      _scannerRunning = false;
+      setScannerVisualState(false);
+      stopScannerPoll();
+      return;
+    }
+
+    // Update stats
+    $("scanner-stat-scans").textContent = data.scan_count || 0;
+    $("scanner-stat-approved").textContent = data.approved_count || 0;
+    $("scanner-stat-subscribed").textContent = data.subscribed_count || 0;
+
+    if (data.last_scan_time) {
+      const elapsed = Math.round((Date.now() / 1000) - data.last_scan_time);
+      $("scanner-stat-lastscan").textContent = elapsed < 5 ? "Now" : elapsed + "s ago";
+    }
+
+    // Update approved tokens feed
+    const list = $("scanner-approved-list");
+    const recent = (data.recent_approved || []).slice().reverse();
+    list.innerHTML = recent.slice(0, 8).map(r => {
+      const isActive = (data.subscribed_mints || []).includes(r.mint);
+      const mcapStr = r.market_cap_usd > 0 ? `$${fmtLarge(r.market_cap_usd)}` : "—";
+      const badge = isActive
+        ? `<span style="font-size:9px;padding:1px 5px;border-radius:10px;background:rgba(38,166,154,0.2);color:#26a69a;border:1px solid rgba(38,166,154,0.3);">TRADING</span>`
+        : `<span style="font-size:9px;padding:1px 5px;border-radius:10px;background:rgba(90,96,113,0.2);color:#5a6071;border:1px solid rgba(90,96,113,0.3);">DONE</span>`;
+      return `
+        <div style="display:flex;align-items:center;gap:10px;padding:6px 10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:6px;">
+          <div style="flex:1;min-width:0;">
+            <div style="font-weight:600;font-size:12px;color:#d1d5e0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${r.symbol || r.mint.slice(0, 8)}
+              <span style="color:#5a6071;font-weight:400;font-size:11px;">${r.name ? ' — ' + r.name : ''}</span>
+            </div>
+            <div style="font-size:10px;color:#5a6071;margin-top:2px;">
+              Mcap ${mcapStr} &nbsp;·&nbsp; ${r.txns_1h.toLocaleString()} txns &nbsp;·&nbsp; Score ${r.rugcheck_score} &nbsp;·&nbsp; LP ${r.lp_locked_pct.toFixed(0)}%
+            </div>
+          </div>
+          ${badge}
+        </div>
+      `;
+    }).join("");
+
+    // Sync any scanner-spawned traders that appeared server-side into the UI
+    const serverMints = new Set(data.subscribed_mints || []);
+    for (const mint of serverMints) {
+      if (!ltActiveTraders[mint] && ltWalletConnected) {
+        // Register a display-only card without opening a WebSocket.
+        // The server is running it headlessly; we just show its status.
+        const ctx = {
+          mint,
+          ws: null,
+          info: { token_name: "Scanner", token_symbol: "…" },
+          stats: {},
+          currentTrade: null,
+          unrealizedPnl: 0, unrealizedPnlPct: 0,
+          events: [{ type: "info", msg: "Auto-discovered by Axiom Scanner", ts: new Date().toLocaleTimeString() }],
+          regime: "idle", direction: "none", sVal: 0,
+        };
+        ltActiveTraders[mint] = ctx;
+        ltStopAllBtn.style.display = "inline-flex";
+        updateTraderCard(mint);
+      }
+    }
+  } catch (e) {
+    // Network error — scanner might still be running; don't stop poll
+  }
+}
+
+function toggleScannerFilters() {
+  const body = $("scanner-filters-body");
+  const icon = $("scanner-filters-toggle-icon");
+  const open = body.style.display !== "none";
+  body.style.display = open ? "none" : "block";
+  icon.textContent = open ? "▼" : "▲";
+}
+
+// Expose globally for onclick handlers in HTML
+window.toggleScanner = toggleScanner;
+window.toggleScannerFilters = toggleScannerFilters;
+
 /* ── Event listeners ─────────────────────────────────────────────────── */
+
 
 ltAddBtn.addEventListener("click", () => {
   const mint = ltTokenInput.value.trim();
