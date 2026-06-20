@@ -419,6 +419,20 @@ class StrategyEngine:
         # ^ Take profit control:
         #   0.0        → disabled
         #   positive   → exit if price exceeds entry by this percentage
+        # ── Confidence-scaled TP / SL ────────────────────────────────────
+        # When in position, TP and SL are linearly interpolated between their
+        # low-confidence and high-confidence extremes based on trend_confidence.
+        #
+        # takeprofit_pct_low  = TP used when confidence ≤ confidence_low
+        # takeprofit_pct_high = TP used when confidence ≥ confidence_high
+        # stoploss_pct_low    = SL (magnitude) used when confidence ≤ confidence_low
+        # stoploss_pct_high   = SL (magnitude) used when confidence ≥ confidence_high
+        #
+        # Set all four to 0.0 to disable scaling (uses static stoploss_pct / takeprofit_pct).
+        takeprofit_pct_low: float = 0.0,
+        takeprofit_pct_high: float = 0.0,
+        stoploss_pct_low: float = 0.0,
+        stoploss_pct_high: float = 0.0,
     ):
         self.ema_fast_p = ema_fast
         self.ema_slow_p = ema_slow
@@ -476,6 +490,13 @@ class StrategyEngine:
 
         self.stoploss_pct = stoploss_pct
         self.takeprofit_pct = takeprofit_pct
+
+        # Confidence-scaled TP/SL bounds
+        self.takeprofit_pct_low = takeprofit_pct_low
+        self.takeprofit_pct_high = takeprofit_pct_high
+        self.stoploss_pct_low = stoploss_pct_low
+        self.stoploss_pct_high = stoploss_pct_high
+
         # Trailing stop state: armed once price hits the gain target
         self._trail_armed: bool = False
 
@@ -1405,13 +1426,53 @@ class StrategyEngine:
 
         return self.regime, signal
 
+    def _confidence_lerp(self, low_val: float, high_val: float) -> float:
+        """Linearly interpolate between low_val and high_val based on trend_confidence.
+        Returns low_val when confidence ≤ confidence_low, high_val when ≥ confidence_high.
+        """
+        conf_range = self.confidence_high - self.confidence_low
+        if conf_range <= 0:
+            return high_val
+        t = (self.trend_confidence - self.confidence_low) / conf_range
+        t = max(0.0, min(1.0, t))
+        return low_val + t * (high_val - low_val)
+
+    def _effective_takeprofit_pct(self) -> float:
+        """Return the effective TP% for the current confidence level.
+        Falls back to static takeprofit_pct when confidence scaling is disabled.
+        """
+        if self.takeprofit_pct_low > 0.0 or self.takeprofit_pct_high > 0.0:
+            lo = self.takeprofit_pct_low if self.takeprofit_pct_low > 0.0 else self.takeprofit_pct
+            hi = self.takeprofit_pct_high if self.takeprofit_pct_high > 0.0 else self.takeprofit_pct
+            return self._confidence_lerp(lo, hi)
+        return self.takeprofit_pct
+
+    def _effective_stoploss_pct(self) -> float:
+        """Return the effective SL% (signed, same convention as stoploss_pct) for
+        the current confidence level.  Falls back to static stoploss_pct when
+        confidence scaling is disabled.
+
+        For hard stops (negative):  higher confidence → tighter stop (smaller magnitude)
+        For trailing stops (positive): same sense — higher confidence → tighter trail
+        """
+        if self.stoploss_pct_low > 0.0 or self.stoploss_pct_high > 0.0:
+            # Scaling operates on magnitudes; sign carried from stoploss_pct
+            sign = -1.0 if self.stoploss_pct < 0 else 1.0
+            lo = self.stoploss_pct_low if self.stoploss_pct_low > 0.0 else abs(self.stoploss_pct)
+            hi = self.stoploss_pct_high if self.stoploss_pct_high > 0.0 else abs(self.stoploss_pct)
+            mag = self._confidence_lerp(lo, hi)
+            return sign * mag
+        return self.stoploss_pct
+
     def _check_exit(self, c: float) -> Optional[Signal]:
         if not self.in_position:
             return None
 
-        if self.stoploss_pct != 0.0:
-            pct = abs(self.stoploss_pct)
-            if self.stoploss_pct < 0:
+        # ── Confidence-scaled (or static) stop loss ───────────────────────
+        eff_sl = self._effective_stoploss_pct()
+        if eff_sl != 0.0:
+            pct = abs(eff_sl)
+            if eff_sl < 0:
                 # ── Hard stop loss (negative stoploss_pct) ──────────────────
                 if self.position_direction == Direction.UP:
                     if c <= self.entry_price * (1.0 - pct / 100.0):
@@ -1436,12 +1497,14 @@ class StrategyEngine:
                     if self._trail_armed and c >= self.entry_price:
                         return Signal.EXIT
 
-        if self.takeprofit_pct > 0.0:
+        # ── Confidence-scaled (or static) take profit ─────────────────────
+        eff_tp = self._effective_takeprofit_pct()
+        if eff_tp > 0.0:
             if self.position_direction == Direction.UP:
-                if c >= self.entry_price * (1.0 + self.takeprofit_pct / 100.0):
+                if c >= self.entry_price * (1.0 + eff_tp / 100.0):
                     return Signal.EXIT
             elif self.position_direction == Direction.DOWN:
-                if c <= self.entry_price * (1.0 - self.takeprofit_pct / 100.0):
+                if c <= self.entry_price * (1.0 - eff_tp / 100.0):
                     return Signal.EXIT
 
         if self.regime == Regime.EXHAUSTION and self.exhaustion_bar_count >= self.exhaustion_bars_limit:

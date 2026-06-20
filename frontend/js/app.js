@@ -76,7 +76,12 @@ let engineParamsV1 = {
   confidence_very_high: 0.86,
   ema_macro_period: 7,
   stoploss_pct: 0,
-  takeprofit_pct: 15,
+  takeprofit_pct: 0,
+  // Confidence-scaled TP/SL (0 = use static value above)
+  takeprofit_pct_low: 10,
+  takeprofit_pct_high: 30,
+  stoploss_pct_low: -15,
+  stoploss_pct_high: -6,
 };
 
 /* Engine version: 1 = V1 (Physics) */
@@ -1185,6 +1190,10 @@ function renderSettings() {
   const paramHints = {
     stoploss_pct: "0 = off  |  negative = hard stop (e.g. -10 exits if -10% from entry)  |  positive = trail stop (e.g. 10: arms at +10% gain, then sells if price falls back to entry)",
     takeprofit_pct: "Take profit at this % gain (0 = disabled, exits position when price hits entry * (1 + pct/100))",
+    takeprofit_pct_low: "TP% used when confidence ≤ confidence_low — tighter exit at low conviction (0 = disabled)",
+    takeprofit_pct_high: "TP% used when confidence ≥ confidence_high — let winners run at high conviction (0 = disabled)",
+    stoploss_pct_low: "SL magnitude (%) at low confidence — wider stop when conviction is low (0 = disabled)",
+    stoploss_pct_high: "SL magnitude (%) at high confidence — tighter stop when conviction is high (0 = disabled)",
     breakout_pct: "Buy when price > VWAP × (1 + breakout_pct/100)",
     vol_spike_mult: "Volume must exceed this × average volume to confirm entry",
     roc_min_pct: "Minimum Rate of Change % to trigger a buy signal",
