@@ -400,15 +400,17 @@ class ForwardTester:
             self._pending_exit = False
 
         elif signal == Signal.EXIT.value and self.current_trade is not None:
-            reason = "exit_signal"
-            if regime == Regime.REVERSAL.value:
-                reason = "reversal_exit"
-            elif regime == Regime.EXHAUSTION.value:
-                reason = "exhaustion_exit"
-            elif regime == Regime.CONTINUATION.value:
-                reason = "continuation_exit"
-            elif regime == Regime.TREND.value:
-                reason = "trend_exit"
+            reason = result.get("exit_reason")
+            if not reason:
+                reason = "exit_signal"
+                if regime == Regime.REVERSAL.value:
+                    reason = "reversal_exit"
+                elif regime == Regime.EXHAUSTION.value:
+                    reason = "exhaustion_exit"
+                elif regime == Regime.CONTINUATION.value:
+                    reason = "continuation_exit"
+                elif regime == Regime.TREND.value:
+                    reason = "trend_exit"
                 
             self._pending_exit = True
             self._pending_exit_reason = reason

@@ -554,6 +554,8 @@ class StrategyEngine:
         self.in_position = False
         self.entry_price: float = 0.0
         self.position_direction: Direction = Direction.NONE
+        self._peak_price: float = 0.0
+        self.exit_signal_reason: str = ""
 
         # Rolling buffers
         self._m_hat_history: list[float] = []
@@ -1455,11 +1457,13 @@ class StrategyEngine:
         For hard stops (negative):  higher confidence → tighter stop (smaller magnitude)
         For trailing stops (positive): same sense — higher confidence → tighter trail
         """
-        if self.stoploss_pct_low > 0.0 or self.stoploss_pct_high > 0.0:
-            # Scaling operates on magnitudes; sign carried from stoploss_pct
-            sign = -1.0 if self.stoploss_pct < 0 else 1.0
-            lo = self.stoploss_pct_low if self.stoploss_pct_low > 0.0 else abs(self.stoploss_pct)
-            hi = self.stoploss_pct_high if self.stoploss_pct_high > 0.0 else abs(self.stoploss_pct)
+        if self.stoploss_pct_low != 0.0 or self.stoploss_pct_high != 0.0:
+            # Scaling operates on magnitudes. Determine sign dynamically from the parameters.
+            is_hard_stop = (self.stoploss_pct_low < 0) or (self.stoploss_pct_high < 0) or (self.stoploss_pct < 0)
+            sign = -1.0 if is_hard_stop else 1.0
+            
+            lo = abs(self.stoploss_pct_low) if self.stoploss_pct_low != 0.0 else abs(self.stoploss_pct)
+            hi = abs(self.stoploss_pct_high) if self.stoploss_pct_high != 0.0 else abs(self.stoploss_pct)
             mag = self._confidence_lerp(lo, hi)
             return sign * mag
         return self.stoploss_pct
@@ -1467,6 +1471,14 @@ class StrategyEngine:
     def _check_exit(self, c: float) -> Optional[Signal]:
         if not self.in_position:
             return None
+
+        # Update peak price for trailing stop
+        if self.position_direction == Direction.UP:
+            if c > self._peak_price:
+                self._peak_price = c
+        elif self.position_direction == Direction.DOWN:
+            if c < self._peak_price:
+                self._peak_price = c
 
         # ── Confidence-scaled (or static) stop loss ───────────────────────
         eff_sl = self._effective_stoploss_pct()
@@ -1476,25 +1488,24 @@ class StrategyEngine:
                 # ── Hard stop loss (negative stoploss_pct) ──────────────────
                 if self.position_direction == Direction.UP:
                     if c <= self.entry_price * (1.0 - pct / 100.0):
+                        self.exit_signal_reason = "hard_stop"
                         return Signal.EXIT
                 elif self.position_direction == Direction.DOWN:
                     if c >= self.entry_price * (1.0 + pct / 100.0):
+                        self.exit_signal_reason = "hard_stop"
                         return Signal.EXIT
             else:
                 # ── Trailing stop loss (positive stoploss_pct) ──────────────
-                # Phase 1  — wait for price to reach the gain target (+x%)
-                # Phase 2  — once armed, sell if price falls back to entry
+                # Exits if price falls 'pct' percent from the peak since entry
                 if self.position_direction == Direction.UP:
-                    gain_target = self.entry_price * (1.0 + pct / 100.0)
-                    if not self._trail_armed and c >= gain_target:
-                        self._trail_armed = True
-                    if self._trail_armed and c <= self.entry_price:
+                    trail_stop = self._peak_price * (1.0 - pct / 100.0)
+                    if c <= trail_stop:
+                        self.exit_signal_reason = "trailing_stop"
                         return Signal.EXIT
                 elif self.position_direction == Direction.DOWN:
-                    gain_target = self.entry_price * (1.0 - pct / 100.0)
-                    if not self._trail_armed and c <= gain_target:
-                        self._trail_armed = True
-                    if self._trail_armed and c >= self.entry_price:
+                    trail_stop = self._peak_price * (1.0 + pct / 100.0)
+                    if c >= trail_stop:
+                        self.exit_signal_reason = "trailing_stop"
                         return Signal.EXIT
 
         # ── Confidence-scaled (or static) take profit ─────────────────────
@@ -1502,22 +1513,28 @@ class StrategyEngine:
         if eff_tp > 0.0:
             if self.position_direction == Direction.UP:
                 if c >= self.entry_price * (1.0 + eff_tp / 100.0):
+                    self.exit_signal_reason = "take_profit"
                     return Signal.EXIT
             elif self.position_direction == Direction.DOWN:
                 if c <= self.entry_price * (1.0 - eff_tp / 100.0):
+                    self.exit_signal_reason = "take_profit"
                     return Signal.EXIT
 
         if self.regime == Regime.EXHAUSTION and self.exhaustion_bar_count >= self.exhaustion_bars_limit:
+            self.exit_signal_reason = "exhaustion_exit"
             return Signal.EXIT
 
         if self.regime == Regime.REVERSAL:
             if (self.reversal_bar_count >= self.reversal_exit_confirm_bars
                     and self.signal_strength > self.S_noise):
+                self.exit_signal_reason = "reversal_exit"
                 return Signal.EXIT
 
         if self.no_motion_count >= 60:
+            self.exit_signal_reason = "stale_exit"
             return Signal.EXIT
 
+        self.exit_signal_reason = ""
         return None
 
     def _update_profile(self, c: float, vol: float, is_buy: bool, time: int):
@@ -1533,12 +1550,14 @@ class StrategyEngine:
         self.in_position = True
         self.entry_price = entry_price
         self.position_direction = direction
+        self._peak_price = entry_price
         self._trail_armed = False  # reset arm state on new position
 
     def notify_trade_closed(self):
         self.in_position = False
         self.entry_price = 0.0
         self.position_direction = Direction.NONE
+        self._peak_price = 0.0
         self._trail_armed = False
 
     def update(
@@ -1568,6 +1587,8 @@ class StrategyEngine:
             exit_signal = self._check_exit(c)
             if exit_signal:
                 signal = exit_signal
+        else:
+            self.exit_signal_reason = ""
 
         # Belt-and-suspenders: never emit a signal during the warmup window
         # or early in the recording when data is insufficient.
@@ -1584,6 +1605,7 @@ class StrategyEngine:
             "regime": self.regime.value,
             "direction": self.direction.value,
             "signal": signal.value if signal else Signal.NONE.value,
+            "exit_reason": self.exit_signal_reason,
         }
 
     def _build_result(self, time: int, price: float, signal: Optional[Signal]) -> dict:
@@ -1598,6 +1620,7 @@ class StrategyEngine:
             "regime": self.regime.value,
             "direction": self.direction.value,
             "signal": signal.value if signal else Signal.NONE.value,
+            "exit_reason": self.exit_signal_reason,
             "indicators": {
                 "ema_fast": self.ema_fast_val,
                 "ema_slow": self.ema_slow_val,
