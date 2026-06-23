@@ -355,8 +355,8 @@ class StrategyEngine:
         signal_noise: float = 1.1535714285714287,
         exhaustion_bars_limit: int = 1,
         delta_threshold: float = 0.3,
-        kalman_gamma: float = 0.145,
-        min_trend_bars: int = 4,
+        kalman_gamma: float = 0.125,
+        min_trend_bars: int = 3,
         reversal_confirm_bars: int = 2,
         chop_atr_pct: float = 0.3,
         chop_spread_pct: float = 0.05,
@@ -369,7 +369,17 @@ class StrategyEngine:
         ema_min_spread_pct: float = 0.02,
         # FIX-B: raised from 0.60 → 0.62 to tighten consolidation gate
         confidence_high: float = 0.79,
-        confidence_low: float = 0.23,
+        confidence_low: float = 0.19,
+        # ── Entry-side confidence gates (independent of exit thresholds) ────
+        # entry_confidence_high: minimum confidence required to open a new
+        #   position (used in _passes_entry_gate).  Kept separate so you can
+        #   tighten entries without affecting exit / TP-SL scaling.
+        # entry_confidence_low:  lower bound used symmetrically if you want
+        #   an entry-side lerp in future; currently acts as a hard floor
+        #   (entry blocked when confidence < entry_confidence_low).
+        #   Defaults to confidence_low so behaviour is unchanged unless set.
+        entry_confidence_high: float = 0.79,
+        entry_confidence_low: float = 0.19,
         confidence_w1: float = 0.3,
         confidence_w2: float = 0.25,
         confidence_w3: float = 0.25,
@@ -381,12 +391,12 @@ class StrategyEngine:
         exhaustion_stall_atr_pct: float = 3.0,
         local_range_bars: int = 80,
         local_range_threshold_pct: float = 5.0,
-        sign_flip_threshold: int = 1,
+        sign_flip_threshold: int = 0,
         stability_bars: int = 3,
         spike_atr_multiplier: float = 1.2,
         spike_lookback_bars: int = 9,
         # ── FIX-A: new top-blast parameters ──────────────────────────
-        body_baseline_bars: int = 15,
+        body_baseline_bars: int = 14,
         # ^ Long window for body average — anchors comparison to calm bars,
         #   not the recent pump bars.  Must be >> spike_lookback_bars.
         overextension_k: float = 0.17,
@@ -398,24 +408,24 @@ class StrategyEngine:
         # ^ If |m_hat| has been declining for this many consecutive bars,
         #   we are past the momentum peak → block BUY regardless of S.
         # ── FIX-B: consolidation range gate parameter ─────────────────
-        consolidation_range_pct: float = 5.0,
+        consolidation_range_pct: float = 0.0,
         # ^ If N-bar range < this % of price AND price is in mid 35–65%
         #   of that range, it's a box / consolidation → block entry.
         # ── FIX-C: high-confidence stability relaxation ────────────────
-        confidence_very_high: float = 0.84,
+        confidence_very_high: float = 0.86,
         # ^ When confidence exceeds this, reduce effective stability_bars to 1.
         # ── Macro trend gate ─────────────────────────────────────────────
         ema_macro_period: int = 7,
         # ^ Slow EMA lookback used to define the macro trend.  Only BUY when
         #   close >= ema_macro.  Set to 0 to disable.
         # ── Stoploss ─────────────────────────────────────────────────────
-        stoploss_pct: float = 0.0,
+        stoploss_pct: float = 25.0,
         # ^ Stop loss control (sign-encoded):
         #   0.0        → disabled
         #   negative   → hard stop loss  (e.g. -10.0 = exit if price drops 10% from entry)
         #   positive   → trailing stop   (e.g.  10.0 = exit if price falls 10% from peak)
         # ── Take Profit ──────────────────────────────────────────────────
-        takeprofit_pct: float = 15.0,
+        takeprofit_pct: float = 0.0,
         # ^ Take profit control:
         #   0.0        → disabled
         #   positive   → exit if price exceeds entry by this percentage
@@ -458,6 +468,8 @@ class StrategyEngine:
         self.ema_min_spread_pct = ema_min_spread_pct
         self.confidence_high = confidence_high
         self.confidence_low = confidence_low
+        self.entry_confidence_high = entry_confidence_high
+        self.entry_confidence_low = entry_confidence_low
         self.confidence_w1 = confidence_w1
         self.confidence_w2 = confidence_w2
         self.confidence_w3 = confidence_w3
@@ -945,8 +957,8 @@ class StrategyEngine:
             if self.ema_macro_val is not None and c < self.ema_macro_val:
                 return False
 
-        # §3: Confidence must be above HIGH_THRESHOLD
-        if self.trend_confidence < self.confidence_high:
+        # §3: Confidence must be above ENTRY threshold (entry_confidence_high)
+        if self.trend_confidence < self.entry_confidence_high:
             return False
 
         # §8: No trading in local chop
@@ -1468,17 +1480,35 @@ class StrategyEngine:
             return sign * mag
         return self.stoploss_pct
 
-    def _check_exit(self, c: float) -> Optional[Signal]:
+    def _update_peak_price(self, h: float, l: float):
+        """Update the trailing-stop peak price using the bar's high/low.
+
+        This must run every bar regardless of regime signals so the peak
+        always reflects the true intra-bar extreme (not just the close).
+        """
+        if not self.in_position:
+            return
+        if self.position_direction == Direction.UP:
+            if h > self._peak_price:
+                self._peak_price = h
+        elif self.position_direction == Direction.DOWN:
+            if l < self._peak_price:
+                self._peak_price = l
+
+    def _check_exit(self, c: float, l: float = 0.0, h: float = 0.0) -> Optional[Signal]:
+        """Check exit conditions for the current bar.
+
+        Args:
+            c: bar close price
+            l: bar low  — used to detect intra-bar trailing-stop breach on longs
+            h: bar high — used to detect intra-bar trailing-stop breach on shorts
+        """
         if not self.in_position:
             return None
 
-        # Update peak price for trailing stop
-        if self.position_direction == Direction.UP:
-            if c > self._peak_price:
-                self._peak_price = c
-        elif self.position_direction == Direction.DOWN:
-            if c < self._peak_price:
-                self._peak_price = c
+        # Note: _peak_price is updated in update() AFTER this method is called,
+        # so it evaluates trailing stops against the peak established from 
+        # previous bars. This prevents phantom intra-bar stop-outs.
 
         # ── Confidence-scaled (or static) stop loss ───────────────────────
         eff_sl = self._effective_stoploss_pct()
@@ -1486,25 +1516,31 @@ class StrategyEngine:
             pct = abs(eff_sl)
             if eff_sl < 0:
                 # ── Hard stop loss (negative stoploss_pct) ──────────────────
+                # Use intra-bar low/high so a wick through the stop always triggers.
                 if self.position_direction == Direction.UP:
-                    if c <= self.entry_price * (1.0 - pct / 100.0):
+                    check_price = l if l > 0 else c
+                    if check_price <= self.entry_price * (1.0 - pct / 100.0):
                         self.exit_signal_reason = "hard_stop"
                         return Signal.EXIT
                 elif self.position_direction == Direction.DOWN:
-                    if c >= self.entry_price * (1.0 + pct / 100.0):
+                    check_price = h if h > 0 else c
+                    if check_price >= self.entry_price * (1.0 + pct / 100.0):
                         self.exit_signal_reason = "hard_stop"
                         return Signal.EXIT
             else:
                 # ── Trailing stop loss (positive stoploss_pct) ──────────────
-                # Exits if price falls 'pct' percent from the peak since entry
+                # Use intra-bar low/high so a wick through the trail level
+                # always triggers an exit, even when close recovers above it.
                 if self.position_direction == Direction.UP:
                     trail_stop = self._peak_price * (1.0 - pct / 100.0)
-                    if c <= trail_stop:
+                    check_price = l if l > 0 else c
+                    if check_price <= trail_stop:
                         self.exit_signal_reason = "trailing_stop"
                         return Signal.EXIT
                 elif self.position_direction == Direction.DOWN:
                     trail_stop = self._peak_price * (1.0 + pct / 100.0)
-                    if c >= trail_stop:
+                    check_price = h if h > 0 else c
+                    if check_price >= trail_stop:
                         self.exit_signal_reason = "trailing_stop"
                         return Signal.EXIT
 
@@ -1584,11 +1620,25 @@ class StrategyEngine:
         regime, signal = self._detect_regime(c)
 
         if signal is None:
-            exit_signal = self._check_exit(c)
+            exit_signal = self._check_exit(c, l=l, h=h)
             if exit_signal:
                 signal = exit_signal
         else:
-            self.exit_signal_reason = ""
+            # Even when the regime emits a non-exit signal, still check the
+            # hard/trailing stop — it must take priority over any BUY signal
+            # and must not be masked by regime transitions.
+            if self.in_position:
+                exit_signal = self._check_exit(c, l=l, h=h)
+                if exit_signal:
+                    signal = exit_signal
+            else:
+                self.exit_signal_reason = ""
+
+        # Update the trailing-stop peak from intra-bar high/low AFTER checking
+        # exits, so the current bar's high doesn't incorrectly tighten the stop
+        # for its own low (which would cause phantom stop-outs).
+        if self.in_position and signal != Signal.EXIT:
+            self._update_peak_price(h, l)
 
         # Belt-and-suspenders: never emit a signal during the warmup window
         # or early in the recording when data is insufficient.
@@ -1647,6 +1697,16 @@ class StrategyEngine:
             "volume_profiles": all_profiles,
             "in_position": self.in_position,
             "entry_price": self.entry_price,
+            "peak_price": self._peak_price,
+            "trail_stop_price": (
+                self._peak_price * (1.0 - abs(self._effective_stoploss_pct()) / 100.0)
+                if self.in_position and self.position_direction == Direction.UP and self._effective_stoploss_pct() > 0
+                else (
+                    self._peak_price * (1.0 + abs(self._effective_stoploss_pct()) / 100.0)
+                    if self.in_position and self.position_direction == Direction.DOWN and self._effective_stoploss_pct() > 0
+                    else None
+                )
+            ),
             "exhaustion_bars": self.exhaustion_bar_count,
             "in_chop": self._is_chop_zone(price) or self._in_local_chop,
             "trend_bars": self.trend_bar_count,

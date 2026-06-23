@@ -124,20 +124,22 @@ def _cache_put(params: dict, result: dict) -> None:
 _BASELINE = {
     "ema_fast": 3, "ema_slow": 7, "atr_period": 7, "roc_period": 3, "warmup": 30,
     "signal_strong": 4, "signal_weak": 1.5, "signal_noise": 1.1535714285714287,
-    "exhaustion_bars_limit": 1, "delta_threshold": 0.3, "kalman_gamma": 0.1,
+    "exhaustion_bars_limit": 1, "delta_threshold": 0.3, "kalman_gamma": 0.125,
     "min_trend_bars": 3, "reversal_confirm_bars": 2, "chop_atr_pct": 0.3,
     "chop_spread_pct": 0.05, "reversal_exit_confirm_bars": 0,
-    "s_effective_threshold": 0.35, "exhaustion_persist_bars": 4, "regime_lookback": 6,
+    "s_effective_threshold": 0.35, "exhaustion_persist_bars": 6, "regime_lookback": 6,
     "persistence_threshold": 2, "momentum_mean_threshold": 0.0, "ema_min_spread_pct": 0.02,
-    "confidence_high": 0.79, "confidence_low": 0.23,
+    "confidence_high": 0.79, "confidence_low": 0.19,
+    "entry_confidence_high": 0.79, "entry_confidence_low": 0.19,
     "confidence_w1": 0.3, "confidence_w2": 0.25, "confidence_w3": 0.25, "confidence_w4": 0.2,
-    "atr_floor_k": 0.6, "ema_cross_persist_bars": 2, "exhaustion_s_decay_bars": 1,
-    "exhaustion_stall_bars": 3, "exhaustion_stall_atr_pct": 3.0, "local_range_bars": 80,
-    "local_range_threshold_pct": 0.8, "sign_flip_threshold": 1, "stability_bars": 3,
-    "spike_atr_multiplier": 1.2, "spike_lookback_bars": 7, "body_baseline_bars": 30,
-    "overextension_k": 0.17, "momentum_peak_bars": 1, "consolidation_range_pct": 5.0,
-    "confidence_very_high": 0.81, "ema_macro_period": 7, "stoploss_pct": 0.0,
-    "takeprofit_pct": 0.0,
+    "atr_floor_k": 0, "ema_cross_persist_bars": 2, "exhaustion_s_decay_bars": 1,
+    "exhaustion_stall_bars": 6, "exhaustion_stall_atr_pct": 3, "local_range_bars": 80,
+    "local_range_threshold_pct": 5, "sign_flip_threshold": 0, "stability_bars": 3,
+    "spike_atr_multiplier": 1.2, "spike_lookback_bars": 9, "body_baseline_bars": 14,
+    "overextension_k": 0.17, "momentum_peak_bars": 1, "consolidation_range_pct": 0,
+    "confidence_very_high": 0.86, "ema_macro_period": 7, "stoploss_pct": 25,
+    "takeprofit_pct": 0, "takeprofit_pct_low": 0, "takeprofit_pct_high": 0,
+    "stoploss_pct_low": 0, "stoploss_pct_high": 0,
 }
 
 _best_json = os.path.join(os.path.dirname(__file__), "best_params.json")
@@ -164,6 +166,8 @@ SPACE = {
     # ── A. ENTRY GATES ───────────────────────────────────────────────────────
     "confidence_high":          (0.50, 0.97, 0.01, False),
     "confidence_low":           (0.10, 0.55, 0.01, False),
+    "entry_confidence_high":    (0.50, 0.97, 0.01, False),
+    "entry_confidence_low":     (0.10, 0.55, 0.01, False),
     "confidence_very_high":     (0.55, 0.98, 0.01, False),
     "signal_strong":            (1.00, 6.00, 0.10, False),
     "signal_weak":              (0.50, 3.00, 0.10, False),
@@ -207,6 +211,7 @@ SPACE = {
 # Entry gate params: loosen → more trades, tighten → higher WR
 _ENTRY_GATE_PARAMS = [
     "confidence_high", "confidence_low", "confidence_very_high",
+    "entry_confidence_high", "entry_confidence_low",
     "signal_strong", "signal_weak", "signal_noise", "s_effective_threshold",
     "min_trend_bars", "stability_bars", "ema_cross_persist_bars",
     "persistence_threshold", "warmup",

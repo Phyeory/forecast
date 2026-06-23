@@ -61,6 +61,7 @@ let engineParamsV1 = {
   s_effective_threshold: 0.35, exhaustion_persist_bars: 6,
   regime_lookback: 6, persistence_threshold: 2, momentum_mean_threshold: 0.0,
   ema_min_spread_pct: 0.02, confidence_high: 0.79, confidence_low: 0.19,
+  entry_confidence_high: 0.79, entry_confidence_low: 0.19,
   confidence_w1: 0.3, confidence_w2: 0.25, confidence_w3: 0.25, confidence_w4: 0.2,
   atr_floor_k: 0, ema_cross_persist_bars: 2, exhaustion_s_decay_bars: 1,
   local_range_bars: 80, local_range_threshold_pct: 5, sign_flip_threshold: 0,
@@ -75,8 +76,8 @@ let engineParamsV1 = {
   consolidation_range_pct: 0,
   confidence_very_high: 0.86,
   ema_macro_period: 7,
-  stoploss_pct: 0,
-  takeprofit_pct: 30,
+  stoploss_pct: 25,
+  takeprofit_pct: 0,
   // Confidence-scaled TP/SL (0 = use static value above)
   takeprofit_pct_low: 0,
   takeprofit_pct_high: 0,
@@ -1194,6 +1195,10 @@ function renderSettings() {
     takeprofit_pct_high: "TP% used when confidence ≥ confidence_high — let winners run at high conviction (0 = disabled)",
     stoploss_pct_low: "SL magnitude (%) at low confidence — wider stop when conviction is low (0 = disabled)",
     stoploss_pct_high: "SL magnitude (%) at high confidence — tighter stop when conviction is high (0 = disabled)",
+    confidence_high: "EXIT: exit regime filter upper threshold — below this confidence the regime is 'ambiguous' and no new signals fire (also used as upper bound for TP/SL lerp)",
+    confidence_low: "EXIT: exit regime filter lower threshold — below this confidence the engine forces EXHAUSTION and exits (also used as lower bound for TP/SL lerp)",
+    entry_confidence_high: "ENTRY: minimum confidence required to open a new position (independent of exit thresholds)",
+    entry_confidence_low: "ENTRY: lower confidence floor for entry — entries are blocked below this level (currently a hard gate, not a lerp)",
     breakout_pct: "Buy when price > VWAP × (1 + breakout_pct/100)",
     vol_spike_mult: "Volume must exceed this × average volume to confirm entry",
     roc_min_pct: "Minimum Rate of Change % to trigger a buy signal",
@@ -1798,7 +1803,7 @@ document.getElementById("bt-params-btn").addEventListener("click", () => {
 
 /* ── Confidence Auto-Tuner ───────────────────────────────────────────── */
 {
-  const CONFIDENCE_PARAMS = ["confidence_high", "confidence_low", "confidence_very_high"];
+  const CONFIDENCE_PARAMS = ["confidence_high", "confidence_low", "entry_confidence_high", "entry_confidence_low", "confidence_very_high"];
   let _autotuneAbort = null;   // AbortController for cancel
   let _autotuneFinalParams = null;
 
@@ -2013,7 +2018,7 @@ document.getElementById("bt-params-btn").addEventListener("click", () => {
       }
     });
     // Sync to settings modal inputs if they're open
-    ["confidence_high", "confidence_low", "confidence_very_high"].forEach(p => {
+    ["confidence_high", "confidence_low", "entry_confidence_high", "entry_confidence_low", "confidence_very_high"].forEach(p => {
       const inp = document.getElementById(`param-${p}`);
       if (inp) inp.value = params[p];
     });
