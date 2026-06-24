@@ -505,7 +505,7 @@ async def autotune_confidence(body: dict = Body(...)):
     STEP         = 0.01
     MIN_TRADES   = 5          # ignore configs that produce too few trades
     MAX_ITERS    = 60         # safety cap per parameter
-    PARAMS_ORDER = ["confidence_high", "confidence_low", "confidence_very_high"]
+    PARAMS_ORDER = ["confidence_high", "confidence_low", "entry_confidence_high", "entry_confidence_low", "confidence_very_high"]
 
     async def _score(params: dict) -> tuple[float, int]:
         wr, trades, _ = await asyncio.to_thread(
@@ -566,6 +566,9 @@ async def autotune_confidence(body: dict = Body(...)):
                     wr, trades = await _score(test_params)
 
                     is_better = trades >= MIN_TRADES and wr > best_wr
+                    
+                    logger.info(f"[Auto-Tune] param={param} value={candidate_val:.4f} wr={wr:.3f} trades={trades} (best_wr={best_wr:.3f}) improved={is_better}")
+                    
                     yield emit({
                         "type":          "trial",
                         "param":         param,
