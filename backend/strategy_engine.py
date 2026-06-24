@@ -509,9 +509,6 @@ class StrategyEngine:
         self.stoploss_pct_low = stoploss_pct_low
         self.stoploss_pct_high = stoploss_pct_high
 
-        # Trailing stop state: armed once price hits the gain target
-        self._trail_armed: bool = False
-
         # State
         self.bar_count = 0
         self.regime = Regime.EXHAUSTION
@@ -1587,14 +1584,12 @@ class StrategyEngine:
         self.entry_price = entry_price
         self.position_direction = direction
         self._peak_price = entry_price
-        self._trail_armed = False  # reset arm state on new position
 
     def notify_trade_closed(self):
         self.in_position = False
         self.entry_price = 0.0
         self.position_direction = Direction.NONE
         self._peak_price = 0.0
-        self._trail_armed = False
 
     def update(
         self,
