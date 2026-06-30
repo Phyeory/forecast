@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Refined Stochastic Framework — Migrated Pump.fun Tokens, 40k–200k Market Cap</title>
+<script>
+  window.MathJax = {
+    tex: {
+      inlineMath: [['\\(','\\)'],['$','$']],
+      displayMath: [['\\[','\\]'],['$$','$$']]
+    },
+    options: { skipHtmlTags: ['script','noscript','style','textarea','pre','code'] }
+  };
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/3.2.2/es5/tex-mml-chtml.min.js"></script>
+<style>
+  :root{
+    --bg:#0d1117;
+    --panel:#121a24;
+    --panel-2:#0f161f;
+    --rule:rgba(231,225,210,0.10);
+    --rule-strong:rgba(231,225,210,0.18);
+    --text:#e7e1d2;
+    --text-dim:#a9a294;
+    --serif: "Iowan Old Style","Palatino Linotype","Sitka Text",Georgia,serif;
+    --mono: ui-monospace,"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+    --signal:#7fd6c2;
+    --hazard:#e3a472;
+    --latent:#9fb4d6;
+  }
+  *{box-sizing:border-box;}
+  html,body{background:var(--bg);margin:0;padding:0;}
+  body{
+    font-family:var(--serif);
+    color:var(--text);
+    line-height:1.65;
+    font-size:17px;
+  }
+  .page{max-width:760px;margin:0 auto;padding:64px 28px 120px;}
+  header.doc-head{border-bottom:1px solid var(--rule-strong);padding-bottom:28px;margin-bottom:48px;}
+  .eyebrow{
+    font-family:var(--mono);
+    font-size:12px;
+    letter-spacing:0.14em;
+    text-transform:uppercase;
+    color:var(--signal);
+    margin-bottom:14px;
+  }
+  h1.title{
+    font-size:30px;
+    font-weight:600;
+    line-height:1.25;
+    margin:0 0 10px;
+    color:var(--text);
+  }
+  .subtitle{
+    color:var(--text-dim);
+    font-size:16px;
+    font-style:italic;
+    margin:0 0 18px;
+  }
+  .scope-line{
+    font-family:var(--mono);
+    font-size:12.5px;
+    color:var(--text-dim);
+    display:flex;
+    gap:18px;
+    flex-wrap:wrap;
+  }
+  .scope-line span b{color:var(--text);font-weight:600;}
+
+  section{margin-bottom:46px;}
+  h2{
+    font-family:var(--mono);
+    font-size:13px;
+    letter-spacing:0.08em;
+    text-transform:uppercase;
+    color:var(--text-dim);
+    border-bottom:1px solid var(--rule);
+    padding-bottom:10px;
+    margin:0 0 20px;
+    display:flex;
+    align-items:baseline;
+    gap:10px;
+  }
+  h2 .num{color:var(--signal);font-weight:600;}
+  h3{
+    font-size:17px;
+    font-weight:600;
+    color:var(--text);
+    margin:28px 0 10px;
+  }
+  p{margin:0 0 14px;}
+  .lede{color:var(--text-dim);}
+
+  .eq{
+    background:var(--panel);
+    border-left:2px solid var(--signal);
+    padding:16px 20px;
+    margin:16px 0;
+    overflow-x:auto;
+    font-size:15.5px;
+  }
+  .eq.hazard{border-left-color:var(--hazard);}
+
+  .tag{
+    font-family:var(--mono);
+    font-size:10.5px;
+    letter-spacing:0.04em;
+    padding:2px 7px;
+    border-radius:3px;
+    display:inline-block;
+  }
+  .tag.obs{background:rgba(127,214,194,0.14);color:var(--signal);}
+  .tag.lat{background:rgba(159,180,214,0.16);color:var(--latent);}
+  .tag.hzd{background:rgba(227,164,114,0.16);color:var(--hazard);}
+
+  table{
+    width:100%;
+    border-collapse:collapse;
+    margin:18px 0;
+    font-size:14.5px;
+  }
+  th,td{
+    text-align:left;
+    padding:9px 10px;
+    border-bottom:1px solid var(--rule);
+    vertical-align:top;
+  }
+  th{
+    font-family:var(--mono);
+    font-size:11px;
+    letter-spacing:0.05em;
+    text-transform:uppercase;
+    color:var(--text-dim);
+    font-weight:500;
+  }
+  td.eqcell{font-family:var(--mono);font-size:13.5px;color:var(--signal);}
+
+  .callout{
+    background:var(--panel-2);
+    border:1px solid var(--rule);
+    border-radius:4px;
+    padding:14px 18px;
+    margin:18px 0;
+    font-size:15px;
+    color:var(--text-dim);
+  }
+  .callout b{color:var(--text);}
+  .callout.assumption::before{
+    content:"ASSUMPTION";
+    display:block;
+    font-family:var(--mono);
+    font-size:10.5px;
+    letter-spacing:0.08em;
+    color:var(--hazard);
+    margin-bottom:6px;
+  }
+  .callout.note::before{
+    content:"NOTE";
+    display:block;
+    font-family:var(--mono);
+    font-size:10.5px;
+    letter-spacing:0.08em;
+    color:var(--signal);
+    margin-bottom:6px;
+  }
+
+  .delta-box{
+    border:1px solid var(--rule-strong);
+    border-radius:4px;
+    margin:18px 0;
+    overflow:hidden;
+  }
+  .delta-box .row{
+    display:grid;
+    grid-template-columns:120px 1fr;
+    border-bottom:1px solid var(--rule);
+  }
+  .delta-box .row:last-child{border-bottom:none;}
+  .delta-box .row .k{
+    font-family:var(--mono);
+    font-size:11px;
+    color:var(--text-dim);
+    padding:10px 12px;
+    background:var(--panel-2);
+  }
+  .delta-box .row .v{padding:10px 14px;font-size:14.5px;}
+
+  hr.div{border:none;border-top:1px solid var(--rule);margin:48px 0;}
+  footer{
+    font-family:var(--mono);
+    font-size:11.5px;
+    color:var(--text-dim);
+    border-top:1px solid var(--rule);
+    padding-top:20px;
+    margin-top:60px;
+  }
+  ul,ol{margin:0 0 14px;padding-left:22px;}
+  li{margin-bottom:6px;}
+  .small{font-size:13.5px;color:var(--text-dim);}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="doc-head">
+    <div class="eyebrow">Quantitative Framework — Revision 2</div>
+    <h1 class="title">From State-Space Trading to AMM-Exact Microstructure</h1>
+    <p class="subtitle">Refining the latent-state / potential-field framework for migrated Pump.fun tokens in the 40k–200k market-cap band.</p>
+    <div class="scope-line">
+      <span>Venue: <b>Raydium / PumpSwap CPMM, post-migration</b></span>
+      <span>Regime: <b>40k–200k market cap</b></span>
+      <span>Chain: <b>Solana</b></span>
+    </div>
+  </header>
+
+  <section id="s0">
+    <h2><span class="num">0</span> Preface — what actually changes</h2>
+    <p>The previous document established a sound skeleton: a latent state-space system, a Generalized Langevin price equation, a Kalman-filtered drift, escape probabilities derived from a potential field, and a confidence functional. That skeleton survives. What does not survive contact with this specific market segment is the way several of its components were <i>populated</i>.</p>
+    <p>Three things are true about a token sitting at 40k–200k market cap, post-migration, that were not assumed in the general version:</p>
+    <ol>
+      <li><b>Liquidity is no longer latent.</b> Once a token migrates, it trades against a constant-product AMM pool with reserves that are read directly from the chain, every slot. The "liquidity field" in §5 of the prior document was a fitted Gaussian sum over heuristic nodes — an estimate of something that, post-migration, is simply <i>observed</i>.</li>
+      <li><b>The holder graph is fully observable.</b> Every wallet's cost basis is reconstructable from transfer history. This is not true of any traditional market and it changes what "support and resistance" can rigorously mean.</li>
+      <li><b>The dominant tail risk is not volatility, it is a discrete absorbing event</b> — liquidity removal or an insider dump — and a diffusion-only model has no mechanism for representing it.</li>
+    </ol>
+    <p class="lede">Sections 1–7 rebuild the observation and potential structure around these three facts. Sections 8–12 rebuild the decision layer (confidence, entry/exit, calibration, validation) so that it is derived rather than asserted, in the way the original brief required.</p>
+  </section>
+
+  <section id="s1">
+    <h2><span class="num">1</span> Stylized facts of the 40k–200k band</h2>
+    <p>This band is the first stretch of trading where the price is no longer mechanically pinned to Pump.fun's internal bonding curve. It sits just above the historical migration threshold and below the level at which a token typically either dies or develops genuine secondary liquidity (CEX listing, sustained holder base). Empirically it is characterized by:</p>
+    <ul>
+      <li>Thin pools — typically low five to mid five figures in quote-currency depth, so price impact is large relative to realistic trade sizes (§3).</li>
+      <li>A short, front-loaded burst of sniper / MEV-bot activity in the first minutes post-migration, followed by organic retail flow if the token survives.</li>
+      <li>Heavy-tailed holder balances (a small number of wallets controlling a large share of supply is the norm, not the exception).</li>
+      <li>A non-trivial, time-decaying hazard of liquidity removal or coordinated dumping by the deployer/insider wallets, concentrated in the first hours after migration.</li>
+      <li>No resting limit-order book. "Support" and "resistance" have no literal referent — they must be reconstructed from AMM mechanics and holder behavior rather than assumed by analogy to equities or futures.</li>
+    </ul>
+    <p>Every refinement below is a response to one of these five facts.</p>
+  </section>
+
+  <section id="s2">
+    <h2><span class="num">2</span> Revised state space — separating observed from inferred</h2>
+    <p>The prior framework's state vector \(X_t=[p_t,\mu_t,\sigma_t,L_t]^\top\) treated liquidity \(L_t\) as latent. For a migrated AMM token this is no longer correct: reserves are an on-chain fact, not a parameter to estimate. The corrected partition is:</p>
+    <div class="delta-box">
+      <div class="row"><div class="k">OBSERVED <span class="tag obs">obs</span></div><div class="v">price \(p_t\); pool reserves \((R_t,Q_t)\); trade sizes and counterparties; holder balance table; LP-token lock/burn status; deployer wallet activity.</div></div>
+      <div class="row"><div class="k">LATENT <span class="tag lat">latent</span></div><div class="v">net order-flow drift \(\mu_t\); buy/sell arrival intensities \(\lambda^{buy}_t,\lambda^{sell}_t\) (Hawkes states); instantaneous return variance \(\sigma_t^2\); liquidity-pull hazard \(\lambda_{rug}(t)\); regime indicator \(Z_t\).</div></div>
+    </div>
+    <p>This re-partition matters because it changes what the Kalman/Bayesian layer is <i>for</i>. It no longer needs to infer the shape of the liquidity landscape — that is read straight from \(R_t,Q_t\). Its job is narrower and better-posed: infer the latent order-flow and intensity states that determine where price goes <i>relative to</i> a fully known liquidity surface. This is a strictly easier, better-identified estimation problem than the general version.</p>
+  </section>
+
+  <section id="s3">
+    <h2><span class="num">3</span> The AMM-exact potential — replacing the fitted liquidity field</h2>
+    <p>For a constant-product pool with invariant \(R_t Q_t = k\) and price \(p=Q/R\) (quote per token), solving the invariant for the reserves as functions of price gives</p>
+    <div class="eq">\[ R(p)=\sqrt{k/p},\qquad Q(p)=\sqrt{kp}. \]</div>
+    <p>The quote-currency cost to move the pool from price \(p_0\) to \(p_1\) is exactly the change in the quote reserve, \(\Delta Q = Q(p_1)-Q(p_0)\). Define the <b>AMM potential</b> as this quote-currency reserve function itself:</p>
+    <div class="eq">\[ U_{\text{AMM}}(p) \;\equiv\; \sqrt{k\,p}. \]</div>
+    <p>This is not fitted to anything — it follows deterministically from \(k\), which is read from the pool every slot. The marginal cost (force) of moving price is</p>
+    <div class="eq">\[ -\frac{\partial U_{\text{AMM}}}{\partial p} = -\frac{1}{2}\sqrt{\frac{k}{p}} = -\frac{1}{2}R(p). \]</div>
+    <p>Two consequences worth stating explicitly, because they replace heuristic claims in the original document with derived ones:</p>
+    <ol>
+      <li><b>Why pumps in this band go parabolic.</b> The cost in quote currency to move price by a <i>fixed dollar amount</i> shrinks as price rises and reserves thin (\(R(p)\) falls as \(p\) rises). The same inflow of capital buys an increasingly large price move late in a run than early in it. This is a structural property of the CPMM, not a behavioral story — it is the correct first-principles replacement for the original document's unjustified Gaussian liquidity-node assumption.</li>
+      <li><b>Barrier energies are now literal, tradeable quantities.</b> The cost to reach a target price \(p^*\) from current price \(p\) is \(\Delta U_{\text{AMM}} = \sqrt{k}\,(\sqrt{p^*}-\sqrt{p})\), denominated in actual SOL. This is the dollar size of net buying (or selling) flow required — a number that can be checked against realistic order-flow intensity, not an abstract energy unit.</li>
+    </ol>
+    <div class="callout note">\(U_{\text{AMM}}\) has no minima or maxima of its own — a bare CPMM imposes cost on movement in either direction symmetrically. Any directional asymmetry in escape probability has to come from elsewhere: the holder distribution (§4) and the order-flow intensities (§6), not from the pool curve itself.</div>
+  </section>
+
+  <section id="s4">
+    <h2><span class="num">4</span> The cost-basis potential — where "support and resistance" actually come from</h2>
+    <p>With no resting order book, the only legitimate source of price-level-specific selling and buying pressure is the distribution of <i>realized entry prices</i> across current holders — fully reconstructable on-chain via volume-weighted cost basis per wallet. Let \(\{(p_i,n_i)\}_{i=1}^N\) be the holder set: price paid and tokens held. Define the holder density via kernel smoothing,</p>
+    <div class="eq">\[ \rho(p') \;=\; \sum_{i=1}^N n_i\, K_h(p'-p_i), \]</div>
+    <p>with bandwidth \(h\) set from the empirical spread of cost bases. \(\rho\) is a real, computable mass function — the token-weighted "memory" of where the market has paid.</p>
+    <p>Selling pressure at current price \(p\) is then the holder mass weighted by an empirical propensity to sell at a given return multiple \(r=p/p'\):</p>
+    <div class="eq">\[ S(p) \;=\; \int_0^\infty \rho(p')\, h_{\text{sell}}\!\left(\frac{p}{p'}\right) dp', \]</div>
+    <p>where \(h_{\text{sell}}(r)\) is a hazard-rate-of-selling function, increasing for \(r\gg1\) (profit-taking, often spiking near round-number multiples such as \(2\times,5\times,10\times\) — a well-documented behavioral regularity in this asset class) and elevated again for \(r\ll1\) (capitulation). \(h_{\text{sell}}\) should be estimated, not assumed, by regressing realized sell hazard against return multiple across the historical token corpus (§11).</p>
+    <p>The total effective potential combines the two sources:</p>
+    <div class="eq">\[ U(p) \;=\; U_{\text{AMM}}(p) \;+\; \gamma\, U_{\text{cost-basis}}(p), \qquad U_{\text{cost-basis}}(p) \equiv -\!\int_{p_0}^{p} \!\big(D(p')-S(p')\big)\,dp', \]</div>
+    <p>where \(D(p)\) is the analogous buy-pressure term driven by virality intensity (§6) and \(\gamma\) is a relative weight, calibrated rather than guessed.</p>
+    <div class="callout assumption">The additive combination of \(U_{\text{AMM}}\) and \(U_{\text{cost-basis}}\) assumes the two pressure sources act approximately independently. This is a simplifying approximation, not a derived result — it should be checked empirically (e.g. does realized price impact at a given trade size move in line with \(U_{\text{AMM}}\) alone, or does proximity to a cost-basis cluster measurably distort it) before being trusted at the margins of the data.</div>
+  </section>
+
+  <section id="s5">
+    <h2><span class="num">5</span> Escape probabilities, revisited</h2>
+    <p>With \(U(p)\) now grounded in observed reserves and reconstructed cost basis rather than fitted nodes, the barrier-energy and Boltzmann-normalization machinery of the prior document carries over unchanged in form:</p>
+    <div class="eq">
+    \[ \Delta U_{\text{up}} = U(p_r)-U(p), \qquad \Delta U_{\text{down}} = U(p_s)-U(p) \]
+    \[ E_{\text{up}}=\frac{\Delta U_{\text{up}}}{\sigma^2},\qquad E_{\text{down}}=\frac{\Delta U_{\text{down}}}{\sigma^2},\qquad P_{\text{up}}=\frac{e^{-E_{\text{up}}}}{e^{-E_{\text{up}}}+e^{-E_{\text{down}}}} \]
+    </div>
+    <p>The substantive change is that \(p_r,p_s\) — the "barrier" prices — are no longer arbitrary support/resistance levels. They are defined as the nearest local maxima of \(\rho(p')\) above and below current price: the nearest meaningful clusters of cost basis, which is where \(S(p)\) and \(D(p)\) actually bend the combined potential. This gives \(p_r,p_s\) an operational, on-chain-checkable definition instead of a chart-pattern one.</p>
+  </section>
+
+  <section id="s6">
+    <h2><span class="num">6</span> Jump risk — whale and insider dumps as a marked Hawkes overlay</h2>
+    <p>A pure diffusion cannot represent the dominant tail event in this band: a single large wallet exiting through thin liquidity. The price equation gains a compensated jump term,</p>
+    <div class="eq">
+    \[ dp_t = \big(\text{drift + AMM/cost-basis force}\big)\,dt + \sigma_t\,dW_t + \int_{\mathcal Z} z\,\tilde N(dt,dz), \]
+    </div>
+    <p>where \(N\) is a marked point process for large sells with self-exciting (Hawkes) intensity,</p>
+    <div class="eq">
+    \[ \lambda_{\text{sell}}(t) = \lambda_0 + \phi(C_t)+\sum_{t_i<t}\kappa\, e^{-\beta(t-t_i)}, \]
+    </div>
+    <p>structurally identical to the buy-side virality kernel already in use for clustering detection elsewhere in this work, applied here to the dump side. \(C_t\) is holder concentration (top-10 wallet share, or a Gini coefficient over the holder set), directly observable and entered as a covariate rather than left as a free parameter: higher concentration raises baseline jump intensity through \(\phi(\cdot)\).</p>
+    <p>The jump-size distribution \(z\) is not assumed; it is induced by composing the empirical (heavy-tailed, roughly power-law) distribution of large-wallet balances with the exact AMM impact map of §3 — i.e. a wallet's realistic dump size, run through \(U_{\text{AMM}}\), produces the implied price-jump distribution directly. This is the correct way to satisfy the brief's instruction not to force a physics analogy where it doesn't hold: jump-diffusion is justified here on structural grounds (a literally discrete, large, observable event), not by aesthetic resemblance to a physical process.</p>
+  </section>
+
+  <section id="s7">
+    <h2><span class="num">7</span> Liquidity-pull hazard — the terminal absorbing state</h2>
+    <p>Complete liquidity removal is qualitatively different from a large sell: it is closer to a default event than a price move, and should be modeled as such. Let \(\tau_{\text{rug}}\) be the (latent, until it happens) time of pool liquidity removal. Model it with a proportional-hazards specification,</p>
+    <div class="eq hazard">
+    \[ \lambda_{\text{rug}}(t\mid \mathbf{c}_t) = \lambda_{0}(t)\,\exp\!\big(\beta_1\,\mathbf 1[\text{LP unlocked}] + \beta_2\,\mathbf 1[\text{dev wallet active}] + \beta_3\,C_t + \beta_4\,/\,\text{mcap}_t\big), \]
+    </div>
+    <p>with baseline hazard \(\lambda_0(t)\) decaying with time-since-migration (rug risk is heavily front-loaded), and covariates that are all directly on-chain observable: whether the LP token is locked or burned, whether the original deployer wallet has moved tokens, holder concentration, and inverse market cap as a thinness proxy. Survival probability is \(S(t)=\exp(-\int_0^t \lambda_{\text{rug}}(u)\,du)\).</p>
+    <p>This enters the decision layer the way default risk enters credit pricing: any expected-value calculation for holding through \([t,t+\Delta t]\) must be a survival-weighted mixture,</p>
+    <div class="eq hazard">
+    \[ \mathbb E[\text{payoff}] = S(t+\Delta t)\,\mathbb E[\text{payoff}\mid\text{no rug}] + \big(1-S(t+\Delta t)\big)\,\mathbb E[\text{payoff}\mid\text{rug}], \]
+    </div>
+    <p>where the rug-conditional payoff is a near-total loss net of any realized slippage on exit. This is the single most important addition relative to the prior document: without it, the confidence functional and optimal-stopping problem are solving the wrong objective, since they implicitly assume the diffusion never terminates catastrophically.</p>
+  </section>
+
+  <section id="s8">
+    <h2><span class="num">8</span> Regime classification, refined</h2>
+    <p>The six regimes from the prior document (Trend, Transition, Breakout, Chop, Idle, and an implicit Exhaustion) are retained but two are sharpened and one is added.</p>
+    <table>
+      <tr><th>Regime</th><th>Definition</th></tr>
+      <tr><td>Trend</td><td class="eqcell">|μ| &gt; kσ and |Edge| &gt; E_T</td></tr>
+      <tr><td><b>Exhaustion</b> (refined)</td><td class="eqcell">|Edge| &gt; E_T but ∂U/∂p ≈ 0 <i>and</i> ρ(p) high — price stalling exactly at a cost-basis cluster, not merely slowing</td></tr>
+      <tr><td>Transition / Breakout</td><td class="eqcell">V_E, A_E exceed thresholds, unchanged in form</td></tr>
+      <tr><td>Chop / Idle</td><td class="eqcell">|Edge| or C below thresholds, unchanged in form</td></tr>
+      <tr><td><b>Terminal</b> (new)</td><td class="eqcell">λ_rug(t) &gt; λ* <i>or</i> observed reserve drop consistent with LP removal</td></tr>
+    </table>
+    <p>Terminal is the only regime with a deterministic trigger once it fires (a reserve collapse is directly observed, not inferred) and overrides every other signal — it forces an immediate exit decision rather than entering the confidence-weighted entry/exit logic below.</p>
+  </section>
+
+  <section id="s9">
+    <h2><span class="num">9</span> Confidence as a derived likelihood ratio, not an asserted sum</h2>
+    <p>The prior document's confidence functional \(C=w_1\text{Edge}+w_2 V_E+w_3 A_E+w_4(\mu/\sigma)\) had the right linear shape but admitted, correctly, that the weights were "calibrated rather than guessed" without saying from what. Here is the derivation that was missing.</p>
+    <p>Frame the decision as a hypothesis test between continuation (\(H_1\)) and reversal/exhaustion (\(H_0\)). The Neyman–Pearson-optimal statistic is the log-likelihood ratio of the observed evidence under each hypothesis. If the evidence streams — Edge, \(V_E\), \(A_E\), \(\mu/\sigma\), and now \(\lambda_{\text{rug}}\) — are treated as conditionally independent given the regime (a naive-Bayes approximation, not exact, but standard and tractable online), the log-likelihood ratio decomposes additively:</p>
+    <div class="eq">
+    \[ \log\Lambda \;=\; \sum_i \log\frac{p(E_i\mid H_1)}{p(E_i\mid H_0)} \;\equiv\; C. \]
+    </div>
+    <p>This is what justifies the linear form — not as a heuristic, but as the additive structure that a log-likelihood ratio takes under conditional independence. It also gives a concrete estimation procedure for the weights: under the naive-Bayes assumption, this combination rule is exactly logistic regression. The \(w_i\) are fitted by regressing realized regime-transition outcomes (did price continue or reverse) against the evidence vector across the historical token corpus, online-updatable via recursive least squares or a Kalman-style update on the regression coefficients themselves.</p>
+    <div class="eq hazard">
+    \[ C' = C - w_5\,\lambda_{\text{rug}}(t), \]
+    </div>
+    <p>subtracting a hazard penalty so that confidence in a continuation trade is discounted by ongoing terminal risk, consistent with §7.</p>
+    <div class="callout assumption">Conditional independence of the evidence streams given the regime is an approximation. The true joint likelihood would require modeling correlations between, say, \(V_E\) and \(\lambda_{rug}\) (a rug event mechanically produces a violent negative \(V_E\)) — these are not independent in reality. The naive-Bayes/logistic form is the standard, tractable compromise; it should be checked against a small joint model (e.g. adding an interaction term) rather than trusted as exact.</div>
+  </section>
+
+  <section id="s10">
+    <h2><span class="num">10</span> Entry and exit as cost-aware optimal stopping</h2>
+    <p>The prior document's entry/exit rule used fixed thresholds \(C_{\text{buy}}, C_{\text{exit}}\) around \(C=0\). At this market-cap band, swap fees, realized slippage against the AMM curve, and MEV/sandwich tax are large relative to typical position size, so a zero-centered threshold is provably suboptimal.</p>
+    <p>This is a singular stochastic control problem with proportional transaction cost \(\theta\) (estimable directly from realized fill data). The standard result from this literature (Constantinides 1986; Davis & Norman 1990, applied here to a confidence-state rather than a wealth-state) is that the optimal policy is a <b>no-trade band</b> \([C_{\text{sell}}^*, C_{\text{buy}}^*]\) around zero, with boundaries satisfying value-matching and smooth-pasting conditions on the associated Hamilton–Jacobi–Bellman variational inequality, and the half-width of the band scaling asymptotically like \(\theta^{1/3}\) for small \(\theta\) relative to the local diffusion variance.</p>
+    <div class="callout note">With the jump and hazard terms included, this free-boundary problem has no closed form in general — it must be solved numerically (or its boundaries fitted empirically via the logistic framework of §9, with the \(\theta^{1/3}\) scaling used as a sanity check on the fitted band width rather than a derivation of it directly). What this section provides is the theoretical justification <i>that</i> a cost-sized no-trade band is correct, replacing the unjustified zero-threshold assumption — not a closed-form value for the band.</div>
+  </section>
+
+  <section id="s11">
+    <h2><span class="num">11</span> Parameter estimation — why hierarchical Bayes is necessary, not optional</h2>
+    <p>A single token in this market-cap band typically offers only minutes to low hours of trade history before either dying or maturing past this regime. Estimating Hawkes decay \(\beta\), OU mean-reversion \(\lambda\), or hazard coefficients \(\beta_{1..4}\) from one token's history alone is poorly identified — the sample is too short.</p>
+    <p>The correct estimator is hierarchical: each token's parameters \(\theta_i\) are drawn from a population distribution, \(\theta_i \sim \mathcal N(\theta_{\text{pop}}, \Sigma_{\text{pop}})\), with \(\theta_{\text{pop}}\) calibrated offline from the full historical corpus of migrated tokens. Per-token estimates are then the Bayesian posterior given \(\theta_{\text{pop}}\) as prior, updated online as ticks arrive — formally a generalization of the Kalman update already used for the drift state, now applied at the parameter level. This is not a stylistic preference: by the James–Stein result, shrinking individual estimates toward a population mean strictly dominates per-token maximum likelihood in mean-squared error whenever the per-token sample is small relative to the population, which is exactly this regime.</p>
+    <p>This resolves the brief's parameter taxonomy concretely:</p>
+    <table>
+      <tr><th>Tier</th><th>Examples</th><th>Source</th></tr>
+      <tr><td>Population hyperparameters</td><td>\(\theta_{\text{pop}},\Sigma_{\text{pop}}\), \(h_{\text{sell}}(\cdot)\) shape, baseline hazard \(\lambda_0(t)\)</td><td>Calibrated offline, periodically refreshed</td></tr>
+      <tr><td>Token-level state</td><td>\(\mu_t,\sigma_t^2,\lambda^{buy}_t,\lambda^{sell}_t\)</td><td>Estimated online, Bayesian update with population prior</td></tr>
+      <tr><td>User risk parameters</td><td>Kelly fraction cap, max position size</td><td>Never market-estimated — a risk-preference choice, set deliberately</td></tr>
+    </table>
+  </section>
+
+  <section id="s12">
+    <h2><span class="num">12</span> Validation — this is a panel problem, not a time-series problem</h2>
+    <p>Because the strategy is applied across many short-lived, structurally similar tokens rather than one long-lived asset, conventional single-series backtesting is the wrong validation frame and will overstate performance. Three corrections matter most:</p>
+    <ul>
+      <li><b>Survivorship bias.</b> The validation sample must include every token that migrated into the 40k–200k band in the test window, including the ones that rugged or died within minutes — excluding them is exactly the bias the hazard model in §7 exists to price.</li>
+      <li><b>Cross-sectional, not sequential, splitting.</b> Hold out entire tokens (and ideally entire time windows, since SOL-wide regime correlation links many tokens' fates together) rather than holding out a trailing slice of one time series — leave-one-token-out or leave-one-window-out, not a simple chronological train/test split.</li>
+      <li><b>Proper scoring rules over raw PnL.</b> Given the extreme variance of memecoin returns, log-loss or Brier score on the regime/direction predictions (§8, §9) is a far lower-variance, harder-to-overfit validation target than realized PnL, and should be the primary metric, with PnL backtesting (synthetic and historical) used as a secondary, sanity-check layer rather than the optimization target itself.</li>
+    </ul>
+  </section>
+
+  <section id="s13">
+    <h2><span class="num">13</span> Summary of what changed</h2>
+    <table>
+      <tr><th>Component</th><th>Original (general)</th><th>Refined (40k–200k, migrated)</th></tr>
+      <tr><td>Liquidity field</td><td>Latent, fitted Gaussian nodes</td><td>Observed, exact CPMM cost function \(U_{\text{AMM}}\)</td></tr>
+      <tr><td>Support/resistance</td><td>Heuristic price levels</td><td>Derived from reconstructed holder cost-basis density \(\rho(p)\)</td></tr>
+      <tr><td>Tail risk</td><td>None (pure diffusion)</td><td>Marked Hawkes jump overlay + separate rug-hazard absorbing state</td></tr>
+      <tr><td>Confidence functional</td><td>Asserted linear sum</td><td>Derived log-likelihood ratio, weights fit by logistic regression</td></tr>
+      <tr><td>Entry/exit thresholds</td><td>Fixed, ungrounded constants</td><td>Cost-sized no-trade band from optimal-stopping theory</td></tr>
+      <tr><td>Parameter estimation</td><td>Implicitly per-token</td><td>Hierarchical Bayes, population prior + online shrinkage</td></tr>
+      <tr><td>Validation</td><td>Implicit single-series backtest</td><td>Cross-sectional, survivorship-corrected, scoring-rule based</td></tr>
+    </table>
+  </section>
+
+  <section id="s14">
+    <h2><span class="num">14</span> Open problems</h2>
+    <ol>
+      <li>The additive combination of \(U_{\text{AMM}}\) and \(U_{\text{cost-basis}}\) (§4) is an approximation; whether it holds under stress (large, fast moves) is untested.</li>
+      <li>\(h_{\text{sell}}(r)\) — the propensity-to-sell-at-multiple function — is asserted to be estimable but its functional form (and whether it is stable across tokens at all, versus highly idiosyncratic) is an empirical question, not a settled one.</li>
+      <li>The naive-Bayes independence assumption in §9 is known to be wrong at least for the \(V_E\)/\(\lambda_{\text{rug}}\) pair; a correctly specified joint model would tighten the confidence functional but is not yet derived here.</li>
+      <li>The no-trade band in §10 has no closed form once jumps and hazard are included — it requires numerical free-boundary solution or empirical fitting, and the asymptotic \(\theta^{1/3}\) scaling is a sanity check, not a substitute.</li>
+      <li>Reliable per-wallet cost-basis reconstruction depends on clean on-chain transfer history; CEX-funded wallets, mixers, or bridged inflows will corrupt \(\rho(p)\) for a non-trivial share of holders, and the framework does not yet specify how to handle that contamination.</li>
+    </ol>
+  </section>
+
+  <footer>state-space refinement · migrated pump.fun, 40k–200k mcap · scope: theory only, no implementation</footer>
+</div>
+</body>
+</html>

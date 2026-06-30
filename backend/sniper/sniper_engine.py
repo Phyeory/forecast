@@ -57,6 +57,8 @@ class SniperEngine:
         self.stale: set[str] = set()       # tokens timed out
         self.rejected: set[str] = set()    # tokens rejected by chart validator
         self.blacklist: set[str] = set()   # blacklisted creators
+        # Last closed-candle time fed to each token's StrategyEngine
+        self._last_se_candle_time: dict[str, int] = {}
 
         # Rate limiting
         self._trades_this_hour: int = 0
@@ -227,8 +229,11 @@ class SniperEngine:
                 self.aggregators[mint] = agg
 
                 # Create per-token strategy engine for Kalman/ROC
-                se = StrategyEngine(warmup=5, ema_fast=3, ema_slow=7, roc_period=3)
+                # Use minimal warmup — we only need m_hat, not the full signal
+                se = StrategyEngine(warmup=3, ema_fast=3, ema_slow=7, roc_period=3)
                 self.strategy_engines[mint] = se
+                # Track last closed candle time so we only feed closed bars
+                self._last_se_candle_time[mint] = -1
 
                 # Subscribe to trade stream for this token
                 await self._subscribe_to_trades(mint)
@@ -282,21 +287,28 @@ class SniperEngine:
 
         # Update candle aggregator
         agg = self.aggregators.get(mint)
+        is_new_candle = False
         if agg:
             is_buy = trade.get("tx_type", "buy") == "buy"
-            agg.process_trade(
+            candle, is_new_candle = agg.process_trade(
                 price=trade.get("price", 0),
                 volume=trade.get("sol_amount", 0),
                 timestamp=trade.get("timestamp", time.time()),
                 is_buy=is_buy,
             )
 
-        # Update strategy engine
+        # Update strategy engine — ONLY on closed candles (new candle started).
+        # Feeding the in-progress candle on every tick means the Kalman filter
+        # sees near-identical prices hundreds of times per second, which drives
+        # m_hat → 0 and permanently breaks C4 (momentum check).
         se = self.strategy_engines.get(mint)
-        if se and agg and agg.current_candle:
-            c = agg.current_candle
-            se.update(c.time, c.open, c.high, c.low, c.close, c.volume,
-                      _build_full_result=False)
+        if se and agg and is_new_candle and len(agg._history) > 0:
+            # Feed the just-CLOSED candle (last entry in history) to StrategyEngine
+            closed = agg._history[-1]
+            last_t = self._last_se_candle_time.get(mint, -1)
+            if closed.time != last_t:
+                se.update(closed.time, closed.open, closed.high, closed.low, closed.close, closed.volume)
+                self._last_se_candle_time[mint] = closed.time
 
         # ── Gate 1: Fee filter ────────────────────────────────────────────
         if not passes_fee_filter(detector.fees_paid_sol, self.config.fee_threshold_sol):
@@ -365,26 +377,54 @@ class SniperEngine:
         if len(self.open_positions) >= self.config.max_concurrent_positions:
             return
 
-        # Get candles and compute pressure
-        candles = agg.get_last_n(15) if agg else []
-        if len(candles) < 10:
+        # ── Entry evaluation: only run on candle close ────────────────────
+        # Running on every raw trade tick means pressure metrics and the
+        # two_green check see partial/in-progress candle data that changes
+        # on every tick. Conditions never align simultaneously. Only evaluate
+        # once per closed 1-second candle when we have settled OHLCV data.
+        if not is_new_candle:
             return
 
-        pressure = compute_pressure(candles)
+        # Need at least 10 closed candles for meaningful signals
+        if not agg or len(agg._history) < 10:
+            return
+
+        # Build candle list from CLOSED history only (exclude current in-progress)
+        # This ensures two_green, floor, and pressure use fully-settled data.
+        closed_candles = list(agg._history)[-15:]
+
+        pressure = compute_pressure(closed_candles)
         if pressure is None:
             return
+
+        # Re-fetch se in case it was cleaned up between gate checks
+        se = self.strategy_engines.get(mint)
 
         entry = evaluate_entry(
             mint=mint,
             launch_detector=detector,
             pressure=pressure,
             strategy_engine=se,
-            candles=candles,
+            candles=closed_candles,
             timestamp=trade.get("timestamp", time.time()),
+        )
+
+        # One log line per closed candle — clear and not spammy
+        failed = [k for k, v in entry.conditions_met.items() if not v]
+        logger.info(
+            f"[Sniper] {mint[:8]} candle eval — "
+            f"{'PASS' if not failed else 'blocked:' + str(failed)} | "
+            f"dip={detector.dip_depth:.1%} "
+            f"m_hat={getattr(se, 'm_hat', 0):.6f} "
+            f"bars={getattr(se, 'bar_count', 0)} "
+            f"buy1s={pressure.buy_ratio_1s:.2f} "
+            f"buy5s={pressure.buy_ratio_5s:.2f} "
+            f"vol_exp={pressure.volume_expansion:.2f}"
         )
 
         if entry.triggered:
             await self._execute_entry(entry, detector)
+
 
     async def _execute_entry(self, entry: EntrySignal, detector: LaunchDetector):
         """Execute a paper or live entry."""
@@ -541,6 +581,7 @@ class SniperEngine:
         # Keep detectors for stale/rejected tracking but clean up heavy objects
         self.aggregators.pop(mint, None)
         self.strategy_engines.pop(mint, None)
+        self._last_se_candle_time.pop(mint, None)
         client = self._trade_clients.pop(mint, None)
         if client:
             client.stop()

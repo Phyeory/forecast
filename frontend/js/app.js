@@ -54,7 +54,7 @@ let pendingMarkerData = [];  // raw marker data awaiting market cap resolution
 /* Strategy Engine Parameters — V1 (Physics-based regime detection) */
 let engineParamsV1 = {
   ema_fast: 3, ema_slow: 7, atr_period: 7, roc_period: 3, warmup: 30,
-  signal_strong: 4, signal_weak: 1.5, signal_noise: 1.1535714285714287,
+  signal_strong: 4, signal_weak: 2, signal_noise: 1.1535714285714287,
   exhaustion_bars_limit: 1, delta_threshold: 0.3, kalman_gamma: 0.125,
   min_trend_bars: 3, reversal_confirm_bars: 2, chop_atr_pct: 0.3,
   chop_spread_pct: 0.05, reversal_exit_confirm_bars: 0,
@@ -76,7 +76,7 @@ let engineParamsV1 = {
   consolidation_range_pct: 0,
   confidence_very_high: 0.86,
   ema_macro_period: 7,
-  stoploss_pct: 25,
+  stoploss_pct: 0,
   takeprofit_pct: 0,
   // Confidence-scaled TP/SL (0 = use static value above)
   takeprofit_pct_low: 0,

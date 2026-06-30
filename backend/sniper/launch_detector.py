@@ -185,16 +185,18 @@ class LaunchDetector:
         """Send an act transition event to the queue."""
         if self.event_queue is None:
             return
-        event = ActTransitionEvent(
-            mint=self.mint,
-            new_act=self.current_act,
-            timestamp=ts,
-            spike_high_mc=self.spike_high_mc,
-            floor_mc=self.lowest_mc_since_spike,
-            dip_depth=self.dip_depth,
-            fees_paid_sol=self.fees_paid_sol,
-        )
+        event = {
+            "type": "act_transition",
+            "mint": self.mint,
+            "new_act": self.current_act,
+            "timestamp": ts,
+            "spike_high_mc": self.spike_high_mc,
+            "floor_mc": self.lowest_mc_since_spike,
+            "dip_depth": self.dip_depth,
+            "fees_paid_sol": self.fees_paid_sol,
+        }
         try:
             self.event_queue.put_nowait(event)
         except asyncio.QueueFull:
             pass
+

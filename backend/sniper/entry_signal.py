@@ -107,23 +107,31 @@ def evaluate_entry(
     )
 
     # ── CONDITION 4 — Momentum Turning Positive ───────────────────────────
-    # m_hat is the Kalman momentum (rate of change of price). m_hat > 0 means
-    # the filter estimates price is currently rising.
-    # BUG FIX: the old code checked p_hat > 0 (Kalman price estimate), which
-    # is always True for any real asset. Changed to m_hat > 0 (momentum).
-    roc = getattr(strategy_engine, 'm_hat', 0)       # Kalman momentum
+    # Called on closed candles only (sniper_engine guarantees this).
+    # m_hat is the Kalman momentum updated on each 1-second candle close.
+    # m_hat > 0 means price is accelerating upwards.
+    # If strategy_engine is None (cleaned up), default to False.
+    if strategy_engine is None:
+        conditions["c4_momentum"] = False
+    else:
+        roc = getattr(strategy_engine, 'm_hat', 0)
 
-    roc_positive = roc > 0
-    kalman_up = roc > 0   # same signal — kept explicit for readability
+        # Two consecutive rising candles confirm visual momentum.
+        # Prefer close > open, but fall back to close-to-close comparison for
+        # doji candles (open == close) which occur when only one trade per second.
+        if len(candles) >= 3:
+            c1, c2, c3 = candles[-1], candles[-2], candles[-3]
+            c1_up = c1.close > c1.open or (c1.close == c1.open and c1.close > c2.close)
+            c2_up = c2.close > c2.open or (c2.close == c2.open and c2.close > c3.close)
+            two_rising = c1_up and c2_up
+        elif len(candles) >= 2:
+            c1, c2 = candles[-1], candles[-2]
+            two_rising = c1.close >= c1.open and c2.close >= c2.open
+        else:
+            two_rising = False
 
-    # Two consecutive green candles confirm visual momentum
-    two_green = (
-        len(candles) >= 2
-        and candles[-1].close > candles[-1].open
-        and candles[-2].close > candles[-2].open
-    )
+        conditions["c4_momentum"] = roc > 0 and two_rising
 
-    conditions["c4_momentum"] = roc_positive and kalman_up and two_green
 
     # ── CONDITION 5 — Volume Expansion ────────────────────────────────────
     conditions["c5_volume_expansion"] = pressure.volume_expansion >= 1.5
