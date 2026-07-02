@@ -1454,27 +1454,38 @@ class StrategyEngine:
         """
         if self.takeprofit_pct_low > 0.0 or self.takeprofit_pct_high > 0.0:
             lo = self.takeprofit_pct_low if self.takeprofit_pct_low > 0.0 else self.takeprofit_pct
-            hi = self.takeprofit_pct_high if self.takeprofit_pct_high > 0.0 else self.takeprofit_pct
+            hi = self.takeprofit_pct_high if self.takeprofit_pct_high > 0.0 else 100.0
             return self._confidence_lerp(lo, hi)
         return self.takeprofit_pct
 
     def _effective_stoploss_pct(self) -> float:
-        """Return the effective SL% (signed, same convention as stoploss_pct) for
-        the current confidence level.  Falls back to static stoploss_pct when
-        confidence scaling is disabled.
+        """Return the confidence-scaled SL% only (0.0 when no scaling params are set).
+
+        This is intentionally separate from stoploss_pct — both can be active
+        simultaneously in _check_exit.  stoploss_pct is always evaluated on its
+        own via _global_stoploss_pct().
 
         For hard stops (negative):  higher confidence → tighter stop (smaller magnitude)
         For trailing stops (positive): same sense — higher confidence → tighter trail
         """
         if self.stoploss_pct_low != 0.0 or self.stoploss_pct_high != 0.0:
             # Scaling operates on magnitudes. Determine sign dynamically from the parameters.
-            is_hard_stop = (self.stoploss_pct_low < 0) or (self.stoploss_pct_high < 0) or (self.stoploss_pct < 0)
+            is_hard_stop = (self.stoploss_pct_low < 0) or (self.stoploss_pct_high < 0)
             sign = -1.0 if is_hard_stop else 1.0
-            
+
             lo = abs(self.stoploss_pct_low) if self.stoploss_pct_low != 0.0 else abs(self.stoploss_pct)
             hi = abs(self.stoploss_pct_high) if self.stoploss_pct_high != 0.0 else abs(self.stoploss_pct)
             mag = self._confidence_lerp(lo, hi)
             return sign * mag
+        return 0.0
+
+    def _global_stoploss_pct(self) -> float:
+        """Return the static global stoploss_pct as-is.
+
+        Runs simultaneously with _effective_stoploss_pct() so you can combine
+        e.g. a confidence-scaled hard stop (-25/-30) with a global trailing
+        stop (+25) at the same time.
+        """
         return self.stoploss_pct
 
     def _update_peak_price(self, h: float, l: float):
@@ -1507,12 +1518,12 @@ class StrategyEngine:
         # so it evaluates trailing stops against the peak established from 
         # previous bars. This prevents phantom intra-bar stop-outs.
 
-        # ── Confidence-scaled (or static) stop loss ───────────────────────
+        # ── Confidence-scaled stop loss (stoploss_pct_low / stoploss_pct_high) ─
         eff_sl = self._effective_stoploss_pct()
         if eff_sl != 0.0:
             pct = abs(eff_sl)
             if eff_sl < 0:
-                # ── Hard stop loss (negative stoploss_pct) ──────────────────
+                # ── Hard stop loss ──────────────────────────────────────────
                 # Use intra-bar low/high so a wick through the stop always triggers.
                 if self.position_direction == Direction.UP:
                     check_price = l if l > 0 else c
@@ -1525,9 +1536,38 @@ class StrategyEngine:
                         self.exit_signal_reason = "hard_stop"
                         return Signal.EXIT
             else:
-                # ── Trailing stop loss (positive stoploss_pct) ──────────────
-                # Use intra-bar low/high so a wick through the trail level
-                # always triggers an exit, even when close recovers above it.
+                # ── Trailing stop loss ──────────────────────────────────────
+                if self.position_direction == Direction.UP:
+                    trail_stop = self._peak_price * (1.0 - pct / 100.0)
+                    check_price = l if l > 0 else c
+                    if check_price <= trail_stop:
+                        self.exit_signal_reason = "trailing_stop"
+                        return Signal.EXIT
+                elif self.position_direction == Direction.DOWN:
+                    trail_stop = self._peak_price * (1.0 + pct / 100.0)
+                    check_price = h if h > 0 else c
+                    if check_price >= trail_stop:
+                        self.exit_signal_reason = "trailing_stop"
+                        return Signal.EXIT
+
+        # ── Global (static) stop loss — runs simultaneously with scaled stop ─
+        gsl = self._global_stoploss_pct()
+        if gsl != 0.0:
+            pct = abs(gsl)
+            if gsl < 0:
+                # ── Hard stop loss ──────────────────────────────────────────
+                if self.position_direction == Direction.UP:
+                    check_price = l if l > 0 else c
+                    if check_price <= self.entry_price * (1.0 - pct / 100.0):
+                        self.exit_signal_reason = "hard_stop"
+                        return Signal.EXIT
+                elif self.position_direction == Direction.DOWN:
+                    check_price = h if h > 0 else c
+                    if check_price >= self.entry_price * (1.0 + pct / 100.0):
+                        self.exit_signal_reason = "hard_stop"
+                        return Signal.EXIT
+            else:
+                # ── Trailing stop loss ──────────────────────────────────────
                 if self.position_direction == Direction.UP:
                     trail_stop = self._peak_price * (1.0 - pct / 100.0)
                     check_price = l if l > 0 else c
@@ -1694,11 +1734,11 @@ class StrategyEngine:
             "entry_price": self.entry_price,
             "peak_price": self._peak_price,
             "trail_stop_price": (
-                self._peak_price * (1.0 - abs(self._effective_stoploss_pct()) / 100.0)
-                if self.in_position and self.position_direction == Direction.UP and self._effective_stoploss_pct() > 0
+                self._peak_price * (1.0 - abs(self._global_stoploss_pct()) / 100.0)
+                if self.in_position and self.position_direction == Direction.UP and self._global_stoploss_pct() > 0
                 else (
-                    self._peak_price * (1.0 + abs(self._effective_stoploss_pct()) / 100.0)
-                    if self.in_position and self.position_direction == Direction.DOWN and self._effective_stoploss_pct() > 0
+                    self._peak_price * (1.0 + abs(self._global_stoploss_pct()) / 100.0)
+                    if self.in_position and self.position_direction == Direction.DOWN and self._global_stoploss_pct() > 0
                     else None
                 )
             ),
