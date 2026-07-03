@@ -59,6 +59,8 @@ class Trade:
     entry_reason: str = ""
     fees_paid: float = 0.0      # priority + bribe fees (not slippage)
     slippage_cost_sol: float = 0.0  # total SOL lost to slippage both ways
+    outcome: str = ""           # "W" or "L" — set when trade is closed
+    entry_params: dict = field(default_factory=dict)  # engine snapshot at entry
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -241,6 +243,133 @@ class ForwardTester:
         # Deduct trade size + fees from balance
         self.balance -= (trade_size + fees)
 
+        # ── Complete engine snapshot at the moment of entry ──────────────
+        # Every state variable + every config parameter — nothing omitted.
+        eng = self.engine
+
+        # ── Live indicator state ──────────────────────────────────────────
+        entry_params = {
+            # Regime / direction
+            "regime":                   eng.regime.value,
+            "direction":                eng.direction.value,
+            "prev_direction":           eng.prev_direction.value,
+            "trend_before_exhaustion":  eng.trend_before_exhaustion.value,
+
+            # Kalman / momentum
+            "m_hat":                    round(eng.m_hat, 8),
+            "prev_m_hat":               round(eng.prev_m_hat, 8),
+            "p_hat":                    round(eng.p_hat, 8),
+            "momentum_acceleration":    round(eng.momentum_acceleration, 8),
+            "_momentum_peak_declining_count": eng._momentum_peak_declining_count,
+            "momentum_past_peak":       eng._momentum_past_peak(),
+
+            # Signal
+            "signal_strength":          round(eng.signal_strength, 6),
+            "s_effective":              round(eng.s_effective, 6),
+
+            # EMA
+            "ema_fast":                 round(eng.ema_fast_val or 0.0, 8),
+            "ema_slow":                 round(eng.ema_slow_val or 0.0, 8),
+            "ema_macro":                round(eng.ema_macro_val or 0.0, 8),
+            "ema_spread":               round(eng.ema_spread, 8),
+            "prev_ema_spread":          round(eng.prev_ema_spread, 8),
+            "spread_expanding":         eng.spread_expanding,
+
+            # ATR / volatility
+            "atr":                      round(eng.atr_val or 0.0, 8),
+            "atr_floor":                round(eng.atr_floor, 8),
+
+            # Confidence / regime filter
+            "trend_confidence":         round(eng.trend_confidence, 6),
+            "is_trending":              eng.is_trending,
+
+            # Cross / stability / chop
+            "ema_cross_valid":          eng._ema_cross_valid,
+            "_ema_cross_persist_count": eng._ema_cross_persist_count,
+            "pre_entry_stable":         eng._pre_entry_stable,
+            "pre_entry_stable_up":      eng._pre_entry_stable_up,
+            "pre_entry_stable_down":    eng._pre_entry_stable_down,
+            "in_local_chop":            eng._in_local_chop,
+
+            # Overextension
+            "price_overextended":       eng._price_overextended(exec_price),
+            "overextension_ratio":      round(exec_price / eng.p_hat, 6) if eng.p_hat > 0 else 0.0,
+
+            # Trend anchors / bar counters
+            "bar_count":                eng.bar_count,
+            "trend_bar_count":          eng.trend_bar_count,
+            "exhaustion_bar_count":     eng.exhaustion_bar_count,
+            "exhaustion_persist_count": eng.exhaustion_persist_count,
+            "reversal_confirm_count":   eng.reversal_confirm_count,
+            "trend_reversal_confirm_count": eng.trend_reversal_confirm_count,
+            "reversal_bar_count":       eng.reversal_bar_count,
+            "no_motion_count":          eng.no_motion_count,
+            "_exhaustion_s_decay_count": eng._exhaustion_s_decay_count,
+            "trend_start_bar":          eng.trend_start_bar,
+            "trend_start_price":        round(eng.trend_start_price, 8),
+            "trend_start_atr":          round(eng.trend_start_atr, 8),
+            "_exhaustion_phase_high":   round(eng._exhaustion_phase_high, 8),
+
+            # Computed helpers
+            "effective_stoploss_pct":   round(eng._effective_stoploss_pct(), 4),
+            "effective_takeprofit_pct": round(eng._effective_takeprofit_pct(), 4),
+            "global_stoploss_pct":      round(eng._global_stoploss_pct(), 4),
+
+            # ── Config / hyperparameters (all of them) ───────────────────
+            "cfg_ema_fast_p":                    eng.ema_fast_p,
+            "cfg_ema_slow_p":                    eng.ema_slow_p,
+            "cfg_atr_period":                    eng.atr_period,
+            "cfg_roc_period":                    eng.roc_period,
+            "cfg_warmup":                        eng.warmup,
+            "cfg_S_strong":                      eng.S_strong,
+            "cfg_S_weak":                        eng.S_weak,
+            "cfg_S_noise":                       eng.S_noise,
+            "cfg_exhaustion_bars_limit":         eng.exhaustion_bars_limit,
+            "cfg_delta_threshold":               eng.delta_threshold,
+            "cfg_min_trend_bars":                eng.min_trend_bars,
+            "cfg_reversal_confirm_bars":         eng.reversal_confirm_bars,
+            "cfg_chop_atr_pct":                  eng.chop_atr_pct,
+            "cfg_chop_spread_pct":               eng.chop_spread_pct,
+            "cfg_reversal_exit_confirm_bars":    eng.reversal_exit_confirm_bars,
+            "cfg_s_effective_threshold":         eng.s_effective_threshold,
+            "cfg_exhaustion_persist_bars":       eng.exhaustion_persist_bars,
+            "cfg_regime_lookback":               eng.regime_lookback,
+            "cfg_persistence_threshold":         eng.persistence_threshold,
+            "cfg_momentum_mean_threshold":       eng.momentum_mean_threshold,
+            "cfg_ema_min_spread_pct":            eng.ema_min_spread_pct,
+            "cfg_confidence_high":               eng.confidence_high,
+            "cfg_confidence_low":                eng.confidence_low,
+            "cfg_entry_confidence_high":         eng.entry_confidence_high,
+            "cfg_entry_confidence_low":          eng.entry_confidence_low,
+            "cfg_confidence_very_high":          eng.confidence_very_high,
+            "cfg_confidence_w1":                 eng.confidence_w1,
+            "cfg_confidence_w2":                 eng.confidence_w2,
+            "cfg_confidence_w3":                 eng.confidence_w3,
+            "cfg_confidence_w4":                 eng.confidence_w4,
+            "cfg_atr_floor_k":                   eng.atr_floor_k,
+            "cfg_ema_cross_persist_bars":        eng.ema_cross_persist_bars,
+            "cfg_exhaustion_s_decay_bars":       eng.exhaustion_s_decay_bars,
+            "cfg_exhaustion_stall_bars":         eng.exhaustion_stall_bars,
+            "cfg_exhaustion_stall_atr_pct":      eng.exhaustion_stall_atr_pct,
+            "cfg_local_range_bars":              eng.local_range_bars,
+            "cfg_local_range_threshold_pct":     eng.local_range_threshold_pct,
+            "cfg_sign_flip_threshold":           eng.sign_flip_threshold,
+            "cfg_stability_bars":                eng.stability_bars,
+            "cfg_spike_atr_multiplier":          eng.spike_atr_multiplier,
+            "cfg_spike_lookback_bars":           eng.spike_lookback_bars,
+            "cfg_body_baseline_bars":            eng.body_baseline_bars,
+            "cfg_overextension_k":               eng.overextension_k,
+            "cfg_momentum_peak_bars":            eng.momentum_peak_bars,
+            "cfg_consolidation_range_pct":       eng.consolidation_range_pct,
+            "cfg_ema_macro_period":              eng.ema_macro_period,
+            "cfg_stoploss_pct":                  eng.stoploss_pct,
+            "cfg_takeprofit_pct":                eng.takeprofit_pct,
+            "cfg_stoploss_pct_low":              eng.stoploss_pct_low,
+            "cfg_stoploss_pct_high":             eng.stoploss_pct_high,
+            "cfg_takeprofit_pct_low":            eng.takeprofit_pct_low,
+            "cfg_takeprofit_pct_high":           eng.takeprofit_pct_high,
+        }
+
         trade = Trade(
             entry_time=time,
             entry_price=exec_price,          # CHART price — realistic, includes delay + slippage
@@ -249,6 +378,7 @@ class ForwardTester:
             fees_paid=fees,
             slippage_cost_sol=slippage_cost,
             entry_reason=reason,
+            entry_params=entry_params,
         )
         self.current_trade = trade
         self.engine.notify_trade_opened(exec_price, Direction.UP)
@@ -316,8 +446,10 @@ class ForwardTester:
 
         if pnl > 0:
             self.stats.winning_trades += 1
+            trade.outcome = "W"
         else:
             self.stats.losing_trades += 1
+            trade.outcome = "L"
 
         if self.stats.total_trades > 0:
             self.stats.win_rate = self.stats.winning_trades / self.stats.total_trades * 100

@@ -58,7 +58,7 @@ let engineParamsV1 = {
   exhaustion_bars_limit: 1, delta_threshold: 0.3, kalman_gamma: 0.125,
   min_trend_bars: 2, reversal_confirm_bars: 2, chop_atr_pct: 0.3,
   chop_spread_pct: 0.05, reversal_exit_confirm_bars: 0,
-  s_effective_threshold: 0.35, exhaustion_persist_bars: 6,
+  s_effective_threshold: 0.5, exhaustion_persist_bars: 6,
   regime_lookback: 6, persistence_threshold: 2, momentum_mean_threshold: 0.0,
   ema_min_spread_pct: 0.02, confidence_high: 0.79, confidence_low: 0.19,
   entry_confidence_high: 0.79, entry_confidence_low: 0.19,

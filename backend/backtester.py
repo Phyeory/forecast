@@ -39,6 +39,9 @@ from __future__ import annotations
 from typing import Optional
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import os
+import json
+import re
+import datetime
 
 from forward_tester import ForwardTester
 from data_store import (
@@ -50,6 +53,9 @@ from data_store import (
 
 
 import multiprocessing
+
+# Directory where per-token JSON trade logs are written.
+_RESULTS_DIR = os.path.join(os.path.dirname(__file__), "backtest_results")
 
 
 def score_batch(
@@ -357,6 +363,18 @@ def run_backtest(
         batch_id=batch_id,
     )
 
+    # ── Write per-token JSON trade log (only when trades were placed) ────────
+    if trades:
+        _write_trade_log(
+            recording_id=recording_id,
+            token_name=recording.get("token_name", ""),
+            token_symbol=recording.get("token_symbol", ""),
+            engine_params=engine_params,
+            stats=stats,
+            trades=trades,
+            batch_id=batch_id,
+        )
+
     return {
         "backtest_id":   bt_id,
         "recording_id":  recording_id,
@@ -368,3 +386,80 @@ def run_backtest(
         "stats":         stats,
         "trade_count":   len(trades),
     }
+
+
+# ── JSON trade log writer ───────────────────────────────────────────────────
+
+def _safe_filename(s: str) -> str:
+    """Strip characters that are unsafe in filenames."""
+    return re.sub(r'[^\w\-]', '_', s).strip('_') or "unknown"
+
+
+def _write_trade_log(
+    recording_id: int,
+    token_name: str,
+    token_symbol: str,
+    engine_params: dict,
+    stats: dict,
+    trades: list[dict],
+    batch_id: Optional[str] = None,
+) -> str:
+    """
+    Write a JSON file for a single backtest run.
+
+    File name:  <RESULTS_DIR>/<symbol_or_name>_rec<recording_id>.json
+    Each trade entry contains:
+      - entry_time, exit_time
+      - entry_price, exit_price
+      - entry_params   → full engine snapshot captured when the position opened
+      - outcome        → "W" or "L"
+      - pnl_pct        → percentage PnL for the trade
+      - exit_reason
+    Returns the path to the written file.
+    """
+    os.makedirs(_RESULTS_DIR, exist_ok=True)
+
+    label = _safe_filename(token_symbol or token_name or str(recording_id))
+    timestamp = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    batch_suffix = f"_{_safe_filename(batch_id)}" if batch_id else ""
+    filename = f"{label}_rec{recording_id}{batch_suffix}_{timestamp}.json"
+    filepath = os.path.join(_RESULTS_DIR, filename)
+
+    trade_log = []
+    for t in trades:
+        trade_log.append({
+            "entry_time":   t.get("entry_time"),
+            "exit_time":    t.get("exit_time"),
+            "entry_price":  t.get("entry_price"),
+            "exit_price":   t.get("exit_price"),
+            "outcome":      t.get("outcome", ""),      # "W" or "L"
+            "pnl_pct":      round(t.get("pnl_pct", 0.0), 4),
+            "pnl_sol":      round(t.get("pnl_sol", 0.0), 6),
+            "exit_reason":  t.get("exit_reason", ""),
+            "entry_reason": t.get("entry_reason", ""),
+            "entry_params": t.get("entry_params", {}),
+        })
+
+    payload = {
+        "token_symbol":  token_symbol,
+        "token_name":    token_name,
+        "recording_id":  recording_id,
+        "batch_id":      batch_id,
+        "generated_at":  timestamp,
+        "engine_params": engine_params,
+        "summary": {
+            "total_trades":    stats.get("total_trades", 0),
+            "winning_trades":  stats.get("winning_trades", 0),
+            "losing_trades":   stats.get("losing_trades", 0),
+            "win_rate_pct":    round(stats.get("win_rate", 0.0), 2),
+            "total_pnl_sol":   round(stats.get("total_pnl_sol", 0.0), 6),
+            "max_drawdown_pct": round(stats.get("max_drawdown_pct", 0.0), 2),
+        },
+        "trades": trade_log,
+    }
+
+    with open(filepath, "w") as f:
+        json.dump(payload, f, indent=2)
+
+    return filepath
+
