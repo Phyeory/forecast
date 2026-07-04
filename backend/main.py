@@ -266,16 +266,20 @@ async def recorder_start(body: dict = Body(...)):
                 if cancelled.is_set():
                     break
                 is_synthetic = bool(trade.get("synthetic"))
+                is_buy_rec: Optional[bool] = None
+                if not is_synthetic:
+                    tx_rec = trade.get("tx_type", "")
+                    if tx_rec == "buy":
+                        is_buy_rec = True
+                    elif tx_rec == "sell":
+                        is_buy_rec = False
                 candle, is_new = aggregator.process_trade(
                     trade["price"], trade["sol_amount"], trade["timestamp"],
                     synthetic=is_synthetic,
+                    is_buy=is_buy_rec,
                 )
                 # Persist every tick (real or synthetic) so the candle row in
                 # the DB always reflects the current accumulated OHLCV state.
-                # INSERT OR REPLACE updates the row in-place for the same
-                # (recording_id, time) key — safe and correct whether the
-                # source emits real trades (PumpPortal) or synthetic polls
-                # (DexScreener, which produces only synthetic ticks).
                 candle_dict = candle.to_dict()
                 ct = candle_dict["time"]
                 data_store.insert_candle(
@@ -283,6 +287,8 @@ async def recorder_start(body: dict = Body(...)):
                     candle_dict["open"], candle_dict["high"],
                     candle_dict["low"], candle_dict["close"],
                     candle_dict.get("volume", 0),
+                    candle_dict.get("buy_volume", 0.0),
+                    candle_dict.get("sell_volume", 0.0),
                 )
                 last_candle_time = ct
         finally:
@@ -726,6 +732,8 @@ async def chart_ws(
                 l=candle["low"],
                 c=candle["close"],
                 volume=candle.get("volume", 0),
+                buy_volume=candle.get("buy_volume", 0.0),
+                sell_volume=candle.get("sell_volume", 0.0),
             )
             strategy_results.append(result)
 
@@ -755,9 +763,17 @@ async def chart_ws(
 
             # Pass synthetic flag so aggregator skips ghost candles when price
             # is flat, but still opens new candle buckets when price moves.
+            is_buy_trade: Optional[bool] = None
+            if not is_synthetic:
+                tx = trade.get("tx_type", "")
+                if tx == "buy":
+                    is_buy_trade = True
+                elif tx == "sell":
+                    is_buy_trade = False
             candle, is_new = aggregator.process_trade(
                 trade["price"], trade["sol_amount"], trade["timestamp"],
                 synthetic=is_synthetic,
+                is_buy=is_buy_trade,
             )
 
             # Skip if price hasn't changed (dedup rapid-fire identical ticks)
@@ -775,6 +791,8 @@ async def chart_ws(
                 l=candle_dict["low"],
                 c=candle_dict["close"],
                 volume=candle_dict.get("volume", 0),
+                buy_volume=candle_dict.get("buy_volume", 0.0),
+                sell_volume=candle_dict.get("sell_volume", 0.0),
             )
 
             # Only show real trades in the trade feed sidebar (not synthetic price polls)
@@ -1015,9 +1033,17 @@ async def _scanner_auto_subscribe(result: ScanResult):
                 break
             got_trade = True
             is_synthetic = bool(trade.get("synthetic"))
+            is_buy_trade2: Optional[bool] = None
+            if not is_synthetic:
+                tx2 = trade.get("tx_type", "")
+                if tx2 == "buy":
+                    is_buy_trade2 = True
+                elif tx2 == "sell":
+                    is_buy_trade2 = False
             candle, is_new = aggregator.process_trade(
                 trade["price"], trade["sol_amount"], trade["timestamp"],
                 synthetic=is_synthetic,
+                is_buy=is_buy_trade2,
             )
             candle_dict = candle.to_dict()
             current_price = candle_dict["close"]
@@ -1029,6 +1055,8 @@ async def _scanner_auto_subscribe(result: ScanResult):
                 candle_dict["open"], candle_dict["high"],
                 candle_dict["low"], candle_dict["close"],
                 candle_dict.get("volume", 0),
+                candle_dict.get("buy_volume", 0.0),
+                candle_dict.get("sell_volume", 0.0),
             )
 
             if last_sent_price is not None and current_price == last_sent_price and not is_new:
@@ -1040,6 +1068,8 @@ async def _scanner_auto_subscribe(result: ScanResult):
                 o=candle_dict["open"], h=candle_dict["high"],
                 l=candle_dict["low"], c=candle_dict["close"],
                 volume=candle_dict.get("volume", 0),
+                buy_volume=candle_dict.get("buy_volume", 0.0),
+                sell_volume=candle_dict.get("sell_volume", 0.0),
                 is_new=is_new,
             )
 
@@ -1063,9 +1093,17 @@ async def _scanner_auto_subscribe(result: ScanResult):
                     if cancelled.is_set():
                         break
                     is_synthetic = bool(trade.get("synthetic"))
+                    is_buy_fb: Optional[bool] = None
+                    if not is_synthetic:
+                        tx_fb = trade.get("tx_type", "")
+                        if tx_fb == "buy":
+                            is_buy_fb = True
+                        elif tx_fb == "sell":
+                            is_buy_fb = False
                     candle, is_new = aggregator.process_trade(
                         trade["price"], trade["sol_amount"], trade["timestamp"],
                         synthetic=is_synthetic,
+                        is_buy=is_buy_fb,
                     )
                     candle_dict = candle.to_dict()
                     current_price = candle_dict["close"]
@@ -1075,6 +1113,8 @@ async def _scanner_auto_subscribe(result: ScanResult):
                         candle_dict["open"], candle_dict["high"],
                         candle_dict["low"], candle_dict["close"],
                         candle_dict.get("volume", 0),
+                        candle_dict.get("buy_volume", 0.0),
+                        candle_dict.get("sell_volume", 0.0),
                     )
                     if last_sent_price is not None and current_price == last_sent_price and not is_new:
                         continue
@@ -1084,6 +1124,8 @@ async def _scanner_auto_subscribe(result: ScanResult):
                         o=candle_dict["open"], h=candle_dict["high"],
                         l=candle_dict["low"], c=candle_dict["close"],
                         volume=candle_dict.get("volume", 0),
+                        buy_volume=candle_dict.get("buy_volume", 0.0),
+                        sell_volume=candle_dict.get("sell_volume", 0.0),
                         is_new=is_new,
                     )
             finally:
@@ -1347,9 +1389,17 @@ async def live_trading_ws(
                 break
             got_trade = True
             is_synthetic = bool(trade.get("synthetic"))
+            is_buy_live: Optional[bool] = None
+            if not is_synthetic:
+                tx_live = trade.get("tx_type", "")
+                if tx_live == "buy":
+                    is_buy_live = True
+                elif tx_live == "sell":
+                    is_buy_live = False
             candle, is_new = aggregator.process_trade(
                 trade["price"], trade["sol_amount"], trade["timestamp"],
                 synthetic=is_synthetic,
+                is_buy=is_buy_live,
             )
             candle_dict = candle.to_dict()
             current_price = candle_dict["close"]
@@ -1361,6 +1411,8 @@ async def live_trading_ws(
                 candle_dict["open"], candle_dict["high"],
                 candle_dict["low"], candle_dict["close"],
                 candle_dict.get("volume", 0),
+                candle_dict.get("buy_volume", 0.0),
+                candle_dict.get("sell_volume", 0.0),
             )
 
             if last_sent_price is not None and current_price == last_sent_price and not is_new:
@@ -1372,6 +1424,8 @@ async def live_trading_ws(
                 o=candle_dict["open"], h=candle_dict["high"],
                 l=candle_dict["low"], c=candle_dict["close"],
                 volume=candle_dict.get("volume", 0),
+                buy_volume=candle_dict.get("buy_volume", 0.0),
+                sell_volume=candle_dict.get("sell_volume", 0.0),
                 is_new=is_new,
             )
 

@@ -121,6 +121,8 @@ def score_batch(
                     mid_first, mid_second = l, h
 
                 # Replicate the 4-state tick expansion used in run_backtest
+                buy_vol = candle.get("buy_volume", 0.0)
+                sell_vol = candle.get("sell_volume", 0.0)
                 ft_update(time=t, o=o, h=o, l=o, c=o, volume=0.0,
                           _build_full_result=False)
                 h2 = max(o, mid_first)
@@ -130,6 +132,7 @@ def score_batch(
                 ft_update(time=t, o=o, h=h, l=l, c=mid_second, volume=0.0,
                           _build_full_result=False)
                 ft_update(time=t, o=o, h=h, l=l, c=c, volume=vol,
+                          buy_volume=buy_vol, sell_volume=sell_vol,
                           _build_full_result=False)
 
             stats = ft.stats
@@ -276,6 +279,8 @@ def run_backtest(
         l   = candle["low"]
         c   = candle["close"]
         vol = candle.get("volume", 0)
+        buy_vol  = candle.get("buy_volume", 0.0)
+        sell_vol = candle.get("sell_volume", 0.0)
 
         # Bull bar: high comes before low; bear bar: low before high
         bullish = c >= o
@@ -314,8 +319,9 @@ def run_backtest(
             trade_action_for_candle = fwd["trade_action"]
             trade_label_for_candle  = fwd.get("trade_label")
 
-        # State 4: close tick — also fast path, read from engine directly
+        # State 4: close tick — buy/sell split lands here
         result = ft_update(time=t, o=o, h=h, l=l, c=c, volume=vol,
+                           buy_volume=buy_vol, sell_volume=sell_vol,
                            _build_full_result=False)
         fwd = result.get("forward_test")
         if fwd and trade_action_for_candle is None and fwd.get("trade_action"):

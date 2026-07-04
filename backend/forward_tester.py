@@ -479,6 +479,8 @@ class ForwardTester:
         l: float,
         c: float,
         volume: float = 0.0,
+        buy_volume: float = 0.0,
+        sell_volume: float = 0.0,
         _build_full_result: bool = True,
     ) -> dict:
         """
@@ -521,6 +523,8 @@ class ForwardTester:
 
         # ── Step 2: Run strategy engine on this full candle ───────────────
         result = self.engine.update(time, o, h, l, c, volume,
+                                    buy_volume=buy_volume,
+                                    sell_volume=sell_volume,
                                     _build_full_result=_build_full_result)
         signal = result.get("signal", "none")
         regime = result.get("regime", "idle")

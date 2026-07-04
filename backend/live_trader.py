@@ -804,7 +804,9 @@ class LiveTrader:
     # ── Intra-candle 4-state expansion (matches ForwardTester exactly) ──────
 
     def _process_completed_candle(self, t: int, o: float, h: float,
-                                   l: float, c: float, vol: float) -> dict:
+                                   l: float, c: float, vol: float,
+                                   buy_vol: float = 0.0,
+                                   sell_vol: float = 0.0) -> dict:
         """
         Mirror ForwardTester.update() exactly — called once per completed candle.
 
@@ -881,8 +883,9 @@ class LiveTrader:
             final_signal = sig
             final_regime = result.get("regime")
 
-        # State 4: close tick
-        result = self.engine.update(t, o, h, l, c, vol)
+        # State 4: close tick — buy/sell split lands here
+        result = self.engine.update(t, o, h, l, c, vol,
+                                    buy_volume=buy_vol, sell_volume=sell_vol)
         sig = result.get("signal", "none")
         if sig not in (Signal.NONE.value, "none") and final_signal is None:
             final_signal = sig
@@ -971,6 +974,8 @@ class LiveTrader:
         time_val: int,
         o: float, h: float, l: float, c: float,
         volume: float = 0.0,
+        buy_volume: float = 0.0,
+        sell_volume: float = 0.0,
         is_new: bool = False,
     ) -> dict:
         """
@@ -1003,7 +1008,9 @@ class LiveTrader:
             #   Step 2 — run 4 sub-states through engine.update()
             #   Step 3 — queue newly detected signal as pending
             result = self._process_completed_candle(
-                prev["t"], prev["o"], prev["h"], prev["l"], prev["c"], prev["vol"]
+                prev["t"], prev["o"], prev["h"], prev["l"], prev["c"], prev["vol"],
+                buy_vol=prev.get("buy_vol", 0.0),
+                sell_vol=prev.get("sell_vol", 0.0),
             )
             self._last_engine_result = result
 
@@ -1061,6 +1068,7 @@ class LiveTrader:
         # ── Always buffer the current tick ────────────────────────────────────
         self._current_accumulating = {
             "t": time_val, "o": o, "h": h, "l": l, "c": c, "vol": volume,
+            "buy_vol": buy_volume, "sell_vol": sell_volume,
         }
 
         # ── Build output ──────────────────────────────────────────────────────

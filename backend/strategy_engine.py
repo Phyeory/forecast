@@ -173,8 +173,23 @@ class VolumeProfile:
             else:
                 self.bins[idx].sell_volume += volume
 
-    def get_hvn_bins(self, top_n: int = 5) -> list[VolumeBin]:
-        sorted_bins = sorted(self.bins, key=lambda b: b.total_volume, reverse=True)
+    def get_hvn_bins(self, top_n: int = 5, min_vol_fraction: float = 0.1) -> list[VolumeBin]:
+        """Return the top-N highest-volume bins.
+
+        Only bins with total_volume >= min_vol_fraction * average_bin_volume
+        are considered candidates.  This prevents zero-volume bins from being
+        included when most bins have no trades — which would otherwise make
+        nearly any price test as HVN.
+        """
+        total = sum(b.total_volume for b in self.bins)
+        if total == 0:
+            return []
+        avg = total / len(self.bins)
+        threshold = avg * min_vol_fraction
+        candidates = [b for b in self.bins if b.total_volume >= threshold]
+        if not candidates:
+            return []
+        sorted_bins = sorted(candidates, key=lambda b: b.total_volume, reverse=True)
         return sorted_bins[:top_n]
 
     def get_lvn_bins(self) -> list[VolumeBin]:
@@ -191,6 +206,8 @@ class VolumeProfile:
                 if direction is None:
                     return True
                 if direction == Direction.UP and b.delta > 0:
+                    return True
+                if direction == Direction.DOWN and b.delta < 0:
                     return True
         return False
 
@@ -390,7 +407,7 @@ class StrategyEngine:
         local_range_bars: int = 80,
         local_range_threshold_pct: float = 10.0,
         sign_flip_threshold: int = 0,
-        stability_bars: int = 3,
+        stability_bars: int = 5,
         spike_atr_multiplier: float = 1.2,
         spike_lookback_bars: int = 9,
         # ── FIX-A: new top-blast parameters ──────────────────────────
@@ -406,7 +423,7 @@ class StrategyEngine:
         # ^ If |m_hat| has been declining for this many consecutive bars,
         #   we are past the momentum peak → block BUY regardless of S.
         # ── FIX-B: consolidation range gate parameter ─────────────────
-        consolidation_range_pct: float = 20.0,
+        consolidation_range_pct: float = 25.0,
         # ^ If N-bar range < this % of price AND price is in mid 35–65%
         #   of that range, it's a box / consolidation → block entry.
         # ── FIX-C: high-confidence stability relaxation ────────────────
@@ -1571,8 +1588,33 @@ class StrategyEngine:
         self.exit_signal_reason = ""
         return None
 
-    def _update_profile(self, c: float, vol: float, is_buy: bool, time: int):
-        if self.current_profile:
+    def _update_profile(
+        self,
+        c: float,
+        vol: float,
+        time: int,
+        buy_volume: float = 0.0,
+        sell_volume: float = 0.0,
+    ):
+        """Feed a completed candle into the volume profile.
+
+        When explicit buy_volume / sell_volume are available (from order-flow
+        data), add them as two separate trades.  This gives the profile real
+        delta information instead of a coarse candle-direction heuristic.
+
+        Falls back to the `c >= o` (candle-direction) heuristic when both
+        split values are zero (e.g. historical OHLCV-only candles).
+        """
+        if not self.current_profile:
+            return
+        if buy_volume > 0 or sell_volume > 0:
+            if buy_volume > 0:
+                self.current_profile.add_trade(c, buy_volume, True, time)
+            if sell_volume > 0:
+                self.current_profile.add_trade(c, sell_volume, False, time)
+        elif vol > 0:
+            # Heuristic fallback: treat the whole candle as one side
+            is_buy = c >= self.open_history[-1] if self.open_history else True
             self.current_profile.add_trade(c, vol, is_buy, time)
 
     def _start_new_profile(self, price: float):
@@ -1607,8 +1649,9 @@ class StrategyEngine:
         self.bar_count += 1
         self._update_indicators(o, h, l, c, volume)
 
-        is_buy = c >= o
-        self._update_profile(c, volume, is_buy, time)
+        self._update_profile(c, volume, time,
+                             buy_volume=buy_volume,
+                             sell_volume=sell_volume)
 
         if self.current_profile is None:
             self._start_new_profile(c)

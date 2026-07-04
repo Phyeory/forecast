@@ -53,11 +53,20 @@ def init_price_db():
             low          REAL NOT NULL,
             close        REAL NOT NULL,
             volume       REAL DEFAULT 0,
+            buy_volume   REAL DEFAULT 0,
+            sell_volume  REAL DEFAULT 0,
             FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
         );
 
         CREATE INDEX IF NOT EXISTS idx_candles_rec_time ON candles(recording_id, time);
     """)
+    # Migrate existing databases that were created before buy/sell volume columns
+    for col in ("buy_volume", "sell_volume"):
+        try:
+            conn.execute(f"ALTER TABLE candles ADD COLUMN {col} REAL DEFAULT 0")
+        except Exception:
+            pass  # column already exists
+    conn.commit()
     conn.close()
 
 
@@ -84,7 +93,13 @@ def stop_recording(recording_id: int):
     conn.close()
 
 
-def insert_candle(recording_id: int, t: int, o: float, h: float, l: float, c: float, vol: float):
+def insert_candle(
+    recording_id: int, t: int,
+    o: float, h: float, l: float, c: float,
+    vol: float,
+    buy_vol: float = 0.0,
+    sell_vol: float = 0.0,
+):
     """
     Upsert a single candle row.  We DELETE any existing row for the same
     (recording_id, time) bucket first so only one row ever exists per bucket.
@@ -97,8 +112,9 @@ def insert_candle(recording_id: int, t: int, o: float, h: float, l: float, c: fl
         (recording_id, t),
     )
     conn.execute(
-        "INSERT INTO candles (recording_id, time, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (recording_id, t, o, h, l, c, vol),
+        "INSERT INTO candles (recording_id, time, open, high, low, close, volume, buy_volume, sell_volume)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (recording_id, t, o, h, l, c, vol, buy_vol, sell_vol),
     )
     conn.commit()
     conn.close()
@@ -107,8 +123,19 @@ def insert_candle(recording_id: int, t: int, o: float, h: float, l: float, c: fl
 def insert_candles_batch(recording_id: int, candles: list[dict]):
     conn = _get_price_conn()
     conn.executemany(
-        "INSERT OR REPLACE INTO candles (recording_id, time, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [(recording_id, c["time"], c["open"], c["high"], c["low"], c["close"], c.get("volume", 0)) for c in candles],
+        "INSERT OR REPLACE INTO candles"
+        " (recording_id, time, open, high, low, close, volume, buy_volume, sell_volume)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                recording_id,
+                c["time"], c["open"], c["high"], c["low"], c["close"],
+                c.get("volume", 0),
+                c.get("buy_volume", 0.0),
+                c.get("sell_volume", 0.0),
+            )
+            for c in candles
+        ],
     )
     conn.commit()
     conn.close()
@@ -142,7 +169,9 @@ def get_recording_candles(recording_id: int) -> list[dict]:
     conn = _get_price_conn()
     rows = conn.execute(
         """
-        SELECT time, open, high, low, close, volume
+        SELECT time, open, high, low, close, volume,
+               COALESCE(buy_volume, 0.0)  AS buy_volume,
+               COALESCE(sell_volume, 0.0) AS sell_volume
         FROM   candles
         WHERE  id IN (
             SELECT MAX(id)
