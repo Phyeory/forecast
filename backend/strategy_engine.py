@@ -1528,10 +1528,15 @@ class StrategyEngine:
                     return Signal.EXIT
             else:
                 # ── Trailing stop loss (long only) ──────────────────────────
-                # Dormant until price has moved at least pct% above entry.
-                # Only then does the stop arm and trail from the running peak.
+                # Dormant until price has moved at least pct% above entry,
+                # PLUS an additional 5% buffer past that activation price.
+                # The buffer prevents the trail from arming the instant price
+                # touches the activation level (which equals the take-profit
+                # target) and then immediately selling on any micro stall at
+                # that exact price.
                 activation_price = self.entry_price * (1.0 + pct / 100.0)
-                if self._peak_price >= activation_price:
+                arm_price = activation_price * 1.05
+                if self._peak_price >= arm_price:
                     trail_stop = self._peak_price * (1.0 - pct / 100.0)
                     check_price = l if l > 0 else c
                     if check_price <= trail_stop:
@@ -1550,9 +1555,12 @@ class StrategyEngine:
                     return Signal.EXIT
             else:
                 # ── Trailing stop loss (long only) ──────────────────────────
-                # Dormant until price has moved at least pct% above entry.
+                # Dormant until price has moved at least pct% above entry,
+                # PLUS an additional 5% buffer past that activation price
+                # (see note in the scaled-SL branch above).
                 activation_price = self.entry_price * (1.0 + pct / 100.0)
-                if self._peak_price >= activation_price:
+                arm_price = activation_price * 1.05
+                if self._peak_price >= arm_price:
                     trail_stop = self._peak_price * (1.0 - pct / 100.0)
                     check_price = l if l > 0 else c
                     if check_price <= trail_stop:
