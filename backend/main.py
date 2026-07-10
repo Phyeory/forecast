@@ -1,8 +1,23 @@
 import asyncio
 import json
 import logging
+import os
 import time
 from pathlib import Path
+
+# Load .env from backend/ OR project root (whichever exists) early — used
+# by autofeed to find GMGN_API_KEY.  dotenv does NOT override env vars
+# already set in the process.  We try backend/.env first, then ../.env.
+try:
+    from dotenv import load_dotenv
+    _backend_dir = Path(__file__).parent
+    _root_dir = _backend_dir.parent
+    for _candidate in (_backend_dir / ".env", _root_dir / ".env"):
+        if _candidate.exists():
+            load_dotenv(_candidate)
+            break
+except ImportError:
+    pass
 from typing import Optional
 
 import uvicorn
@@ -15,6 +30,7 @@ from candle_aggregator import CandleAggregator, TIMEFRAME_SECONDS
 from pumpfun_client import DexScreenerPollClient, PumpFunWSClient, PumpSwapRPCClient, get_historical_candles, get_token_info, resolve_input, SUB_MINUTE_TFS, NewPairsStream
 from forward_tester import ForwardTester
 from live_trader import LiveTrader, keypair_from_private_key
+from autofeed import AutoFeed, AutofeedConfig, Candidate
 import data_store
 from backtester import run_backtest, run_backtest_batch
 from sniper.sniper_router import router as sniper_router, set_engine as set_sniper_engine
@@ -404,6 +420,11 @@ async def chart_ws(
     # Guard: reject reserved path segments that have dedicated routes.
     # FastAPI matches /ws/{mint} before /ws/sniper because the wildcard is
     # declared first. Must accept() before close() to avoid a 403.
+    # For "autofeed", delegate directly — FastAPI WS routing doesn't fall
+    # through, so the dedicated /ws/autofeed endpoint is unreachable.
+    if mint == "autofeed":
+        await _autofeed_ws_handler(websocket)
+        return
     _RESERVED = {"sniper", "live"}
     if mint in _RESERVED:
         await websocket.accept()
@@ -680,6 +701,128 @@ async def live_stop_all():
         info["cancelled"].set()
     _active_live_traders.clear()
     return JSONResponse({"status": "all_stopped"})
+
+
+# ── AutoFeed state & manager ───────────────────────────────────────────────
+# AutoFeed is a *discovery-only* loop that polls gmgn.ai for migrated pump.fun
+# tokens (mcap ≥ 15k) and pushes candidate mint addresses to connected Live
+# Trading dashboards via /ws/autofeed.  The frontend then opens the SAME
+# /ws/live/{mint} WebSocket the manual "Start Trading" button uses — autofeed
+# performs no trading itself.
+
+_autofeed: AutoFeed = AutoFeed(AutofeedConfig())
+# Per-WS client queue of pending candidates to push
+_autofeed_clients: set[asyncio.Queue] = set()
+
+
+def _autofeed_active_count() -> int:
+    """Number of currently-active live traders (used for backpressure)."""
+    return len(_active_live_traders)
+
+
+async def _autofeed_forward(cand: Candidate):
+    """Called by AutoFeed for each accepted candidate. Broadcasts to /ws/autofeed clients."""
+    payload = {
+        "type": "autofeed_candidate",
+        "candidate": cand.to_dict(),
+        "timestamp": time.time(),
+    }
+    n_clients = len(_autofeed_clients)
+    pushed = 0
+    for q in list(_autofeed_clients):
+        try:
+            q.put_nowait(payload)
+            pushed += 1
+        except asyncio.QueueFull:
+            pass
+    logger.info(f"[AutoFeed] Forward ${cand.symbol} to {pushed}/{n_clients} WS clients")
+
+
+@app.get("/api/autofeed/status")
+async def autofeed_status():
+    snap = _autofeed.snapshot()
+    snap["clients_connected"] = len(_autofeed_clients)
+    # Wallet-gate exposed for the frontend toggle state
+    snap["wallet_connected"] = getattr(app.state, "lt_wallet_connected", False)
+    return JSONResponse(snap)
+
+
+@app.post("/api/autofeed/config")
+async def autofeed_config(body: dict = Body(...)):
+    """Hot-update any config keys (e.g. poll_seconds, min_mcap_usd, gmgn_timeframe).
+    Does NOT honor `enabled` here — use /api/autofeed/start + /stop for that gate."""
+    safe = {k: v for k, v in body.items() if k != "enabled"}
+    changed = _autofeed.set_config(safe)
+    return JSONResponse({"status": "updated", "changed": changed, "snapshot": _autofeed.snapshot()})
+
+
+@app.post("/api/autofeed/start")
+async def autofeed_start(body: dict = Body(default={})):
+    """Turn ON the autofeed. Refuses if no private key is set in the backend."""
+    private_key = getattr(app.state, "lt_private_key", "") or getattr(app.state, "lt_wallet_connected", False)
+    if not private_key:
+        return JSONResponse(
+            {"error": "Cannot start autofeed without a private key set."},
+            status_code=400,
+        )
+    if body:
+        _autofeed.set_config({k: v for k, v in body.items() if k != "enabled"})
+    _autofeed.config.enabled = True
+    _autofeed.start(forward_fn=_autofeed_forward, active_count_fn=_autofeed_active_count)
+    return JSONResponse({"status": "started", "snapshot": _autofeed.snapshot()})
+
+
+@app.post("/api/autofeed/stop")
+async def autofeed_stop():
+    _autofeed.config.enabled = False
+    await _autofeed.stop()
+    return JSONResponse({"status": "stopped", "snapshot": _autofeed.snapshot()})
+
+
+@app.post("/api/live/private_key")
+async def live_set_private_key(body: dict = Body(...)):
+    """Frontend tells backend it has a private key set (gates the autofeed switch).
+    The key itself is not posted here — it is sent over the /ws/live WebSocket query
+    string. This endpoint only records connection-state for gating purposes."""
+    connected = bool(body.get("connected", False))
+    app.state.lt_wallet_connected = connected
+    if not connected:
+        # Wallet unset → forcibly stop autofeed
+        _autofeed.config.enabled = False
+        await _autofeed.stop()
+    return JSONResponse({"connected": connected, "autofeed_running": _autofeed.is_running()})
+
+
+async def _autofeed_ws_handler(websocket: WebSocket):
+    """Core autofeed WS logic — callable from both the dedicated route and the
+    /ws/{mint} wildcard delegation."""
+    await websocket.accept()
+    q: asyncio.Queue = asyncio.Queue(maxsize=200)
+    _autofeed_clients.add(q)
+    logger.info(f"[AutoFeed WS] Client connected (total={len(_autofeed_clients)})")
+    try:
+        await websocket.send_json({"type": "autofeed_status", "data": _autofeed.snapshot()})
+        # Send any already-tracked candidates for instant UI population
+        for cand in list(_autofeed._seen.values())[-5:]:
+            await websocket.send_json({
+                "type": "autofeed_candidate",
+                "candidate": cand.to_dict(),
+                "timestamp": time.time(),
+            })
+        while True:
+            try:
+                msg = await asyncio.wait_for(q.get(), timeout=30.0)
+                await websocket.send_json(msg)
+            except asyncio.TimeoutError:
+                # Heartbeat
+                await websocket.send_json({"type": "ping"})
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning(f"[AutoFeed WS] Error: {e}")
+    finally:
+        _autofeed_clients.discard(q)
+        logger.info(f"[AutoFeed WS] Client disconnected (total={len(_autofeed_clients)})")
 
 
 

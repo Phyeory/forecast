@@ -382,6 +382,186 @@
           </div>
         </div>
 
+        <!-- AutoFeed (gmgn.ai) -->
+        <div class="glass-card" id="lt-autofeed-card">
+          <h3 class="panel-title" style="margin-bottom:12px">📡 AutoFeed (gmgn.ai)</h3>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+            <label style="font-size:13px;font-weight:600">AutoFeed Engine</label>
+            <label class="af-switch" title="Cannot be turned on until wallet key is set">
+              <input type="checkbox" id="af-toggle" />
+              <span class="af-slider"></span>
+            </label>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;font-size:11px">
+            <span id="af-status-dot" class="dot error"></span>
+            <span id="af-status-text" style="color:#888">Disconnected</span>
+            <span id="af-cli-status" style="margin-left:auto;color:#888"></span>
+          </div>
+
+          <!-- Settings -->
+          <div class="af-settings" id="af-settings" style="margin-top:14px;display:none">
+            <h4 style="font-size:12px;color:#aaa;text-transform:uppercase;margin-bottom:8px">Discovery Filters</h4>
+            <div class="lt-config-grid">
+              <div class="form-group">
+                <label class="form-label">Poll Interval (s)</label>
+                <input id="af-poll-seconds" type="number" class="form-input" value="60" step="5" min="15" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Trending Interval</label>
+                <select id="af-interval" class="form-select">
+                  <option value="1m" selected>1m</option>
+                  <option value="5m">5m</option>
+                  <option value="1h">1h</option>
+                  <option value="6h">6h</option>
+                  <option value="24h">24h</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Min MCap ($)</label>
+                <input id="af-min-mcap" type="number" class="form-input" value="15000" step="1000" min="0" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Max MCap ($)</label>
+                <input id="af-max-mcap" type="number" class="form-input" value="10000000" step="500000" min="0" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Min Liquidity ($)</label>
+                <input id="af-min-liq" type="number" class="form-input" value="5000" step="500" min="0" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Min Holders</label>
+                <input id="af-min-holders" type="number" class="form-input" value="50" step="10" min="0" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Min Smart Money</label>
+                <input id="af-min-smart" type="number" class="form-input" value="1" step="1" min="0" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Min Volume ($) — motion</label>
+                <input id="af-min-volume" type="number" class="form-input" value="5000" step="1000" min="0" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Min Swaps — motion</label>
+                <input id="af-min-swaps" type="number" class="form-input" value="10" step="5" min="0" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Rank By</label>
+                <select id="af-order-by" class="form-select">
+                  <option value="volume" selected>Volume (USD)</option>
+                  <option value="swaps">Swap count</option>
+                  <option value="smart_degen_count">Smart money</option>
+                  <option value="change1h">1h price change</option>
+                  <option value="marketcap">Market cap</option>
+                </select>
+              </div>
+              <div class="form-group" style="grid-column: span 2">
+                <label class="form-label">Migration Exchanges (comma-sep, lower-case)</label>
+                <input id="af-migration-exchanges" type="text" class="form-input"
+                  value="pump_amm,meteora_dlmm,meteora_damm_v2,raydium,raydium_cpmm,orca_whirlpool" autocomplete="off"
+                  spellcheck="false" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Max Top10 Holdings</label>
+                <input id="af-max-top10" type="number" class="form-input" value="0.5" step="0.05" min="0" max="1" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Max Rug Ratio</label>
+                <input id="af-max-rug" type="number" class="form-input" value="0.3" step="0.05" min="0" max="1" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Max Bundler Rate</label>
+                <input id="af-max-bundler" type="number" class="form-input" value="0.3" step="0.05" min="0" max="1" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Max Insider Rate</label>
+                <input id="af-max-insider" type="number" class="form-input" value="0.5" step="0.05" min="0" max="1" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Max Entrapment Ratio</label>
+                <input id="af-max-entrap" type="number" class="form-input" value="0.5" step="0.05" min="0" max="1" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Max Bot Degen Rate</label>
+                <input id="af-max-bot-degen" type="number" class="form-input" value="0.8" step="0.05" min="0" max="1" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Max Created Age (e.g. 4h, 7d)</label>
+                <input id="af-max-age" type="text" class="form-input" value="" placeholder="e.g. 4h / 7d / empty"
+                  autocomplete="off" spellcheck="false" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Platforms (comma-sep)</label>
+                <input id="af-platforms" type="text" class="form-input" value="Pump.fun" autocomplete="off"
+                  spellcheck="false" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Max Concurrent Feeds</label>
+                <input id="af-max-concurrent" type="number" class="form-input" value="30" step="1" min="1" max="100" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Feed Cooldown (min)</label>
+                <input id="af-cooldown" type="number" class="form-input" value="1" step="0.5" min="0" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Exclude Mints (comma-sep)</label>
+                <input id="af-exclude" type="text" class="form-input" value="" placeholder="Mints to skip…"
+                  autocomplete="off" spellcheck="false" />
+              </div>
+            </div>
+
+            <h4 style="font-size:12px;color:#aaa;text-transform:uppercase;margin:14px 0 8px">Boolean Gates</h4>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px;font-size:12px">
+              <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="af-req-renounced-mint"
+                  checked /> Renounced Mint</label>
+              <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="af-req-renounced-freeze"
+                  checked /> Renounced Freeze</label>
+              <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="af-rej-wash" checked />
+                Reject Wash Trading</label>
+              <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="af-rej-honeypot"
+                  checked /> Reject Honeypot</label>
+              <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="af-req-social" />
+                Require Social</label>
+              <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="af-req-migration"
+                  checked /> Require Migration Exchange</label>
+            </div>
+
+            <div style="margin-top:14px;display:flex;gap:8px">
+              <button class="btn btn-primary" id="af-save-config">💾 Save Settings</button>
+              <button class="btn" id="af-test-poll" style="background:#26a69a;color:#000">🧪 Poll Once</button>
+              <span id="af-preview" style="margin-left:auto;font-size:11px;color:#888;align-self:center"></span>
+            </div>
+          </div>
+
+          <!-- Stats summary -->
+          <div class="af-stats" id="af-stats"
+            style="margin-top:10px;display:grid;grid-template-columns:repeat(4,1fr);gap:8px;font-size:11px;opacity:.9">
+            <div>
+              <div style="color:#888">Total Seen</div>
+              <div id="af-stat-seen">0</div>
+            </div>
+            <div>
+              <div style="color:#888">Total Fed</div>
+              <div id="af-stat-fed">0</div>
+            </div>
+            <div>
+              <div style="color:#888">Active Tracked</div>
+              <div id="af-stat-tracked">0</div>
+            </div>
+            <div>
+              <div style="color:#888">Last Poll</div>
+              <div id="af-stat-lastpoll">—</div>
+            </div>
+          </div>
+
+          <!-- Recent candidates feed -->
+          <h4 style="font-size:12px;color:#aaa;text-transform:uppercase;margin:14px 0 8px">Recent Candidates</h4>
+          <div id="af-candidates"
+            style="max-height:280px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
+            <div class="empty-state" style="font-size:11px;padding:14px">No candidates yet. Toggle AutoFeed on (requires
+              wallet key).</div>
+          </div>
+        </div>
+
         <!-- Active Traders Grid -->
         <div class="lt-traders-section">
           <h2 class="section-title">📊 Active Traders</h2>
@@ -615,7 +795,7 @@
       setTimeout(check, 1000);
     })();
   </script>
-  <script src="/static/js/app.js?v=102"></script>
+  <script src="/static/js/app.js?v=104"></script>
   <script src="/static/js/sniper.js"></script>
 </body>
 

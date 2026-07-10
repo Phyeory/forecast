@@ -2397,6 +2397,413 @@ window.stopAllTraders = stopAllTraders;
 
 
 /* ══════════════════════════════════════════════════════════════════════════
+   AUTOFEED — Auto-feed clean/organic pump.fun-migrated tokens from gmgn.ai
+   ─────────────────────────────────────────────────────────────────────────
+   Autofeed is discovery-only.  The backend polls gmgn-cli `market trending`
+   with strict organic / non-bundled / mcap ≥ 15k gates.  Each accepted
+   candidate is pushed over /ws/autofeed.  On each candidate we call
+   startLiveTrader(mint) — exactly the same path the manual "Start Trading"
+   button uses to open /ws/live/{mint}.
+
+   Switch governance: the autofeed toggle cannot be turned on until the
+   wallet key is set (`ltWalletConnected`).  We also force the backend to
+   refuse if no private key is set, by sending `connected: true` on enable.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+const AF_WS_BASE = `ws://${location.host}/ws/autofeed`;
+
+/* ── DOM refs ────────────────────────────────────────────────────────── */
+const afToggle = $("af-toggle");
+const afSettingsWrap = $("af-settings");
+const afStatusDot = $("af-status-dot");
+const afStatusText = $("af-status-text");
+const afCliStatus = $("af-cli-status");
+const afCandidates = $("af-candidates");
+const afStatSeen = $("af-stat-seen");
+const afStatFed = $("af-stat-fed");
+const afStatTracked = $("af-stat-tracked");
+const afStatLastPoll = $("af-stat-lastpoll");
+const afSaveConfigBtn = $("af-save-config");
+const afTestPollBtn = $("af-test-poll");
+const afPreview = $("af-preview");
+
+let afWS = null;
+let afConfigCache = null;
+
+/* ── Toggle governance ──────────────────────────────────────────────── */
+function afUpdateToggleGate() {
+  // Cannot be enabled until wallet (private key) is set
+  if (!ltWalletConnected) {
+    if (afToggle.checked) afToggle.checked = false;
+    afToggle.disabled = true;
+    afToggle.parentElement.title = "Connect wallet (set private key) first";
+    if (!afToggle.checked) afSetStatus("off", "Wallet key required");
+  } else {
+    afToggle.disabled = false;
+    afToggle.parentElement.title = "Turn on autofeed";
+  }
+}
+
+/* ── WS lifecycle ───────────────────────────────────────────────────── */
+function afConnectWS() {
+  if (afWS && afWS.readyState === WebSocket.OPEN) return;
+  try {
+    afWS = new WebSocket(AF_WS_BASE);
+  } catch (e) { console.warn("[AutoFeed WS] connect failed", e); return; }
+
+  afWS.onopen = () => afSetStatus("connected", "Connected");
+  afWS.onclose = () => {
+    afSetStatus("off", "Disconnected");
+    afWS = null;
+    // Reconnect in 5s only if autofeed is supposed to be on
+    if (afToggle.checked && ltWalletConnected) {
+      setTimeout(afConnectWS, 5000);
+    }
+  };
+  afWS.onerror = () => afSetStatus("off", "WS error");
+
+  afWS.onmessage = async (ev) => {
+    let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg.type === "autofeed_status") {
+      afHandleStatus(msg.data || {});
+    } else if (msg.type === "autofeed_candidate") {
+      afHandleCandidate(msg.candidate || {});
+    } else if (msg.type === "ping") {
+      try { afWS.send(JSON.stringify({ type: "pong" })); } catch { /* ignore */ }
+    }
+  };
+}
+
+function afDisconnectWS() {
+  if (afWS) { try { afWS.close(); } catch { /* ignore */ } afWS = null; }
+}
+
+function afSetStatus(state, text) {
+  afStatusDot.className = `dot ${state === "connected" ? "connected" : state === "running" ? "connected" : "error"}`;
+  if (state === "running") afStatusDot.className = "dot connected";
+  if (state === "off") afStatusDot.className = "dot error";
+  if (text) afStatusText.textContent = text;
+}
+
+/* ── Incoming from backend ─────────────────────────────────────────── */
+function afHandleStatus(snap) {
+  afConfigCache = snap;
+  // Ppopulate form fields from backend (only when local fields untouched -> just always)
+  afPopulateForm(snap);
+
+  // CLI configuration status
+  if (snap.cli_configured) {
+    afCliStatus.textContent = "gmgn-cli: ✅ configured";
+    afCliStatus.style.color = "var(--green, #26a69a)";
+  } else {
+    afCliStatus.textContent = "gmgn-cli: ⚠ no API key";
+    afCliStatus.style.color = "var(--red, #ef5350)";
+  }
+
+  // Stats
+  afStatSeen.textContent = snap.total_seen || 0;
+  afStatFed.textContent = snap.total_fed || 0;
+  afStatTracked.textContent = snap.active_tracked || 0;
+  if (snap.last_poll_at && snap.last_poll_at > 0) {
+    afStatLastPoll.textContent = new Date(snap.last_poll_at * 1000).toLocaleTimeString();
+  } else {
+    afStatLastPoll.textContent = "—";
+  }
+
+  // Recent candidates → render
+  afRenderCandidates(snap.recent_candidates || []);
+
+  // Running state
+  if (snap.is_running) {
+    afSetStatus("running", "Running");
+  } else {
+    afSetStatus(snap.cli_configured ? "off" : "off", snap.cli_configured ? "Idle" : "gmgn-cli unconfigured");
+  }
+}
+
+function afHandleCandidate(cand) {
+  afAddCandidateRow(cand);
+  // Feed into live trader — exactly the manual-button path.
+  afFeedToLiveTrader(cand);
+}
+
+function afFeedToLiveTrader(cand) {
+  if (!cand || !cand.mint) return;
+  if (!ltWalletConnected) {
+    console.warn("[AutoFeed] Received candidate but wallet not connected — skipping feed:", cand.mint);
+    return;
+  }
+  // Don't double-start: skip if this mint is already an active trader
+  if (ltActiveTraders[cand.mint]) {
+    console.log("[AutoFeed] Skipping feed — already trading:", cand.mint);
+    return;
+  }
+  try {
+    console.info(`[AutoFeed] Feeding ${cand.mint} (${cand.symbol || "?"}) mcap=$${Math.round(cand.market_cap || 0)} into live trader…`);
+    startLiveTrader(cand.mint);
+  } catch (e) {
+    console.error("[AutoFeed] Failed to start live trader for", cand.mint, e);
+  }
+}
+
+function afRenderCandidates(list) {
+  if (!Array.isArray(list) || list.length === 0) {
+    afCandidates.innerHTML = `<div class="empty-state" style="font-size:11px;padding:14px">No candidates yet. Toggle AutoFeed on (requires wallet key).</div>`;
+    return;
+  }
+  afCandidates.innerHTML = list.slice(0, 30).map(afRenderRowHTML).join("");
+}
+
+function afAddCandidateRow(cand) {
+  // Prepend (removing empty state if present)
+  const empty = afCandidates.querySelector(".empty-state");
+  if (empty) empty.remove();
+  const html = afRenderRowHTML(cand);
+  afCandidates.insertAdjacentHTML("afterbegin", html);
+  // Keep at most 30 rows
+  const rows = afCandidates.querySelectorAll(".af-candidate");
+  if (rows.length > 30) {
+    rows[rows.length - 1].remove();
+  }
+}
+
+function afRenderRowHTML(c) {
+  const mint_short = (c.mint || "").slice(0, 8) + "…";
+  const fmtUsd = (n) => {
+    if (!n || n <= 0) return "—";
+    if (n > 1e6) return `$${(n / 1e6).toFixed(2)}M`;
+    if (n > 1e3) return `$${(n / 1e3).toFixed(1)}k`;
+    return `$${n.toFixed(0)}`;
+  };
+  const fmtPct = (n) => (n != null && n > 0) ? (n * 100).toFixed(1) + "%" : "—";
+  const fmtBool = (b, okWhenFalse = true) => {
+    const cls = (b === false) ? (okWhenFalse ? "af-flag-ok" : "af-flag-bad") : "af-flag-bad";
+    const lbl = (b === false) ? "✓" : "✗";
+    return `<span class="${cls}">${lbl}</span>`;
+  };
+  return `
+    <div class="af-candidate" data-mint="${c.mint}">
+      <div>
+        <span class="af-name">${c.symbol || mint_short}</span>
+        <span class="af-sub"> / ${c.name || "—"}</span>
+        <div class="af-sub">${c.mint}</div>
+      </div>
+      <div>
+        <div class="af-sub">MCap</div>
+        <div class="af-metric">${fmtUsd(c.market_cap)}</div>
+        <div class="af-sub">Liq: ${fmtUsd(c.liquidity)}</div>
+      </div>
+      <div>
+        <div class="af-sub">Smart / Holders</div>
+        <div class="af-metric">${c.smart_degen_count || 0} / ${c.holders || 0}</div>
+      </div>
+      <div>
+        <div class="af-sub">Rug / Bund</div>
+        <div class="af-metric">${fmtPct(c.rug_ratio)} / ${fmtPct(c.bundler_rate)}</div>
+      </div>
+      <div>
+        <div class="af-sub">Motion (vol / swaps)</div>
+        <div class="af-metric" style="color:var(--green,#26a69a);font-weight:700">
+          ${fmtUsd(c.volume)} / ${c.swaps || 0}
+        </div>
+        <div class="af-sub">1h: ${(c.price_change_1h != null && c.price_change_1h !== 0) ? ((c.price_change_1h >= 0 ? "+" : "") + Number(c.price_change_1h).toFixed(1) + "%") : "—"}</div>
+      </div>
+      <div>
+        <div class="af-sub">Organic Gates</div>
+        <div class="af-metric">
+          Wash ${fmtBool(c.is_wash_trading)} ·
+          RenMint ${fmtBool(c.renounced_mint, false)} ·
+          RenFrz ${fmtBool(c.renounced_freeze, false)}
+        </div>
+        <button class="btn btn-xs btn-primary" style="margin-top:4px"
+          onclick="afManualStart('${c.mint}')">⚡ Start</button>
+      </div>
+    </div>
+  `;
+}
+
+function afManualStart(mint) {
+  if (!ltWalletConnected) { alert("Connect wallet first."); return; }
+  startLiveTrader(mint);
+}
+window.afManualStart = afManualStart;
+
+/* ── Form read/write ───────────────────────────────────────────────── */
+const AF_FIELD_MAP = [
+  ["af-poll-seconds", "poll_seconds", "float"],
+  ["af-interval", "interval", "str"],
+  ["af-min-mcap", "min_mcap_usd", "float"],
+  ["af-max-mcap", "max_mcap_usd", "float"],
+  ["af-min-liq", "min_liquidity_usd", "float"],
+  ["af-min-holders", "min_holders", "int"],
+  ["af-min-smart", "min_smart_degen_count", "int"],
+  ["af-min-volume", "min_volume_usd", "float"],
+  ["af-min-swaps", "min_swaps", "int"],
+  ["af-order-by", "order_by", "str"],
+  ["af-migration-exchanges", "migration_exchanges", "str"],
+  ["af-req-migration", "require_migration_exchange", "bool"],
+  ["af-max-top10", "max_top10_holder_rate", "float"],
+  ["af-max-rug", "max_rug_ratio", "float"],
+  ["af-max-bundler", "max_bundler_rate", "float"],
+  ["af-max-insider", "max_insider_rate", "float"],
+  ["af-max-entrap", "max_entrapment_ratio", "float"],
+  ["af-max-bot-degen", "max_bot_degen_rate", "float"],
+  ["af-max-age", "max_created_age", "str"],
+  ["af-platforms", "platforms", "str"],
+  ["af-max-concurrent", "max_concurrent_feed", "int"],
+  ["af-cooldown", "cooldown_after_feed_minutes", "float"],
+  ["af-exclude", "exclude_mints", "str"],
+  ["af-req-renounced-mint", "require_renounced_mint", "bool"],
+  ["af-req-renounced-freeze", "require_renounced_freeze", "bool"],
+  ["af-rej-wash", "reject_wash_trading", "bool"],
+  ["af-rej-honeypot", "reject_honeypot", "bool"],
+  ["af-req-social", "require_has_social", "bool"],
+];
+
+function afPopulateForm(snap) {
+  for (const [id, key, type] of AF_FIELD_MAP) {
+    const el = $(id);
+    if (!el || snap[key] === undefined || snap[key] === null) continue;
+    if (type === "bool") el.checked = !!snap[key];
+    else el.value = snap[key];
+  }
+}
+
+function afReadForm() {
+  const out = {};
+  for (const [id, key, type] of AF_FIELD_MAP) {
+    const el = $(id);
+    if (!el) continue;
+    if (type === "bool") out[key] = !!el.checked;
+    else if (type === "int") out[key] = parseInt(el.value, 10) || 0;
+    else if (type === "float") out[key] = parseFloat(el.value) || 0;
+    else out[key] = el.value.trim();
+  }
+  return out;
+}
+
+/* ── Button handlers ────────────────────────────────────────────────── */
+afToggle.addEventListener("change", async () => {
+  if (afToggle.checked) {
+    if (!ltWalletConnected) {
+      afToggle.checked = false;
+      alert("⚠️  Cannot turn on autofeed without a private key set. Connect your wallet first.");
+      afUpdateToggleGate();
+      return;
+    }
+    // Tell backend the wallet-gate is satisfied (gate the autofeed loop)
+    try {
+      await apiFetch("/api/live/private_key", {
+        method: "POST",
+        body: JSON.stringify({ connected: true }),
+      });
+    } catch (e) { /* non-fatal; also reported to backend via /start below */ }
+    // Send current config then start
+    try {
+      const cfg = afReadForm();
+      await apiFetch("/api/autofeed/config", {
+        method: "POST",
+        body: JSON.stringify(cfg),
+      });
+      await apiFetch("/api/autofeed/start", { method: "POST", body: "{}" });
+      afSettingsWrap.style.display = "block";
+      afConnectWS();
+    } catch (e) {
+      afToggle.checked = false;
+      console.error("[AutoFeed] start failed", e);
+      alert("AutoFeed start failed: " + e.message);
+    }
+  } else {
+    try {
+      await apiFetch("/api/autofeed/stop", { method: "POST" });
+      afSetStatus("off", "Stopped");
+    } catch (e) { /* ignore */ }
+    afDisconnectWS();
+  }
+});
+
+afSaveConfigBtn.addEventListener("click", async () => {
+  const cfg = afReadForm();
+  try {
+    const r = await apiFetch("/api/autofeed/config", {
+      method: "POST",
+      body: JSON.stringify(cfg),
+    });
+    afConfigCache = r.snapshot || afConfigCache;
+    afPreview.textContent = `Saved ${r.changed?.length || 0} field(s) ✓`;
+    setTimeout(() => afPreview.textContent = "", 3000);
+  } catch (e) {
+    afPreview.textContent = "Save error: " + e.message;
+    afPreview.style.color = "var(--red, #ef5350)";
+  }
+});
+
+afTestPollBtn.addEventListener("click", async () => {
+  if (!ltWalletConnected) return alert("Connect wallet first.");
+  afTestPollBtn.disabled = true;
+  afTestPollBtn.textContent = "Polling…";
+  try {
+    // Start then immediately stop — runs exactly one full poll since no candidate
+    // will be processed safely.  Better: backend exposes "poll once" — we don't,
+    // so fall back to fetch a status update.
+    await apiFetch("/api/autofeed/config", {
+      method: "POST",
+      body: JSON.stringify(afReadForm()),
+    });
+    await apiFetch("/api/autofeed/start", { method: "POST", body: "{}" });
+    await new Promise(r => setTimeout(r, 2500));   // allow 1 poll cycle
+    await apiFetch("/api/autofeed/stop", { method: "POST" });
+    const snap = await apiFetch("/api/autofeed/status");
+    afHandleStatus(snap);
+  } catch (e) {
+    console.warn("[AutoFeed poll-once] failed", e);
+  } finally {
+    afTestPollBtn.disabled = false;
+    afTestPollBtn.textContent = "🧪 Poll Once";
+  }
+});
+
+/* ── Wire into wallet connect lifecycle ────────────────────────────── */
+const _origConnectWallet = connectWallet;
+connectWallet = function () {
+  _origConnectWallet();
+  if (ltWalletConnected) {
+    afUpdateToggleGate();
+    // Refresh backend status once WS is open
+    setTimeout(async () => {
+      try {
+        const snap = await apiFetch("/api/autofeed/status");
+        afHandleStatus(snap);
+        afConnectWS();
+      } catch (e) { /* ignore */ }
+    }, 200);
+  }
+};
+window.connectWallet = connectWallet;  // keep inline `onclick="connectWallet()"` working
+ltConnectBtn.removeEventListener("click", _origConnectWallet);
+ltConnectBtn.addEventListener("click", connectWallet);
+
+/* ── Initial state ─────────────────────────────────────────────────── */
+afUpdateToggleGate();
+// Pull initial status from backend (in case autofeed is already running)
+(async () => {
+  try {
+    const snap = await apiFetch("/api/autofeed/status");
+    afHandleStatus(snap);
+    if (snap.is_running) {
+      afToggle.checked = true;
+      afSettingsWrap.style.display = "block";
+      afConnectWS();
+    }
+  } catch (e) { /* ignore until user navigates to page */ }
+})();
+
+// When wallet disconnects or page is left, gracefully shutdown
+window.addEventListener("beforeunload", () => {
+  try { afDisconnectWS(); } catch { /* ignore */ }
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
    Market Data Module — fetch OHLCV data for Index Futures, Crypto, Equities
    ══════════════════════════════════════════════════════════════════════════ */
 
