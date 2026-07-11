@@ -18,9 +18,9 @@ if __name__ == "__main__":
 
     print(f"Completed {len(results)} backtests.")
 
-    total_trades = sum(r['metrics']['num_trades'] for r in results if 'metrics' in r)
-    winning_trades = sum(r['metrics']['num_winning_trades'] for r in results if 'metrics' in r)
-    total_pnl = sum(r['metrics']['total_pnl_sol'] for r in results if 'metrics' in r)
+    total_trades = sum(r['stats']['total_trades'] for r in results if 'stats' in r)
+    winning_trades = sum(r['stats']['winning_trades'] for r in results if 'stats' in r)
+    total_pnl = sum(r['stats']['total_pnl_sol'] for r in results if 'stats' in r)
 
     winrate = winning_trades / total_trades if total_trades > 0 else 0
     print(f"Total Trades: {total_trades}")
