@@ -15,3 +15,5 @@ AGENTS.md
 kickbacks.vsix
 
 .env
+
+backend/backtest_results/*

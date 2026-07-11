@@ -1015,6 +1015,7 @@ class StrategyEngine:
                     if 0.35 <= position_in_range <= 0.65:
                         return False
 
+
         # ── Original spike filter (short window, kept as secondary) ──
         # FIX-A replaces this as primary, but we keep it as a backstop.
         if self.atr_val and self.atr_val > 0 and len(self.open_history) >= 2:
@@ -1184,7 +1185,7 @@ class StrategyEngine:
                 spread_shrinking,
                 roc_decreasing,
                 momentum_decay,
-                S < self.S_weak,
+                S < self.S_strong,
                 self.momentum_acceleration < 0,
                 s_decreasing,
                 price_stalling,
@@ -1260,7 +1261,7 @@ class StrategyEngine:
             #   normal post-trend exhaustion: use S_weak — we want meaningful
             #     signal before re-entering but not the full S_strong gate.
             #   S_strong is reserved for BUY entry decisions only.
-            s_transition_threshold = self.S_noise if cold_start else self.S_weak
+            s_transition_threshold = self.S_noise if cold_start else self.S_strong
             if self.spread_expanding and S > s_transition_threshold and not momentum_decay:
                 if direction == self.trend_before_exhaustion or cold_start:
                     self.regime = Regime.CONTINUATION
@@ -1268,24 +1269,6 @@ class StrategyEngine:
                     signal = None
                     if cold_start:
                         self.trend_before_exhaustion = Direction.DOWN if direction == Direction.UP else Direction.UP
-
-                    # FIX-C: Emit BUY on cold-start UP breakout.
-                    # Original code never emitted BUY here. For the very first breakout
-                    # from idle, this is the only chance — symmetric with the
-                    # opposite-direction and REVERSAL→CONTINUATION BUY paths.
-                    if cold_start and direction == Direction.UP:
-                        if not self.in_position and self.m_hat > 0:
-                            if self._passes_entry_gate(c, direction):
-                                entry_conds = [
-                                    S > self.S_weak,                            # S_weak sufficient at cold start
-                                    delta_aligned,
-                                    self._is_leaving_hvn(c, direction),
-                                    self.momentum_acceleration > 0,
-                                    self._ema_cross_valid,
-                                    self.s_effective > self.s_effective_threshold,
-                                ]
-                                if sum(1 for x in entry_conds if x) >= 2:
-                                    signal = Signal.BUY
 
                     # EXIT long if market direction has flipped to DOWN
                     if direction == Direction.DOWN and self.in_position:
@@ -1325,7 +1308,7 @@ class StrategyEngine:
                                             self._ema_cross_valid,
                                             self.s_effective > self.s_effective_threshold,
                                         ]
-                                        if sum(1 for x in entry_conds if x) >= 2:
+                                        if sum(1 for x in entry_conds if x) >= 3:
                                             signal = Signal.BUY
                     # EXIT long if market direction has flipped to DOWN
                     elif direction == Direction.DOWN and self.in_position:
@@ -1403,7 +1386,7 @@ class StrategyEngine:
                                 self._ema_cross_valid,
                                 self.s_effective > self.s_effective_threshold,
                             ]
-                            if sum(1 for x in entry_conds if x) >= 2:
+                            if sum(1 for x in entry_conds if x) >= 3:
                                 signal = Signal.BUY
                 elif new_dir == Direction.DOWN and self.prev_direction == Direction.UP:
                     # EXIT long on confirmed reversal — no short entry

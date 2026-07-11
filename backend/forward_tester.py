@@ -125,6 +125,10 @@ class ForwardTester:
         self._pending_exit: bool = False
         self._pending_exit_reason: str = ""
 
+        # Stash for the exec price used by the deferred entry_params snapshot
+        # (set in _open_long, consumed in update() after engine.update() runs).
+        self._pending_entry_snapshot_exec_price: float = 0.0
+
     @property
     def total_fees_per_trade(self) -> float:
         return self.priority_fee + self.bribe_fee
@@ -243,12 +247,34 @@ class ForwardTester:
         # Deduct trade size + fees from balance
         self.balance -= (trade_size + fees)
 
-        # ── Complete engine snapshot at the moment of entry ──────────────
-        # Every state variable + every config parameter — nothing omitted.
-        eng = self.engine
+        trade = Trade(
+            entry_time=time,
+            entry_price=exec_price,          # CHART price — realistic, includes delay + slippage
+            size_sol=trade_size,
+            size_tokens=tokens,
+            fees_paid=fees,
+            slippage_cost_sol=slippage_cost,
+            entry_reason=reason,
+            entry_params={},                 # populated AFTER engine.update() — see update()
+        )
+        self.current_trade = trade
+        # Stash the fill price so the deferred snapshot can compute
+        # overextension/ratio against the execution price, not the close.
+        self._pending_entry_snapshot_exec_price: float = exec_price
+        self.engine.notify_trade_opened(exec_price, Direction.UP)
+        return trade
 
-        # ── Live indicator state ──────────────────────────────────────────
-        entry_params = {
+    def _capture_entry_params(self, exec_price: float) -> dict:
+        """
+        Build the full engine snapshot for entry_params.
+
+        MUST be called AFTER engine.update() has run for the entry candle,
+        so that bar_count, trend_bar_count, regime, EMAs, ATR, confidence,
+        etc. reflect the bar on which the trade was actually filled — not
+        the prior bar that merely produced the signal.
+        """
+        eng = self.engine
+        return {
             # Regime / direction
             "regime":                   eng.regime.value,
             "direction":                eng.direction.value,
@@ -365,24 +391,10 @@ class ForwardTester:
             "cfg_stoploss_pct":                  eng.stoploss_pct,
             "cfg_takeprofit_pct":                eng.takeprofit_pct,
             "cfg_stoploss_pct_low":              eng.stoploss_pct_low,
-            "cfg_stoploss_pct_high":             eng.stoploss_pct_high,
+            "cfg_stoploss_pct_high":              eng.stoploss_pct_high,
             "cfg_takeprofit_pct_low":            eng.takeprofit_pct_low,
             "cfg_takeprofit_pct_high":           eng.takeprofit_pct_high,
         }
-
-        trade = Trade(
-            entry_time=time,
-            entry_price=exec_price,          # CHART price — realistic, includes delay + slippage
-            size_sol=trade_size,
-            size_tokens=tokens,
-            fees_paid=fees,
-            slippage_cost_sol=slippage_cost,
-            entry_reason=reason,
-            entry_params=entry_params,
-        )
-        self.current_trade = trade
-        self.engine.notify_trade_opened(exec_price, Direction.UP)
-        return trade
 
     def _close_long(self, o: float, h: float, l: float, c: float, time: int, reason: str = "") -> Optional[Trade]:
         """
@@ -528,6 +540,21 @@ class ForwardTester:
                                     _build_full_result=_build_full_result)
         signal = result.get("signal", "none")
         regime = result.get("regime", "idle")
+
+        # ── Step 2b: Capture the deferred entry_params snapshot ──────────
+        # The snapshot must reflect engine state for the ENTRY candle, which
+        # means it has to be read AFTER engine.update() has incremented
+        # bar_count, advanced the regime state machine, recomputed EMAs/ATR/
+        # Kalman, etc.  _open_long() ran in Step 1 (before engine.update),
+        # so we populate the snapshot here and assign it into the Trade.
+        # This preserves the 1-bar-delay execution order (signal from candle
+        # N fires at the open of candle N+1) while correctly recording the
+        # entry-bar state instead of the prior-bar state.
+        if opened_trade is not None and self._pending_entry_snapshot_exec_price > 0:
+            opened_trade.entry_params = self._capture_entry_params(
+                self._pending_entry_snapshot_exec_price
+            )
+            self._pending_entry_snapshot_exec_price = 0.0
 
         # ── Step 3: Queue signal for the NEXT candle's open ───────────────
         if signal == Signal.BUY.value and self.current_trade is None and not self._pending_buy:
