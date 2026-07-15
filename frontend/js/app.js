@@ -79,10 +79,14 @@ let engineParamsV1 = {
   stoploss_pct: 0,
   takeprofit_pct: 0,
   // Confidence-scaled TP/SL (0 = use static value above)
-  takeprofit_pct_low: 0,
-  takeprofit_pct_high: 0,
-  stoploss_pct_low: 0,
-  stoploss_pct_high: 0,
+  takeprofit_pct_low: 30,
+  takeprofit_pct_high: 300,
+  stoploss_pct_low: 12,
+  stoploss_pct_high: 25,
+  // Late-recording entry gate: refuse BUY when bar_count > this (0 = disabled)
+  max_entry_bar_count: 6000,
+  // Trailing-stop floor: armed trail_stop never falls below entry * (1 + this%)
+  trail_floor_pct: 13,
 };
 
 /* Engine version: 1 = V1 (Physics) */

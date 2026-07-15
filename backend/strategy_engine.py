@@ -454,10 +454,96 @@ class StrategyEngine:
         # stoploss_pct_high   = SL (magnitude) used when confidence ≥ confidence_high
         #
         # Set all four to 0.0 to disable scaling (uses static stoploss_pct / takeprofit_pct).
-        takeprofit_pct_low: float = 0.0,
-        takeprofit_pct_high: float = 0.0,
-        stoploss_pct_low: float = 0.0,
-        stoploss_pct_high: float = 0.0,
+        takeprofit_pct_low: float = 30.0,
+        takeprofit_pct_high: float = 300.0,
+        stoploss_pct_low: float = 12.0,
+        stoploss_pct_high: float = 25.0,
+        # ── FIX-D: early underwater exit ────────────────────────────────────
+        # If the position is losing more than this % AND momentum is rolling
+        # over, exit before the regime state machine takes 5+ bars to confirm
+        # a REVERSAL.  Set to a large value (e.g. 100) to effectively disable.
+        early_exit_loss_pct: float = 10.0,
+        # FIX-D: bars (engine states) after entry during which the
+        # early underwater exit is active.  30 ≈ 7-8 candles on a 4-state
+        # expansion.  Set to 0 to disable the protection window entirely.
+        early_protection_bars: int = 30,
+        # FIX-D: hard cap on TREND-stuck length.  If a trade stays in TREND
+        # regime (without dipping ≥10% above entry as a peak) for more than
+        # this many engine state-bars, exit.  0 disables.  Pump-and-dump
+        # tokens that never launch can sit stuck in TREND for 9+ minutes;
+        # this caps the bleed.
+        trend_max_hold_bars: int = 0,
+        # FIX-D: stage_a only fires while the trade peak is below
+        # `entry × (1 + early_peak_floor_pct/100)`.  Setting it to 5 means
+        # stage_a fires only on trades whose peak gain never reached +5%
+        # (true pump-and-dumps).  A trade that already ran +15% lets the
+        # trailing-stop mechanism handle its downside.
+        early_peak_floor_pct: float = 5.0,
+        # ── Trailing-stop arm buffer (was hardcoded 5%) ────────────────────
+        # Percentage buffer above the activation price that must be reached
+        # before the trailing stop arm engages.  5 = original behaviour.
+        # 0 = arm exactly at activation (1+pct above entry), tighter.
+        trailing_stop_arm_buffer_pct: float = 5.0,
+        # FIX-D: floor for armed trailing-stops, expressed as % above entry.
+        # Once the trail has armed, the trail_stop is never allowed below
+        # `entry_price * (1 + trail_floor_pct/100)`.  This protects a
+        # winning trade from whipsawing back below entry after arming.
+        trail_floor_pct: float = 13.0,
+        # FIX-D: confidence level below which a stuck-in-TREND position is
+        # demoted to EXHAUSTION (so the existing _check_exit mechanisms can
+        # take over).  Default 0.5×confidence_high (= 0.395 at confidence_high
+        # of 0.79).  Must sit ABOVE confidence_low (=0.19) to avoid double
+        # demote already handled by that branch.
+        bleed_demote_threshold: float = 0.395,
+        # FIX-D: the bleed-out demote must only fire when the position is
+        # materially below entry (i.e. this is a real pump-and-dump bleed,
+        # not a winning uptrend's brief confidence pullback).  Default -3%:
+        # the demote kicks in only when c ≤ entry × 0.97.
+        bleed_underwater_pct: float = 3.0,
+        # FIX-D: signal_strength threshold for the bleed-out demote.  When
+        # TREND-stuck LONG positions have S < this value AND confidence <
+        # bleed_demote_threshold AND price is below entry × (1 - bleed_underwater%/100),
+        # they become eligible for TREND→EXHAUSTION demotion after
+        # `bleed_persist_bars` consecutive eligible bars.  Default S_weak
+        # (=2.0) is much more stable than m_hat<0 (which flips sign on
+        # Kalman noise).  Pump-and-dump tokens reliably collapse to S near 0
+        # during the bleed phase.
+        bleed_signal_threshold: float = 2.0,
+        # FIX-D: debounce — require confidence + bleed-out conditions to
+        # persist for this many state-updates before demoting.  ~20 state
+        # updates ≈ 5 seconds on 1s candles; long enough to skip transient
+        # pullbacks inside a winning TREND but quick enough to catch a
+        # pump-and-dump bleed before giving back +10%.
+        bleed_persist_bars: int = 20,
+        # FIX-D (price-action guard): require current price to have fallen
+        # at least this far below the running peak (_peak_price) for the
+        # bleed demote to be eligible.  A pump-and-dump reliably retraces
+        # 15-30% from its short-lived peak; a healthy pullback inside a
+        # winning uptrend rarely sweeps more than 8-12%.  Expressed as a
+        # percentage drop from peak (e.g. 15 means c < peak × 0.85).
+        # Default 0 disables the price-drop criterion and falls back to
+        # pure-underwater eligibility: any state-bar in TREND with c < entry
+        # × (1 - bleed_underwater_pct/100) counts toward persistence.
+        bleed_drop_from_peak_pct: float = 0.0,
+        # ── FIX-D: max bars REVERSAL regime waits for S collapse before exit
+        # If reversal_bar_count has grown past this and we are still in
+        # position, exit regardless of signal strength.
+        reversal_exit_bars_max: int = 20,
+        # ── Late-recording entry gate: refuse BUY entries when bar_count > this.
+        # Backtest analysis showed entries later than ~8000 state-bars (>~2000 1s
+        # candles) have winrate ~51% and near-zero PnL contribution per trade,
+        # while still generating big losses.  Default 0 disables the gate.
+        max_entry_bar_count: int = 6000,
+        # ── Velocity-stop exit (Path D) ────────────────────────────────────────
+        # Exits a long position if the close has dropped more than
+        # `velocity_stop_pct` percent over the last `velocity_stop_lookback`
+        # engine state-bars AND the position is currently underwater.  This
+        # catches slow bleeds and sharp dumps that the trailing stop misses
+        # because the trade never armed (peak < activation price).  Winning
+        # pullbacks recover fast and won't sustain a >X% drop over N bars.
+        # Set velocity_stop_pct to 0 to disable.
+        velocity_stop_pct: float = 0.0,
+        velocity_stop_lookback: int = 8,
     ):
         self.ema_fast_p = ema_fast
         self.ema_slow_p = ema_slow
@@ -524,6 +610,32 @@ class StrategyEngine:
         self.stoploss_pct_low = stoploss_pct_low
         self.stoploss_pct_high = stoploss_pct_high
 
+        # FIX-D early-exit parameter
+        self.early_exit_loss_pct = early_exit_loss_pct
+        self.early_protection_bars = early_protection_bars
+        self.trend_max_hold_bars = trend_max_hold_bars
+        self.early_peak_floor_pct = early_peak_floor_pct
+
+        # ── Trailing-stop arm buffer (was hardcoded 5%) ────────────────────
+        # When the trailing stop has positive `stoploss_pct`, the trail
+        # doesn't arm until the peak has moved `activation + buffer %` above
+        # entry.  Set to 0 to arm exactly at the activation level.  Lower
+        # values arm the trail sooner (catches dumps before they get bad)
+        # but are more prone to whipsaw stop-outs on noise.
+        self.trailing_stop_arm_buffer_pct = trailing_stop_arm_buffer_pct
+        self.reversal_exit_bars_max = reversal_exit_bars_max
+        self.trail_floor_pct = trail_floor_pct
+        self.bleed_demote_threshold = bleed_demote_threshold
+        self.bleed_underwater_pct = bleed_underwater_pct
+        self.bleed_persist_bars = bleed_persist_bars
+        self.bleed_signal_threshold = bleed_signal_threshold
+        self.bleed_drop_from_peak_pct = bleed_drop_from_peak_pct
+        self.max_entry_bar_count = max_entry_bar_count
+        self.velocity_stop_pct = velocity_stop_pct
+        self.velocity_stop_lookback = velocity_stop_lookback
+        # State for the debounce counter of the bleed guard.
+        self._bleed_eligible_count: int = 0
+
         # State
         self.bar_count = 0
         self.regime = Regime.EXHAUSTION
@@ -579,6 +691,9 @@ class StrategyEngine:
         self.entry_price: float = 0.0
         self.position_direction: Direction = Direction.NONE
         self._peak_price: float = 0.0
+        # FIX-D: engine state-bar at which the most recent position opened,
+        # used by the early-underwater exit protection window.
+        self._entry_bar_count: int = 0
         self.exit_signal_reason: str = ""
 
         # Rolling buffers
@@ -952,6 +1067,13 @@ class StrategyEngine:
     def _passes_entry_gate(self, c: float, direction: Direction) -> bool:
         """FIX-A + FIX-B + macro-trend gate applied here in addition to existing checks."""
 
+        # ── Late-recording entry gate: avoid trading tokens whose recording is
+        # already mature (high bar_count).  Late-record trades have a higher
+        # big-loss density and lower per-trade PnL contribution.  Default 0
+        # disables this gate.
+        if self.max_entry_bar_count > 0 and self.bar_count > self.max_entry_bar_count:
+            return False
+
         # ── Macro trend gate: block BUY when price is below the slow EMA ──
         if direction == Direction.UP:
             if self.ema_macro_val is not None and c < self.ema_macro_val:
@@ -1166,11 +1288,133 @@ class StrategyEngine:
             return self.regime, None
 
         if self.trend_confidence < self.confidence_high:
+            # ── FIX-D: bleed-out guard ───────────────────────────────────────
+            # The ambiguous-zone guard was leaking a serious bug: when an open
+            # position's trend started decaying (confidence drops below
+            # confidence_high) the state machine got stuck in TREND because
+            # the state-transition block (TREND → EXHAUSTION / REVERSAL)
+            # only runs when confidence ≥ confidence_high.  Traces of all 31
+            # big-loss backtest trades show 5-10 minutes of regime="trend"
+            # while price bled from peak to -25%.
+            #
+            # Two exits exist for stuck positions: exhaust_exit and reversal.
+            # To unblock them, demote TREND → EXHAUSTION only when:
+            #   * the position is in money (in_position)
+            #   * confidence has collapsed *materially* below confidence_high
+            #     (i.e. conf < bleed_demote_threshold) — small dips in
+            #     confidence during a healthy uptrend pullback should NOT
+            #     demote.  Default 0.5 * confidence_high is well into decay
+            #     territory.
+            #   * AND the price has rolled against us (m_hat < 0 OR we are
+            #     already at a loss relative to entry — otherwise we cut
+            #     winners that had a one-bar confidence dip).
+            # Demote requires:
+            #   * position is a long, in TREND regime, in ambiguous conf
+            #   * confidence has collapsed well below confidence_high
+            #     (conf < bleed_demote_threshold) — small dips in
+            #     confidence during a healthy uptrend pullback should NOT
+            #     demote.  Default 0.5 * confidence_high is well into decay
+            #     territory.
+            #   * AND the trade is materially underwater (c < entry × (1 -
+            #     bleed_underwater_pct/100)) AND m_hat < 0 — i.e. this is
+            #     not a winning pullback but a real bleed: the price rolled
+            #     over AND is now below our entry.  This gate means we do
+            #     NOT demote on winning pullbacks; only genuine losers.
+            #
+            # Without this gate, the demote fires on any winning uptrend's
+            # brief confidence dip and exits +9% winners prematurely.
+            underwater = (
+                self.entry_price > 0
+                and c < self.entry_price * (1.0 - self.bleed_underwater_pct / 100.0)
+            )
+            # Debounce: count bars where this condition has been continuously
+            # eligible — only demote after confidence has been below the
+            # threshold AND price below entry for at least `bleed_persist_bars`
+            # state-updates.  This filters transient pullbacks inside an
+            # otherwise healthy TREND.
+            #
+            # Two eligibility modes:
+            #
+            #  — Price-action mode (preferred when `bleed_drop_from_peak_pct` > 0
+            #    AND a peak above entry exists): eligible when TREND + LONG AND
+            #    price is materially below entry AND has fallen at least
+            #    `bleed_drop_from_peak_pct` from the running peak.  This catches
+            #    pump-and-roll-over trades whose trend confidence stays high
+            #    throughout the dump entirely: a token bleeding out keeps
+            #    `trend_confidence` in the 0.45-0.75 range for many seconds while
+            #    price falls -5% to -20%, but the relative drop from peak is
+            #    monotonic.
+            #
+            #  — Legacy mode (default, when `bleed_drop_from_peak_pct` == 0):
+            #    Confidence+signal-gated eligibility: requires conf <
+            #    `bleed_demote_threshold` AND S < `bleed_signal_threshold` AND
+            #    underwater.  This is the original FIX-D design that effectively
+            #    never fires on the big-loss distribution under default
+            #    parameters — which is the backward-compatible baseline
+            #    behaviour.
+            use_price_mode = (
+                self.bleed_drop_from_peak_pct > 0.0
+                and self._peak_price > self.entry_price
+            )
+            if use_price_mode:
+                drop_from_peak = 0.0
+                if self._peak_price > 0:
+                    drop_from_peak = (self._peak_price - c) / self._peak_price * 100.0
+                price_drop_ok = drop_from_peak >= self.bleed_drop_from_peak_pct
+                eligible = (
+                    self.regime == Regime.TREND
+                    and self.in_position
+                    and self.position_direction == Direction.UP
+                    and underwater
+                    and price_drop_ok
+                )
+            else:
+                # Legacy confidence-gated eligibility: requires confidence
+                # collapsed AND signal collapsed AND underwater.  Defaults
+                # (bleed_demote_threshold=0.395, bleed_signal_threshold=2.0)
+                # make this NEVER fire in practice on the baseline loss
+                # distribution — preserving the original baseline's bleed-guard
+                # behaviour.
+                eligible = (
+                    self.regime == Regime.TREND
+                    and self.in_position
+                    and self.position_direction == Direction.UP
+                    and self.trend_confidence < self.bleed_demote_threshold
+                    and self.signal_strength < self.bleed_signal_threshold
+                    and underwater
+                )
+            if eligible:
+                self._bleed_eligible_count += 1
+            else:
+                self._bleed_eligible_count = 0
+
+            if eligible and self._bleed_eligible_count >= self.bleed_persist_bars:
+                self.regime = Regime.EXHAUSTION
+                self.trend_before_exhaustion = self.direction
+                # Pre-set exhaustion_bar_count at the demote threshold so that
+                # _check_exit (line ~1792) on this SAME bar and on subsequent
+                # bars immediately fires `exhaustion_exit` even while the
+                # state-machine remains in EXHAUSTION inside the ambiguous
+                # confidence zone (where the EXHAUSTION branch at line ~1447
+                # is unreachable due to the ambiguous-zone early return).
+                # Setting it ≥ exhaustion_bars_limit means _check_exit will
+                # see the exit condition already met on the very next call.
+                self.exhaustion_bar_count = max(self.exhaustion_bar_count, self.exhaustion_bars_limit)
+                self.reversal_confirm_count = 0
+                self.exhaustion_persist_count = 0
+                self._exhaustion_s_decay_count = 0
+                self._exhaustion_phase_high = max(self._exhaustion_phase_high, self._peak_price)
+                self._bleed_eligible_count = 0
+                # Demote only — do NOT immediately emit EXIT.  The next call
+                # to `_check_exit` will fire exhaustion_exit because we preset
+                # exhaustion_bar_count above (or the regime state machine may
+                # further transition EXHAUSTION → CONTINUATION/REVERSAL and
+                # emit its own EXIT).  Delaying one bar gives a tentatively
+                # recovering trade a chance to bounce back into TREND before
+                # we cut it.
+                return self.regime, None
+
             # ── FIX-B: Ambiguous zone — hard return with no signal ────────────
-            # Old code used `pass` for in_position then fell through to the
-            # state machine below, allowing BUY/DB signals to fire in consolidation.
-            # New: always return here.  Exit signals are still allowed via
-            # _check_exit() which runs after this function.
             return self.regime, None
 
         # ─── A. TREND → EXHAUSTION ────────────────────────────────────────────
@@ -1294,22 +1538,31 @@ class StrategyEngine:
                         )
                         if persist_ok:
                             if not self.in_position and S > self.S_weak and self.m_hat > 0:
-                                price_retrace = (self._exhaustion_phase_high <= 0 or
-                                                 c < self._exhaustion_phase_high * 0.998)
-                                if not price_retrace:
+                                # ── FIX-D: top-of-spike guard ───────────────
+                                # The 29/31 worst losses all entered here with
+                                # momentum_past_peak=True, pre_entry_stable=False
+                                # and spread_expanding=False. We are buying the
+                                # last gasp of a spike that already crested →
+                                # reject the BUY.
+                                if self._momentum_past_peak() and not self.spread_expanding:
                                     signal = None
                                 else:
-                                    if self._passes_entry_gate(c, direction):
-                                        entry_conds = [
-                                            S > self.S_strong,
-                                            delta_aligned,
-                                            self._is_leaving_hvn(c, direction),
-                                            self.momentum_acceleration > 0,
-                                            self._ema_cross_valid,
-                                            self.s_effective > self.s_effective_threshold,
-                                        ]
-                                        if sum(1 for x in entry_conds if x) >= 3:
-                                            signal = Signal.BUY
+                                    price_retrace = (self._exhaustion_phase_high <= 0 or
+                                                     c < self._exhaustion_phase_high * 0.998)
+                                    if not price_retrace:
+                                        signal = None
+                                    else:
+                                        if self._passes_entry_gate(c, direction):
+                                            entry_conds = [
+                                                S > self.S_strong,
+                                                delta_aligned,
+                                                self._is_leaving_hvn(c, direction),
+                                                self.momentum_acceleration > 0,
+                                                self._ema_cross_valid,
+                                                self.s_effective > self.s_effective_threshold,
+                                            ]
+                                            if sum(1 for x in entry_conds if x) >= 3:
+                                                signal = Signal.BUY
                     # EXIT long if market direction has flipped to DOWN
                     elif direction == Direction.DOWN and self.in_position:
                         signal = Signal.EXIT
@@ -1334,7 +1587,7 @@ class StrategyEngine:
                 direction_flipped,
             ]
             rev_met = sum(1 for x in rev_conds if x)
-            rev_threshold = 4 if in_chop else 3
+            rev_threshold = 5 if in_chop else 5
 
             if rev_met >= rev_threshold:
                 self.reversal_confirm_count += 1
@@ -1410,10 +1663,17 @@ class StrategyEngine:
                 return self.regime, None
 
         # ─── E. CONTINUATION → TREND ──────────────────────────────────────────
+        # Promote to TREND only when the move has confluence: confidence is
+        # already ABOVE the entry threshold AND the EMA spread is expanding.
+        # This prevents the blind 1-bar promotion that historically let weak
+        # continuation flips ride straight into TREND with no validation,
+        # forcing exits through the same loose reversal flag.
         elif self.regime == Regime.CONTINUATION:
-            self.regime = Regime.TREND
-            self.trend_bar_count = 0
-            return self.regime, None
+            if self.trend_confidence >= self.entry_confidence_high and self.spread_expanding:
+                self.regime = Regime.TREND
+                self.trend_bar_count = 0
+                return self.regime, None
+            # Otherwise: stay in CONTINUATION (look for more evidence next bar).
 
         if direction != Direction.NONE:
             if self.regime in (Regime.EXHAUSTION, Regime.REVERSAL):
@@ -1511,16 +1771,24 @@ class StrategyEngine:
                     return Signal.EXIT
             else:
                 # ── Trailing stop loss (long only) ──────────────────────────
-                # Dormant until price has moved at least pct% above entry,
-                # PLUS an additional 5% buffer past that activation price.
-                # The buffer prevents the trail from arming the instant price
-                # touches the activation level (which equals the take-profit
-                # target) and then immediately selling on any micro stall at
-                # that exact price.
+                # Dormant until price has moved at least pct% above entry.
+                # An optional `trailing_stop_arm_buffer_pct` (default 5%) is
+                # added on top of activation to prevent the trail from arming
+                # the instant price touches the activation level and then
+                # immediately selling on any micro stall at that exact price.
+                # Set the buffer to 0 to arm at exactly the activation price.
                 activation_price = self.entry_price * (1.0 + pct / 100.0)
-                arm_price = activation_price * 1.05
+                arm_price = activation_price * (1.0 + self.trailing_stop_arm_buffer_pct / 100.0)
                 if self._peak_price >= arm_price:
                     trail_stop = self._peak_price * (1.0 - pct / 100.0)
+                    # FIX-D: floor the trail stop at `entry_price * trail_floor_pct`.
+                    # Once the trailing stop is armed, never let it sit below the
+                    # entry price + a small profit margin.  This prevents the
+                    # whipsaw pattern where a +20% spike arms the trail, then the
+                    # trail follows the price down to a loss when the spike
+                    # retraces past the activation level.
+                    floor = self.entry_price * (1.0 + self.trail_floor_pct / 100.0)
+                    trail_stop = max(trail_stop, floor)
                     check_price = l if l > 0 else c
                     if check_price <= trail_stop:
                         self.exit_signal_reason = "trailing_stop"
@@ -1542,9 +1810,14 @@ class StrategyEngine:
                 # PLUS an additional 5% buffer past that activation price
                 # (see note in the scaled-SL branch above).
                 activation_price = self.entry_price * (1.0 + pct / 100.0)
-                arm_price = activation_price * 1.05
+                arm_price = activation_price * (1.0 + self.trailing_stop_arm_buffer_pct / 100.0)
                 if self._peak_price >= arm_price:
                     trail_stop = self._peak_price * (1.0 - pct / 100.0)
+                    # FIX-D: same floor as scaled branch — prevents armed
+                    # trail stops settling below entry on retracement after
+                    # a temporary spike.
+                    floor = self.entry_price * (1.0 + self.trail_floor_pct / 100.0)
+                    trail_stop = max(trail_stop, floor)
                     check_price = l if l > 0 else c
                     if check_price <= trail_stop:
                         self.exit_signal_reason = "trailing_stop"
@@ -1567,10 +1840,52 @@ class StrategyEngine:
             return Signal.EXIT
 
         if self.regime == Regime.REVERSAL:
+            # FIX-D: keep the original exit gate (S > S_noise) but also exit
+            # if we are stuck in REVERSAL for > reversal_exit_bars_max bars
+            # while still in position — bounds the loss if the regime machine
+            # is slow to confirm a collapse.
             if (self.reversal_bar_count >= self.reversal_exit_confirm_bars
                     and self.signal_strength > self.S_noise):
                 self.exit_signal_reason = "reversal_exit"
                 return Signal.EXIT
+            if self.reversal_bar_count >= self.reversal_exit_bars_max:
+                self.exit_signal_reason = "reversal_exit_max"
+                return Signal.EXIT
+
+        # NOTE: the original 'Stuck-in-TREND exit' band has been removed.
+        # The FIX-D bleed-out guard in `_detect_regime` (TREND → EXHAUSTION
+        # transition under the ambiguous-zone guard) is the root-cause fix
+        # and now lets the regime state machine drop to EXHAUSTION when a
+        # position's trend starts decaying, allowing the existing
+        # `exhaustion_exit` mechanism to fire instead of adding a second
+        # parallel trend-exit path that was proving too noisy.
+
+        # ── FIX-D: Early underwater exit ────────────────────────────────────
+        # Pump-and-dump tokens drawdown -15% to -70% in the first ~30-60
+        # seconds after the BUY.  The regime state machine takes that long
+        # just to flip to REVERSAL, so the position rides the slide all the
+        # way to the bottom.  This guard exits early when:
+        #   1. the trade is in its initial `early_protection_bars` engine-bar
+        #      window (default 30 ≈ 7-8 candles),
+        #   2. the unrealised loss ≥ `early_exit_loss_pct` %,
+        # (The early-underwater exit path has been removed — the
+        # stuck-in-TREND exit above replaced it with a simpler/more
+        # targeted trigger that fires only when actually stuck in TREND.)
+
+        # ── Velocity-stop exit (Path D) ──────────────────────────────────────
+        # Exits if close has fallen > velocity_stop_pct% over the last
+        # velocity_stop_lookback state-bars while the position is underwater.
+        # Catches bleeds/dumps that miss arming the trailing stop.
+        if (self.velocity_stop_pct > 0.0
+                and self.position_direction == Direction.UP
+                and len(self.close_history) >= self.velocity_stop_lookback + 1
+                and c < self.entry_price):
+            ref_price = self.close_history[-(self.velocity_stop_lookback + 1)]
+            if ref_price > 0:
+                drop_pct = (ref_price - c) / ref_price * 100.0
+                if drop_pct >= self.velocity_stop_pct:
+                    self.exit_signal_reason = "velocity_stop"
+                    return Signal.EXIT
 
         if self.no_motion_count >= 60:
             self.exit_signal_reason = "stale_exit"
@@ -1618,6 +1933,9 @@ class StrategyEngine:
         self.entry_price = entry_price
         self.position_direction = direction
         self._peak_price = entry_price
+        # FIX-D: record engine state-bar at which the position opened so the
+        # early-underwater protection window can be measured in engine bars.
+        self._entry_bar_count = self.bar_count
 
     def notify_trade_closed(self):
         self.in_position = False

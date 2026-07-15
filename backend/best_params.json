@@ -50,9 +50,11 @@
     "stoploss_pct": 0,
     "takeprofit_pct": 0,
     "takeprofit_pct_low": 30,
-    "takeprofit_pct_high": 200,
+    "takeprofit_pct_high": 300,
     "stoploss_pct_low": 12,
-    "stoploss_pct_high": 20
+    "stoploss_pct_high": 25,
+    "max_entry_bar_count": 6000,
+    "trail_floor_pct": 13
   }
 }
 

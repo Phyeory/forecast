@@ -87,6 +87,7 @@ def run_backtest_batch(
     max_workers: Optional[int] = None,
     batch_id: Optional[str] = None,
     engine_version: int = 1,
+    recording_ids: Optional[list[int]] = None,
 ) -> list[dict]:
     """
     Run backtests on ALL completed recordings.
@@ -97,6 +98,10 @@ def run_backtest_batch(
     """
     recordings = list_recordings()
     completed = [r for r in recordings if r.get("status") == "completed"]
+
+    if recording_ids is not None:
+        sel = set(recording_ids)
+        completed = [r for r in completed if r.get("id") in sel]
 
     if not completed:
         return []
