@@ -17,3 +17,15 @@ kickbacks.vsix
 .env
 
 backend/backtest_results/*
+
+iteration_runs_iter18
+iteration_runs_iter19
+iteration_runs_iter20
+iteration_runs_iter21
+iteration_runs_iter22
+iteration_runs_iter23
+iteration_runs_iter24
+iteration_runs_iter25
+iteration_runs_iter26
+iteration_log.txt
+_prev_backtest_results_pending

@@ -534,16 +534,6 @@ class StrategyEngine:
         # candles) have winrate ~51% and near-zero PnL contribution per trade,
         # while still generating big losses.  Default 0 disables the gate.
         max_entry_bar_count: int = 6000,
-        # ── Velocity-stop exit (Path D) ────────────────────────────────────────
-        # Exits a long position if the close has dropped more than
-        # `velocity_stop_pct` percent over the last `velocity_stop_lookback`
-        # engine state-bars AND the position is currently underwater.  This
-        # catches slow bleeds and sharp dumps that the trailing stop misses
-        # because the trade never armed (peak < activation price).  Winning
-        # pullbacks recover fast and won't sustain a >X% drop over N bars.
-        # Set velocity_stop_pct to 0 to disable.
-        velocity_stop_pct: float = 0.0,
-        velocity_stop_lookback: int = 8,
     ):
         self.ema_fast_p = ema_fast
         self.ema_slow_p = ema_slow
@@ -631,8 +621,6 @@ class StrategyEngine:
         self.bleed_signal_threshold = bleed_signal_threshold
         self.bleed_drop_from_peak_pct = bleed_drop_from_peak_pct
         self.max_entry_bar_count = max_entry_bar_count
-        self.velocity_stop_pct = velocity_stop_pct
-        self.velocity_stop_lookback = velocity_stop_lookback
         # State for the debounce counter of the bleed guard.
         self._bleed_eligible_count: int = 0
 
@@ -1871,21 +1859,6 @@ class StrategyEngine:
         # (The early-underwater exit path has been removed — the
         # stuck-in-TREND exit above replaced it with a simpler/more
         # targeted trigger that fires only when actually stuck in TREND.)
-
-        # ── Velocity-stop exit (Path D) ──────────────────────────────────────
-        # Exits if close has fallen > velocity_stop_pct% over the last
-        # velocity_stop_lookback state-bars while the position is underwater.
-        # Catches bleeds/dumps that miss arming the trailing stop.
-        if (self.velocity_stop_pct > 0.0
-                and self.position_direction == Direction.UP
-                and len(self.close_history) >= self.velocity_stop_lookback + 1
-                and c < self.entry_price):
-            ref_price = self.close_history[-(self.velocity_stop_lookback + 1)]
-            if ref_price > 0:
-                drop_pct = (ref_price - c) / ref_price * 100.0
-                if drop_pct >= self.velocity_stop_pct:
-                    self.exit_signal_reason = "velocity_stop"
-                    return Signal.EXIT
 
         if self.no_motion_count >= 60:
             self.exit_signal_reason = "stale_exit"
