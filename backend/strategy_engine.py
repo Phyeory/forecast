@@ -533,7 +533,7 @@ class StrategyEngine:
         # Backtest analysis showed entries later than ~8000 state-bars (>~2000 1s
         # candles) have winrate ~51% and near-zero PnL contribution per trade,
         # while still generating big losses.  Default 0 disables the gate.
-        max_entry_bar_count: int = 6000,
+        max_entry_bar_count: int = 5700,
     ):
         self.ema_fast_p = ema_fast
         self.ema_slow_p = ema_slow

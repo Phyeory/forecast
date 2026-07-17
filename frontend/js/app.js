@@ -84,7 +84,7 @@ let engineParamsV1 = {
   stoploss_pct_low: 12,
   stoploss_pct_high: 25,
   // Late-recording entry gate: refuse BUY when bar_count > this (0 = disabled)
-  max_entry_bar_count: 6000,
+  max_entry_bar_count: 5700,
   // Trailing-stop floor: armed trail_stop never falls below entry * (1 + this%)
   trail_floor_pct: 13,
 };
