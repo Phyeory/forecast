@@ -82,9 +82,12 @@ let engineParamsV1 = {
   takeprofit_pct_low: 30,
   takeprofit_pct_high: 300,
   stoploss_pct_low: 12,
-  stoploss_pct_high: 25,
+  stoploss_pct_high: 20,
   // Late-recording entry gate: refuse BUY when bar_count > this (0 = disabled)
   max_entry_bar_count: 5700,
+  // Forbidden bar_count band: refuse BUY when bar_count in [lo, hi] (0,0 = disabled)
+  forbidden_bc_lo: 2000,
+  forbidden_bc_hi: 3000,
   // Trailing-stop floor: armed trail_stop never falls below entry * (1 + this%)
   trail_floor_pct: 13,
 };

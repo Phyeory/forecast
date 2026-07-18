@@ -137,7 +137,7 @@ class LiveTrader:
         if engine_kwargs is None:
             engine_kwargs = {}
 
-        self.engine = StrategyEngine(**engine_kwargs)
+        self.engine = create_engine(engine_version, **engine_kwargs)
         self.token_mint = token_mint
         self.keypair = keypair
         self.wallet_pubkey = str(keypair.pubkey())

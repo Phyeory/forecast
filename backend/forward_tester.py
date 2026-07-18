@@ -395,6 +395,9 @@ class ForwardTester:
             "cfg_stoploss_pct_high":              eng.stoploss_pct_high,
             "cfg_takeprofit_pct_low":            eng.takeprofit_pct_low,
             "cfg_takeprofit_pct_high":           eng.takeprofit_pct_high,
+            "cfg_max_entry_bar_count":           eng.max_entry_bar_count,
+            "cfg_forbidden_bc_lo":               getattr(eng, "forbidden_bc_lo", 0),
+            "cfg_forbidden_bc_hi":               getattr(eng, "forbidden_bc_hi", 0),
         }
 
     def _close_long(self, o: float, h: float, l: float, c: float, time: int, reason: str = "") -> Optional[Trade]:
