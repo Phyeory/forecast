@@ -42,7 +42,8 @@ Execution model (timed-delay fill):
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Optional
-from strategy_engine import StrategyEngine, Signal, Direction, Regime
+from strategy_engine import Signal, Direction, Regime
+from engine_factory import create_engine
 
 
 @dataclass
@@ -102,7 +103,7 @@ class ForwardTester:
         if engine_kwargs is None:
             engine_kwargs = {}
         
-        self.engine = StrategyEngine(**engine_kwargs)
+        self.engine = create_engine(engine_version, **engine_kwargs)
         self.balance = starting_balance
         self.buy_size_sol = buy_size_sol
         self.priority_fee = priority_fee

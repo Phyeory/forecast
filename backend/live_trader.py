@@ -31,7 +31,8 @@ from solders.pubkey import Pubkey
 from solders.message import MessageV0
 from solders.hash import Hash
 
-from strategy_engine import StrategyEngine, Signal, Direction, Regime
+from strategy_engine import Signal, Direction, Regime
+from engine_factory import create_engine
 
 logger = logging.getLogger("live-trader")
 
