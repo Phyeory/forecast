@@ -60,6 +60,10 @@
           <button class="tf-btn" data-tf="15m">15m</button>
           <button class="tf-btn" data-tf="1h">1h</button>
         </div>
+        <div class="engine-ver-toggle" id="engine-ver-toggle" title="Switch strategy engine version">
+          <button class="engine-ver-btn active" id="engine-ver-v1" data-ver="1">⚙️ V1</button>
+          <button class="engine-ver-btn" id="engine-ver-v2" data-ver="2">🔬 V2</button>
+        </div>
       </div>
 
       <div id="token-bar" class="hidden">
@@ -741,7 +745,13 @@
       <div class="settings-content">
         <div class="settings-header">
           <h2>Strategy Parameters <span id="settings-engine-badge" class="engine-badge">V1</span></h2>
-          <button id="close-settings">&times;</button>
+          <div style="display:flex;align-items:center;gap:12px">
+            <div class="engine-ver-toggle engine-ver-toggle-sm" id="settings-engine-toggle" title="Switch engine version">
+              <button class="engine-ver-btn active" id="settings-ver-v1" data-ver="1">V1</button>
+              <button class="engine-ver-btn" id="settings-ver-v2" data-ver="2">V2</button>
+            </div>
+            <button id="close-settings">&times;</button>
+          </div>
         </div>
         <div class="settings-body" id="settings-form">
         </div>
@@ -795,7 +805,7 @@
       setTimeout(check, 1000);
     })();
   </script>
-  <script src="/static/js/app.js?v=104"></script>
+  <script src="/static/js/app.js?v=106"></script>
   <script src="/static/js/sniper.js"></script>
 </body>
 

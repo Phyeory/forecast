@@ -92,12 +92,81 @@ let engineParamsV1 = {
   trail_floor_pct: 13,
 };
 
-/* Engine version: 1 = V1 (Physics) */
+/* Strategy Engine Parameters — V2 (RBPF + UKF + KDE + Kramers escape) */
+let engineParamsV2 = {
+  // ── 16 core SDE free parameters (strategyV2.md §2) ──────────────────
+  // Drift μ OU process
+  lambda_mu:  0.15,    // μ mean-reversion rate  (larger = faster mean revert)
+  kappa_mu:   0.05,    // order-flow coupling φ→μ  (larger = more OF influence)
+  sigma_mu:   0.10,    // drift shock std per √s  (larger = noisier μ)
+  // Log-variance h Heston-like OU process
+  eta:        0.10,    // h mean-reversion rate   (larger = vol reverts faster)
+  sigma_h:    0.20,    // log-var shock std       (larger = vol more volatile)
+  // Order-flow pressure φ AR(1)
+  alpha:      0.20,    // φ mean-reversion rate   (larger = quick decay)
+  beta:       1.00,    // signed-delta coefficient (δ/v+ε influence on φ)
+  sigma_phi:  0.15,    // φ shock std
+  // Liquidity ℓ OU + jump dampener
+  theta:      0.10,    // ℓ mean-reversion rate
+  sigma_ell:  0.10,    // ℓ shock std
+  zeta:       0.30,    // liquidity-jump decay magnitude on ℓ
+  // KDE / volume profile decay
+  lambda_0:   0.00333, // KDE exponential decay rate (1/300s = one 5-min window)
+  lambda_1:   0.10,    // secondary slow-decay component
+  // Jump-intensity (Poisson rate per second)
+  kappa_J:    0.05,    // λ_J  — governs ℓ jump frequency
+  // Execution cost model  s(n,ℓ) = s_0(ℓ) + s_1(ℓ)·n
+  s_0:        0.001,   // base slippage fraction
+  s_1:        0.0005,  // marginal slippage per unit size
+  // ── Regime topology tuning knobs ────────────────────────────────────
+  regime_mu_star_scale:  0.10, // mu_star multiplier (0.1 = 10% of spec floor)
+  regime_phi_star_scale: 1.00, // phi threshold scale factor
+  // ── Meta / structural parameters ────────────────────────────────────
+  n_particles:        200,   // RBPF particle count  (more = slower, accurate)
+  n_grid:             200,   // spatial grid size for U(x,t)
+  grid_sigma_extent:  5.0,   // grid half-width in units of σ_t·√T_w
+  tw_window_seconds:  300.0, // KDE memory window T_w (seconds)
+  tau_min:            5.0,   // shortest prediction horizon (s)
+  tau_max:            30.0,  // longest prediction horizon (s)
+  tau_step:           5.0,   // horizon sweep step (s)
+  eps_div:            1.0,   // ε in δ_k/(v_k+ε)
+  fee_fraction:       0.001, // Jupiter fee fraction (~0.1%)
+  latency_seconds:    0.5,   // execution latency Δ_lat
+  liquidity_cap_frac: 0.10,  // Kelly position cap  (0.10 = up to 10% of L_t)
+  warmup_seconds:     30,    // bars before any decision is emitted
+  sigma_floor:        1e-6,  // numerical σ floor
+  // ── Shared TP/SL parameters (V1 contract, adapter reads these) ──────
+  stoploss_pct: 0,
+  takeprofit_pct: 0,
+  takeprofit_pct_low: 30,
+  takeprofit_pct_high: 300,
+  stoploss_pct_low: 12,
+  stoploss_pct_high: 20,
+  trail_floor_pct: 13,
+  // ── V1 confidence / regime-filter pass-through ───────────────────────
+  // The V2 adapter inherits V1's well-tuned confidence gating on top of
+  // Kramers / KDE checks.  These mirror the V1 defaults.
+  warmup: 30,
+  confidence_high: 0.79,
+  confidence_low: 0.19,
+  entry_confidence_high: 0.79,
+  entry_confidence_low: 0.19,
+  confidence_w1: 0.3, confidence_w2: 0.25, confidence_w3: 0.25, confidence_w4: 0.2,
+  confidence_very_high: 0.86,
+  regime_lookback: 6,
+  persistence_threshold: 2,
+  ema_fast: 3, ema_slow: 7, ema_macro_period: 7, atr_period: 7, roc_period: 3,
+  max_entry_bar_count: 5700,
+  forbidden_bc_lo: 2000,
+  forbidden_bc_hi: 3000,
+};
+
+/* Engine version: 1 = V1 (Physics), 2 = V2 (RBPF/UKF/KDE/Kramers) */
 let engineVersion = 1;
 
 /* Active params getter — returns the params for the current engine version */
 function getEngineParams() {
-  return engineParamsV1;
+  return engineVersion === 2 ? engineParamsV2 : engineParamsV1;
 }
 /* Legacy compat — direct references to `engineParams` throughout the file */
 let engineParams = engineParamsV1;
@@ -1190,12 +1259,12 @@ function renderSettings() {
   // Update engine badge in settings modal
   const badge = document.getElementById("settings-engine-badge");
   if (badge) {
-    badge.textContent = "V1";
-    badge.className = "engine-badge";
+    badge.textContent = engineVersion === 2 ? "V2" : "V1";
+    badge.className = "engine-badge" + (engineVersion === 2 ? " v2" : "");
   }
 
-  // Hint text for specific params
-  const paramHints = {
+  // ── Shared param hints (both engines) ──
+  const sharedHints = {
     stoploss_pct: "0 = off  |  negative = hard stop (-10 exits at -10% from entry)  |  positive = true trailing stop (10 exits if price falls 10% from its absolute peak since entry)",
     takeprofit_pct: "Take profit at this % gain (0 = disabled, exits position when price hits entry * (1 + pct/100))",
     takeprofit_pct_low: "TP% used when confidence ≤ confidence_low — tighter exit at low conviction (0 = disabled)",
@@ -1206,6 +1275,11 @@ function renderSettings() {
     confidence_low: "EXIT: exit regime filter lower threshold — below this confidence the engine forces EXHAUSTION and exits (also used as lower bound for TP/SL lerp)",
     entry_confidence_high: "ENTRY: minimum confidence required to open a new position (independent of exit thresholds)",
     entry_confidence_low: "ENTRY: lower confidence floor for entry — entries are blocked below this level (currently a hard gate, not a lerp)",
+  };
+
+  // ── V1-specific hints ──
+  const v1Hints = {
+    ...sharedHints,
     breakout_pct: "Buy when price > VWAP × (1 + breakout_pct/100)",
     vol_spike_mult: "Volume must exceed this × average volume to confirm entry",
     roc_min_pct: "Minimum Rate of Change % to trigger a buy signal",
@@ -1217,7 +1291,84 @@ function renderSettings() {
     roc_exit_bars: "Exit if ROC stays negative for this many consecutive bars",
     rsi_overbought: "Block entries when RSI exceeds this threshold",
   };
+
+  // ── V2-specific hints and section groupings ──
+  const v2Hints = {
+    ...sharedHints,
+    // Drift μ OU
+    lambda_mu:  "μ mean-reversion rate — higher = drift decays to zero faster (more mean-reverting)",
+    kappa_mu:   "Order-flow coupling φ→μ — higher = order flow imbalance pushes drift harder",
+    sigma_mu:   "Drift shock std per √s — higher = drift is noisier / more volatile",
+    // Log-variance h OU
+    eta:        "h mean-reversion rate — higher = volatility reverts to long-run mean faster",
+    sigma_h:    "Log-variance shock std — higher = volatility itself is more volatile (vol-of-vol)",
+    // Order-flow φ AR(1)
+    alpha:      "φ mean-reversion rate — higher = order-flow pressure dissipates faster",
+    beta:       "Signed-delta coefficient — scales the δ_k/(v_k+ε) input into φ (order-flow sensitivity)",
+    sigma_phi:  "φ shock std — higher = order-flow can jump more abruptly",
+    // Liquidity ℓ
+    theta:      "ℓ mean-reversion rate — how fast liquidity returns to normal after a shock",
+    sigma_ell:  "ℓ shock std — continuous noise on liquidity",
+    zeta:       "Liquidity-jump decay magnitude — size of ℓ drop on a detected jump (volume surge)",
+    // KDE
+    lambda_0:   "KDE exponential decay rate — 1/T_w where T_w is the memory window. Default 1/300s",
+    lambda_1:   "Secondary slow-decay component for the two-timescale KDE",
+    kappa_J:    "Jump-intensity Poisson rate per second — governs how often liquidity jumps occur",
+    // Execution
+    s_0:        "Base slippage fraction (paid on every trade regardless of size)",
+    s_1:        "Marginal slippage per unit size — linear impact cost term",
+    // Regime
+    regime_mu_star_scale:  "mu_star multiplier: lowers the drift threshold below which the engine stays IDLE. 0.1 = 10% of the theoretical floor — increase to be more selective",
+    regime_phi_star_scale: "phi threshold scale factor — multiplies the order-flow exit threshold. Higher = require stronger order-flow signal",
+    // Meta
+    n_particles:        "RBPF particle count — more particles = better posterior, but linearly slower. Minimum 50",
+    n_grid:             "Spatial grid resolution for the potential landscape U(x,t)",
+    grid_sigma_extent:  "Grid half-width in units of σ_t·√T_w — how far from current price to compute U",
+    tw_window_seconds:  "KDE memory window T_w in seconds — price distribution is built from this recent history",
+    tau_min:            "Shortest prediction horizon in seconds (minimum horizon swept for Kelly decision)",
+    tau_max:            "Longest prediction horizon in seconds (maximum horizon swept)",
+    tau_step:           "Horizon sweep step — horizons tau_min, tau_min+step, …, tau_max are all evaluated",
+    eps_div:            "ε in δ_k/(v_k+ε) — small constant preventing division by zero in signed-delta ratio",
+    fee_fraction:       "Jupiter DEX fee fraction (e.g. 0.001 = 0.1%)",
+    latency_seconds:    "Execution latency Δ_lat in seconds — cost of delayed execution is baked into Kelly",
+    liquidity_cap_frac: "Kelly position cap as fraction of estimated liquidity L_t (e.g. 0.10 = up to 10%)",
+    warmup_seconds:     "Bars before any signal is emitted — allows the RBPF state to stabilise",
+    sigma_floor:        "Numerical σ floor to prevent division-by-zero in degenerate low-vol regimes",
+  };
+
+  // ── V2 section headers — label displayed above first key of each group ──
+  const v2Sections = {
+    lambda_mu:             "🌊 Drift μ  (OU process)",
+    eta:                   "📉 Log-Variance h  (Heston-like OU)",
+    alpha:                 "⚡ Order-Flow Pressure φ  (AR-1)",
+    theta:                 "💧 Liquidity ℓ  (OU + Jump)",
+    lambda_0:              "📈 KDE  (Volume Profile Decay)",
+    kappa_J:               "💥 Jump Intensity",
+    s_0:                   "💸 Execution Cost Model",
+    regime_mu_star_scale:  "🎯 Regime Topology Tuning",
+    n_particles:           "⚙️ Structural / Meta Parameters",
+    stoploss_pct:          "🛡️ Risk Management (TP / SL)",
+    warmup:                "🔗 Confidence Gate  (V1 pass-through)",
+    confidence_high:       "🔗 Confidence Gate  (V1 pass-through)",
+    ema_fast:              "📀 EMA / ATR  (V1 indicator pass-through)",
+    max_entry_bar_count:   "⏰ Bar-Count Gates",
+  };
+
+  const paramHints = engineVersion === 2 ? v2Hints : v1Hints;
+  const sectionMap  = engineVersion === 2 ? v2Sections : {};
+  const renderedSections = new Set();
+
   for (const [key, val] of Object.entries(engineParams)) {
+    // Insert section divider if this key opens a new section
+    const sectionTitle = sectionMap[key];
+    if (sectionTitle && !renderedSections.has(sectionTitle)) {
+      renderedSections.add(sectionTitle);
+      const divider = document.createElement("div");
+      divider.className = "param-section-header";
+      divider.textContent = sectionTitle;
+      settingsForm.append(divider);
+    }
+
     const group = document.createElement("div");
     group.className = "param-group";
     const label = document.createElement("label");
@@ -1229,7 +1380,7 @@ function renderSettings() {
     input.value = val;
     // determine type
     if (Number.isInteger(val)) input.type = "number";
-    else { input.type = "number"; input.step = "0.01"; }
+    else { input.type = "number"; input.step = "0.001"; }
 
     group.append(label, input);
 
@@ -1271,6 +1422,49 @@ applySettingsBtn.addEventListener("click", () => {
   });
   settingsModal.classList.add("hidden");
   if (currentMint) connect(currentMint, currentTf);
+});
+
+/* ── Engine version switching ─────────────────────────────────────────── */
+
+function setEngineVersion(v) {
+  engineVersion = v;
+
+  // Sync controls-bar toggle
+  const v1Btn = document.getElementById("engine-ver-v1");
+  const v2Btn = document.getElementById("engine-ver-v2");
+  if (v1Btn) v1Btn.classList.toggle("active", v === 1);
+  if (v2Btn) v2Btn.classList.toggle("active", v === 2);
+
+  // Sync settings-modal toggle
+  const sv1 = document.getElementById("settings-ver-v1");
+  const sv2 = document.getElementById("settings-ver-v2");
+  if (sv1) sv1.classList.toggle("active", v === 1);
+  if (sv2) sv2.classList.toggle("active", v === 2);
+
+  // Re-render the settings form live if the modal is currently open
+  if (settingsModal && !settingsModal.classList.contains("hidden")) {
+    renderSettings();
+  } else {
+    // Still update the badge even when modal is closed
+    const badge = document.getElementById("settings-engine-badge");
+    if (badge) {
+      badge.textContent = v === 2 ? "V2" : "V1";
+      badge.className = "engine-badge" + (v === 2 ? " v2" : "");
+    }
+  }
+
+  // Reconnect live chart with new engine if already streaming
+  if (currentMint) connect(currentMint, currentTf);
+}
+
+// Controls-bar toggle buttons
+document.querySelectorAll("#engine-ver-toggle .engine-ver-btn").forEach(btn => {
+  btn.addEventListener("click", () => setEngineVersion(parseInt(btn.dataset.ver, 10)));
+});
+
+// Settings-modal toggle buttons
+document.querySelectorAll("#settings-engine-toggle .engine-ver-btn").forEach(btn => {
+  btn.addEventListener("click", () => setEngineVersion(parseInt(btn.dataset.ver, 10)));
 });
 
 /* Re-render volume profiles when chart view changes */
