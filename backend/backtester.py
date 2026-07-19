@@ -362,6 +362,7 @@ def _write_trade_log(
             "exit_reason":  t.get("exit_reason", ""),
             "entry_reason": t.get("entry_reason", ""),
             "entry_params": t.get("entry_params", {}),
+            "exit_params":  t.get("exit_params", {}),
         })
 
     payload = {

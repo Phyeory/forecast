@@ -272,6 +272,8 @@ def init_backtest_db():
             exit_reason   TEXT DEFAULT '',
             fees_paid     REAL DEFAULT 0,
             slippage_cost REAL DEFAULT 0,
+            entry_params  TEXT DEFAULT '{}',
+            exit_params   TEXT DEFAULT '{}',
             FOREIGN KEY (backtest_id) REFERENCES backtests(id) ON DELETE CASCADE
         );
 
@@ -283,7 +285,17 @@ def init_backtest_db():
         conn.execute("ALTER TABLE backtests ADD COLUMN batch_id TEXT;")
     except sqlite3.OperationalError:
         pass
-    
+
+    for col, definition in [
+        ("entry_params", "TEXT DEFAULT '{}'"),
+        ("exit_params",  "TEXT DEFAULT '{}'"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE backtest_trades ADD COLUMN {col} {definition}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
+    conn.commit()
     conn.close()
 
 
@@ -337,8 +349,9 @@ def create_backtest(recording_id: int, mint: str, token_name: str, token_symbol:
     conn.executemany(
         """INSERT INTO backtest_trades
            (backtest_id, entry_time, entry_price, exit_time, exit_price,
-            size_sol, pnl_sol, pnl_pct, entry_reason, exit_reason, fees_paid, slippage_cost)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            size_sol, pnl_sol, pnl_pct, entry_reason, exit_reason, fees_paid, slippage_cost,
+            entry_params, exit_params)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         [
             (
                 bt_id, t.get("entry_time"), t.get("entry_price"),
@@ -346,6 +359,8 @@ def create_backtest(recording_id: int, mint: str, token_name: str, token_symbol:
                 t.get("size_sol", 0), t.get("pnl_sol", 0), t.get("pnl_pct", 0),
                 t.get("entry_reason", ""), t.get("exit_reason", ""),
                 t.get("fees_paid", 0), t.get("slippage_cost_sol", 0),
+                json.dumps(t.get("entry_params", {})),
+                json.dumps(t.get("exit_params", {})),
             )
             for t in trades
         ],
@@ -386,7 +401,13 @@ def get_backtest(backtest_id: int) -> Optional[dict]:
     result["engine_params"] = json.loads(result.get("engine_params", "{}"))
     result["summary_json"] = json.loads(result.get("summary_json", "{}"))
     result["candles"] = [dict(c) for c in candles]
-    result["trades"] = [dict(t) for t in trades]
+    decoded_trades = []
+    for t in trades:
+        td = dict(t)
+        td["entry_params"] = json.loads(td.get("entry_params") or "{}")
+        td["exit_params"]  = json.loads(td.get("exit_params")  or "{}")
+        decoded_trades.append(td)
+    result["trades"] = decoded_trades
     return result
 
 

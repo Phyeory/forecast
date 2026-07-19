@@ -62,6 +62,7 @@ class Trade:
     slippage_cost_sol: float = 0.0  # total SOL lost to slippage both ways
     outcome: str = ""           # "W" or "L" — set when trade is closed
     entry_params: dict = field(default_factory=dict)  # engine snapshot at entry
+    exit_params: dict = field(default_factory=dict)   # engine snapshot at exit
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -126,9 +127,12 @@ class ForwardTester:
         self._pending_exit: bool = False
         self._pending_exit_reason: str = ""
 
-        # Stash for the exec price used by the deferred entry_params snapshot
-        # (set in _open_long, consumed in update() after engine.update() runs).
-        self._pending_entry_snapshot_exec_price: float = 0.0
+        # Signal-candle param snapshots: captured immediately when the signal is
+        # queued (Step 3, after engine.update on candle N) using the signal
+        # candle's close as the price reference.  Assigned to the trade when
+        # it fills on candle N+1.
+        self._stashed_entry_params: dict = {}
+        self._stashed_exit_params: dict = {}
 
     @property
     def total_fees_per_trade(self) -> float:
@@ -256,12 +260,10 @@ class ForwardTester:
             fees_paid=fees,
             slippage_cost_sol=slippage_cost,
             entry_reason=reason,
-            entry_params={},                 # populated AFTER engine.update() — see update()
+            entry_params=self._stashed_entry_params,  # signal-candle snapshot
         )
+        self._stashed_entry_params = {}  # clear stash
         self.current_trade = trade
-        # Stash the fill price so the deferred snapshot can compute
-        # overextension/ratio against the execution price, not the close.
-        self._pending_entry_snapshot_exec_price: float = exec_price
         self.engine.notify_trade_opened(exec_price, Direction.UP)
         return trade
 
@@ -400,6 +402,84 @@ class ForwardTester:
             "cfg_forbidden_bc_hi":               getattr(eng, "forbidden_bc_hi", 0),
         }
 
+    def _capture_exit_params(self, exec_price: float) -> dict:
+        """
+        Build the engine snapshot for exit_params.
+
+        Mirrors _capture_entry_params() but is called for the EXIT bar.
+        Must be called AFTER engine.update() has run for the exit candle so
+        that regime, EMAs, ATR, bar counts, etc. reflect the bar on which the
+        sell was actually filled.
+        """
+        eng = self.engine
+        return {
+            # Regime / direction
+            "regime":                   eng.regime.value,
+            "direction":                eng.direction.value,
+            "prev_direction":           eng.prev_direction.value,
+            "trend_before_exhaustion":  eng.trend_before_exhaustion.value,
+
+            # Kalman / momentum
+            "m_hat":                    round(eng.m_hat, 8),
+            "prev_m_hat":               round(eng.prev_m_hat, 8),
+            "p_hat":                    round(eng.p_hat, 8),
+            "momentum_acceleration":    round(eng.momentum_acceleration, 8),
+            "_momentum_peak_declining_count": eng._momentum_peak_declining_count,
+            "momentum_past_peak":       eng._momentum_past_peak(),
+
+            # Signal
+            "signal_strength":          round(eng.signal_strength, 6),
+            "s_effective":              round(eng.s_effective, 6),
+
+            # EMA
+            "ema_fast":                 round(eng.ema_fast_val or 0.0, 8),
+            "ema_slow":                 round(eng.ema_slow_val or 0.0, 8),
+            "ema_macro":                round(eng.ema_macro_val or 0.0, 8),
+            "ema_spread":               round(eng.ema_spread, 8),
+            "prev_ema_spread":          round(eng.prev_ema_spread, 8),
+            "spread_expanding":         eng.spread_expanding,
+
+            # ATR / volatility
+            "atr":                      round(eng.atr_val or 0.0, 8),
+            "atr_floor":                round(eng.atr_floor, 8),
+
+            # Confidence / regime filter
+            "trend_confidence":         round(eng.trend_confidence, 6),
+            "is_trending":              eng.is_trending,
+
+            # Cross / stability / chop
+            "ema_cross_valid":          eng._ema_cross_valid,
+            "_ema_cross_persist_count": eng._ema_cross_persist_count,
+            "pre_entry_stable":         eng._pre_entry_stable,
+            "pre_entry_stable_up":      eng._pre_entry_stable_up,
+            "pre_entry_stable_down":    eng._pre_entry_stable_down,
+            "in_local_chop":            eng._in_local_chop,
+
+            # Overextension relative to Kalman estimate
+            "price_overextended":       eng._price_overextended(exec_price),
+            "overextension_ratio":      round(exec_price / eng.p_hat, 6) if eng.p_hat > 0 else 0.0,
+
+            # Trend anchors / bar counters
+            "bar_count":                eng.bar_count,
+            "trend_bar_count":          eng.trend_bar_count,
+            "exhaustion_bar_count":     eng.exhaustion_bar_count,
+            "exhaustion_persist_count": eng.exhaustion_persist_count,
+            "reversal_confirm_count":   eng.reversal_confirm_count,
+            "trend_reversal_confirm_count": eng.trend_reversal_confirm_count,
+            "reversal_bar_count":       eng.reversal_bar_count,
+            "no_motion_count":          eng.no_motion_count,
+            "_exhaustion_s_decay_count": eng._exhaustion_s_decay_count,
+            "trend_start_bar":          eng.trend_start_bar,
+            "trend_start_price":        round(eng.trend_start_price, 8),
+            "trend_start_atr":          round(eng.trend_start_atr, 8),
+            "_exhaustion_phase_high":   round(eng._exhaustion_phase_high, 8),
+
+            # Computed helpers
+            "effective_stoploss_pct":   round(eng._effective_stoploss_pct(), 4),
+            "effective_takeprofit_pct": round(eng._effective_takeprofit_pct(), 4),
+            "global_stoploss_pct":      round(eng._global_stoploss_pct(), 4),
+        }
+
     def _close_long(self, o: float, h: float, l: float, c: float, time: int, reason: str = "") -> Optional[Trade]:
         """
         Close long position.
@@ -481,6 +561,8 @@ class ForwardTester:
         if drawdown > self.stats.max_drawdown_pct:
             self.stats.max_drawdown_pct = drawdown
 
+        trade.exit_params = self._stashed_exit_params  # signal-candle snapshot
+        self._stashed_exit_params = {}  # clear stash
         self.trade_history.append(trade)
         self.current_trade = None
         self.engine.notify_trade_closed()
@@ -545,26 +627,16 @@ class ForwardTester:
         signal = result.get("signal", "none")
         regime = result.get("regime", "idle")
 
-        # ── Step 2b: Capture the deferred entry_params snapshot ──────────
-        # The snapshot must reflect engine state for the ENTRY candle, which
-        # means it has to be read AFTER engine.update() has incremented
-        # bar_count, advanced the regime state machine, recomputed EMAs/ATR/
-        # Kalman, etc.  _open_long() ran in Step 1 (before engine.update),
-        # so we populate the snapshot here and assign it into the Trade.
-        # This preserves the 1-bar-delay execution order (signal from candle
-        # N fires at the open of candle N+1) while correctly recording the
-        # entry-bar state instead of the prior-bar state.
-        if opened_trade is not None and self._pending_entry_snapshot_exec_price > 0:
-            opened_trade.entry_params = self._capture_entry_params(
-                self._pending_entry_snapshot_exec_price
-            )
-            self._pending_entry_snapshot_exec_price = 0.0
-
         # ── Step 3: Queue signal for the NEXT candle's open ───────────────
+        # Snapshots are taken HERE (after engine.update on candle N) so they
+        # reflect the signal candle's engine state.  They are stashed and
+        # assigned to the trade when it fills on candle N+1.
         if signal == Signal.BUY.value and self.current_trade is None and not self._pending_buy:
             self._pending_buy = True
             self._pending_buy_reason = f"buy_{regime}"
             self._pending_exit = False
+            # Snapshot engine state on the signal candle (close price as ref)
+            self._stashed_entry_params = self._capture_entry_params(c)
 
         elif signal == Signal.EXIT.value and self.current_trade is not None:
             reason = result.get("exit_reason")
@@ -578,10 +650,12 @@ class ForwardTester:
                     reason = "continuation_exit"
                 elif regime == Regime.TREND.value:
                     reason = "trend_exit"
-                
+
             self._pending_exit = True
             self._pending_exit_reason = reason
             self._pending_buy = False
+            # Snapshot engine state on the signal candle (close price as ref)
+            self._stashed_exit_params = self._capture_exit_params(c)
 
         # ── Fast path: skip expensive output construction ─────────────────
         if not _build_full_result:
