@@ -44,8 +44,23 @@ logger = logging.getLogger("live-trader")
 # updated program that supports Token-2022 natively.
 JUPITER_QUOTE_URL = "https://lite-api.jup.ag/swap/v1/quote"
 JUPITER_SWAP_URL  = "https://lite-api.jup.ag/swap/v1/swap"
-SOLANA_RPC        = "https://api.mainnet-beta.solana.com"
 WSOL_MINT         = "So11111111111111111111111111111111111111112"
+
+# ── Multi-RPC fanout ──────────────────────────────────────────────────────────
+# Broadcast every signed TX to ALL of these endpoints simultaneously.
+# If ANY one forwards it to a slot leader, the TX lands on-chain.
+# All are free, no API key required.  Order matters: first = primary
+# (used for reads like balance queries and confirmation polling).
+SOLANA_RPCS = [
+    "https://api.mainnet-beta.solana.com",
+    "https://solana-rpc.publicnode.com",
+]
+SOLANA_RPC_PRIMARY = SOLANA_RPCS[0]
+
+# Confirmation polling and retry tuning
+CONFIRM_TIMEOUT_S   = 15   # seconds per attempt (short — we retry with fresh blockhash)
+MAX_TX_RETRIES      = 5    # more attempts, each faster
+CONFIRM_POLL_MS     = 500  # poll every 500 ms
 
 
 def keypair_from_private_key(pk_b58: str) -> Keypair:
@@ -125,7 +140,7 @@ class LiveTrader:
         keypair: Keypair,
         buy_size_sol: float = 0.01,
         slippage_bps: int = 1500,
-        priority_fee_lamports: int = 100_000,
+        priority_fee_lamports: int = 500_000,
         min_market_cap_usd: float = 6_000.0,
         engine_kwargs: Optional[dict] = None,
 
@@ -228,6 +243,11 @@ class LiveTrader:
             "outputMint": output_mint,
             "amount": str(amount),
             "slippageBps": str(self.slippage_bps),
+            # Exclude Meteora DLMM — sells routed through it consistently
+            # timeout while Pump.fun Amm routes confirm in ~1s.  Forcing
+            # Jupiter to skip Meteora keeps buys and sells on the same
+            # protocol (Pump.fun Amm) for pump.fun tokens.
+            "excludeDexes": "Meteora DLMM",
             # NOTE: onlyDirectRoutes removed — restricting to direct routes
             # can force a Pump.fun AMM route that fails on Token-2022 via
             # the V6 program. Letting Jupiter find the best route (possibly
@@ -323,7 +343,7 @@ class LiveTrader:
         try:
             s = await self._get_session()
             async with s.post(
-                SOLANA_RPC, json=payload,
+                SOLANA_RPC_PRIMARY, json=payload,
                 timeout=aiohttp.ClientTimeout(total=7),
             ) as r:
                 data = await r.json()
@@ -341,14 +361,20 @@ class LiveTrader:
             logger.warning(f"[SIMULATE WARN] Simulation call failed ({e}), proceeding anyway…")
             return {"ok": True, "error": None, "logs": []}  # Don't block on sim failure
 
-    async def _confirm_tx(self, sig: str, timeout_s: int = 30) -> dict:
+    async def _confirm_tx(self, sig: str, timeout_s: int = CONFIRM_TIMEOUT_S) -> dict:
         """
-        Poll for transaction confirmation. Returns the transaction status.
-        Polling interval is 0.75 s (halved from 1.5 s) for faster detection.
+        Poll multiple RPCs for transaction confirmation.
+
+        Uses a short default timeout (CONFIRM_TIMEOUT_S) so that on failure
+        we can quickly retry with a fresh quote / fresh blockhash rather
+        than waiting 30 s for a TX that's likely already expired.
         """
         logger.info(f"[CONFIRM] Waiting for confirmation of {sig[:16]}… (max {timeout_s}s)")
         start = time.time()
         s = await self._get_session()
+        poll_interval = CONFIRM_POLL_MS / 1000.0
+
+        # We poll all RPCs in parallel each cycle — first confirmed wins.
         while time.time() - start < timeout_s:
             payload = {
                 "jsonrpc": "2.0",
@@ -356,30 +382,39 @@ class LiveTrader:
                 "method": "getSignatureStatuses",
                 "params": [[sig], {"searchTransactionHistory": False}],
             }
-            try:
-                async with s.post(
-                    SOLANA_RPC, json=payload,
-                    timeout=aiohttp.ClientTimeout(total=4),
-                ) as r:
-                    data = await r.json()
-                    statuses = data.get("result", {}).get("value", [None])
-                    status = statuses[0] if statuses else None
-                    if status is not None:
-                        err = status.get("err")
-                        conf = status.get("confirmationStatus")
-                        slot = status.get("slot")
-                        if err:
-                            logger.error(f"[CONFIRM FAILED] sig={sig[:16]}… err={err} slot={slot}")
-                            # Fetch transaction logs for the failed TX
-                            await self._fetch_tx_logs(sig)
-                            return {"confirmed": False, "error": str(err), "slot": slot}
-                        if conf in ("confirmed", "finalized"):
-                            logger.info(f"[CONFIRM OK] sig={sig[:16]}… status={conf} slot={slot}")
-                            return {"confirmed": True, "error": None, "slot": slot}
-                        logger.debug(f"[CONFIRM] sig={sig[:16]}… status={conf}, waiting…")
-            except Exception as e:
-                logger.warning(f"[CONFIRM] poll error: {e}")
-            await asyncio.sleep(0.75)  # 750 ms — twice as fast as before
+
+            async def _poll_one(rpc_url: str) -> Optional[dict]:
+                try:
+                    async with s.post(
+                        rpc_url, json=payload,
+                        timeout=aiohttp.ClientTimeout(total=3),
+                    ) as r:
+                        data = await r.json()
+                        statuses = data.get("result", {}).get("value", [None])
+                        return statuses[0] if statuses else None
+                except Exception:
+                    return None
+
+            results = await asyncio.gather(
+                *[_poll_one(url) for url in SOLANA_RPCS],
+                return_exceptions=True,
+            )
+
+            for status in results:
+                if isinstance(status, Exception) or status is None:
+                    continue
+                err = status.get("err")
+                conf = status.get("confirmationStatus")
+                slot = status.get("slot")
+                if err:
+                    logger.error(f"[CONFIRM FAILED] sig={sig[:16]}… err={err} slot={slot}")
+                    await self._fetch_tx_logs(sig)
+                    return {"confirmed": False, "error": str(err), "slot": slot}
+                if conf in ("confirmed", "finalized"):
+                    logger.info(f"[CONFIRM OK] sig={sig[:16]}… status={conf} slot={slot}")
+                    return {"confirmed": True, "error": None, "slot": slot}
+
+            await asyncio.sleep(poll_interval)
 
         logger.warning(f"[CONFIRM TIMEOUT] sig={sig[:16]}… not confirmed within {timeout_s}s")
         return {"confirmed": False, "error": "timeout", "slot": None}
@@ -398,7 +433,7 @@ class LiveTrader:
         try:
             s = await self._get_session()
             async with s.post(
-                SOLANA_RPC, json=payload,
+                SOLANA_RPC_PRIMARY, json=payload,
                 timeout=aiohttp.ClientTimeout(total=7),
             ) as r:
                 data = await r.json()
@@ -415,8 +450,18 @@ class LiveTrader:
         except Exception as e:
             logger.warning(f"[TX LOGS] Failed to fetch logs: {e}")
 
-    async def _broadcast_rpc(self, signed_b64: str) -> Optional[str]:
-        """Broadcast a signed transaction via the standard Solana RPC."""
+
+    async def _broadcast_multi(self, signed_b64: str) -> Optional[str]:
+        """
+        Broadcast a signed transaction to ALL RPCs simultaneously.
+
+        Key differences from the old single-RPC approach:
+          - Fan-out to every endpoint in SOLANA_RPCS concurrently.
+          - maxRetries=0 — we control retries ourselves with fresh
+            blockhashes (Jupiter gives us a new one on each quote).
+          - If ANY endpoint accepts it, the TX will be forwarded to
+            slot leaders.  This dramatically improves landing rates.
+        """
         payload = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -427,31 +472,57 @@ class LiveTrader:
                     "encoding": "base64",
                     "skipPreflight": True,
                     "preflightCommitment": "processed",
-                    "maxRetries": 5,
+                    "maxRetries": 0,
                 },
             ],
         }
-        s = await self._get_session()
-        async with s.post(
-            SOLANA_RPC,
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=10),
-        ) as r:
-            data = await r.json()
-            if "error" in data:
-                logger.error(f"[BROADCAST FAILED] RPC error: {data['error']}")
+
+        async def _send_one(rpc_url: str) -> Optional[str]:
+            try:
+                s = await self._get_session()
+                async with s.post(
+                    rpc_url, json=payload,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as r:
+                    data = await r.json()
+                    if "error" in data:
+                        logger.debug(f"[BROADCAST] {rpc_url[:30]}… rejected: {data['error']}")
+                        return None
+                    return data.get("result")
+            except Exception as e:
+                logger.debug(f"[BROADCAST] {rpc_url[:30]}… error: {e}")
                 return None
-            sig = data.get("result")
-            logger.info(f"[BROADCAST OK] sig={sig}")
+
+        results = await asyncio.gather(
+            *[_send_one(url) for url in SOLANA_RPCS],
+            return_exceptions=True,
+        )
+
+        # Take the first non-None signature
+        sig = None
+        accepted = 0
+        for r in results:
+            if isinstance(r, str) and r:
+                if sig is None:
+                    sig = r
+                accepted += 1
+
+        if sig:
+            logger.info(f"[BROADCAST OK] sig={sig} ({accepted}/{len(SOLANA_RPCS)} RPCs accepted)")
             logger.info(f"[SOLSCAN] https://solscan.io/tx/{sig}")
-            return sig
+        else:
+            logger.error(f"[BROADCAST FAILED] All {len(SOLANA_RPCS)} RPCs rejected the transaction")
+
+        return sig
 
     async def _sign_and_send(self, swap_tx_b64: str, wait_for_confirmation: bool = False) -> Optional[str]:
         """
-        Sign the base64-encoded versioned transaction and broadcast it.
+        Sign the base64-encoded versioned transaction and broadcast it
+        to ALL RPCs simultaneously.
 
         Hot path:
           - skip_simulation=True  → no simulate call (saves ~300 ms)
+          - Multi-RPC fanout for maximum landing probability
           - If wait_for_confirmation is True, await confirmation before returning.
             Otherwise, dispatch confirmation as a fire-and-forget background task.
         """
@@ -478,8 +549,8 @@ class LiveTrader:
                     )
                     return None
 
-            # ── Broadcast via standard RPC ────────────────────────
-            sig = await self._broadcast_rpc(signed_b64)
+            # ── Broadcast to ALL RPCs simultaneously ──────────────────────
+            sig = await self._broadcast_multi(signed_b64)
 
             if sig is None:
                 return None
@@ -519,7 +590,7 @@ class LiveTrader:
         }
         try:
             s = await self._get_session()
-            async with s.post(SOLANA_RPC, json=payload,
+            async with s.post(SOLANA_RPC_PRIMARY, json=payload,
                                timeout=aiohttp.ClientTimeout(total=4)) as r:
                 data = await r.json()
                 return float(data.get("result", {}).get("value", 0)) / 1e9
@@ -540,7 +611,7 @@ class LiveTrader:
         }
         try:
             s = await self._get_session()
-            async with s.post(SOLANA_RPC, json=payload,
+            async with s.post(SOLANA_RPC_PRIMARY, json=payload,
                                timeout=aiohttp.ClientTimeout(total=4)) as r:
                 data = await r.json()
                 accounts = data.get("result", {}).get("value", [])
@@ -556,15 +627,17 @@ class LiveTrader:
 
     async def execute_buy(self, reason: str = "signal") -> Optional[str]:
         """
-        Full buy cycle: quote → swap TX → simulate → sign → broadcast → confirm.
+        Full buy cycle: estimate fee → quote → swap TX → sign → multi-broadcast → confirm.
         Returns tx signature on success, None on failure.
+
+        Each retry fetches a fresh quote (which embeds a fresh blockhash)
+        and re-estimates the priority fee, maximising landing probability.
         """
         if self._swap_in_flight:
             logger.warning("[BUY] Swap already in flight — skipping")
             return None
         self._swap_in_flight = True
         buy_start = time.time()
-        max_retries = 3
         try:
             amount_lam = int(self.buy_size_sol * 1e9)
             mint_str = str(self.token_mint)
@@ -577,35 +650,35 @@ class LiveTrader:
                 await self._broadcast_status("buy_failed", f"Insufficient SOL ({sol_bal:.4f} available)", reason)
                 return None
 
-            for attempt in range(1, max_retries + 1):
-                # Step 1: Quote
+            for attempt in range(1, MAX_TX_RETRIES + 1):
+                # Step 1: Fresh quote (embeds fresh blockhash)
                 quote = await self._get_quote(WSOL_MINT, self.token_mint, amount_lam)
                 if not quote:
-                    logger.error(f"[BUY FAILED] Jupiter quote failed for {mint_str[:8]}… (attempt {attempt}/{max_retries})")
-                    if attempt == max_retries:
+                    logger.error(f"[BUY FAILED] Jupiter quote failed for {mint_str[:8]}… (attempt {attempt}/{MAX_TX_RETRIES})")
+                    if attempt == MAX_TX_RETRIES:
                         await self._broadcast_status("buy_failed", "Jupiter quote failed after retries", reason)
                         return None
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.5)
                     continue
 
                 # Step 2: Build swap TX
                 swap_tx = await self._get_swap_tx(quote)
                 if not swap_tx:
-                    logger.error(f"[BUY FAILED] Jupiter swap TX build failed for {mint_str[:8]}… (attempt {attempt}/{max_retries})")
-                    if attempt == max_retries:
+                    logger.error(f"[BUY FAILED] Jupiter swap TX build failed for {mint_str[:8]}… (attempt {attempt}/{MAX_TX_RETRIES})")
+                    if attempt == MAX_TX_RETRIES:
                         await self._broadcast_status("buy_failed", "Jupiter swap TX failed after retries", reason)
                         return None
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.5)
                     continue
 
-                # Step 3: Sign, simulate, broadcast, confirm
+                # Step 3: Sign, multi-broadcast, confirm
                 sig = await self._sign_and_send(swap_tx, wait_for_confirmation=True)
                 if not sig:
-                    logger.error(f"[BUY FAILED] TX sign/send/confirm failed for {mint_str[:8]}… (attempt {attempt}/{max_retries})")
-                    if attempt == max_retries:
+                    logger.error(f"[BUY FAILED] TX sign/send/confirm failed for {mint_str[:8]}… (attempt {attempt}/{MAX_TX_RETRIES})")
+                    if attempt == MAX_TX_RETRIES:
                         await self._broadcast_status("buy_failed", "TX failed on-chain after retries", reason)
                         return None
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.3)
                     continue
 
                 # Record trade
@@ -634,15 +707,17 @@ class LiveTrader:
 
     async def execute_sell(self, reason: str = "signal") -> Optional[str]:
         """
-        Full sell cycle: get token balance → quote → swap TX → simulate → sign → broadcast → confirm.
+        Full sell cycle: estimate fee → get balance → quote → swap TX → sign → multi-broadcast → confirm.
         Returns tx signature on success, None on failure.
+
+        Each retry fetches a fresh quote (fresh blockhash) and re-estimates
+        the priority fee for maximum landing probability.
         """
         if self._swap_in_flight:
             logger.warning("[SELL] Swap already in flight — skipping")
             return None
         self._swap_in_flight = True
         sell_start = time.time()
-        max_retries = 3
         try:
             # Fetch live token balance to sell exactly what we hold
             token_balance = await self._get_token_balance()
@@ -657,35 +732,35 @@ class LiveTrader:
                 await self._broadcast_status("sell_failed", "No token balance", reason)
                 return None
 
-            for attempt in range(1, max_retries + 1):
-                # Step 1: Quote
+            for attempt in range(1, MAX_TX_RETRIES + 1):
+                # Step 1: Fresh quote (embeds fresh blockhash)
                 quote = await self._get_quote(self.token_mint, WSOL_MINT, token_balance)
                 if not quote:
-                    logger.error(f"[SELL FAILED] Jupiter quote failed for {mint_str[:8]}… (attempt {attempt}/{max_retries})")
-                    if attempt == max_retries:
+                    logger.error(f"[SELL FAILED] Jupiter quote failed for {mint_str[:8]}… (attempt {attempt}/{MAX_TX_RETRIES})")
+                    if attempt == MAX_TX_RETRIES:
                         await self._broadcast_status("sell_failed", "Jupiter quote failed after retries", reason)
                         return None
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.5)
                     continue
 
                 # Step 2: Build swap TX
                 swap_tx = await self._get_swap_tx(quote)
                 if not swap_tx:
-                    logger.error(f"[SELL FAILED] Jupiter swap TX build failed for {mint_str[:8]}… (attempt {attempt}/{max_retries})")
-                    if attempt == max_retries:
+                    logger.error(f"[SELL FAILED] Jupiter swap TX build failed for {mint_str[:8]}… (attempt {attempt}/{MAX_TX_RETRIES})")
+                    if attempt == MAX_TX_RETRIES:
                         await self._broadcast_status("sell_failed", "Jupiter swap TX failed after retries", reason)
                         return None
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.5)
                     continue
 
-                # Step 3: Sign, simulate, broadcast, confirm
+                # Step 3: Sign, multi-broadcast, confirm
                 sig = await self._sign_and_send(swap_tx, wait_for_confirmation=True)
                 if not sig:
-                    logger.error(f"[SELL FAILED] TX sign/send/confirm failed for {mint_str[:8]}… (attempt {attempt}/{max_retries})")
-                    if attempt == max_retries:
+                    logger.error(f"[SELL FAILED] TX sign/send/confirm failed for {mint_str[:8]}… (attempt {attempt}/{MAX_TX_RETRIES})")
+                    if attempt == MAX_TX_RETRIES:
                         await self._broadcast_status("sell_failed", "TX failed on-chain after retries", reason)
                         return None
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.3)
                     continue
 
                 # Calculate PnL
