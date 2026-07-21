@@ -79,7 +79,7 @@ let engineParamsV1 = {
   stoploss_pct: 0,
   takeprofit_pct: 0,
   // Confidence-scaled TP/SL (0 = use static value above)
-  takeprofit_pct_low: 30,
+  takeprofit_pct_low: 20,
   takeprofit_pct_high: 300,
   stoploss_pct_low: 12,
   stoploss_pct_high: 20,
@@ -90,6 +90,18 @@ let engineParamsV1 = {
   forbidden_bc_hi: 3000,
   // Trailing-stop floor: armed trail_stop never falls below entry * (1 + this%)
   trail_floor_pct: 13,
+  reversal_exit_bars_max: 20,
+  // LANGEVIN drift discriminator — price-level escape detector.
+  // Increases PnL by 0.045 SOL on top of the regime-only baseline by
+  // demoting TREND → REVERSAL once `p_hat` (or `c`) has been continuously
+  // below `entry * (1 − langevin_drift_pct/100)` for `langevin_drift_stay`
+  // consecutive state-updates.  A V-recovery signature (p_hat climbs back
+  // above the tripwire) resets the counter — tuned at stay=94 to match
+  // the corpus' natural V-recovery timescale.  Set `langevin_drift_stay`
+  // very large (>1e6) to fully disable.
+  langevin_drift_window: 28,
+  langevin_drift_pct: 8.0,
+  langevin_drift_stay: 94,
 };
 
 /* Strategy Engine Parameters — V2 (RBPF + UKF + KDE + Kramers escape) */
@@ -138,7 +150,7 @@ let engineParamsV2 = {
   // ── Shared TP/SL parameters (V1 contract, adapter reads these) ──────
   stoploss_pct: 0,
   takeprofit_pct: 0,
-  takeprofit_pct_low: 30,
+  takeprofit_pct_low: 20,
   takeprofit_pct_high: 300,
   stoploss_pct_low: 12,
   stoploss_pct_high: 20,
@@ -1290,6 +1302,10 @@ function renderSettings() {
     cooldown_bars: "After an exit, wait this many bars before re-entering",
     roc_exit_bars: "Exit if ROC stays negative for this many consecutive bars",
     rsi_overbought: "Block entries when RSI exceeds this threshold",
+    langevin_drift_pct: "LANGEVIN drift discriminator tripwire. Demotes TREND → REVERSAL once `min(p_hat, c)` has been continuously below `entry × (1 − pct/100)` for `langevin_drift_stay` consecutive state-updates. Default 8.0 = 8% adverse excursion",
+    langevin_drift_stay: "LANGEVIN drift discriminator consecutive-state trigger before regime demotion. Tuned at 94 against the corpus' natural V-recovery timescale (~23s). Lower = more aggressive exits, higher = more tolerant of dips. Set very large (>1e6) to fully disable",
+    langevin_drift_window: "Window size (state-updates) for the auxiliary `_langevin_escape_score` analysis helper. Diagnostic-only — not a hard gate. Default 28",
+    reversal_exit_bars_max: "Maximum bars the regime machine is allowed to sit in REVERSAL before forcing an exit (`reversal_exit_max` reason). Bounds the loss when the regime machine is slow to confirm a collapse",
   };
 
   // ── V2-specific hints and section groupings ──

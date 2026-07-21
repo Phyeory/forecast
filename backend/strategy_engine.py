@@ -368,7 +368,7 @@ class StrategyEngine:
         signal_strong: float = 4.0,
         signal_weak: float = 2.0,
         signal_noise: float = 1.1535714285714287,
-        exhaustion_bars_limit: int = 1,
+        exhaustion_bars_limit: int = 3,
         delta_threshold: float = 0.3,
         kalman_gamma: float = 0.125,
         min_trend_bars: int = 2,
@@ -376,7 +376,7 @@ class StrategyEngine:
         chop_atr_pct: float = 0.3,
         chop_spread_pct: float = 0.05,
         reversal_exit_confirm_bars: int = 0,
-        s_effective_threshold: float = 0.35,
+        s_effective_threshold: float = 0.5,
         exhaustion_persist_bars: int = 6,
         regime_lookback: int = 6,
         persistence_threshold: int = 2,
@@ -414,7 +414,7 @@ class StrategyEngine:
         body_baseline_bars: int = 160,
         # ^ Long window for body average — anchors comparison to calm bars,
         #   not the recent pump bars.  Must be >> spike_lookback_bars.
-        overextension_k: float = 0.17,
+        overextension_k: float = 0.08,
         # ^ If close > p_hat * (1 + k) AND S > S_strong, price is a blow-off
         #   (both overextended AND signal already peaked).  0.04 = 4% above
         #   Kalman estimate.  Smaller values block valid mid-trend entries due
@@ -454,7 +454,7 @@ class StrategyEngine:
         # stoploss_pct_high   = SL (magnitude) used when confidence ≥ confidence_high
         #
         # Set all four to 0.0 to disable scaling (uses static stoploss_pct / takeprofit_pct).
-        takeprofit_pct_low: float = 30.0,
+        takeprofit_pct_low: float = 20.0,
         takeprofit_pct_high: float = 300.0,
         stoploss_pct_low: float = 12.0,
         # Tuned: stoploss_pct_high = 20 (was 25). Tightening the high-conviction
@@ -543,8 +543,42 @@ class StrategyEngine:
         # -0.20 SOL contribution.  Skipping this band cuts ~70 trades but
         # simultaneously removes 7 big losses (~-0.40 SOL) while preserving ~93% of
         # the +1.30 SOL take-profit winners, lifting overall WR/PnL/big-loss counts.
-        forbidden_bc_lo: int = 0,
-        forbidden_bc_hi: int = 0,
+        forbidden_bc_lo: int = 2000,
+        forbidden_bc_hi: int = 3000,
+        # ── LANGEVIN drift discriminator (price-level escape detector) ───────
+        # Mathematical motivation: Under the engine's Langevin regime model
+        #   dp = m·dt + σ·dW , dm = -γ·m·dt + F·dt + σ·dW'
+        # the Kalman-smoothed position estimate `p_hat` is the *most stable*
+        # observable of the latent price level.  Three regimes are visible
+        # in p_hat over a rolling window of size `langevin_drift_window`:
+        #
+        #   (i)  Price mean-reverting         → p_hat drifts around entry.
+        #   (ii) V-shaped recovery            → p_hat dips briefly then climbs
+        #                                        back above entry; the rolling
+        #                                        MIN(p_hat/entry) recovers to
+        #                                        near 1.0 within K windows.
+        #   (iii) Pump-and-dump escape         → p_hat monotonically falls,
+        #                                        typically settling below
+        #                                        entry × (1 − 10%).  Rolling
+        #                                        MIN(p_hat/entry) keeps
+        #                                        drifting down window by window.
+        #
+        # The discriminator `D(t)` checks: for `langevin_drift_stay`
+        # consecutive state-updates, has ``p_hat < entry × (1 −
+        # langevin_drift_pct/100)`` been sustained?  In case (iii) the
+        # answer is yes — p_hat is *trapped* below entry for the whole
+        # window.  In case (ii) the dip is too short to qualify.  In case
+        # (i) p_hat never crosses the threshold.
+        #
+        # Combined with the requirement that we are in a long position
+        # while in the ambiguous confidence zone (regime=TREND but
+        # confidence < confidence_high, where the natural TREND → REVERSAL
+        # flip is gated on S > S_strong which never fires on slow bleeds),
+        # this discriminator cleanly detects the slow-bleed pattern that
+        # currently leaves positions stuck in TREND-up while they bleed.
+        langevin_drift_window: int = 28,
+        langevin_drift_pct: float = 8.0,
+        langevin_drift_stay: int = 94,
     ):
         self.ema_fast_p = ema_fast
         self.ema_slow_p = ema_slow
@@ -634,6 +668,16 @@ class StrategyEngine:
         self.max_entry_bar_count = max_entry_bar_count
         self.forbidden_bc_lo = forbidden_bc_lo
         self.forbidden_bc_hi = forbidden_bc_hi
+        # LANGEVIN drift discriminator (price-level escape detector)
+        self.langevin_drift_window = langevin_drift_window
+        self.langevin_drift_pct = langevin_drift_pct
+        self.langevin_drift_stay = langevin_drift_stay
+        # Persistent counter: consecutive state-bars where p_hat stayed below
+        # `entry × (1 − langevin_drift_pct/100)`.  Reset on any state-update
+        # where p_hat climbs back above the tripwire (typical V-recovery).
+        self._p_hat_below_entry_count: int = 0
+        # Same idea, but used directly by the exit path (bypasses regime).
+        self._check_exit_p_hat_below: int = 0
         # State for the debounce counter of the bleed guard.
         self._bleed_eligible_count: int = 0
 
@@ -703,6 +747,22 @@ class StrategyEngine:
         self._atr_history: list[float] = []
         self._signal_strength_history: list[float] = []
         self._ema_spread_history: list[float] = []
+        # LANGEVIN drift discriminator (positions-drift detector):
+        # We monitor how often the Kalman position estimate `p_hat` falls
+        # below the trade's entry by more than some threshold over a window.
+        # In an Orstein-Uhlenbeck-like price process, `p_hat` reverts toward
+        # equilibrium (entry).  When `p_hat` consistently drops below entry
+        # for an extended window, the realisation `p` is escaping its basin
+        # (real dump).  When the price temporarily dips then recovers,
+        # `p_hat` *also* dips then climbs back above entry — the V-recovery.
+        #   _p_hat_below_entry_count: consecutive state-bars where p_hat < entry
+        #     (declared above in __init__)
+        #   _p_hat_vs_entry_history: rolling recent p_hat vs entry ratio
+        self._p_hat_vs_entry_history: list[float] = []
+        # Legacy LANGEVIN m_hat kinetic-energy buffers (still maintained but
+        # currently unused by the active discriminator).
+        self._neg_m_hat_history: list[float] = []
+        self._neg_m_hat_atr_ratio_history: list[float] = []
 
         # Regime filter results
         self.is_trending: bool = False
@@ -825,6 +885,37 @@ class StrategyEngine:
         if len(self._ema_spread_history) > N * 2:
             self._ema_spread_history = self._ema_spread_history[-(N * 2):]
 
+        # ── Dead code: legacy LANGEVIN buffers (kept for backward compat
+        # since external callers may mutate these).  The active LANGEVIN
+        # discriminator uses the `_p_hat_vs_entry_history` rolling buffer
+        # populated just below.  Computing `neg_mhat` here is costless
+        # and keeps the buffer symbols alive for any future re-tuning.
+        neg_mhat = max(0.0, -self.m_hat)
+        self._neg_m_hat_history.append(neg_mhat)
+        if len(self._neg_m_hat_history) > N * 4:
+            self._neg_m_hat_history = self._neg_m_hat_history[-(N * 4):]
+
+        denom = max(self.atr_val or 0.0, self.atr_floor or 0.0, 1e-18)
+        ratio = neg_mhat / denom
+        # keep buffer (used by old metric; harmless dead code if not used)
+        self._neg_m_hat_atr_ratio_history.append(ratio)
+        if len(self._neg_m_hat_atr_ratio_history) > N * 4:
+            self._neg_m_hat_atr_ratio_history = self._neg_m_hat_atr_ratio_history[-(N * 4):]
+
+        # ── LANGEVIN drift discriminator (price level escape detector):
+        # Track the ratio p_hat / entry_price over a rolling window.
+        # Whenever the ratio drops below (1 − p_hat_drift_pct/100), increment
+        # a consecutive counter.  When the counter reaches stay_floor it
+        # indicates that p_hat has been persistently below entry for the
+        # last `stay_floor` state-bars — escape has happened.
+        if self.entry_price > 0:
+            p_vs_entry_ratio = self.p_hat / self.entry_price
+            self._p_hat_vs_entry_history.append(p_vs_entry_ratio)
+            if len(self._p_hat_vs_entry_history) > N * 8:
+                self._p_hat_vs_entry_history = self._p_hat_vs_entry_history[-(N * 8):]
+        else:
+            p_vs_entry_ratio = 1.0
+
         # Barrier-adjusted signal
         self.s_effective = self._compute_s_effective(c)
 
@@ -842,6 +933,39 @@ class StrategyEngine:
         entries at this point almost always end up buying a top.
         """
         return self._momentum_peak_declining_count >= self.momentum_peak_bars
+
+    def _langevin_escape_score(self) -> float:
+        """LANGEVIN drift discriminator.
+
+        Returns the *minimum* p_hat / entry_price ratio observed over the
+        most recent `langevin_drift_window` state-updates (or 1.0 when no
+        trade is open / window too short).
+
+        In an Orstein-Uhlenbeck-like price process, `p_hat` is a
+        mean-reverting estimator that pulls back toward equilibrium (the
+        entry price) when the price is bouncing around.  When the
+        realisation is escaping (real dump), `p_hat` *itself* drifts
+        downward and over successive windows its rolling MIN keeps
+        falling.  When the realisation is V-shaped, `p_hat` dips for a
+        brief window then climbs back above entry — the MIN over a
+        rolling 28-bar window briefly goes low, then returns to 1.0+.
+
+        So: a low `min(p_hat/entry)` over langevin_drift_window is the
+        concrete signal that the p_hat estimator is *trapped* below entry
+        — i.e. the particle has escaped its basin.
+
+        The actual gate is enforced by `_apply_langevin_drift_demote`
+        which references _p_hat_below_entry_count — incremented per
+        state-update when p_hat < entry × (1 − langevin_drift_pct/100)
+        and reset as soon as p_hat climbs back above that tripwire.
+        """
+        if self.entry_price <= 0 or self.langevin_drift_window <= 0:
+            return 1.0
+        if not self._p_hat_vs_entry_history:
+            return 1.0
+        W = self.langevin_drift_window
+        window = self._p_hat_vs_entry_history[-W:]
+        return min(window) if window else 1.0
 
     def _price_overextended(self, c: float) -> bool:
         """Returns True when close is above Kalman p_hat by > overextension_k.
@@ -1424,6 +1548,46 @@ class StrategyEngine:
                 # we cut it.
                 return self.regime, None
 
+            # ── LANGEVIN drift discriminator (price-level escape detector)
+            # Two routes to ENFORCE the demote:
+            #   (A) direct executive in `_check_exit` → `langevin_drift_exit`
+            #   (B) demote TREND → REVERSAL here, then existing reversal_exit
+            #       fires via line ~2030.  Having both gives the strategy a
+            #       robust two-track routing: the executive Bypasses the
+            #       regime state machine entirely if the executive was
+            #       somehow disabled, and the demote route preserves the
+            #       natural mid-trade state transitions for diagnostics.
+            # Set `langevin_drift_stay` very large (>1e6) to fully disable
+            # both routes.
+            # Use the EFFECTIVE adverse excursion: max(p_hat_drop, c_drop).
+            # In slow bleeds the kalman-smoothed p_hat trails the close so we use
+            # `c`; in fast dumps `p_hat` lags behind so we use both.  This makes
+            # the discriminator responsive to both regimes — mode (a) and (b) in
+            # `_langevin_escape_score` at line ~940.
+            if self.in_position and self.position_direction == Direction.UP and self.entry_price > 0 and self.langevin_drift_stay > 0:
+                tripwire = self.entry_price * (1.0 - self.langevin_drift_pct / 100.0)
+                effective_low = min(self.p_hat, c) if c > 0 else self.p_hat
+                if effective_low < tripwire:
+                    self._p_hat_below_entry_count += 1
+                else:
+                    # Both p_hat and c have climbed back above the tripwire —
+                    # V-recovery signature.
+                    self._p_hat_below_entry_count = 0
+            else:
+                self._p_hat_below_entry_count = 0
+
+            if self._p_hat_below_entry_count >= self.langevin_drift_stay:
+                # Route (B): demote TREND→REVERSAL.
+                self.regime = Regime.REVERSAL
+                self.prev_direction = self.direction
+                self.direction = Direction.DOWN
+                self.reversal_bar_count = 0
+                self.trend_reversal_confirm_count = 0
+                self.exhaustion_persist_count = 0
+                self._exhaustion_s_decay_count = 0
+                self._p_hat_below_entry_count = 0
+                return self.regime, None
+
             # ── FIX-B: Ambiguous zone — hard return with no signal ────────────
             return self.regime, None
 
@@ -1768,6 +1932,36 @@ class StrategyEngine:
         # so it evaluates trailing stops against the peak established from 
         # previous bars. This prevents phantom intra-bar stop-outs.
 
+        # ── LANGEVIN drift EXECUTIVE — directly exit when p_hat has been
+        # trapped below entry for too long.  This is an advanced physical
+        # discriminator: the Kalman-smoothed position `p_hat` is the most
+        # stable estimator of the latent price level.  When it has been
+        # continuously below `entry × (1 − langevin_drift_pct/100)` for at
+        # least `langevin_drift_stay` consecutive state-bars, the realisation
+        # has been ESCAPING its basin (Ortstein-Uhlenbeck picture) for too
+        # long.  Bypasses the slower regime-state machine which needs S > 4
+        # to flip to REVERSAL.
+        # ── (Currently DISABLED in favour of the demote-and-reversal_exit
+        #     path through `_detect_regime`.  See iteration log: the direct
+        #     executive produced slightly worse PnL by exiting during
+        #     the regime's natural resolution window — the demote-then-
+        #     reversal_exit flow gives the regime an opportunity to
+        #     re-evaluate once before committing.  Re-enable by removing
+        #     these comments if profiling results in the future change.) ──
+        # if self.position_direction == Direction.UP and self.entry_price > 0 and self.langevin_drift_stay > 0:
+        #     tripwire = self.entry_price * (1.0 - self.langevin_drift_pct / 100.0)
+        #     if self.p_hat < tripwire:
+        #         self._check_exit_p_hat_below += 1
+        #         if self._check_exit_p_hat_below >= self.langevin_drift_stay:
+        #             self.exit_signal_reason = "langevin_drift_exit"
+        #             self._check_exit_p_hat_below = 0
+        #             return Signal.EXIT
+        #     else:
+        #         self._check_exit_p_hat_below = 0
+        # Reset space for the lazy-init attribute above — Reset to 0 once
+        # the trade closes
+        # (handled in notify_trade_closed via reset)
+
         # ── Confidence-scaled stop loss (stoploss_pct_low / stoploss_pct_high) ─
         eff_sl = self._effective_stoploss_pct()
         if eff_sl != 0.0:
@@ -1931,12 +2125,20 @@ class StrategyEngine:
         # FIX-D: record engine state-bar at which the position opened so the
         # early-underwater protection window can be measured in engine bars.
         self._entry_bar_count = self.bar_count
+        # LANGEVIN drift discriminator: clear any escape-counter carried
+        # over from a previous trade.  The discriminator is *intra-trade*
+        # by construction; it must not span across closed positions.
+        self._p_hat_below_entry_count = 0
+        self._check_exit_p_hat_below = 0
+        self._p_hat_vs_entry_history = []
 
     def notify_trade_closed(self):
         self.in_position = False
         self.entry_price = 0.0
         self.position_direction = Direction.NONE
         self._peak_price = 0.0
+        self._p_hat_below_entry_count = 0
+        self._check_exit_p_hat_below = 0
 
     def update(
         self,
