@@ -55,7 +55,13 @@ from data_store import (
 import multiprocessing
 
 # Directory where per-token JSON trade logs are written.
-_RESULTS_DIR = os.path.join(os.path.dirname(__file__), "backtest_results")
+# Allow override via env var so V2 iteration runs can persist to a safe location
+# (e.g. backend/v2_results/) that is NOT wiped by external V1 param-sweep scripts
+# that do `rm -rf backend/backtest_results`.
+_RESULTS_DIR = os.environ.get(
+    "BACKTEST_RESULTS_DIR",
+    os.path.join(os.path.dirname(__file__), "backtest_results"),
+)
 
 
 _pool: ProcessPoolExecutor | None = None

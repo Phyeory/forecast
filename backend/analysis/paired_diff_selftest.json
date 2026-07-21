@@ -1,0 +1,59 @@
+{
+  "baseline": {
+    "tokens_traded": 1,
+    "total_trades": 4,
+    "winning_trades": 4,
+    "win_rate_pct": 100.0,
+    "total_pnl_sol": 0.04755,
+    "tokens_profitable": 1
+  },
+  "candidate": {
+    "tokens_traded": 1,
+    "total_trades": 4,
+    "winning_trades": 4,
+    "win_rate_pct": 100.0,
+    "total_pnl_sol": 0.04755,
+    "tokens_profitable": 1
+  },
+  "labels": {
+    "baseline": "iter04_smoke_1784561323",
+    "candidate": "iter04_smoke_1784561323"
+  },
+  "common_tokens": 1,
+  "only_in_baseline": 0,
+  "only_in_candidate": 0,
+  "mean_d_pnl": 0.0,
+  "median_d_pnl": 0.0,
+  "n_tokens_improved": 0,
+  "n_tokens_regressed": 0,
+  "n_tokens_flipped_L_to_W": 0,
+  "n_tokens_flipped_W_to_L": 0,
+  "majority_improved_pct": 0.0,
+  "stats": {
+    "wilcoxon_stat": null,
+    "wilcoxon_p": null,
+    "wilcoxon_p_greater": null,
+    "paired_t_stat": null,
+    "paired_t_p": null,
+    "bootstrap_d_pnl_mean": null,
+    "bootstrap_d_pnl_ci95_low": null,
+    "bootstrap_d_pnl_ci95_high": null,
+    "mcnemar_p": null,
+    "n_diffs": 1
+  },
+  "verdict": "REJECT",
+  "rows": [
+    {
+      "recording_id": 1246,
+      "symbol": "Tater",
+      "base_pnl": 0.04755,
+      "cand_pnl": 0.04755,
+      "d_pnl": 0.0,
+      "base_n": 4,
+      "cand_n": 4,
+      "base_wr": 100.0,
+      "cand_wr": 100.0,
+      "d_wr": 0.0
+    }
+  ]
+}

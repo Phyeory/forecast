@@ -57,6 +57,9 @@
     "trail_floor_pct": 13,
     "forbidden_bc_lo": 2000,
     "forbidden_bc_hi": 3000,
-    "reversal_exit_bars_max": 20
+    "reversal_exit_bars_max": 10,
+    "langevin_drift_pct": 8,
+    "langevin_drift_stay": 94,
+    "langevin_drift_window": 28
   }
 }
