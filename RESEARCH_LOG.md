@@ -604,3 +604,132 @@ Per user direction (2026-07-21): implement iter06 barrier-anchored
 s_effective first as the math-grounded improvement. If this also
 fails paired_diff, then pivot to iter07 SL/TP tightening as a
 pragmatic risk-management patch.
+
+---
+
+## iter06 systematic probe — V2 stochastic observables (2026-07-21)
+
+To empirically test iter06 hypotheses at scale, wrote
+`backend/analysis/iter06_probe.py` which monkey-patches the
+`ForwardTester._capture_entry_params()` snapshot to record additional
+fields at every trade entry:
+
+| Field | Source |
+|---|---|
+| `spec_s_eff`, `du_up_norm`, `du_down_norm` | entropy-only barrier heights via `_barrier_find_kernel(U_entropy=x*log(rho), idx_t)` (probe-only; not used by engine) |
+| `rho_up_max`, `rho_down_max`, `rho_up_pos`, `rho_down_pos`, `rho_drop_{50,10}_{up,down}` | KDE density sub-peaks & first-decay distance |
+| `dec_{P_up,P_down,P_zero,k_up,k_down,k_total,du_up,du_down,mu_hat_tau,n_star,E_star,direction}` | live `_kramers_escape_and_decision` return |
+| `signal_strength`, `s_effective`, `T_t`, `sigma_t_V2`, `grid_span`, `bar_count`, `confidence_at_entry` | engine-adapter scalars |
+
+Probe run on the 20 worst + 19 best priced trade tokens (39 recs
+total, biased sample); 198 trades recovered.
+
+### iter06 findings — kramers-decision degeneracy
+
+**Critical structural finding.** Across ALL 198 probed long entries
+(both winners and losers):
+
+1. `dec_k_up = 1e6` in 100 % of trades — the "infinite escape rate
+   proxy" from `_kramers_escape_and_decision:1543` that fires when
+   `du_up ≤ 0`.
+2. `dec_du_up < 0` in **198 / 198** trades (range -1.4e-2 to -5e-7).
+   The upward "barrier" U value has LOWER energy than the basin U
+   because the V_liq taper (line 1404) makes the boundary's
+   V_liq ≈ 1e-6, while `x_t`'s V_liq = `ask_depth × 1.0`. Compo-
+   site U underflows.
+3. `dec_P_up = 1.0` everywhere (`dec_P_down ≈ 0`, `dec_P_zero = 0`).
+4. **No genuine density barrier exists in the V2 KDE grid**: rho
+   does not drop below 0.5 × rho_max anywhere in the 200-point
+   span.  `rho_drop_50_up` (the grid index where rho first
+   halves) hits the right boundary `≈ 102 / 100` for every trade.
+5. `dec_mu_hat_tau` distribution (a Bayesian forward-extremum
+   forecast: `μ̂_τ = μ_t·τ + (φ_t/α)·τ`):
+   - Q1 [0.004, 0.48]: n=39  WR=84.6%  pnl=+0.392
+   - Q2 [0.48,  1.73]: n=40  WR=75.0%  pnl=+0.274
+   - Q3 [1.73,  2.88]: n=39  WR=74.4%  pnl=+0.909
+   - Q4 [2.88,  4.44]: n=40  WR=80.0%  pnl=+0.656
+   - Q5 [4.44,    ∞):  n=40  WR=62.5%  pnl=+0.295 ← tail losers
+   - **Spearman ρ(mu_hat_tau, pnl_sol) = -0.05**
+
+   The V2 forecast's HIGHEST quintile has the WORST win rate.
+   Tracing this: at top-of-spike, the Kalman/OU forward projects
+   huge `mu_hat_tau` from the recent pump, but the underlying SDE
+   phase is reversing. The kramers k_up saturation prevents
+   the safety mechanism from catching this — it's a structural
+   disability, not a tunable error.
+
+6. `dec_n_star` median 0.111 (worst-30) vs 0.115 (best-30) — 
+   identical. `dec_E_star` median 0.446 (worst-30) vs 0.433
+   (best-30) — identical. Kelly outputs cannot discriminate.
+
+### iter06 implementation tested — REJECTED by paired_diff
+
+Three V2 knob variants implemented & tested on subset200 (200
+random recs) against `iter04_baseline_subset200_1784615508`:
+
+| Variant | trades | WR | PnL | Tokens improved | Wilcoxon p | Verdict |
+|---|---|---|---|---|---|---|
+| `mu_hat_tau_max=5` plain | 292 | 79.8 % | +1.813 | 6 / 91 | 0.367 | **REJECT** |
+| `mu_hat_tau_max=5 & sig_max=1e9` | 294 | 79.9 % | +1.825 | 4 / 93 | 0.711 | **REJECT** |
+| `mu_hat_tau_max=4` plain | 289 | 78.9 % | +1.770 | 12 / 90 | 0.625 | **REJECT** |
+
+vs iter04_baseline (subset200): 299 trades, 79.3 % WR, +1.8282
+SOL.  All three variants slightly REDUCE PnL (mean Δ ≤ -0.00013
+SOL) AND produce ≤ 13.3 % tokens-improved — fails paired_diff's
+50 %-improvement test and Wilcoxon p < 0.05 test.
+
+The over-extrapolation filter does NOT generalize from the biased
+probe sample (worst-30+best-30) to the random subset200. The
+particular worst-regressions on subset200 (RUMP, くまきち, BTCX,
+BOUNTREE) are tokens where the filter blocked a WINNING trade,
+revealing the probe set's selection bias.
+
+### iter06 conclusion + revert
+
+The kramers-decision degeneracy isn't fixable by entry-side filters
+because the V2 potential model — centered at x_t on a 200-point
+grid, with KDE bandwidth from a 600-tick buffer — cannot represent
+off-grid HVN clusters.  Realisation: any barrier-aware signal feed
+of the form `S / ΔU` mathematically collapses to `S / ε` for memecoin
+liquidity regimes.
+
+**Infrastructure reverted (commit 59b5128 + git checkout)**:
+all iter06 knobs and entry-gate additions removed from
+`strategy_engineV2.py`. The engine is once again numerically
+identical to iter04 with `engine_params={}`. Probe artifacts
+preserved at `backend/analysis/iter06_probe.{py,results.json}`
+for future reference but the rejected-experiment files
+(`iter06_mu*_subset200.{json,comparison.json}`) were swept.
+
+---
+
+## iter07 design — risk-management tail-truncation (PENDING)
+
+Per user direction (2026-07-21): "if it doesn't work, revert to
+iter04 and start tightening the SL and TP".  The catastrophic loss
+profile from the iter04-full analysis identifies the target mode:
+
+- All 30 worst trades exit via `kramers_down_exit`, not flash-stop.
+- 13 / 30 entered with bar_count < 500 (cold-start).
+- Median pnl_pct = -45 % (slow bleeds) — kramers triggers too late
+  on slow-bleed losers.
+- Worst trade: SOLANA (rec 1544) −43.7 % over 1150 bars, s_eff=1.73e9,
+  confidence 0.95.
+
+iter06 showed the entry-side is fundamentally uncategorisable; the
+fix has to be in the **exit tail**.  Two coupled levers:
+
+### iter07 SL-tightening (entry-side risk budget cap)
+
+| Iteration knob | Default | Description |
+|---|---|---|
+| `iter07_per_trade_max_loss_pct` | inf (off) | Hard cap on intra-trade loss vs entry.  When the trade has accumulated `pnl_pct ≤ iter07_per_trade_max_loss_pct`, fire EXIT immediately.  Mathematical motivation: catastrophic losers in iter04 Full have pnl_pct deeper than -30 %, but kramers_down_exit fires late at observed drawdowns -20 to -40 %; a tighter budget (-15 %) would convert most of the worst-30's tail into smaller-mode exits.  Trade-off: bumps false-exit rate on slow-bleed winners; iter04 baseline exits winners on slow bleeds via kramers too, so the net effect on winners depends on the difference between the new budget and the empirical winning-trade maximum drawdown. |
+| `iter07_takeprofit_pct_boost` | 1.0 (no boost) | Multiplier on the effective take-profit %.  Multiplying TP by 0.8 means the engine harvests winning trades 20 % earlier — losing fewer winners on continuations that reverse.  Multiplier < 1 adds trade count, ≥ 1 reduces trade count. |
+
+iter07 sweep plan:
+1. `iter07_sl_-15`        : `iter07_per_trade_max_loss_pct = -15`.
+2. `iter07_sl_-20`        : -20.
+3. `iter07_sl_-25`        : -25.
+4. `iter07_tp_0.8`        : TP multiplier 0.8 (which = +16% vs current ~+20%).
+5. `iter07_sl_-15_tp_0.8`  : joint.
+All on subset200, then full 1495 for the winning variant.

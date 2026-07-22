@@ -48,6 +48,12 @@ def _v2_spec_s_effective(eng: se2.StrategyEngineV2Adapter) -> dict:
       rho_down_max = rho at that sub-peak
       S_eff_spec   = signal_strength / max(du_up_norm, ε)   [long-only]
 
+    Also compute ENTROPY-ONLY barriers (V_liq removed) and the
+    "first upward rho GAP" — the distance in grid index from idx_t to the
+    first frame where rho drops to < 0.5 × rho_at_t.  This corresponds to
+    the entropic wall encountered moving upward in log-price space; when
+    the wall is close, we expect momentum to stall (low du_up_norm).
+
     All quantities are READ-ONLY here — no state mutation.
     """
     core = getattr(eng, "core", None)
@@ -57,7 +63,13 @@ def _v2_spec_s_effective(eng: se2.StrategyEngineV2Adapter) -> dict:
                     rho_up_max=0.0, rho_down_max=0.0,
                     T_t=0.0, idx_up=0, idx_down=0, rho_max=0.0, rho_at_t=0.0,
                     U_entropy_up=0.0, U_entropy_down=0.0, U_entropy_basin=0.0,
-                    grid_span=0.0, sigma_t_V2=0.0, dist_x_to_up=0.0, dist_x_to_down=0.0)
+                    grid_span=0.0, sigma_t_V2=0.0, dist_x_to_up=0.0, dist_x_to_down=0.0,
+                    rho_drop_50_up=0, rho_drop_10_up=0,
+                    rho_drop_50_down=0, rho_drop_10_down=0,
+                    U_ent_up_norm=0.0, U_ent_down_norm=0.0,
+                    U_ent_drop_50_up=0.0, U_ent_drop_10_up=0.0,
+                    U_ent_drop_50_down=0.0, U_ent_drop_10_down=0.0,
+                    spec_s_eff_ent=0.0, spec_s_eff_drop50=0.0)
     pot = core._last_potential
     grid = pot["grid"]
     rho = pot["rho"]
@@ -70,7 +82,13 @@ def _v2_spec_s_effective(eng: se2.StrategyEngineV2Adapter) -> dict:
                     rho_up_max=0.0, rho_down_max=0.0,
                     T_t=0.0, idx_up=0, idx_down=0, rho_max=0.0, rho_at_t=0.0,
                     U_entropy_up=0.0, U_entropy_down=0.0, U_entropy_basin=0.0,
-                    grid_span=0.0, sigma_t_V2=0.0, dist_x_to_up=0.0, dist_x_to_down=0.0)
+                    grid_span=0.0, sigma_t_V2=0.0, dist_x_to_up=0.0, dist_x_to_down=0.0,
+                    rho_drop_50_up=0, rho_drop_10_up=0,
+                    rho_drop_50_down=0, rho_drop_10_down=0,
+                    U_ent_up_norm=0.0, U_ent_down_norm=0.0,
+                    U_ent_drop_50_up=0.0, U_ent_drop_10_up=0.0,
+                    U_ent_drop_50_down=0.0, U_ent_drop_10_down=0.0,
+                    spec_s_eff_ent=0.0, spec_s_eff_drop50=0.0)
     idx_t = int(np.argmin(np.abs(grid - x_t)))
     eps_rho = 1e-12
     U_ent = -T_t * np.log(np.maximum(rho, eps_rho))
@@ -105,8 +123,47 @@ def _v2_spec_s_effective(eng: se2.StrategyEngineV2Adapter) -> dict:
     S = float(eng.signal_strength or 0.0)
     eps = 1e-3
     spec_s_eff = S / max(du_up_norm, eps) if du_up_norm > 0 else 0.0
+    spec_s_eff_ent = S / max(du_up_norm, eps) if du_up_norm > 0 else 0.0
+
+    # ALSO compute the "rho drop" — distance from idx_t along the grid until rho
+    # first drops below 0.5 × rho_at_t.  This is the entropic wall location in grid
+    # units; closer wall ⇒ smaller room to move ⇒ expect smaller momentum.
+    def _first_drop(rho_arr, idx_t_local, factor, step):
+        thresh = factor * rho_at_t
+        i = idx_t_local + step
+        while 0 <= i < n:
+            if rho_arr[i] <= thresh:
+                return i - idx_t_local  # grid index offset (negative for left side)
+            i += step
+        return (n - 1 - idx_t_local) * step  # hit boundary
+
+    rho_drop_50_up = _first_drop(rho, idx_t, 0.5, +1)
+    rho_drop_10_up = _first_drop(rho, idx_t, 0.1, +1)
+    rho_drop_50_down = _first_drop(rho, idx_t, 0.5, -1)
+    rho_drop_10_down = _first_drop(rho, idx_t, 0.1, -1)
+
+    # Entropy at the rho_drop_50 locations (showing actual wall heights above basin)
+    U_ent_drop_50_up = 0.0
+    U_ent_drop_10_up = 0.0
+    U_ent_drop_50_down = 0.0
+    U_ent_drop_10_down = 0.0
+    if 0 <= idx_t + rho_drop_50_up < n:
+        U_ent_drop_50_up = float(U_ent[idx_t + rho_drop_50_up] - U_ent_basin)
+    if 0 <= idx_t + rho_drop_10_up < n:
+        U_ent_drop_10_up = float(U_ent[idx_t + rho_drop_10_up] - U_ent_basin)
+    if 0 <= idx_t + rho_drop_50_down < n:
+        U_ent_drop_50_down = float(U_ent[idx_t + rho_drop_50_down] - U_ent_basin)
+    if 0 <= idx_t + rho_drop_10_down < n:
+        U_ent_drop_10_down = float(U_ent[idx_t + rho_drop_10_down] - U_ent_basin)
+    # Wall heights normalized by T_t (i.e. in "kT" units)
+    U_ent_up_norm = U_ent_drop_50_up / max(T_t, 1e-12) if T_t > 0 else 0.0
+    U_ent_down_norm = U_ent_drop_50_down / max(T_t, 1e-12) if T_t > 0 else 0.0
+    spec_s_eff_drop50 = S / max(U_ent_up_norm, eps) if U_ent_up_norm > 0 else 0.0
+
     return dict(
         spec_s_eff=float(spec_s_eff),
+        spec_s_eff_ent=float(spec_s_eff_ent),
+        spec_s_eff_drop50=float(spec_s_eff_drop50),
         du_up_norm=float(du_up_norm),
         du_down_norm=float(du_down_norm),
         T_t=float(T_t),
@@ -118,6 +175,11 @@ def _v2_spec_s_effective(eng: se2.StrategyEngineV2Adapter) -> dict:
         rho_up_pos=rho_up_pos, rho_down_pos=rho_down_pos,
         rho_up_max=rho_up_max, rho_down_max=rho_down_max,
         dist_x_to_up=dist_x_to_up, dist_x_to_down=dist_x_to_down,
+        rho_drop_50_up=int(rho_drop_50_up), rho_drop_10_up=int(rho_drop_10_up),
+        rho_drop_50_down=int(rho_drop_50_down), rho_drop_10_down=int(rho_drop_10_down),
+        U_ent_up_norm=float(U_ent_up_norm), U_ent_down_norm=float(U_ent_down_norm),
+        U_ent_drop_50_up=float(U_ent_drop_50_up), U_ent_drop_10_up=float(U_ent_drop_10_up),
+        U_ent_drop_50_down=float(U_ent_drop_50_down), U_ent_drop_10_down=float(U_ent_drop_10_down),
     )
 
 
@@ -127,6 +189,21 @@ _orig_capture_entry = ftm.ForwardTester._capture_entry_params
 # Cache the most recent kramers decision so we can correlate with trade outcome.
 import collections as _c
 _last_decision_snapshot: dict = {}
+
+# Patch the core engine's get_decision to store its return on `_last_decision`.
+_orig_get_decision = se2.MemecoinStrategyEngine.get_decision
+
+
+def _patched_get_decision(self, horizon: int = 30) -> dict:
+    res = _orig_get_decision(self, horizon=horizon)
+    try:
+        self._last_decision = res
+    except Exception:
+        pass
+    return res
+
+
+se2.MemecoinStrategyEngine.get_decision = _patched_get_decision
 
 
 def _patched_capture_entry(self, exec_price: float):
@@ -138,8 +215,7 @@ def _patched_capture_entry(self, exec_price: float):
             barrier_ctx = _v2_spec_s_effective(eng)
             snap.update(barrier_ctx)
             snap["__iter06_probe__"] = True
-            # Also snapshot the most recent decision (P_up/P_down/P_zero/du_up/du_down)
-            # Live on the core engine (MemecoinStrategyEngine), not the adapter.
+            # Read the latest decision from the core engine (set via patched get_decision).
             dec = getattr(getattr(eng, "core", eng), "_last_decision", None)
             if isinstance(dec, dict):
                 snap["dec_P_up"]   = float(dec.get("P_up",   0.0))
@@ -212,6 +288,8 @@ def main():
                 rec=rec_id, sym=d.get("token_symbol", ""),
                 pnl_pct=tt["pnl_pct"], pnl_sol=tt["pnl_sol"], outcome=tt.get("outcome", ""),
                 spec_s_eff=ep.get("spec_s_eff", 0.0),
+                spec_s_eff_ent=ep.get("spec_s_eff_ent", 0.0),
+                spec_s_eff_drop50=ep.get("spec_s_eff_drop50", 0.0),
                 du_up_norm=ep.get("du_up_norm", 0.0),
                 du_down_norm=ep.get("du_down_norm", 0.0),
                 rho_up_pos=ep.get("rho_up_pos", 0),
@@ -228,6 +306,16 @@ def main():
                 sigma_t_V2=ep.get("sigma_t_V2", 0.0),
                 dist_x_to_up=ep.get("dist_x_to_up", 0.0),
                 dist_x_to_down=ep.get("dist_x_to_down", 0.0),
+                rho_drop_50_up=ep.get("rho_drop_50_up", 0),
+                rho_drop_10_up=ep.get("rho_drop_10_up", 0),
+                rho_drop_50_down=ep.get("rho_drop_50_down", 0),
+                rho_drop_10_down=ep.get("rho_drop_10_down", 0),
+                U_ent_up_norm=ep.get("U_ent_up_norm", 0.0),
+                U_ent_down_norm=ep.get("U_ent_down_norm", 0.0),
+                U_ent_drop_50_up=ep.get("U_ent_drop_50_up", 0.0),
+                U_ent_drop_10_up=ep.get("U_ent_drop_10_up", 0.0),
+                U_ent_drop_50_down=ep.get("U_ent_drop_50_down", 0.0),
+                U_ent_drop_10_down=ep.get("U_ent_drop_10_down", 0.0),
                 signal_strength=ep.get("signal_strength", 0.0),
                 s_effective=ep.get("s_effective", 0.0),
                 bar_count=ep.get("bar_count", 0),
@@ -269,11 +357,17 @@ def main():
         print("\nField comparisons (worst-losers vs best-winners on this probe set):")
         los_worst = sorted(los, key=lambda r: r["pnl_sol"])[:min(30, len(los))]
         win_best = sorted(win, key=lambda r: -r["pnl_sol"])[:min(30, len(win))]
-        for key in ["spec_s_eff", "du_up_norm", "du_down_norm", "rho_up_pos", "rho_down_pos",
+        for key in ["spec_s_eff", "spec_s_eff_ent", "spec_s_eff_drop50",
+                    "du_up_norm", "du_down_norm", "rho_up_pos", "rho_down_pos",
                     "rho_up_max", "rho_down_max", "T_t", "rho_at_t",
                     "U_entropy_up", "U_entropy_down", "U_entropy_basin",
                     "grid_span", "sigma_t_V2",
                     "dist_x_to_up", "dist_x_to_down",
+                    "rho_drop_50_up", "rho_drop_10_up",
+                    "rho_drop_50_down", "rho_drop_10_down",
+                    "U_ent_up_norm", "U_ent_down_norm",
+                    "U_ent_drop_50_up", "U_ent_drop_10_up",
+                    "U_ent_drop_50_down", "U_ent_drop_10_down",
                     "signal_strength", "s_effective",
                     "bar_count", "confidence_at_entry",
                     "dec_P_up", "dec_P_down", "dec_P_zero", "dec_P_up_minus_down", "dec_P_up_div_down",
