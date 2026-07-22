@@ -275,6 +275,18 @@ def run_backtest(
             "unrealized_pnl":  0,
         })
 
+        last_candle = (t, o, h, l, c)
+
+    # Force-close any position still open at end of recording so its PnL is
+    # captured in stats (win_rate / total_pnl_sol).  Otherwise trades that
+    # entered near the end of data are silently dropped, biasing results.
+    if ft.current_trade is not None:
+        t_last, o_last, h_last, l_last, c_last = last_candle
+        ft._close_long(
+            o_last, h_last, l_last, c_last, t_last,
+            reason="recording_ended",
+        )
+
     # Gather trade history
     trades = [t.to_dict() for t in ft.trade_history]
     stats = ft.stats.to_dict()
