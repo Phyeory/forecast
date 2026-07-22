@@ -733,3 +733,83 @@ iter07 sweep plan:
 4. `iter07_tp_0.8`        : TP multiplier 0.8 (which = +16% vs current ~+20%).
 5. `iter07_sl_-15_tp_0.8`  : joint.
 All on subset200, then full 1495 for the winning variant.
+
+---
+
+## iter07 trade-walk drawdown analysis (2026-07-22)
+
+Walked every iter04_full trade from entry_time through exit_time and
+recovered the per-trade **maximum underwater drawdown** (lowest low vs
+entry-price).  Saved to
+`/Users/jaime/pump-chart/backend/analysis/iter04_intra_trade_drawdowns.json`
+(2547 trades; ~5 s on a single thread).
+
+### Result: Hard SL cap REJECTED in simulation
+
+Trade-walk simulation: replace each trade's `pnl_sol` with the `pnl_sol`
+it would have at the simulated `iter07_per_trade_max_loss_pct = thresh`,
+**only if** the trade's intra-trade drawdown dipped at or below thresh.
+Otherwise the trade is unchanged.
+
+| Hard SL cap | winners unchanged | winners truncated | losers unchanged | losers saved | winner cost (SOL) | loser saving (SOL) | net Δ PnL (SOL) |
+|---|---|---|---|---|---|---|---|
+| -7.5 % | 1177 | 858 | 251 | 261 | -18.82 | -1.45 | **-20.27** |
+| -10.0 % | 1352 | 683 | 271 | 241 | -17.65 | -0.96 | **-18.61** |
+| -12.5 % | 1478 | 557 | 292 | 220 | -16.12 | -0.58 | **-16.70** |
+| -15.0 % | 1577 | 458 | 310 | 202 | -14.73 | -0.26 | **-14.99** |
+| -20.0 % | 1718 | 317 | 334 | 178 | -12.21 | +0.39 | **-11.82** |
+| -25.0 % | 1799 | 236 | 353 | 159 | -10.34 | +0.93 | **-9.46** |
+
+At every tested hard-cap threshold between -7.5 % and -25 %, the cap
+truncates more upside from winners than downside from losers.  Even
+at the very generous -25 % (159 catastrophic losers saved = +0.93 SOL
+of PnL), the 236 wide-drawdown winners cost -10.34 SOL.
+
+### Why this happens
+
+The sample of 2547 iter04 trades includes 2035 winners (80 %),
+and most winners have intra-trade drawdowns considerably deeper
+than -5 %.  Cap-driven exits fire during the typical "draw-and-
+rebound" of memecoin winners: price dips -15 % to -25 %, reverts
+up while V2 Kramers/EMA signals stay supportive, kramers_down
+fires on the eventual reversion to capture +5 to +30 %.  Hard-
+interrupting the drawdown phase prevents the mean-reversion
+capture.
+
+iter04 kramers_down is the engine's **correct** behaviour for wide-
+drawdown winners.  Truncating the exit price at the drawdown low
+destroys this.
+
+### Re-evaluation of user-stated direction
+
+The user said "revert to iter04 and start tightening the SL and
+TP" after iter06 failed.  The trade-walk evidence above makes it
+clear that **a naive hard SL cap is rejected** by the iter04 distri-
+bution of winner drawdowns.  iter07 cannot ship a hard SL cap as
+described: the wins would be eaten by exit-truncation.
+
+Two remaining iter07 directions (not yet implemented):
+
+(a) **Confidence-conditional SL cap**.  Trades entered at low
+    confidence (e.g. 0.79-0.85) get a tighter cap; high-confidence
+    trades (0.95-1.00) keep the current kramers_down behaviour.
+    Hypothesis: low-confidence trades are more likely to be the
+    catastrophic pump-and-crash entries; high-confidence trades
+    are the genuine breakouts we want to ride through drawdowns.
+    This requires the per-trade distribution of `confidence_at_
+    entry × drawdown_pct` from this trade walk.
+
+(b) **Time-decayed SL cap**.  After holding the trade for more
+    than, say, 30 minutes, tighten the SL progressively.  This
+    would shorten the "slow bleed" tail without crushing fast-
+    mean-reversions.
+
+(c) **Halt-and-restart breaker**.  After `kramers_down_exit`,
+    REFUSE subsequent re-entries on the same token for N state-
+    updates, to break the "re-entry churn" hypothesis (an idea
+    floated earlier, not yet tested rigorously on subset200).
+
+Direction (c) is the simplest to validate: it just adds a token-
+level cooldown timer keyed on exit_reason.
+The companion probe (`backend/analysis/probes/iter07_drawdown_walk.py`)
+is the working tool for directions (a) and (b).
