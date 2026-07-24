@@ -2212,82 +2212,6 @@ class StrategyEngineV2Adapter:
         # closer to U(x) barrier — both correspond to high-confidence
         # Kramers-escape foundations per spec §3.6.
         self.iter05_s_effective_min   = float(engine_kwargs.pop("iter05_s_effective_min", 0.0))
-        # ── iter10/11 crash-circuit-breaker exit — DISABLED by default ──
-        # Mathematical motivation: the V2 kramers exit (line 2517→2705_gate)
-        # fires when `P_down > P_up AND P_down > P_zero AND P_down >= 0.5`.
-        # Probe data (RESEARCH_LOG §iter10) showed that during crashes the
-        # engine is locked into a `P_zero = 1, k_up = k_down = 0` attractor
-        # — the basin is so deep that no escape rate is computed, and the
-        # kramers-down gate never flips. Trades held in this state bleed
-        # to `recording_ended` at -99% (656 such trades = -25.98 SOL in
-        # iter08).
-        #
-        # Note: iter10 and iter11 attempted to add a complementary exit
-        # gate based on this trap signature, but probes (iter11b) showed
-        # that the degeneracy of `k ∝ exp(-ΔU/T_t)` with `T_t ≈ 10^-5`
-        # makes `k_up` vacillate between 1e6 (strongly bullish on grid
-        # noise) and 0 (trapped) on adjacent state-updates. The
-        # trapped-basin "signature" only crosses 0.5 fraction when the
-        # trade is in profit; during the crash phase the per-bar
-        # trapped-fraction is at ~10% of the window. The gate is
-        # therefore a no-op (the disabled below). iter12 will replace
-        # the entire Kramers-bump catalyst with the bounded
-        # Inverse-Gaussian First-Passage formulation.
-        #
-        # Defaults: `iter10_crash_exit_enable = 0.0` (disabled). The four
-        # other knobs are kept only for instrumentation — do not pass
-        # them in production.
-        self.iter10_crash_exit_enable   = float(engine_kwargs.pop("iter10_crash_exit_enable", 0.0))
-        self.iter10_kramers_min         = float(engine_kwargs.pop("iter10_kramers_min", 1e-3))
-        self.iter10_loss_pct            = float(engine_kwargs.pop("iter10_loss_pct", 15.0))
-        self.iter10_min_bars_after_entry = int(engine_kwargs.pop("iter10_min_bars_after_entry", 20))
-        # `iter10_consecutive_trapped_bars` (default 24 = 6 candles ≈ 6 s
-        # under the 4-state expansion on a 1s-timeframe token): CB fires only
-        # after the trapped-basin signature (k_up<min AND k_down<min) has
-        # held for this many *consecutive* engine-bars. Iter11a tried
-        # `consecutive=15` (relaxed from the original 320) and discovered
-        # that on this dataset the trapped-basin signature only ever
-        # survives a few engine-bars in a single candle before the engine
-        # flips back to k_up=1e6 on the next state-update (vacillation
-        # between attractors is the engine's own behavior). Default of 24
-        # sub-states ≈ 6 candles is empirically the high-water mark we see
-        # during true catastrophic records; 8 sub-states ≈ 2 candles is the
-        # winner-trade spike we saw on Shipley rec300 trade #4.
-        # `iter10_trapped_window_fraction` provides a complementary persistence
-        # metric that should also work on this dataset: ratio of trapped-
-        # states in the last `iter10_trapped_window` state-updates ≥ threshold.
-        # See `iter10_trapped_ratio_enable` (default 0.0 = OFF).
-        self.iter10_consecutive_trapped_bars = int(engine_kwargs.pop("iter10_consecutive_trapped_bars", 20))
-        self._iter10_trapped_streak: int = 0
-        # `iter10_trapped_window` (default 120 = 30 candles ≈ 30 s under the
-        # 4-state expansion on 1s tokens): sliding window over which the
-        # fraction of trapped-basin state-updates is computed. Computed as
-        # `trapped_count / window_size`. The fraction overcomes the streak
-        # vacillation that caps `consecutive_trapped_bars` at ~24 even on
-        # real crashes.
-        # `iter10_trapped_window_thresh` (default 0.5 ≡ 50%): minimum trapped
-        # fraction over the window to admit a CB exit. on shipley winning
-        # trade #4 the trapped-fraction during the deepest dip is short
-        # (max streak=8 ≈ 7% of a 120-bar window) — comfortably below
-        # 50%. on nyoro the trapped fraction is the majority across many
-        # candles — well above 50% — so CB fires there.
-        self.iter10_trapped_window = int(engine_kwargs.pop("iter10_trapped_window", 120))
-        self.iter10_trapped_window_thresh = float(engine_kwargs.pop("iter10_trapped_window_thresh", 0.5))
-        self._iter10_trapped_window_count: int = 0  # rolling count
-        self._iter10_trapped_window_buf: list[int] = []  # rolling buffer of 0/1
-        # `iter10_entry_cooldown_bars` (default 1200 = 300 candles under the
-        # 4-state expansion): once a `crash_circuit_breaker` EXIT has fired,
-        # refuse all new BUY entries for this many engine-bars.  The
-        # `_crash_cb_cooldown_until` counter is set when CB fires and
-        # decremented by 1 per `update()` call — the engine enters on the
-        # 4-state expansion, so 1200 sub-state-updates ≈ 300 real candles ≈
-        # ~5 minutes wall-clock on a 1-second timeframe token.  This is
-        # calibrated to be long enough to short-circuit iter05's documented
-        # re-entry churn (trades #28/#30 on nyoro rec482 re-entered within
-        # seconds of CB exits, costing -0.063 and -0.038 SOL — avoidable if
-        # the engine had waited for the trapped-basin signature to lift).
-        self.iter10_entry_cooldown_bars = int(engine_kwargs.pop("iter10_entry_cooldown_bars", 1200))
-        self._iter10_crash_cb_active_until = 0  # engine-bar-count floor
         # V2 only — used by ForwardTester when it generates the cfg dict
         # via the V1 attr names; defaults = spec defaults
         self.lambda_mu = self.cfg["lambda_mu"]
@@ -2781,60 +2705,6 @@ class StrategyEngineV2Adapter:
             if p_down > p_up and p_down > p_zero and p_down >= 0.5:
                 self.exit_signal_reason = "kramers_down_exit"
                 return _V1Signal.EXIT
-            # 5b. iter10 crash-circuit-breaker exit.  The kramers gate above
-            #     requires `P_down >= 0.5` (i.e. `k_down` dominates), which in
-            #     this dataset only fires briefly when the engine pops out
-            #     of the trapped-basin attractor.  During slow bleeds the
-            #     engine locks into `k_up = k_down = 0, P_zero = 1`, hence
-            #     *neither* kramers gate trips and trades bleed to
-            #     `recording_ended`.  This complementary gate fires only on
-            #     that trapped-basin signature plus an offside guard, leaving
-            #     the 2538 already-good kramers_down_exits strictly alone.
-            #     Disabled when `iter10_crash_exit_enable = 0`.
-            if float(getattr(self, "iter10_crash_exit_enable", 0.0)) > 0.0:
-                k_up_g   = float(decision.get("k_up",   0.0))
-                k_down_g = float(decision.get("k_down", 0.0))
-                kramers_min = float(getattr(self, "iter10_kramers_min", 1e-3))
-                is_trapped = (k_up_g < kramers_min and k_down_g < kramers_min)
-                # Maintain streak counter (kept for instrumentation; streak
-                # alone caps at ~24 on this dataset per iter11a probe).
-                if is_trapped:
-                    self._iter10_trapped_streak = int(getattr(self, "_iter10_trapped_streak", 0)) + 1
-                else:
-                    self._iter10_trapped_streak = 0
-                # Sliding-window fraction (iter11b) — robust to per-state
-                # vacillation between `k_up=1e6` and `k_up=0` attractors.
-                # The fraction accumulates trapped instances across many
-                # state-updates, so a brief sub-state flip back to bullish
-                # no longer resets the persistence signal entirely.
-                win = int(getattr(self, "iter10_trapped_window", 120))
-                if not hasattr(self, "_iter10_trapped_window_buf") or self._iter10_trapped_window_buf is None:
-                    self._iter10_trapped_window_buf = []
-                if win > 0:
-                    self._iter10_trapped_window_buf.append(1 if is_trapped else 0)
-                    if len(self._iter10_trapped_window_buf) > win:
-                        # FIFO drop oldest
-                        self._iter10_trapped_window_buf = self._iter10_trapped_window_buf[-win:]
-                    win_count = sum(self._iter10_trapped_window_buf)
-                    trapped_frac = win_count / win
-                else:
-                    trapped_frac = 0.0
-                win_thresh = float(getattr(self, "iter10_trapped_window_thresh", 0.5))
-                if (trapped_frac >= win_thresh
-                        and entry > 0
-                        and c <= entry * (1.0 - float(getattr(self, "iter10_loss_pct", 15.0)) / 100.0)
-                        and (self.bar_count - self.entry_bar_count) >= int(getattr(self, "iter10_min_bars_after_entry", 20))):
-                    self.exit_signal_reason = "crash_circuit_breaker"
-                    # Arm the entry cooldown so the engine doesn't
-                    # immediately cycle into another bleeding long on the
-                    # same crashing token (iter05's "re-entry churn"
-                    # anti-pattern — see RESEARCH_LOG iter05 followups).
-                    cd = int(getattr(self, "iter10_entry_cooldown_bars", 1200))
-                    self._iter10_crash_cb_active_until = max(
-                        self._iter10_crash_cb_active_until, self.bar_count + cd)
-                    self._iter10_trapped_streak = 0
-                    self._iter10_trapped_window_buf = []
-                    return _V1Signal.EXIT
             # 5. Bayesian exit A: when the engine's decision direction is
             #    no longer +1 (the posterior's integrated escape does not
             #    support the long) AND the counter-direction Kelly
@@ -2878,16 +2748,6 @@ class StrategyEngineV2Adapter:
         # quality floor; trades entered below this proxy lose more often.
         s_min = float(getattr(self, "iter05_s_effective_min", 0.0))
         if s_min > 0.0 and float(getattr(self, "s_effective", 0.0)) < s_min:
-            return False
-        # iter10 crash-cooldown gate.  Once a crash_circuit_breaker EXIT
-        # has fired, suppress new entries for the cooldown window.  This
-        # is the principled fix for iter05's noted re-entry churn: a CB
-        # exit signals that the engine's posterior trapped-basin attractor
-        # has been active for a sustained period in a crashing token; new
-        # BUY entries in the same window are statistically
-        # counter-productive (rec482 trades #28/#30 lost an extra -0.063
-        # / -0.038 SOL by re-entering within seconds of CB exits).
-        if self.bar_count < self._iter10_crash_cb_active_until:
             return False
         return True
 
