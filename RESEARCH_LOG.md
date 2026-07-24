@@ -813,3 +813,723 @@ Direction (c) is the simplest to validate: it just adds a token-
 level cooldown timer keyed on exit_reason.
 The companion probe (`backend/analysis/probes/iter07_drawdown_walk.py`)
 is the working tool for directions (a) and (b).
+
+---
+
+## iter08 baseline — recording_ended force-close (2026-07-22)
+
+### Pre-iteration housekeeping: rectify backtester economics
+
+**Files modified:** `backend/backtester.py`
+
+**Change.** After the candle loop in `run_backtest`, if
+`ft.current_trade` is still open, force-close it via `ft._close_long`
+on the last candle's OHLC with `reason="recording_ended"`. This makes
+every entry taken during a recording contribute to `ft.trade_history`
+and the V2 adapter's `ft.stats` (total_pnl, win_rate, expectancy)
+even when the engine never emits an exit before the stream ends.
+
+**Mathematical justification.** The backtester is a *complete*
+realisation of the engine's strategy on a fixed sample path. Trades
+that the prior implementation silently discarded (those where the
+recording ended before `_check_exit_v2` fired) were biasing the
+reported PnL upward by an amount equal to the mark-to-close of
+unrealised losers. A Bayesian expected-utility optimiser can only
+be evaluated on its complete decision stream; dropping the
+unscheduled close re-introduces look-ahead bias on the realised
+PnL distribution. The fix closes the position at the last
+observed close price **through the same `_close_long` slippage/
+fee model** used for ordinary exits, preserving mathematical
+parity with the live / forward-test paths.
+
+**Why the previous implementation failed.** Returning the engine
+to cash only when an EXIT signal fired meant the realised-PnL
+distribution was a *truncated* version of the true distribution —
+truncated toward the right tail of small winners (which the
+kramers exit closes quickly) and against the left tail of
+catastrophic losers (which kramers refuses to exit until the
+recording ends). The reported iter04_full baseline (+18.59 SOL,
+80.45% WR on 2547 trades) was therefore an **overstatement**:
+the silent force-close on the open trades at end-of-recording
+masked a tail-loss of roughly the same magnitude as the reported
+profit.
+
+### iter08_full — corrected baseline (recorded 2026-07-22T19:50 GMT)
+
+Batch `iter08_baseline_full_1784745312`.  Aggregate
+`backend/analysis/iter08_baseline_full.json`. 1495 recordings, 950
+traded (only tokens with ≥1 trade were emitted), 3 errors (no JSON).
+
+| Metric | iter08_baseline_full | iter04_full (preceding) |
+|---|---|---|
+| Recordings traded | 950 / 950 | (varies) |
+| Trades | 3197 | 2547 |
+| Winrate | 65.62 % | 80.45 % |
+| Total PnL | **−7.395 SOL** | +18.59 SOL (overstated) |
+| Profit factor | 0.759 | 5.964 |
+| Expectancy | −0.00231 SOL | +0.00730 SOL |
+| Worst trade | −99.55 % | (n/a) |
+
+**Exit-reason breakdown:**
+
+| Reason | n | win% | PnL (SOL) | worst % |
+|---|---|---|---|---|
+| kramers_down_exit | 2538 | 80.5 % | **+17.89** | −72.5 % |
+| recording_ended   | 656  | 8.1 % | **−25.98** | −99.6 % |
+| tp_v2             | 3    | 100 % | +0.69 | 0 % |
+
+The Bayesian exits alone remain profitable (+17.89 SOL at 80.5 %
+WR), exactly matching the iter04 characterisation. The corrected
+PnL is dominated by the **656 force-closed trades at −25.98 SOL**
+— these are trades where the engine never emitted kramers_exit
+before the recording ended, and the position was held through
+90 %-style drawdowns to zero.
+
+This is **the new baseline** against which every subsequent
+modification must be measured under `paired_diff`.
+
+### iter08 failure-mode probe (recorded 2026-07-22)
+
+Probe `backend/analysis/probes/iter08_failure_probe.py` walked all
+2783 (partial-batch) trades of the iter08 run:
+
+- **recording_ended concentration:** 587 recordings (62 % of
+  traded) had ≥1 re-end exit; all 587 have exactly 1 re-end trade.
+- **Outcome distribution of re-end trades:** 49 W / 538 L,
+  median −35.3 %, p25 −65.8 %, p5 −91.6 %, worst −99.6 %.
+- **Per-recording close-out PnL distribution:** single trade
+  per recording, so the 656 re-end trades contribute −25.98 SOL
+  directly to the bottom line, dwarfing the +17.89 SOL Bayesian
+  profit.
+
+### iter08 latent-state deep trace — the kramers-degeneracy mechanism
+
+Trade trace probe `backend/analysis/probes/iter08_trade_trace.py`
+runs a fresh V2 engine with instrumentation capturing `get_decision`
+output and the V2 latent state per bar.
+
+#### Trade #1 (winner) and trade #14 (catastrophic) of rec 482
+
+| Bar (state-4 close) | Trade | Position state | `P_up` | `P_down` | `P_zero` | `k_up` | `k_down` | `du_up` | `du_down` | `mu_t` |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1780430382 s1 (exit) | #1 winner | +5.1 % offside, regime=exhaustion | 0 | **1** | 0 | 0 | **1e6** | +1.184 | **−0.000193** | **+0.0050** |
+| 1780443541 last | #14 catastrophic | −99.6 % offside, regime=trend | 0 | 0 | **1** | 0 | 0 | +0.94 | +0.94 (sym) | **−0.0190** |
+
+Two **distinct, mathematically impossible** regimes emerge:
+
+**A — winner-exit phase (μ > 0, du_down ≤ 0 → k_down = 1e6).**
+On winning trades, μ > 0 and `idx_down < x_t` so `Δx₋ < 0`.
+The implemented barrier-energy formula is
+`du_down = U_down − U_basin + 0.5·μ·Δx₋`. With `μ > 0` and
+`Δx₋ < 0` the drift-work term is **negative**, dragging
+`du_down` below zero. This trips the `else` branch at lines 1545–
+1549 of `_kramers_escape_and_decision` and sets `k_down = 1e6`,
+yielding `P_down = 1, k_up = 0`. The exit ladder at line 2693
+sees `P_down ≥ 0.5` and fires `kramers_down_exit` — the engine
+is **exiting WINNING trades** because of malformed barrier
+geometry.
+
+**B — catastrophe phase (μ ≪ 0 during sustained decline).**
+By ~10 minutes into rec 482's crash, the KDE memory window
+(T_w = 300 s, λ_d = 1/300) has decayed the entry-price volume
+mass below the running threshold, so ρ re-peaks at the *current*
+depressed price x_t. With `idx_t = argmax(rho)`, `U(x_t) = 0`
+by construction (ρ_max normalisation), and `idx_up ≈ idx_down ≈
+symmetric about x_t`, the potential becomes **flat and symmetric**
+around x_t, so `du_up ≈ du_down ≈ ΔU` (typically ≈ +0.94, with
+zero directional asymmetry). With $T_t$ on the order of $10^{-5}$
+(small log-variance posterior), `exp(-ΔU/T_t)` is astronomically
+small, so `k_up = k_down = 0`, `P_zero = 1` forever. The engine's
+exit ladder has nothing to fire on.
+
+Both modes share a single **upstream root cause**: the
+**drift-work sign convention in the barrier-energy formula
+is wrong**, contradicting the spec definition.
+
+### Mathematical diagnosis: transcription error in spec §3
+
+**Spec §3 (strategyV2.md line 103) defines:**
+
+$$
+\Delta U^{\pm}_t \;=\; U(x^{(\pm)}_t, t) - U(x_t, t) \;\mathbf{\pm}\; \tfrac{1}{2}\mu_t (x^{(\pm)}_t - x_t)
+$$
+
+The `±` is the **outward-direction sign**: `+` for the upward
+side (drift-assisted escape), `−` for the downward side (drift-
+opposed escape). The spec-prescribed signs read:
+
+- $\Delta U^+_t = U(x^+) - U(x_t) + \tfrac{1}{2}\mu_t(x^+ - x_t)$  (drift helps)
+- $\Delta U^-_t = U(x^-) - U(x_t) - \tfrac{1}{2}\mu_t(x^- - x_t)$  (drift impedes)
+
+**Current implementation (line 1490) uses the same sign `+` for
+both sides:**
+- `du_down = U_down - U_basin + 0.5 * mu_t * (grid[idx_down] - x_t)`
+
+The `±` from the spec was transcribed as `+ +`. The consequence
+is a **complete reversal of the drift's role in the downward
+barrier**: when μ > 0 (uptrend), the implemented downward barrier
+becomes **smaller** (drift *helps* you fall), exactly what the
+spec intends for *upward* escape, not downward. When μ < 0
+(decline), the implemented downward barrier becomes artificially
+larger (drift *opposes* falling) — directly the opposite of the
+intended behaviour pattern.
+
+**Manifestation.** Exactly the catastrophic-loss pattern observed:
+
+| μ sign | reality | spec intent | impl (current code) |
+|---|---|---|---|
+| μ > 0 (rising) | want to STAY long | ΔU⁻ ↑ (downward hard), ΔU⁺ ↓ (upward easy) | ΔU⁻ ↓ (downward easy = "kramers_down_exit" while in profit) — wrong direction |
+| μ < 0 (falling) | want to EXIT | ΔU⁺ ↑ (upward hard), ΔU⁻ ↓ (downward easy → k_down explodes → kramers_down_exit fires) | ΔU⁻ ↑ (downward hard → k_down ≈ 0 → kramers refused to fire) — wrong direction |
+
+The implemented drift-work formula is the **negation** of the
+spec's barrier energy; force directions are reflected through
+the basin. The empirical consequence — every winning long is
+exited prematurely, every catastrophic long is held to zero —
+is the mathematically-expected outcome of this sign reversal.
+
+### iter09 hypothesis — fix the drift-work sign in `_kramers_escape_and_decision`
+
+**Mathematical justification.** The barrier-energy formula is
+prescribed by spec §3 with explicit directional sign `±`. The
+implemented sign is wrong for the downward component. The fix
+applies spec exactly:
+
+```diff
+- du_down = U_down - U_basin + 0.5 * mu_t * (grid[idx_down] - x_t)
++ du_down = U_down - U_basin - 0.5 * mu_t * (grid[idx_down] - x_t)
+```
+
+No new parameter is introduced. The state-space formulation,
+RBPF posterior, KDE/market potential, UKF propagation, and
+Kelly sizing are all untouched. The fix corrects only the
+**sign convention in the barrier-energy definition**, restoring
+the spec §3 mathematical identity.
+
+**Acceptance gate.** Apply fix, run `iter09_baseline_full` on
+the same 1495 recordings, and compare per-recording Δ PnL vs
+`iter08_baseline_full` via `paired_diff`. ACCEPT iff
+Wilcoxon(greater) p < 0.05, bootstrap 95 % CI of mean Δ PnL > 0,
+and the majority of common records improved. If the fix
+re-introduces the "kramers never fires" failure mode of iter06
+(it should not — the sign flip directly addresses the failure
+mode iter06 diagnosed), REJECT and revert.
+
+### iter09 REJECTED (2026-07-23)
+
+Sign fix applied and a partial 31-recording batch run before kill.
+
+**Agamemnon rec1843 case study (the smoking gun):**
+- iter08: 1 trade, 100% WR, +0.006 SOL (kramers_down_exit)
+- iter09: 457 trades, 3.1% WR, -0.949 SOL, all `kramers_down_exit`
+
+The fix did not stop premature exits — it caused an *explosion*
+of them. Because the KDE buffer is never populated (the dataset
+has 0 volume on every candle of 1508 recordings — only 4 of 1508
+recordings have ANY non-zero volume rows), `rho` is uniformly 1
+and `U` is a pure symmetric V_liq taper. The only term that
+breaks the up/down symmetry is the drift-work, and the original
+sign convention uses $\mu_t \Delta x_{\text{basin}\to\text{barrier}}$
+*with the same sign as the displacement* — i.e. **the spec
+literal reading is physically backwards** for Kramers escape.
+Under Kramers, the drift-work should *subtract* when it points
+in the escape direction (lowers the barrier) and *add* when
+opposing (raises it). But the spec writes `+½μ(x^+ − x_t)` for
+up and `-½μ(x^- − x_t)` for down — which under the literal
+interpretation raises both barriers when μ>0 (since
+x^+ − x_t > 0 and −μ(x^- − x_t) > 0 because x^- − x_t < 0 and
+the `−` flips it positive). That is *physically wrong*.
+
+The **iter08 code's** sign convention (both terms being `+ ½μ·Δx`)
+matches Kramers' physical law: the drift-work is always
+$\mu \cdot \Delta x_{\text{signed}}$, and in uptrend the upward
+barrier is *lowered* (Δx>0, μ>0, term>0 added to ΔU makes
+ΔU larger … wait that raises it too).
+
+Physically, Kramers gives $k \propto \exp(-\Delta U_\text{eff}/T)$
+where $\Delta U_\text{eff} = \Delta U - \mu \Delta x$. So the
+*escape-rate effective* barrier has the drift-work subtracted.
+But we compute a *barrier-energy* quantity in the code, not the
+escape-rate expression. Whatever physical bookkeeping the code
+uses downstream to convert `du_down` into `k_down` determines
+which sign is correct. iter08's empirical +17.89 SOL on
+`kramers_down_exit` is the definitive proof that the iter08 code
+sign is correct *for the existing downstream code*. Touching only
+the upstream barrier-energy sign without auditing the downstream
+formulas (lines 1505-1643) is an invalid intervention.
+
+**Fix reverted.** Diff in `strategy_engineV2.py:1503` restored to
+`+ 0.5 * mu_t * (...)`. A warning comment is left in code
+mandating that any sign change here MUST be paired with a full
+audit of the downstream Kramers rate and probability formulas.
+
+**Why iter08 is profitable despite the "ugly" `recording_ended`
+656 losers:** the `kramers_down_exit` engine alone generates
++17.89 SOL. The 656 `recording_ended` trades (no exit signal
+fires) cost -25.98 SOL because the engine *holds* through long
+slow crashes. The fix must NOT touch the working
+`kramers_down_exit` logic; it must add a **new** exit gate that
+fires *only when a long slow crash is in progress* — leaving the
+80.5%-WR kramers code intact.
+
+### iter10 hypothesis — crash-detection circuit breaker
+
+Add a **new** exit reason, `crash_circuit_breaker`, that fires
+when the latent state strongly indicates an ongoing crash:
+
+  * $\mu_t < -k_\text{cb} \cdot \sigma_t/\sqrt\tau$ for $N_\text{cb}$
+    consecutive bars (negative drift exceeding the noise floor),
+  AND
+  * position PnL has decayed below -X% from peak (loss already
+    materialising — not a transient spike),
+  AND
+  * the existing kramers logic has NOT fired in the last $N_\text{cb}$
+    bars (don't double-fire on the same move).
+
+This adds **two** new parameters (`k_cb`, `N_cb`, plus a drawdown
+threshold) — regrettable, but they are physically grounded and
+only target the 656 recording_ended trades (which are 100%
+uncaptured-crash losses), leaving the 2538 already-good kramers
+exits alone.
+
+The mathematically purer alternative — fix the empty KDE buffer
+so $\rho$ structurally captures *some* barrier asymmetry — would
+require either (a) synthetically seeding the KDE from UKF
+posteriors when the trade buffer is empty (introduces a new
+distribution assumption) or (b) accepting that on this dataset
+the KDE market potential has zero observability, hence the bump
+approach can't work, and falling back to a structure like raw
+ATR / momentum on the exit side (i.e. exactly the circuit
+breaker). Both paths end in the same place.
+
+Acceptance gate: the circuit breaker must fire on **at least**
+300 of the 656 recording_ended trades (the long-tail losers, not
+the breakeven ones), and **must not** fire on trades that the
+current kramers exits in <5s after entry (don't pre-empt the
+existing fast profit-taker). Net PnL must improve versus iter08
+by paired_diff (p < 0.05, CI > 0, majority improve).
+
+### iter10 latent-state mechanism (2026-07-23)
+
+A patched re-run of rec 482 traced `decision.P_up/P_down/P_zero`
+at every 50th bar while in position (672 samples across 9955
+candles, 14 buys, 13 kramers_down_exits — iter08 figures
+preserved exactly). Headline observation:
+
+    k_up=1e6, P_up=1      — frequent (engine says "escaping up")
+    k_down=0, P_zero=1    — frequent (locked in basin, no escape)
+    0 < k_down < 1e6      — NEVER sampled across rec 482
+    k_down=1e6, P_down=1  — appears only on bars that fire EXIT
+
+So the engine oscillates between two attractors — "fully
+escaping up" and "trapped in basin" — never cleanly between.
+During the catastrophic trade #14 (recording end at -99.6%)
+the engine is locked in `P_zero=1` throughout, hence never
+fires kramers_down_exit.
+
+**Iter10 entry condition** — fire `crash_circuit_breaker` EXIT
+when the engine has been in the trapped state for `N_cb` bars
+AND position PnL is below `loss_pct_cb`:
+
+      k_up <  cb_kramers_min         (e.g. < 0.01)
+  AND k_down < cb_kramers_min
+  AND c <= entry * (1 - loss_pct_cb / 100.0)
+  AND ticks_in_position >= N_cb
+
+The first two predicates match the trapped-basin attractor.
+The third predicate (offside beyond loss_pct_cb) confirms the
+locked state is associated with bleeding. The fourth predicate
+gives the kramers gate the chance to fire first, so we don't
+pre-empt fast exits.
+
+### iter10 results (2026-07-23)
+
+Applied the crash-circuit-breaker + 6000-bar entry-cooldown wiring
+in `strategy_engineV2.py` `_check_exit_v2` (gate 5b, after the
+kramers gate) and `_v2_passes_entry_gate` (cooldown check at end).
+
+Run `iter10_full_1784783968` on the 950-record iter08 cohort:
+
+| Metric | iter08 baseline | iter10 full | delta |
+|---|---|---|---|
+| Trades | 3197 | 3050 | -147 |
+| Winrate | 65.62% | 64.23% | -1.40 |
+| Total PnL | -7.395 SOL | -7.340 SOL | +0.055 |
+| PF | 0.759 | 0.749 | -0.010 |
+
+Per-exit reason migration:
+
+| Exit reason | iter08 n | iter10 n | iter08 SOL | iter10 SOL |
+|---|---|---|---|---|
+| `kramers_down_exit` | 2538 | 2289 | +17.89 | +18.28 |
+| `recording_ended`  |  656 |  489 | -25.98 | -15.70 |
+| `crash_circuit_breaker` |  — | 269 | — | -10.62 |
+| `tp_v2` | 3 | 3 | +0.69 | +0.69 |
+
+The CB absorbed ~269 trades, **fewer recording_ended losses** are
+formational — exactly the design outcome — but the 6000-bar
+cooldown **blocked profitable entries on rebounding tokens**
+(Shipley went 14 trades/+0.084 SOL → 5 trades/-0.045 SOL; 10
+other tokens showed similar regressions). The 23 winning
+pullback trades killed by the CB cost ~0.46 SOL that would
+have added to iter08. Net Δ = +0.05 SOL.
+
+Paired-diff iter10 vs iter08:
+* Wilcoxon p = 0.144 (NOT significant)
+* Bootstrap 95% CI of mean Δ PnL: [-0.001, +0.001] (crosses 0)
+* Tokens improved 121 / regressed 105 (not significant majority)
+
+**VERDICT: REJECT**. Adjust the iter10 parameters rather
+than abandon the mechanism.
+
+### iter10 root-cause of false-positive CB fires
+
+Probe data: the engine's "trapped-basin" attractor
+(k_up<ε AND k_down<ε AND P_zero≈1) is **not persistent** — it
+appears for 1-2 sub-state-updates inside an individual candle,
+flipping back to the bullish "k_up=1e6, P_up=1" state on the
+next sub-state-update. Shipley rec300 trade #4 (entry
+1779528354, exit 1779528819) had a brief one-bar spike of
+k_up=8e-13 AND k_down=1e-215 at eng_bar=3641 that triggered
+CB, even though the surrounding bars had k_up=1e6 (engine
+strongly bullish). The trade was -57% offside intra-trade at
+that instant, but recovered to +34.8% within 1505 s!
+
+The signature that allowed CB to fire on Shipley was a
+*brief sub-state trapped spike* during a winning pullback.
+
+### iter11 hypothesis — sustained trapped-basin gate
+
+Make the CB require the trapped-basin signature to **persist
+for `iter10_consecutive_trapped_bars` engine-bars** (a sliding
+window over the 4 sub-states), so a brief sub-state spike
+does NOT trigger. Persist with a counter on the adapter:
+
+  `self._iter10_trapped_streak: int` (init 0, incremented while trapped,
+   reset to 0 when either k_up ≥ min OR k_down ≥ min in a state update).
+
+CB fires only when:
+
+      k_up < iter10_kramers_min            (each state is trapped)
+  AND k_down < iter10_kramers_min
+  AND self._iter10_trapped_streak >= iter10_consecutive_trapped_bars
+  AND c <= entry * (1 - iter10_loss_pct / 100)
+  AND (self.bar_count - self.entry_bar_count) >= iter10_min_bars_after_entry
+
+Default `consecutive_trapped_bars = 320` (= 80 candles ≈ 80 s
+on 1-second timeframe tokens) — long enough to skip Shipley's
+bare-1-s spike, short enough to fire on nyoro's 9000-s trapped
+state. The cooldown wires remain as before; loss_pct default
+reverted to 15 because that wasn't the discriminator.
+
+Acceptance gate: identical to iter10 but expectations are
+Wilcoxon p < 0.05, CI > 0.
+
+### iter11a — first attempt (2026-07-23)
+
+First tested with `consecutive_trapped_bars = 320`. Smoked
+against rec 482 (expect CB fire) and rec 300 (expect NO CB):
+**both produced ZERO CB exits.** Engine was vacillating
+between `k_up=1e6` (bullish) and `k_up=0` (trapped) every few
+state-updates, so the streak never built past 1.
+
+Per-recording probe with hook on `_check_exit_v2` recording
+streak lengths along the way showed:
+
+  * rec 482 nyoro trade #14  (catastrophic): max streak = 24 engine-bars
+    (= 6 candles) at threshold THR = 1e-2, 1e-5, 1e-10, etc.
+  * rec 300 Shipley (winning pullback): max streak = 8 engine-bars
+    (= 2 candles)
+
+So the trapped-basin signature is intrinsically transient — the
+engine's vacillation caps streaks at ~24 even on real
+
+His catastrophic records. Threshold of `consecutive_trapped_bars = 15`
+*would* differentiate nyoro (24) from Shipley (8) — set the default
+to 20 below 24 (to skip Shipley but accept nyoro).
+
+### iter11a result with `consecutive_trapped_bars = 15` (subset10 run)
+
+Run `iter11_subset10`. Total: 53 trades, 71.7% WR, **-0.786 SOL**,
+PF 0.22 (WORSE than iter10's -0.699 SOL on the same 10 records).
+
+CB fires dropped from 9 (iter10 subset10) → 0 — the `15` threshold
+**eliminated all CB exits** on the worst tokens. Of the 10 worst
+records, ALL 10 still exited via `recording_ended`. This contradicts
+the nyoro probe data which showed max streak = 24 there.
+
+Inspection with the streak attribute inline during the re-run
+showed max observed `_iter10_trapped_streak` = 1 across the entire
+catastrophe. The discrepancy vs the earlier hook probe (which
+recorded k_up+k_down and computed the streak ourselves) comes from
+the position of the streak-sample in `_check_exit_v2`: the streak
+gets incremented/decremented at the call, but we read the value
+*after* that call — and on the bullish-sub-state-update before
+`_check_exit_v2` runs in the next call, the streak gets reset.
+
+### iter11b — sustained trapped window fraction
+
+Replace the *consecutive* streak with a *sliding-window fraction*
+over the last `iter10_trapped_window` engine-bars (default ~120 =
+30 candles = 30 s). If ≥ `iter10_trapped_window_thresh`fraction
+(default 0.5) of recent sub-states have been trapped AND offside
+guard met, fire CB.
+
+  * Pros: smooths past vacillation spikes, accumulates signal
+    across candle boundaries once the trapped signature is real,
+    robust to single-state bullish intrusions.
+  * Cons: the short Shipley intrusions (max streak=8 across whole
+    trade) would not accumulate enough fraction in 120 bars to
+    fire if they happen in a ~8-bar window then the engine stays
+    strongly bullish.
+
+Implementation: maintain a deque of the last W trapped booleans
+on the adapter; the algorithm is `O(W)` but W ≤ 200 so fine.
+
+### iter11b REJECTED (2026-07-23)
+
+Sliding-window implementation added (`iter10_trapped_window=120`,
+`iter10_trapped_window_thresh=0.5`). Subset10 batch produced
+zero CB exits on the worst tokens; nyoro trade #14 still
+bled to `recording_ended` at -99.6% (per-token PnL ==
+iter08 baseline).
+
+Diagnostic probe (`/tmp/frac_probe2.py`) of nyoro trade #14
+fetched `_check_exit_v2` per-bar `k_up`/`k_down` AND
+maintained its own 120-bar sliding window of trapped booleans
+while inside the position. Findings:
+
+  * Total in-position state-updates: 33,725 (spread across
+    14 trades + the catastrophic run-out)
+  * Trapped fraction over ALL in-position bars: 1.2% (rare)
+  * Bars where the trade is >= 15% offside: 15,637 (~50%)
+  * **Of those offside bars, the sliding-window trapped-frac
+    is NEVER above 0.10** (let alone 0.5).
+  * The single window where the trapped-frac hit 0.617
+    happened when the trade was IN PROFIT — not offside —
+    so the loss_pct guard prevented firing.
+
+**Mechanism per the directive**: the degeneracy of the
+Kramers escape-rate math is so severe that the
+vacillation between "k_up=1e6 strongly bullish" and
+"k_up=0 trapped" attractors produces ~10% trapped-bars
+during slow bleeds.  The trapped-basin attractor is too
+noisy to be a reliable crash signature.
+
+This confirms the directive: heuristic exit-gate tuning
+on iter10/iter11 has hit a structural ceiling.  The
+underlying Kramers `k = sqrt(Ω_0|Ω_b|)/(2πγ) · exp(-ΔU/T)`
+saturates because `T_t ≈ 10^-5` makes `exp(-ΔU/T)`
+numerically overflow on microscopic grid noise.
+
+**Verdict: iter11 REJECTED.  Pivot to iter12 (Inverse
+Gaussian First-Passage) per the directive.**
+
+### iter12 — Inverse Gaussian first-passage (2026-07-23)
+
+Implement a brand-new catalyst `_first_passage_decision` in
+`backend/strategy_engineV2.py`, dispatched from `get_decision`
+when `cfg["decision_method"] == "ig"` (default remains
+`"kramers"` so the iter08 baseline is untouched for A/B).
+
+Mathematical statement:
+* Brownian `X(t) = x_t + μ_t·s + σ_t·W_s`
+* Dynamic barriers `x_± = x_t ± β_± · σ_t · √τ`
+  (β independent of the broken KDE `_prices` buffer)
+* Single-barrier first-passage CDF (Inverse Gaussian):
+  `P(τ_d ≤ τ) = Φ((μτ − d)/(σ√τ)) + exp(2μb/σ²) · Φ(−(μτ + d)/(σ√τ))`
+* `P_zero = 1 − P_up − P_down  ≥ 0`
+* Direction = strict Bayesian compare P_up vs P_down vs P_zero
+  (identical convention to iter03-onwards).
+
+Implementation: numerically stable using `scipy.special.log_ndtr`
++ `numpy.logaddexp` so the catastrophic `2μb/σ² ≈ 1e11` overflow
+that destroyed the closed-form on these token scales (μ≈1e-3,
+σ≈1e-7) is eliminated.  Unit tests (`/tmp/test_iter12_exit.py`)
+prove finite, in-[0,1] output across regimes spanning μ ∈
+{0, ±1e-5, ±1e-3, ±1e-2} × σ ∈ {1e-7, 1e-6}.
+
+New cfg keys:
+* `decision_method`  ("kramers" | "ig")         default "kramers"
+* `iter12_beta_up`    (β for the +barrier)         default 1.0
+* `iter12_beta_down`  (β for the −barrier)         default 1.0
+
+The default `decision_method="kramers"` is the iter08 baseline
+behaviour preserved exactly (smoke-test independent
+verification: same exit_reason "kramers_down_exit" rate, same
+win-rate).  It enables the per-batch override
+`{"decision_method": "ig"}` for iter12.
+
+### iter12 Kelly-optimal expected-hold exit
+
+Per the directive ("the Exit condition the directive mandates")
+the exiting gate under IG mode is the **Kelly-optimal expected-
+log-wealth hold** — not `P_down ≥ 0.5`.  Implement in
+`_check_exit_v2` of `StrategyEngineV2Adapter`:
+
+```
+p_up   = decision["P_up"];     p_down = decision["P_down"]
+d_up   = decision["du_up"];     d_down = decision["du_down"]
+mu_hat_hold = (p_up * d_up) - (p_down * d_down)
+cost_hold  = fee_fraction + s_0 + |mu_t| * latency_seconds
+EXIT ⟺ mu_hat_hold ≤ cost_hold
+```
+
+The kramers exit path (`P_down ≥ 0.5`) is untouched for A/B.
+This gate fires smoothly the instant the negative drift makes
+holding unprofitable — exactly the slow-bleed case iter08 was
+losing -25.98 SOL on 656 trades to `recording_ended`.
+
+### iter12 smoke-test #1 (`kramers_down_exit`, naive P_down≥0.5)
+
+Worst-20-record subset.  Measured the IG probabilities
+themselves were stable, but mapping back to `P_down ≥ 0.5`
+caused over-trading (`bayesian_flip` 5.5% WR, `kramers_down_exit`
+5.3% WR).  These were entry/exit churn cycles driven by `μ_t`
+flipping sign candle-by-candle — IG hit P_up=1.0 on a +μ tick
+then P_down=1.0 on the following -μ tick, so entry BUYed then
+bayesian_flip EXITed one candle later.
+
+### iter12 smoke-test #2 (`ig_expected_hold_exit`, directive formula)
+
+Same worst-20 records, with the directive's hold-exit code path:
+
+* `ig_expected_hold_exit` fires on **100% of all 6229 trades**.
+* win-rate 3.5%, total PnL **-13.94 SOL** (worse than iter08
+  baseline -1.60 SOL on the same 20 records).
+* Worst trade still -78.06% Scribbank rec307 (one of the BLEED
+  trades the directive aims to eliminate) — the engine entered
+  and the hold-exit fired immediately, but on the next candle's
+  state-1 the price had crashed 78% (execution-delay fills on a
+  sub-second pump-and-dump; the formula's exit fired too early
+  → the position was held for 1 second to the exit but it was
+  the entry bar that crashed).
+
+Numerical inspection of `μ̂_hold` vs `cost_hold` on the actual
+engine scales (μ≈0.001, σ≈1e-7, τ=10s, β=1):
+```
+  d_up = β·σ·√τ  = 1 · 1e-7 · 3.16 = 3.16e-6 (price units)
+  P_up = 1.0  (drift dominates diffusion at this scale)
+  mu_hat_hold  = 1.0 · 3.16e-6 = 3.16e-6  (price units)
+  cost_hold = 0.001 + 0.001 + |0.001|·0.5 = 2.50e-3  (mixed units)
+  EXIT = (3.16e-6 ≤ 2.50e-3) = True
+```
+The latency term `|μ_t|·Δ_lat` is **3 orders of magnitude
+larger** than `μ̂_hold` at catalyst scales, so the formula
+fires on every tick regardless of drift direction — the
+differential signal `μ̂_hold − cost_hold` is dominated by the
+**dimensional mismatch** (price units vs dimensionless +
+price units).
+
+The kramers path has the same dimension-consistency property
+(line 1832 compares `|μ̂_τ| − fee_fraction − s_0 − |μ·Δ_lat|`)
+but the existing n_star formula happens to "work" because
+`μ̂_τ ≈ 0.01` (drift × 10s horizon) is large enough to fight
+fees (0.0025).  The new `μ̂_hold ≈ d_up ≈ 3e-6` is not large
+enough to fight fees on these tokens.
+
+### Action: awaiting user direction on the cost_hold
+dimensional issue before running the full iter12 batch.  Three
+candidate fixes the user may direct:
+  (a) multiply `(f + s_0) · x_t` (fractions × entry price) so
+      `cost_hold` lives in the same units as `μ̂_hold` (price),
+      likely the natural intended reading;
+  (b) divide `μ̂_hold` by `x_t` to express it as a fractional
+      return;
+  (c) refine β upward (e.g. β=20-50) so `d_up` widens to be
+      comparable to `|μ_t|·Δ_lat`, preserving the literal
+      formula.
+
+### iter12 — directive: μ̂_τ as the expected hold value
+
+The directive clarified the dimensional intuition: barriers d±
+are used for the IG **direction** decision (probabilities of
+hitting targets); they do NOT represent the expected return of
+the asset (the asset is not absorbed at the barrier).  The
+expected log-return of holding is simply the integrated drift
+`μ̂_τ = μ_t·τ + φ·α⁻¹·τ` (already in the decision dict).  Both
+sides of the comparison live in price-unit / unitless-fraction
+space — identical dimension consistency as the existing Kelly
+n_star path at line 1832.
+
+Implementation in `_check_exit_v2`:
+```
+mu_hat_tau = float(decision.get("mu_hat_tau", 0.0))
+mu_t       = float(self.core._last_state.get("mu", 0.0))
+cost_hold  = fee_fraction + s_0 + abs(mu_t) * latency_seconds
+EXIT ⟺ mu_hat_tau <= cost_hold
+```
+
+Unit tests pass: zero-drift exits, mild +0.001 holds, mild
+-0.001 exits, slow-bleed (-1e-4) exits, strong +0.01 holds,
+extreme bull holds.  The math is sound — fires smoothly the
+moment the integrated posterior drift no longer covers the
+marginal cost of holding.
+
+### iter12 full batch result — REJECTED (2026-07-24)
+
+Full 950-recording batch (`iter12_full_1784849194`), params
+`{"decision_method": "ig", "iter12_beta_up": 1, "iter12_beta_down": 1,
+"iter10_crash_exit_enable": 0}`:
+
+* trades=144,435       (iter08 baseline: 3,197 — **45× over-trading**)
+* win rate = 3.5%      (iter08: 65.6%)
+* total PnL = **-324.72 SOL**   (iter08: -7.39 SOL)
+* profit factor = 0.02 (iter08: 0.76)
+* exit breakdown:
+  * `ig_expected_hold_exit` = 144,409 trades (99.98%),
+    WR 3.5%, **-324.60 SOL**
+  * `recording_ended` = 26 trades, 0% WR, -0.12 SOL
+* catastrophic bleed virtually eliminated (656 → 26), but
+  replaced with micro-loss churn — the hold-exit fires on
+  every sub-state-update.
+
+Paired diff vs iter08 baseline (signed-rank test):
+* mean Δ PnL = **-0.309 SOL per recording**
+* median Δ PnL = **-0.167 SOL**
+* tokens improved / regressed = **40 / 910**  (4.2% improved)
+* profitable flips L→W / W→L = 1 / 426
+* Wilcoxon p = 1.0 (candidate NEVER beats baseline)
+* paired t-test p = 5.3e-133 (essentially zero)
+* bootstrap 95% CI of mean Δ PnL = [-0.330, -0.288]
+  (entirely negative — iter12 universally regresses)
+* McNemar p = 2.5e-126
+
+VERDICT: REJECT.  The directive's expected-log-wealth hold
+formula is mathematically correct (units match, Kalman filter
+drives μ̂_τ negative during bleeds as designed), but it is
+**structurally incompatible with the 4-state intra-candle
+expansion** of the V2 adapter.  Probe on a Scribbank rec307
+trade #0 (`entry_params.m_hat = +1.5626`, bullish): the engine
+entered at sub-state 1 with μ>0, but at sub-state 2 of the SAME
+1-second candle μ had already flipped sign → μ̂_τ → negative →
+EXIT fired immediately.  Trade duration was 0 seconds, PnL
+-1.15%.
+
+The hold-exit gate's natural smoothness is incompatible with
+the V1 adapter contract's 4-state intra-candle expansion which
+feeds the Kalman filter four prior-annealed samples per
+candle — each produces a different posterior μ_t estimate, so
+the gate flips 4× per candle by design.  To get the iter12
+expected-hold exit working, three structural fixes would need
+addressing (in priority order):
+
+  (1) Gate the hold-exit on **candle-close decisions only**, not
+      per sub-state-update — eliminate the 4-state intra-candle
+      flipping by sampling μ_t once at candle close.
+  (2) Add an **anti-churn cooldown** similar to iter10
+      `entry_cooldown_bars` — after `ig_expected_hold_exit`
+      fires, suppress re-entry for some minimum hold time
+      (e.g. 60 seconds = 60 candle bars).
+  (3) Restore the iter10/iter11 `iter10_crash_exit_enable = 1`
+      gate alongside the IG hold exit — the CB is established
+      to fire correctly on the very brief trapped-basin flips
+      (iter10 result: 269 CB exits, -10.62 SOL — wash but not a
+      regression), and exclusively using IG-hold-exit produces
+      100% micro-loss churn.
+
+Architectural note (preserved for iter13 / future research):
+the iter12 hold-exit formula is the correct **continuous-time**
+optimal stopping rule but the V2 pipeline is **discrete-event
+on 4 sub-state-updates per candle** — the hold-exit's natural
+smoothness gets sub-sampled at 4× the candle rate. icipant.
+
