@@ -44,7 +44,6 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
-from scipy.special import log_ndtr
 
 # Import V1 Enums so the V1-compatible adapter (StrategyEngineV2Adapter) can
 # emit the exact same `.value` strings the rest of the pipeline expects.
@@ -133,11 +132,6 @@ class LatentState:
     regime: int = R_IDLE
 
 
-def _norm_cdf(x: float) -> float:
-    """Standard normal CDF Φ(x) = 0.5 (1 + erf(x/√2)).  Pure-math, no scipy."""
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 2.  Configuration — 16 free parameters with memecoin-tuned defaults
 # ─────────────────────────────────────────────────────────────────────────────
@@ -191,20 +185,6 @@ DEFAULT_CONFIG = {
                                  #   (adapter-only; pure V2 ignores)
     "sigma_floor":       1e-6,   # numerical floor on σ
     "logprob_floor":     -50.0,  # clamp for log-likelihoods
-
-    # ── iter12 ──────────────────────────────────────────────────────────
-    # Catalyst flag: "kramers" (default, iter01-iter11) or "ig"
-    # (Inverse-Gaussian first-passage).  When "ig", `_kramers_escape_and_decision`
-    # is bypassed and `_first_passage_decision` is called instead.
-    "decision_method":   "kramers",
-    # Dynamic barriers x_± = x_t ± β_± · σ_t · √τ.  β=1 gives one-sigma
-    # barriers (50% chance of touch per horizon under pure diffusion);
-    # smaller β tightens barriers (more sensitive, noisier decision);
-    # larger β relaxes barriers (more conservative, fewer signals).  The
-    # defaults β_up=β_down=1.0 keep the framework symmetric; we will
-    # explore asymmetric β after the first signed run.
-    "iter12_beta_up":     1.0,
-    "iter12_beta_down":   1.0,
 }
 
 
@@ -1675,206 +1655,6 @@ def _kramers_escape_and_decision(
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────────────
-# 8b.  iter12 — Inverse Gaussian First-Passage Decision  (replaces Kramers escape)
-# ─────────────────────────────────────────────────────────────────────────────────────
-#
-# Rationale (RESEARCH_LOG.md §iter11 reject): the Kramers escape rate
-#   k = sqrt(ω_0 |ω_b|) / (2π γ) · exp(-ΔU / T_t)
-# saturates catastrophically on this dataset because the volume-KDE `_prices`
-# buffer is empty on ~99% of recordings (zero-trade candles), forcing `rho`
-# to the uniform fallback and `T_t` to a tiny floor (~1e-5).  At that T_t
-# the factor `exp(-ΔU / T_t)` overflows / under-flows on any microscopic
-# ΔU value, so `k_up` vacillates between "1e6 strongly bullish" and "0
-# trapped" on adjacent state-updates — the trapped-basin signature is not
-# persistent enough to drive a complementary crash gate (iter10/iter11 all
-# REJECTED).  The downstream `P_down ≥ 0.5` exit gate therefore fires
-# only on the brief sub-state flips on PULLBACKS (good winning exits
-# happen) but never fires during sustained slow bleeds (loss trades bleed
-# to `recording_ended` at -99%).
-#
-# iter12 replaces the Kramers-bump catalyst with the bounded,
-# non-saturating Inverse-Gaussian first-passage formulation:
-#
-#   X_t = x_t + μ_t · s + σ_t · W_s           (Itô BM with drift)
-#
-# Dynamic barriers (per the directive)
-#   x_± = x_t ± β_± · σ_t · √τ
-# so the barrier distance is always in volatility-normalized units and is
-# NOT dependent on the (broken) KDE-derived potential landscape.  When the
-# KDE is flat we still get a meaningful, non-NaN, non-saturating regime
-# probability.
-#
-# Single-barrier first-passage distribution (classic IG):
-#   P(τ_b ≤ τ | μ, σ, b) = Φ((−b + μτ)/(σ√τ)) + exp(2μb/σ²) · Φ((−b − μτ)/(σ√τ))
-# which is bounded ∈ [0, 1] for ALL real μ, σ > 0, b > 0, τ > 0.
-#
-# Two competing single barriers give two first-passage probabilities
-# P_up, P_down; P_zero = 1 - P_up - P_down ≥ 0 (the path may stay within
-# the band for the full horizon).  Direction is then chosen by the
-# spec-mandated Bayesian comparison P_up vs P_down vs P_zero (identical
-# convention to iter03 onwards).
-#
-# The Kelly sizing / E* formulation is preserved unchanged from the
-# Kramers path (μ̂_τ, σ²_τ, n*) because the literature is identical once
-# we have a direction estimate; only the catalyst P± changes.
-
-def _first_passage_decision(
-    cfg: dict,
-    state: dict,           # latest RBPF posterior
-    sigma_t: float,
-    sigma_phi: float,
-    L_t: float,
-    tau: float,
-) -> dict:
-    """
-    iter12: Inverse-Gaussian First-Passage decision.  See module docstring
-    for the mathematical derivation.  σ_t is OU diffusion per √s, μ_t and x_t
-    are price-space mean drift and last price (all from RBPF posterior).
-    """
-    eps = float(cfg["sigma_floor"])
-    sigma_t = max(sigma_t, eps)
-    mu_t = float(state["mu"])
-    x_t = float(state["x"])
-
-    # ── Dynamic barriers (iter12) ────────────────────────────────────
-    # x_± = x_t ± β_± · σ_t · √τ  — distance always scales with the
-    # terminal-OU standard deviation, so the barriers move with current
-    # volatility and never collapse to numerical zero.
-    beta_up   = float(cfg["iter12_beta_up"])
-    beta_down = float(cfg["iter12_beta_down"])
-    sqrt_tau = math.sqrt(max(tau, 0.0))
-    d_up   = beta_up   * sigma_t * sqrt_tau
-    d_down = beta_down * sigma_t * sqrt_tau
-    if d_up   <= 0.0: d_up   = eps
-    if d_down <= 0.0: d_down = eps
-
-    # ── Inverse-Gaussian single-barrier first-passage probabilities ─
-    # We compute P(τ_d_± ≤ τ) for the upward (+μ drift helps climb up)
-    # and downward (μ opposes descent) barriers.  With v = σ·√τ and
-    # m_± = (μ·τ ∓ d_±) / v:
-    #
-    #   P_up   = Φ(m_up)  + exp( 2μ·d_up  / σ²) · Φ(−m_up − 2μ·d_up/(σ²))    (up barrier)
-    #   P_down = Φ(−m_dn) + exp(−2μ·d_dn / σ²) · Φ(  m_dn − 2μ·d_dn/(σ²))    (down barrier)
-    #
-    # The closed form below is the standard first-passage CDF for
-    # Brownian motion with drift (a.k.a. the Inverse Gaussian CDF).
-    v = sigma_t * sqrt_tau
-    if v <= 0.0: v = eps
-
-    # Standardized drift-to-barrier ratios.
-    # m_up = (μτ − d_up) / v   ;   m_down = (μτ − d_down) / v  (note sign below)
-    mup  = (mu_t * tau - d_up)   / v
-    mdn  = (mu_t * tau - d_down) / v
-    phi_scalar = mu_t / (sigma_t * sigma_t)   # Oh, the exp argument 2μb/σ²
-
-    # Two competing single-barrier first-passage probabilities via the
-    # classic Inverse-Gaussian CDF, computed in **log-space** to remain
-    # numerically stable for the (μ, σ) regime encountered on these tokens:
-    # μ ≈ ±1e-3, σ ≈ 1e-7, μ/σ² ≈ 1e11 → the bare closed form `exp(2μb/σ²)·Φ(...)`
-    # overflows.  Using `scipy.special.log_ndtr` (stable log Φ) +
-    # `np.logaddexp` keeps every intermediate in (−∞, +∞) and yields a
-    # clipped result in [0, 1].
-    #
-    #   P_up   = Φ(m_up)        + exp(+2μ·d_up/σ²)  · Φ(−(μτ + d_up)/v)
-    #   P_down = Φ(−m_down_neg) + exp(−2μ·d_down/σ²) · Φ( (μτ − d_down)/v)
-    # Symmetric downward expresses via (−μ, −d_down): see derivation in
-    # module docstring.
-    a_up   = 2.0 * phi_scalar * d_up
-    a_down = -2.0 * phi_scalar * d_down
-
-    z1_up, z2_up = mup, -(mu_t * tau + d_up)   / v
-    # Down barrier: substitute (μ → −μ, b → d_down) in the IG CDF.
-    z1_dn, z2_dn = (-mu_t * tau - d_down) / v, (mu_t * tau - d_down) / v
-
-    log_p_up   = np.logaddexp(float(log_ndtr(z1_up)),   a_up   + float(log_ndtr(z2_up)))
-    log_p_down = np.logaddexp(float(log_ndtr(z1_dn)),   a_down + float(log_ndtr(z2_dn)))
-    p_up   = float(np.exp(min(log_p_up,   0.0)))
-    p_down = float(np.exp(min(log_p_down, 0.0)))
-    # Final clamp — logaddexp path guarantees finite, but be defensive.
-    if not math.isfinite(p_up):   p_up   = 1.0
-    if not math.isfinite(p_down): p_down = 1.0
-    p_up   = min(max(p_up,   0.0), 1.0)
-    p_down = min(max(p_down, 0.0), 1.0)
-    p_zero = 1.0 - p_up - p_down
-    if p_zero < 0.0:
-        # Numerical overshoot — renormalize the two probabilities.
-        s = p_up + p_down
-        if s > 0:
-            p_up   /= s
-            p_down /= s
-        p_zero = 0.0
-
-    # Synthetic k-rate stand-ins: report drift-action so the existing
-    # adapter code paths that read `k_up`/`k_down` (e.g. the kramers_down
-    # exit gate at line 2781 which keys on `P_down >= 0.5`) keep working
-    # with the new bounded `P_up`/`P_down`/`P_zero`.  We set k = −log(1−P)/τ
-    # so the downstream `P_* = (k_*/k_total)(1 − exp(−k_total·τ))` is
-    # approximately self-consistent.  These are NOT used for direction
-    # (which is decided by P_* directly) but kept for logging/instrumentation.
-    def _rate(p):
-        if p <= 0.0:    return 0.0
-        if p >= 1.0:    return 1e6
-        return -math.log(1.0 - p) / max(tau, eps)
-    k_up   = _rate(p_up)
-    k_down = _rate(p_down)
-
-    # ── Kelly sizing  (identical to the Kramers path; spec §6) ───────
-    mu_hat_tau = mu_t * tau + (state["phi"] / max(cfg["alpha"], 1e-6)) * tau
-    sigma2_tau = (sigma_t ** 2) * tau + (state["phi"] ** 2) * (tau ** 2)
-    if sigma2_tau <= 0:
-        sigma2_tau = 1e-12
-    f_fee = float(cfg["fee_fraction"])
-    s_0 = float(cfg["s_0"])
-    s_1 = float(cfg["s_1"])
-    lat = float(cfg["latency_seconds"])
-    mu_lat_cost = mu_t * lat
-    numerator = abs(mu_hat_tau) - f_fee - s_0 - abs(mu_lat_cost)
-    denom = sigma2_tau + s_1
-    n_star = numerator / denom if denom > 0 else 0.0
-    cap = cfg["liquidity_cap_frac"] * max(L_t, 0.0)
-    if cap > 0 and n_star > cap:
-        n_star = cap
-    if n_star < 0:
-        n_star = 0.0
-
-    # ── Direction: Bayesian compare P_up vs P_down vs P_zero ─────────
-    direction = 0
-    if p_up > p_down and p_up > p_zero:
-        direction = +1
-    elif p_down > p_up and p_down > p_zero:
-        direction = -1
-    if direction == 0 or n_star <= 0:
-        return {
-            "k_up": float(k_up), "k_down": float(k_down), "k_total": float(k_up + k_down),
-            "P_up": float(p_up), "P_down": float(p_down), "P_zero": float(p_zero),
-            "du_up": float(d_up), "du_down": float(d_down),
-            "mu_hat_tau": float(mu_hat_tau), "sigma2_tau": float(sigma2_tau),
-            "n_star": 0.0, "direction": 0,
-            "E_star": -1e3, "tau": float(tau),
-            "method": "ig",
-        }
-
-    E_star = direction * n_star * mu_hat_tau \
-             - 0.5 * (n_star ** 2) * sigma2_tau \
-             - f_fee * n_star \
-             - s_0 * n_star \
-             - 0.5 * s_1 * (n_star ** 2) \
-             - direction * n_star * mu_lat_cost
-    if E_star <= 0:
-        n_star = 0.0
-        direction = 0
-    return {
-        "k_up": float(k_up), "k_down": float(k_down), "k_total": float(k_up + k_down),
-        "P_up": float(p_up), "P_down": float(p_down), "P_zero": float(p_zero),
-        "du_up": float(d_up), "du_down": float(d_down),
-        "mu_hat_tau": float(mu_hat_tau), "sigma2_tau": float(sigma2_tau),
-        "n_star": float(n_star), "direction": int(direction),
-        "E_star": float(E_star), "tau": float(tau),
-        "method": "ig",
-    }
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 9.  The Primary Engine  —  `MemecoinStrategyEngine`
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2136,30 +1916,16 @@ class MemecoinStrategyEngine:
         if taus.size == 0:
             taus = np.array([float(horizon)], dtype=np.float64)
         for tau in taus:
-            method = str(self.cfg.get("decision_method", "kramers")).lower()
-            if method == "ig":
-                # iter12: bounded, non-saturating Inverse-Gaussian first-passage
-                # catalyst.  Does NOT consult `potential` (which is broken on
-                # zero-volume tokens); uses dynamic barriers x_± = x_t ± β·σ_t·√τ.
-                d = _first_passage_decision(
-                    cfg=self.cfg,
-                    state=self._last_state,
-                    sigma_t=self._last_sigma_t,
-                    sigma_phi=self._last_sigma_phi,
-                    L_t=self._last_L_t,
-                    tau=float(tau),
-                )
-            else:
-                d = _kramers_escape_and_decision(
-                    cfg=self.cfg,
-                    potential=self.potential,
-                    state=self._last_state,
-                    mu_dot=self._mu_dot,
-                    sigma_t=self._last_sigma_t,
-                    sigma_phi=self._last_sigma_phi,
-                    L_t=self._last_L_t,
-                    tau=float(tau),
-                )
+            d = _kramers_escape_and_decision(
+                cfg=self.cfg,
+                potential=self.potential,
+                state=self._last_state,
+                mu_dot=self._mu_dot,
+                sigma_t=self._last_sigma_t,
+                sigma_phi=self._last_sigma_phi,
+                L_t=self._last_L_t,
+                tau=float(tau),
+            )
             if best is None or d["E_star"] > best["E_star"]:
                 best = d
         if best is None:
@@ -3012,46 +2778,9 @@ class StrategyEngineV2Adapter:
             p_up   = float(decision.get("P_up",   0.0))
             p_down = float(decision.get("P_down", 0.0))
             p_zero = float(decision.get("P_zero", 0.0))
-            # ─── iter12 Kelly-Optimal Expected Hold Exit ───────────────────
-            # In `"ig"` mode the IG first-passage probabilities P± are
-            # *smooth* (no vacillation), so the appropriate exit is the
-            # expected-log-wealth hold test the directive mandates.
-            #
-            # The expected log-return of holding over horizon τ is the
-            # integrated posterior drift `μ̂_τ = μ_t·τ + φ·α⁻¹·τ` (already
-            # computed in the decision dict — see `_first_passage_decision`
-            # / `_kramers_escape_and_decision`).  The barriers d± are used
-            # by the IG catalyst to compute P± for the *direction* decision,
-            # NOT to express the expected return of the asset itself — the
-            # asset is not absorbed at the barrier, it keeps moving.
-            #
-            #     EXIT ⇔ μ̂_τ ≤ f + s_0 + |μ_t|·Δ_lat
-            #
-            # Both sides are dimensionally consistent (price units + the
-            # fee fractions of `1` unit of notional, exactly the same mix
-            # as the existing Kelly n_star numerator at line 1832).
-            #
-            # During a slow bleed, the Kalman filter drives μ_t negative →
-            # μ̂_τ → negative → EXIT fires smoothly.  This targets the
-            # 2538-trade `recording_ended` catastrophic bag-holding loss
-            # (iter08 -25.98 SOL on 656 trades) WITHOUT arbitrary
-            # thresholds or a separate trapped-basin heuristic.
-            #
-            # The kramers path (`P_down ≥ 0.5`) is untouched for A/B.
-            if str(self.core.cfg.get("decision_method", "kramers")).lower() == "ig":
-                mu_hat_tau = float(decision.get("mu_hat_tau", 0.0))
-                cfg_  = self.core.cfg
-                mu_t  = float(self.core._last_state.get("mu", 0.0))
-                cost_hold = (float(cfg_["fee_fraction"])
-                             + float(cfg_["s_0"])
-                             + abs(mu_t) * float(cfg_["latency_seconds"]))
-                if mu_hat_tau <= cost_hold:
-                    self.exit_signal_reason = "ig_expected_hold_exit"
-                    return _V1Signal.EXIT
-            else:
-                if p_down > p_up and p_down > p_zero and p_down >= 0.5:
-                    self.exit_signal_reason = "kramers_down_exit"
-                    return _V1Signal.EXIT
+            if p_down > p_up and p_down > p_zero and p_down >= 0.5:
+                self.exit_signal_reason = "kramers_down_exit"
+                return _V1Signal.EXIT
             # 5b. iter10 crash-circuit-breaker exit.  The kramers gate above
             #     requires `P_down >= 0.5` (i.e. `k_down` dominates), which in
             #     this dataset only fires briefly when the engine pops out
