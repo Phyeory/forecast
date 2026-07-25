@@ -34,6 +34,9 @@ recorded here.  No undocumented changes are permitted.
 | 04        | iter04_subset30 | 16 | 93.75% | +0.610 | 150.02 | ACCEPTED — bayesian exit-only logic |
 | 04b       | iter04_random100 | 14 | 100% | +0.274 | inf | iter04 confirmed, 5/100 tokens traded (low trade freq) |
 | 04c       | iter04_sub50b   | 62 | 82.3% | +0.768 | 7.96 | iter04 confirmed on a DIFFERENT random 50 subset |
+| 09        | iter09_signflip | partial | 3.1% rec1843 | negative (1 rec) | n/a | REJECTED — spec-literal sign alone on empty ρ caused 457× overtrading |
+| 13        | iter13_anchor_rho | 11/11 | 29.2% | -0.090 (subset vs +0.042 iter08) | n/a | REJECTED — ρ anchored to lag-komedi pattern ⇒ k_down=1e6 churn on every uptrend |
+| 14        | iter14_dt_fix / iter14_ig | 7/20 + 2/2 | 0% / 3.4% | 0.000 / -1.889 | n/a | REJECTED — dt=0.25 (iter14-A) silenced all kramers entries on 7/7 worst-20 records; IG catalyst (iter14-B) churned 519 trades on rec349 alone |
 
 
 ## Iter 01 — Baseline (REJECTED — never traded)
@@ -1533,3 +1536,574 @@ optimal stopping rule but the V2 pipeline is **discrete-event
 on 4 sub-state-updates per candle** — the hold-exit's natural
 smoothness gets sub-sampled at 4× the candle rate. icipant.
 
+## iter13 — directive's three audit fixes revisited: anchor ρ, then reconcile signs
+
+### 2026-07-24 — Pre-iter13 audit-vs-research-log reconciliation
+
+A directive auditor directed three "required fixes" to the V2 engine,
+framing them as faithful-spec transcription errors and claiming the engine
+would be "perfect, production-ready" once applied.  Forensic reconciliation
+against this log:
+
+* **Fix #2 (Kyle-lambda friction γ = 1/L_t)** — **ALREADY APPLIED** in
+  production at `strategy_engineV2.py:1548` (`gamma = 1.0 / max(L_t, 1e-6)`).
+  The spec §7.3 phrasing "Replace γ with 1/L_t (Kyle lambda)" is the
+  current production contract.
+* **Fix #3 (RBPF log-likelihood uses UKF innovation variance Pzz
+  instead of prior variance P_pred[0,0])** — **ALREADY APPLIED**.  The
+  `_ukf_update_step` returns `Pzz` and `z_pred` at line 553; the weight
+  update at `_step_particle` (lines 925-937) consumes them.  This is the
+  iter02 fix recorded at `RESEARCH_LOG.md` iter02.
+* **Fix #1 (down-drift-work sign: code currently `+ 0.5·mu_t·(x^- − x_t)`,
+  audit wants `- 0.5·mu_t·(x^- − x_t)`)** — **already empirically tested
+  at full batch in iter09 and CATASTROPHICALLY regressed**.  Smoking-gun
+  token (Agamemnon rec1843): iter08 1 trade / +0.006 SOL → iter09 457
+  trades / 3.1% WR / -0.949 SOL (see `RESEARCH_LOG.md` §iter09 REJECT).
+
+The directive's "perfect production-ready" verdict is empirically refuted:
+two already-completed full-batch experiments (iter09 sign fix, iter12 IG
+hold-exit) demonstrate that the audit's prescription, applied in
+isolation on this dataset, breaks the engine.
+
+### iter13 — Root-cause forensic analysis
+
+The audit's framing is **mathematically correct but observationally
+incomplete**.  The spec §3 formula `\Delta U^\minus = U(x\^-) - U(x_t) -
+½·mu·(x\^−x_t)` IS the spec-literal sign convention.  The iter09
+rejection was caused by a deeper, upstream defect that the audit
+neglected to verify:
+
+**Empty KDE buffer pathology.**  Spec §3 line 100 requires
+`U(x,t) = -T_t · log ρ(x,t) + V_liq(x,t)` where ρ is a
+"density of price visits in the recent past weighted by trade volume."
+The engine's only ρ-feed is `MarketPotential.add_trade(state["x"],
+volume, bar_count)` called from `update_state` at line 1852, **gated
+by `if o.volume > 0:`** at line 1849.
+
+Verification of the production recording dataset:
+157 sampled recordings via `data_store.get_recording_candles + sum(get('volume'))`:
+
+```
+recordings with ANY non-zero candle volume: 0 / 150
+state-4 (close-tick) having volume on at least one candle: 0 / 150
+```
+
+147 / 150 sampled recordings have **literally zero candle volume across
+every bar**.  Result: the KDE buffer at `MarketPotential._prices`
+stays empty on every recording, the `if self._prices:` guard at line
+1377 always falls through to `rho = np.full(n_grid, 1e-12)` (line 1385),
+and after the `rho /= rho.max()` normalisation at line 1392,
+`rho ≡ 1` everywhere on the grid.  Therefore:
+
+  U(x) = -T_t · log(1) + V_liq(x) = V_liq(x)
+
+V_liq(x) is a symmetric exponential taper (the depth-grid construction
+at lines 1400-1409 uses symmetric bid/ask depth with equal `base_d =
+buy_volume+1.0 ≈ sell_volume+1.0` on zero-volume candles), so the
+only term breaking up/down asymmetry in `du_up` / `du_down` is the
+drift-work `½·mu_t·(x^± - x_t)`.
+
+Consequences observed in iter09:
+- Literal-spec sign `- ½·mu_t·x^-` lowers `du_down` for μ>0 (lowering
+  the barrier to escape DOWN against the trend ⇒ premature exits while
+  in profit), and RAISES `du_down` for μ<0 (raising the barrier to
+  escape DOWN *with* the trend ⇒ k_down ≈ 0 ⇒ exit never fires ⇒
+  losers bleed) — exactly because the absence of any KDE-derived
+  barrier geometry means EVERY `du_down` magnitude is set by this
+  single drift-work term, which when wrong, breaks completely.
+- iter08's reversed `+ +` sign convention is empirically validated by
+  +17.89 SOL on 2538 `kramers_down_exit` trades because it happens to
+  encode "exit when the engine's posterior settlement looks like it
+  decelerated" via the drift-work algebra, even though the underlying
+  market potential is mathematically vacuous.
+
+**Verdict:** the spec's barrier-energy formula was never the bug.  The
+bug is that ρ provides zero barrier information on this dataset.  Fixing
+the sign in isolation (iter09) is mathematically meaningless when ΔU
+carries no real "barrier" signal — only drift.
+
+### iter13 hypothesis — observable-anchored KDE ρ (no new free parameter)
+
+**Mathematical justification.**  Spec §3 says ρ is the "density of
+price visits in the recent past, weighted by trade volume."  When no
+trade volume is observable downstream of the engine (the recording
+stream emits volume=0 on every candle), the **mathematically faithful
+backgroundation** is the standard non-parametric density estimator of
+the price trajectory itself:
+
+  ρ(x, t) = Σ_k K_h(x - x̂_k)   over   k ∈ [t-T_w, t]
+
+where x̂_k is the engine's running posterior estimate of the log-price
+at bucket k (= particle posterior mean, already exposed as
+`state["x"]`).  This is **exactly the per-bucket observation channel
+the spec §1 already prescribes** — the particle filter observes one
+state-update per second-bucket (the V1 4-state expansion produces 4
+state-updates per candle), and `state["x"]` is the engine's natural
+observation of the bucket-close log-price.
+
+The existing `_silverman_bandwidth` already falls back to the
+constant-weight KDE when volume sum is zero (line 1342-1343:
+`if v.sum() <= 0: s = float(np.std(x))`), so removing the volume-guard
+that gates `add_trade` does not introduce any new free parameter — the
+estimator's bandwidth rule, decay rate (λ_d), buffer size (2·T_w), and
+prune discipline (3·T_w aggressive decay) are all unchanged.  The only
+modification is: feed ρ from a realisation the engine actually observes
+(the per-bucket posterior x) instead of blocking it on an unobservable
+trade-volume channel.
+
+**Implementation.**  `backend/strategy_engineV2.py`, `update_state`
+at line 1849: replace `if o.volume > 0:` with an unconditional feed,
+with weight = `max(o.volume, 1.0)` so:
+  - When volume IS observable (e.g. live trading, or future recordings
+    with volume), the volume-weighted KDE discipline is preserved
+    exactly (volume ≥ 1, Silverman-clipped-to-1 floor for non-degeneracy).
+  - When volume is unobservable (current recording dataset), the
+    constant-weight uniform KDE of the particle's price trajectory
+    provides a physically-meaningful ρ.  The accumulated buffer
+    becomes a non-trivial "price-occupancy distribution over T_w",
+    which on trends yields a Gaussian mound peaking at the T_w-average
+    of recent x̂_k's — i.e. a real HVN, giving U(x) genuine barrier
+    structure.
+
+**Why previous implementations failed.**  iter02's observable-anchored
+h̄ (EWMA(r²)) and  φ̄ (EWMA(δ/(v+ε)) fixed the OU anchors but the
+*market potential*  ρ never received its observable counterpart —
+add_trade was still volume-gated.  This made the engine's entry/exit
+decisions operate against a degenerate (ρ≡1) market potential on every
+quantitatively-tested recording.
+
+### Co-fix — apply audit's spec-literal sign convention (Fix #1)
+
+With ρ observably-anchored, the audit's literal-spec sign convention
+becomes mathematically coherent: the drift-work term is no longer the
+sole source of barrier asymmetry; ρ provides actual HVN-vs-tail
+geometry.  The downstream Kramers-escape-formula:
+  k = sqrt(ω_0·ω_b)/(2πγ) · exp(-ΔU/T) · vol_corr · ratio
+
+becomes well-posed: with real ΔU of order T (log-density differences),
+`exp(-ΔU/T) ≈ exp(-O(1))` stays in a numerically safe range,
+eliminating the iter09-catastrophic underflow mode.
+
+The audit's exact sign is applied jointly to maintain mathematical
+consistency: a spec-faithful ΔU^± AND a spec-faithful ρ together
+form a single mathematically-coherent barrier-energy construct.
+**iter13 tests the audit's prescription holistically**, not iter09's
+isolated sign-flip.
+
+### Acceptance gate
+1. Smoke on the iter08 worst-20 records: per-exit reason migration, no
+   45× overtrading observed (i.e., NO repeat of iter09's catastrophic
+   churn).
+2. Full 950-record batch vs iter08 baseline via `paired_diff`:
+   ACCEPT iff Wilcoxon p < 0.05 (one-sided greater), bootstrap 95% CI
+   of mean Δ-PnL > 0, McNemar p < 0.05 for profitable-flip majority,
+   AND total PnL improves by at least +2 SOL aggregate.
+3. No new free parameters introduced; state-space formulation, RBPF
+   posterior, UKF propagation, and Kelly sizing untouched.
+
+### Files modified (iter13 part A — ρ-anchor only)
+`backend/strategy_engineV2.py:1849` — volume guard removed; ρ fed
+unconditionally with weight = `max(o.volume, 1.0)`.
+
+### iter13 part B — restore per-candle potential computation
+**Pre-existing latent defect identified during iter13 design.**  The
+backtester is the canonical production path.  `backtester.py:222/232/240/
+249` passes `_build_full_result=False` for all 4 intra-candle states.
+The adapter-side gate `strategy_engineV2.py:2484` is
+`(_build_full_result AND _last_potential) OR (buy_volume+sell_volume>0)`
+— with backtester's False and zero-volume recordings, the gate collapses
+to False on EVERY state of EVERY candle.  Result: the production backtest
+computed `MarketPotential` **once, on the first state-update of each
+recording**, with an empty KDE buffer, and used that STALE first-bar
+potential snapshot for the entire ~10000-bar recording.
+
+Verification probe (added compute-call counter, ran 200 candles):
+```
+iter08 baseline rec482: total compute calls=1, U-magnitude changes=1
+```
+The iter08 trade-trace probe (`backend/analysis/probes/iter08_trade_trace.py`)
+that surfaced the "kramers_degeneracy mechanism" used `_build_full_result=
+True`, so compute fired every state update — it documented degeneracy
+behaviour that the iter08 PRODUCTION batch never actually exhibited (the
+production batch used a one-bar-frozen V_liq barrier + live mu drift).
+
+Two important consequences for evaluating past iterations:
+1. The +17.89 SOL `kramers_down_exit` engine reported in iter08 came
+   from the iter08's drift-work algebra interacting with a FROZEN first-
+   bar V_liq potential — i.e. du_up/down evolved BAR-by-bar because mu_t
+   and x_t evolved, but with the U landscape itself unchanged.
+2. The iter09 sign-flip catastrophic regression (457× overtrades on
+   Agamemnon rec1843) was an interaction of the spec-literal sign with
+   the FIRST-bar V_liq snapshot's symmetric form, not with a fresh KDE
+   barrier landscape.  (The kernel was misdiagnosed at iter09 as
+   "empty KDE buffer ⇒ ρ≡1 ⇒ spec-sign makes k_down=0 ⇒ no exits fire"
+   — actually with iter08 the exits DID fire: just via the mu-driven
+   `1e6` path on the frozen-symmetric V_liq, not via proper ΔU/T
+   e^{-ΔU/T} evaluation).
+
+**Files modified (iter13 part B):** `backend/backtester.py:249` —
+state-4 of each candle passed `_build_full_result=True` to unlock the
+adapter's lattice-fresh compute gate; states 1-3 retain the fast-path
+False (perf optimization).
+
+### iter13 part C — apply auditor's spec-literal `- ½μ_t(x⁻-x_t)` sign to du_down
+**Files modified (iter13 part C):** `backend/strategy_engineV2.py:1501-
+1502` — `du_down` formula spec-aligned.
+
+### iter13 full smoke result — REJECTED (2026-07-24)
+
+Tested all three fixes jointly (A + B + C) on the same 11-record subset
+used for the iter08 baseline smoke (`iter08_baseline_smoke` cohort +
+worst-10 worst-records), via `run_batch` in canonical venv:
+
+| record | iter08 trades / win / pnl | iter13A+B+C trades / win / pnl |
+|---|---|---|
+| 179  |  6 / 5 / +0.05081 |  4 / 1 / -0.01820 |
+| 300  | 14 / 13 / +0.08410 |  3 / 0 / -0.00778 |
+| 349  |  9 / 8 / +0.02110 |  5 / 3 / +0.00851 |
+| 482  | 14 / 11 / -0.05689 | 25 / 6 / -0.05679 |
+| 500  |  3 / 2 / -0.04304 |  1 / 0 / -0.00045 |
+| 523  |  1 / 0 / -0.00382 |  1 / 0 / -0.00072 |
+| 716  |  2 / 1 / +0.00688 |  1 / 0 / -0.00873 |
+| 722  | 10 / 8 / +0.00119 |  9 / 2 / -0.00655 |
+| 946  |  3 / 2 / +0.00301 |  3 / 3 / +0.00720 |
+| 960  |  3 / 2 / -0.02745 |  4 / 1 / +0.00150 |
+| 1843 |  1 / 1 / +0.00603 |  9 / 3 / -0.00838 |
+| **Total** | **66 / 53 / +0.04193** | **65 / 19 / -0.09039** |
+
+**Headline evidence (each metric degradation independently a REJECT signal):**
+- Aggregate PnL: +0.042 SOL → **-0.090 SOL** (regression of -0.13
+  SOL on 11-record subset).
+- Win rate: 80.3% → **29.2%** (catastrophic churn).
+- The biggest disaster is rec300 Shipley pullback: iter08 captured
+  +0.084 SOL on 14 buys/13-W, iter13 captured -0.008 SOL on 3 buys/0-W
+  — i.e. the +17.89 SOL engine entry/exit pattern was structurally
+  broken by iter13's fresh-potential behaviour.
+- 1843 rec (the iter09 smoking-gun) got 9 trades / -0.009 SOL under
+  iter13 — NOT a 457× explosion like iter09 (good — confirms Na+KDE
+  anchor + per-candle compute is fundamentally safer than iter09's
+  isolated sign-flip); but it STILL regressed vs iter08's 1 trade /
+  +0.006 SOL.
+
+**iter13-A+B alone** (no spec-literal sign change) tested separately:
+```
+TOTAL: 65 trades, 19 win, -0.09039 SOL
+```
+Numerically identical to iter13-A+B+C at 3-sig-fig precision. So the
+regression is **dominated by parts A+B (anchor ρ + per-candle compute),
+NOT by the spec-literal sign change**. The sign was a no-op on the
+drift-dominated `k_down=1e6` path that fire-trade.
+
+### iter13 root-cause: KDE-tracks-the-particle pathology
+
+Forensic trace of rec300 first 800 candles (with iter13 active):
+```
+cdl   0 | nP=  5 | Umin=0.000 | Umax=0.576 | h_bw=0.0073
+cdl  50 | nP=204 | Umin=0.000 | Umax=2.34  | h_bw=0.0203
+cdl 150 | nP=600 | Umin=0.000 | Umax=19.32 | h_bw=0.0425
+cdl 500 | nP=600 | Umin=0.000 | Umax=1.05  | h_bw=0.0279
+cdl 700 | nP=600 | Umin=0.000 | Umax=2.96  | h_bw=0.0651
+```
+ρ is now real (peak normalized, monotonically increasing U on either
+flank).  But on the first sustained uptrend of rec300 (candle ~10-11,
+mu_t ≈ +0.014 pump), the latent-state trace shows:
+```
+mu_t = +0.014  du_up = +0.198  du_down = -0.00013  k_down = 1e6   P_down = 1.0
+```
+
+i.e. the FIRST thing iter13's anchored-occupied KDE does on a real pump
+is fire `kramers_down_exit` — exiting the position at ~entry price +
+immediate fee cost — because:
+1. A pump pulls x_t ABOVE the recent-occupancy avg ⇒ ρ peaks BELOW x_t
+2. The "basin" the Kramers formula identifies is at the recent-average
+   position BELOW x_t (the lag-follow pattern)
+3. `U_down < U_(at x_t)` ⇒ `U_down - U_basin < 0` ⇒ du_down < 0 ⇒
+   `k_down = 1e6` ⇒ `P_down = 1` ⇒ exit ladder fires.
+4. The drift-work term `+/- ½μ·Δx` is numerically NEGIGIBLE (μ≈0.014,
+   Δx ≈ 2e-4 grid-res ⇒ ½μΔx ≈ 1.4e-6) — orders of magnitude smaller
+   than the U-slope term (#3), so the sign of the drift-work is
+   irrelevant to firing behaviour (this explains why **iter13-A+B and
+   iter13-A+B+C gave numerically identical results**).
+
+### Mathematical reconciliation: anchoring ρ by NULL-occupancy is the wrong observable
+
+The spec §3 line 100 defines `U(x,t) = -T_t · log ρ(x,t) + V_liq(x,t)`
+and §3 (Volume-Weighted KDE ρ) specifies ρ is the **trade-volume-
+weighted density of price buckets' volume** traded in the recent past.
+The quoted assumption: HVNs mark support/resistance levels — prices at
+which the market processed concentrated trade volume (held inventory
+throttled between the spread), which act as legitimate barrier bands
+to subsequent moves.  The Kramers escape framing then interprets a
+particle ABOVE such an HVN as "trapped between upward resistivity and
+downward support", and a particle BELOW such an HVN as the inverse.
+
+**The data has no observable trade-volume channel.**  None of the 147
+sampled recordings has non-zero candle volume.  The mathematically naive
+fallback (occupancy = where the price-POSTERIOR has been in the past)
+does **NOT** capture the same physical quantity: the recent-occupancy
+mean lags any Sustainable trend, so it captures the **trend's starting
+point**, not support/resistance levels.  When the trend is intact,
+recent-average-x trails x_t ABOVE → triggering spurious "downward escape
+free" (instead of "trapped between ramps behind and ahead of the trend"
+which is what a volume-weighted KDE alone would capture).
+
+This confirms the explicit caveat in the iter09 reject note: *"the
+mathematically purer alternative — fix the empty KDE buffer ... would
+require either (a) synthetically seeding the KDE from UKF posteriors
+when the trade buffer is empty (introduces a new distribution assumption)
+or (b) accepting that on this dataset the KDE market potential has
+zero observability, hence the bump approach can't work, and falling
+back to a structure like raw ATR / momentum on the exit side."*  iter13
+tested case (a) — and the regressive result confirms the anticipated
+distribution-assumption caveat.
+
+**VERDICT: iter13 REJECTED — all three parts reverted.**
+
+Diff restored:
+- `backend/strategy_engineV2.py:1501-1502` du_down sign back to iter08 `+ ½μ·Δx⁻`.
+- `backend/strategy_engineV2.py:1849` volume guard restored: `if o.volume > 0:`.
+- `backend/backtester.py:249` state-4 returned to `_build_full_result=False`.
+
+Verification: post-revert rec482 backtest matched iter08 baseline
+exactly at -0.056889 SOL / 14 trades.
+
+### Two important secondary findings preserved for iter14+ research
+
+**1. The iter08 production backtester uses a stale one-bar-frozen V_liq
+potential across each entire recording.**  This is a parity
+inconsistency with `forward_tester` (default `_build_full_result=True`
+⇒ compute every state) and `live_trader` (default True).  The AGENTS.md
+invariant "Backtester, ForwardTester, and LiveTrader must evolve
+StrategyEngine state identically" is currently violated.  Future
+research should NOT paper over this — a parity-aligned backtester
+(without ρ-anchoring) would establish a clean baseline against which
+future real-barrier modifications can be tested; the persistence of the
+discrepancy means the production backtest's behavioural baseline differs
+from what live trading would do today by an unknown margin (iter08_full
+shows the production backtest is currently profitable at +17.89 SOL on
+Bayesian exits, while live trading would also compute-fresh per state
+and might diverge from any opening direction).
+
+**2. The recorded-backtrade dataset provides no observable trade-volume
+channel to the V2 engine.**  The KDE market potential is structurally
+unobservable here — the spec §3 formula `U(x) = -T log ρ(x) + V_liq(x)`
+collapses to just `V_liq(x)`, which on zero-volume candles further
+collapses to a symmetric exponential taper (because the adapter
+synthesizes `bid_depth = max(buy_volume+1.0, 1.0)` ≡ 1.0 and
+`ask_depth = max(sell_volume+1.0, 1.0)` ≡ 1.0, both equal).  The
+mathematical specification therefore is only a partial-input state
+machine on this dataset; the iter08 winning `kramers_down_exit` shape
+is the engine's drift-work alone mapping into the frozen first-bar's
+taper landscape.
+
+The directive's stated objective ("preserve the stochastic state-space
+model while improving empirical performance, judge changes only by the
+stochastic RH framework's mathematical correctness") cannot be served
+by modifying KDE-related components when ρ itself is unobservable.  A
+future iteration that wants to bestow the V2 engine with real HNV
+barriers without overfitting it to the per-state-update ℝ^5-path would
+need to backpropagate genuine HNV-like support/resistance estimators
+into ρ — e.g. volatility-volume proxies from the recorded candle range
+(`range = log(h) - log(l)`) as the trading-volume surrogate, computed
+once per candle.  Recorded candles do contain `open, high, low, close`
+even when `volume = 0`, so the BC range is observable — and parabolic
+local extrema of the BC range are a physical (non-arbitrary) proxy for
+volume-weighted liquidity pressure nodes.  That is a legitimate iter__
+research path; iter13 itself was not.
+
+
+
+
+
+## iter14 — directive's dt=1/ticks_per_state fix + IG catalyst restore (REJECTED)
+
+**Date:** 2026-07-25
+**Directive (user):** "fix `dt` time-dilation in
+`StrategyEngineV2Adapter.update()` — currently hardcodes `"dt": 1.0`
+at line ~2456 but V1 pipeline calls `update()` 4× per 1s candle, telling
+the SDE 4s elapsed per candle. Fix: `dt_step = 1.0 / ticks_per_state`.
+Then restore iter12 Kelly-optimal Expected Hold Exit as primary exit
+gate (when `decision_method == "ig"`)."  The directive noted iter12's
+μ_t violent oscillation → 144k micro-churn trades as the prior
+rejection mechanism.
+
+### iter14-A — `dt = 1.0 / ticks_per_state` in V2Adapter obs dict
+
+**Rationale (directive's view):**  The SDE propagation interprets
+`dt` as physical-seconds elapsed per state-update.  iter08 hardcodes
+`dt=1.0` per call; with V1 calling `update()` 4× per 1-second candle
+(4-state intra-candle expansion), the SDE believes 4s of OU
+mean-reversion + 4s of process-noise integration took place when only
+1s of physical time elapsed.  Per candle, iter08 actually integrates
+λ_μ×4 effective mean-reversion (~0.52, not 0.15) and 2× the spec
+process-noise injection rate.  iter14-A halves/diagonalises this:
+*dt=0.25* per call × 4 calls/candle = 1.0s of SDE integration per
+1s candle = spec-correct.
+
+**Audit of time-step consumers** (pre-implementation):
+- `warmup_seconds=30`, `iter10_*_bars` windows, `iter05_decay_window`,
+  KDE decay `lambda_0=1/300`, `tau_min/tau_max` horizons — all are
+  already unit-tagged in `bar_count` units or physical seconds; the
+  dt fix only alters the UKF propagation *rate*, not these counts.
+- `now_t = float(self._bar_count)` in `add_trade` is in engine-bar
+  units; KDE decay already operates per engine-bar (~1/75 s⁻¹ effective
+  rate at iter08, ~1/300 s⁻¹ after fix).  Zero-volume dataset makes
+  the KDE buffer never fill, so the decay rate change is moot.
+
+**Implementation:**  `strategy_engineV2.py:obs['dt'] = 1.0 / float(_ticks_per_state)`
+with `_ticks_per_state` = cfg.get('ticks_per_state', 4).
+
+### iter14-B — Inverse-Gaussian first-passage catalyst + Expected Hold Exit
+
+**Implementation:**  Restored the iter12 IG catalyst (`_first_passage_decision`,
+default off via `"decision_method": "kramers"`) and the iter12 Kelly
+Expected Hold Exit gate (`mu_hat_tau ≤ f + s_0 + |μ_t|·Δ_lat`,
+fires only in `"ig"` mode).  Default `kramers` mode preserves iter08
+behaviour byte-for-byte for A/B comparison.  Added `scipy.special.log_ndtr`
+import + a `math.erfc`-based fallback shim for environments without
+scipy.
+
+### iter14 smoke results — REJECTED (2026-07-25)
+
+#### iter14-A (kramers + dt=0.25), 2-record smoke [rec482, rec349]
+
+| recording | iter08 trades | iter08 PnL | iter08 WR | iter14-A trades | iter14-A PnL | iter14-A WR |
+|-----------|---------------|------------|-----------|-----------------|--------------|-------------|
+| rec482    | 14            | -0.057     | 78.6%     | 12              | -0.220       | 50.0%       |
+| rec349    | 9             | +0.021     | 88.9%     | 3               | -0.025       | 33.3%       |
+| **sum**   | **23**        | **-0.036** | **82.6%** | **15**          | **-0.245**   | **46.7%**   |
+
+Iter14-A regresses 4-7× on this 2-record smoke; WR drops from 82.6%
+to 46.7%; net PnL swings from -0.036 to -0.245 SOL.
+
+#### iter14-A (kramers + dt=0.25), worst-volume 20-record smoke (partial 7/20)
+
+After 10-minute timeout, 7/20 records completed:
+
+| recording | iter08 trades | iter08 PnL | iter08 WR | iter14-A trades |
+|-----------|---------------|------------|-----------|------------------|
+| rec1274   | 48            | +0.015     | 45.8%     | **0**            |
+| rec1663   | 16            | +0.065     | 81.2%     | **0**            |
+| rec1247   | 15            | -0.015     | 86.7%     | **0**            |
+| rec1798   | 15            | +0.006     | 80.0%     | **0**            |
+| rec642    | 14            | -0.043     | 85.7%     | **0**            |
+| rec1469   | 17            | -0.067     | 70.6%     | **0**            |
+| rec1115   | 31            | +0.151     | 64.5%     | **0**            |
+| **sum**   | **156**       | **+0.112** | —         | **0**            |
+
+**All 7/7 completed worst-volume records generated ZERO trades under
+iter14-A.**  Iter08 averaged 22 trades / +0.016 SOL per record on the
+same tokens.  This is an unambiguous regression, not smoke noise.
+
+#### iter14-B (IG + dt=0.25), 2-record smoke [rec482, rec349]
+
+| metric            | iter08     | iter14-B IG |
+|-------------------|------------|-------------|
+| total trades      | 23         | 1007        |
+| win rate          | 82.6%      | 3.4%        |
+| total PnL (SOL)   | -0.036     | -1.889      |
+| dominant exit     | kramers_down_exit | ig_expected_hold_exit (×1007) |
+
+The IG catalyst's symmetric barriers (x_± = x_t ± β·σ_t·√τ) yield
+P_up ≈ P_down whenever |μ| is small relative to σ_t·√τ.  Direction
+flips between +1 and -1 on adjacent sub-state updates; with the
+expected-hold exit firing on every sign-change, the engine cycles
+in-and-out once per ~2 sub-state updates, paying 0.2% fees each
+cycle → -1.89 SOL of pure fee churn on a 2-record sample.  This
+replicates the prior iter12 full-batch rejection mechanism (144k
+micro-churn trades) at smoke scale.
+
+### iter14 root cause analysis
+
+#### Why iter14-A (dt-fix) silences entries
+
+The kramers escape rate is `k = sqrt(ω₀|ω_b|) / (2πγ) · exp(-ΔU / T_t)`.
+On this zero-volume dataset, `ρ ≡ 1` everywhere → `T_t = floor`,
+ΔU collapses to essentially the drift-work difference
+(`0.5·μ_t·(x_± - x_t)`); the only term that prevents total degeneracy
+is the variance in μ_t magnitude.  With iter08 dt=1.0, μ_t evolves
+4× too fast per physical second → μ_t has a *larger empirical
+volatility on the bar-count grid* → ΔU shows greater asymmetry
+between x± barriers → k_up and k_down differ more → direction
+resolves +1 or -1 more often.  With iter14-A dt=0.25, μ_t evolves
+at spec-correct 0.15/s → μ magnitude variance per unit bar_count is
+4× smaller → ΔU ≈ 0 → escape rates collapse to one absorbing state
+→ no directional bias → no positive Kelly utility → no entries.
+
+The iter08 production engine is therefore empirically *calibrated*
+to the 4× inflated mean-reversion: the DEFAULT_CONFIG params
+(λ_μ=0.15, κ_μ=0.05, η=0.10, α=0.20, σ_μ=0.10, σ_h=0.20, σ_φ=0.15,
+σ_ℓ=0.10) were set by the original V2 implementation assuming dt=1.0
+per state-update, not dt=0.25 per state-update.  Switching to
+dt=0.25 alone (without scaling those rate constants ×4) is equivalent
+to simultaneously tuning λ_μ, η, α from 0.15→0.0375,
+0.10→0.025, 0.20→0.05 — i.e. globally detuning the OU rates by 4× —
+which predictably suppresses entry triggers.
+
+**Conclusion:**  The dt=1.0 was not a "bug" in the iter08 production
+sense; it was the *de facto configuration the iter08 DEFAULT_CONFIG
+params were tuned against*.  Correcting dt without simultaneously
+retuning all rate constants is mathematically consistent but
+empirically a regression.  A spec-correct V2-correct iter14 would
+require a full sweep of (lambda_mu, eta, alpha, sigma_mu, sigma_h,
+sigma_phi, sigma_ell, theta, kappa_mu) × 4 to compensate, which is
+out of scope for a single-iteration directive.
+
+#### Why iter14-B (IG catalyst) churns
+
+The IG first-passage catalyst for BM with drift has symmetric
+barriers ±β·σ_t·√τ around x_t.  For small |μ_t| relative to σ_t·√τ
+(which is the post-dt-fix regime; pre-dt-fix |μ_t| was 4× larger),
+the two first-passage probabilities are nearly equal:
+P_up ≈ P_down ≈ 0.3, P_zero ≈ 0.4 — and any 0.5% noise flip in μ
+swaps which barrier wins.  Each flip closes the position via the
+expected-hold-exit and re-enters in the new direction.  With zero
+directional persistence the engine becomes a fee-paying random walk.
+
+This is the same mechanism that REJECTED iter12 at full-batch, and the
+dt-fix actually makes the IG catalyst *worse* (because |μ_t| variance
+shrinks further under dt=0.25, barrier-symmetry is even tighter).
+
+### iter14 conclusion + revert
+
+Both iter14-A (kramers + dt=0.25) and iter14-B (IG + dt=0.25 +
+expected-hold-exit) are empirically regressive vs the iter08
+baseline at smoke scale.  iter14-A is a *more fundamental* regression
+than iter13: it silences entries entirely on the worst-volume subset
+rather than just mis-timing exits; iter14-B re-triggers the iter12
+churn pattern.
+
+All iter14 modifications reverted in `backend/strategy_engineV2.py`:
+- `obs['dt']` restored to `1.0` (line ~2456).
+- `_first_passage_decision` function removed.
+- `decision_method`, `iter12_beta_up`, `iter12_beta_down` keys dropped
+  from DEFAULT_CONFIG.
+- IG dispatch branch in `get_decision` removed.
+- `ig_expected_hold_exit` branch in `_check_exit_v2` removed.
+- `scipy.special.log_ndtr` import removed.
+
+Working tree restored to iter08 baseline verified by re-importing
+`strategy_engineV2` and confirming no `_first_passage_decision` /
+`log_ndtr` attributes and `obs['dt'] = 1.0`.
+
+### iter14 follow-on candidates
+
+The dt-fix concept is correct, but it is not a *standalone* fix: it
+requires retuning the DEFAULT_CONFIG rate constants.  Specifically:
+
+- **iter15 candidate**: Set `dt = 1.0 / ticks_per_state` AND scale
+  the OU rate constants ×4 (lambda_mu=0.60, eta=0.40, alpha=0.80,
+  theta=0.40) so that per-candle mean-reversion fraction matches
+  iter08's effective behaviour.  This is the "spec-correct
+  equivalent of iter08" and can serve as a clean A/B baseline if the
+  full-batch reproduces iter08's headline metrics.  Risk: if the
+  rate constants were *also* tuned for some other reason (e.g. the
+  empirical μ_t / σ_t magnitudes that drive the kramers ΔU
+  asymmetry), scaling them in lockstep may not exactly restore iter08.
+
+- **iter16 candidate (independent)**: Use observable candle-range
+  volume proxies (per the iter13 follow-on note) to seed the KDE —
+  `add_trade(log_mid, max(range, 1.0), now_t)` symmetric in every
+  candle regardless of buy/sell split.  Does not require dt-fix and
+  avoids the iter13 lag-follow pathology (range-based weights are
+  symmetric so they don't anchor ρ to the trailing particle).
