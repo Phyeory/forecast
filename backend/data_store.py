@@ -203,6 +203,36 @@ def update_recording_candle_count(recording_id: int):
     conn.close()
 
 
+def cleanup_small_recordings(min_candles: int = 100) -> int:
+    """
+    Delete recordings with fewer than `min_candles` candles (and their associated candles).
+    Returns the count of deleted recordings.
+    """
+    conn = _get_price_conn()
+    rows = conn.execute(
+        """
+        SELECT r.id
+        FROM recordings r
+        LEFT JOIN (
+            SELECT recording_id, COUNT(DISTINCT time) as cnt
+            FROM candles
+            GROUP BY recording_id
+        ) c ON r.id = c.recording_id
+        WHERE COALESCE(c.cnt, r.candle_count, 0) < ?
+        """,
+        (min_candles,),
+    ).fetchall()
+
+    deleted_ids = [row[0] for row in rows]
+    if deleted_ids:
+        placeholders = ",".join("?" * len(deleted_ids))
+        conn.execute(f"DELETE FROM candles WHERE recording_id IN ({placeholders})", deleted_ids)
+        conn.execute(f"DELETE FROM recordings WHERE id IN ({placeholders})", deleted_ids)
+        conn.commit()
+    conn.close()
+    return len(deleted_ids)
+
+
 # ── Backtest DB ──────────────────────────────────────────────────────────────
 
 def _get_backtest_conn() -> sqlite3.Connection:

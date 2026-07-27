@@ -313,6 +313,13 @@ async def delete_recording_endpoint(recording_id: int):
     return JSONResponse({"status": "deleted"})
 
 
+@app.post("/api/recordings/cleanup")
+@app.delete("/api/recordings/cleanup")
+async def cleanup_recordings_endpoint(min_candles: int = Query(default=100)):
+    deleted_count = data_store.cleanup_small_recordings(min_candles=min_candles)
+    return JSONResponse({"status": "cleaned", "deleted_count": deleted_count, "min_candles": min_candles})
+
+
 # ── Backtest API ─────────────────────────────────────────────────────────────
 
 @app.post("/api/backtest")

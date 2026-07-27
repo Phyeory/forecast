@@ -1608,6 +1608,21 @@ async function deleteRecording(id, e) {
   loadRecordingsList("viewer-recordings-list", true);
 }
 
+async function cleanupRecordings() {
+  if (!confirm("Clean up all recordings with fewer than 100 candles?")) return;
+  const res = await apiFetch("/api/recordings/cleanup", { method: "POST" });
+  if (res.error) {
+    alert(res.error);
+    return;
+  }
+  alert(`Cleaned up ${res.deleted_count || 0} recording(s) with < 100 candles.`);
+  loadRecordingsList("recordings-list");
+  loadRecordingsList("viewer-recordings-list", true);
+  if (typeof loadRecordingsDropdown === "function") {
+    loadRecordingsDropdown();
+  }
+}
+
 /* ── Recorder ────────────────────────────────────────────────────────── */
 
 let recPollTimer = null;
