@@ -37,6 +37,7 @@ recorded here.  No undocumented changes are permitted.
 | 09        | iter09_signflip | partial | 3.1% rec1843 | negative (1 rec) | n/a | REJECTED — spec-literal sign alone on empty ρ caused 457× overtrading |
 | 13        | iter13_anchor_rho | 11/11 | 29.2% | -0.090 (subset vs +0.042 iter08) | n/a | REJECTED — ρ anchored to lag-komedi pattern ⇒ k_down=1e6 churn on every uptrend |
 | 14        | iter14_dt_fix / iter14_ig | 7/20 + 2/2 | 0% / 3.4% | 0.000 / -1.889 | n/a | REJECTED — dt=0.25 (iter14-A) silenced all kramers entries on 7/7 worst-20 records; IG catalyst (iter14-B) churned 519 trades on rec349 alone |
+| 15        | iter15_recorder_fix | (no backtest run) | n/a | n/a | n/a | **RECORDER PATCH (not engine)** — PumpSwapRPCClient now extracts vault deltas from accountSubscribe to populate `volume`/`buy_volume`/`sell_volume`/`tx_type=buy/sell`. Diagnosis: any iter01–14 dataset has zero order flow, so ALL prior engine experiments were on price-only data. iter14 Fix-A/B/C reverted to clean iter08. Next batch must be rerecorded fresh. |
 
 
 ## Iter 01 — Baseline (REJECTED — never traded)
@@ -456,7 +457,7 @@ expansion × ~10ms/tick / 8 workers).
 
 ---
 
-## iter04_full baseline (recorded 2026-07-20T18:33 GMT)
+## iter04_full "baseline" (recorded 2026-07-20T18:33 GMT) — ⚠ OVERSTATED, NOT A REAL BASELINE
 
 Batch `iter04_full_1784569629`.  Aggregate
 `backend/analysis/iter04_full.json`.
@@ -470,8 +471,56 @@ Batch `iter04_full_1784569629`.  Aggregate
 | profit factor | 5.9638 |
 | expectancy | +0.00730 SOL / trade |
 
-This is the **current production-best baseline**. All subsequent
-iterations must beat this under `paired_diff` statistical criteria.
+### ⚠ THIS BASELINE IS OVERSTATED — DO NOT USE IT AS AN ACCEPTANCE TARGET
+
+A live re-run of the V2 engine at commit `59b5128` (the exact commit
+that produced iter04_full) on a held-open trade audit (see
+`backend/analysis/probes/iter08_failure_probe.py` for the methodology,
+and the in-line audit in §iter08 below) demonstrates that:
+
+  1. The V2 engine at iter04 commit *already* entered the long-bleed
+     trades that became `recording_ended` in iter08. The engine state
+     machine is **byte-equivalent** between commit `59b5128` (iter04
+     era) and HEAD `5a05d0f` (iter08/iter14 era) — the only `git diff`
+     between the two commits in `strategy_engineV2.py` is documentation
+     comment refinement plus never-activated iter12 scaffolding
+     (`decision_method="kramers"` default).
+
+  2. The difference is entirely in **`backend/backtester.py`**: commit
+     `ef31d98` (2026-07-22, the "gitignore change" commit) added the
+     `if ft.current_trade is not None: ft._close_long(..., reason="recording_ended")`
+     block at `backend/backtester.py:283-288`. Before this commit, the
+     backtester silently dropped unconcluded trades — `ft.stats` only
+     counted trades that the engine itself had exited.
+
+  3. Concrete audit (orthogonal reproduction): the worst-token
+     recording `482` ("nyoro") re-ran at the iter04 commit V2
+     engine and produced **14 trades / 78.57% WR / -0.057 SOL**, NOT
+     the 13 trades / 84.62% WR / +0.043 SOL that the iter04_full
+     per-token JSON log reports. The 14th trade, `entry_t=1780433068`,
+     entered at the same engine state as the iter04_log's "missing
+     trade" (same `bar_count=8463`, same `regime=trend dir=up`, same
+     `m_hat=-2.92`, same `entry_price`) and bled 10473 seconds to
+     exit at -99.55% via `recording_ended` on the very last candle.
+
+  4. Aggregate reconciliation: iter04_full saved 731 per-token JSON
+     files (only recordings with trades written); iter08_baseline_full
+     saved 950. The 219-record difference, multiplied by an average
+     of ~3 dropped losers per affected recording (validated by the
+     656 / 219 ≈ 3 ratio), is exactly the missing tail loss that turns
+     `+18.59 SOL` into `-7.40 SOL` once the 656 force-close trades
+     are added at `-25.98 SOL`.
+
+**The iter04_full baseline of "+18.59 SOL / 80% WR / 2547 trades" is
+therefore an artifact of look-ahead survivorship bias on the losing
+tail. The engine never actually achieved that performance. Acceptance
+gates must NOT compare candidate batches against iter04_full; always
+compare against `iter08_baseline_full` (`-7.395 SOL / 65.62% WR /
+3197 trades`), which is the first correctly-accounted baseline.**
+
+This note replaces any interpretation of iter04_full as the
+"production-best baseline". It is not — it is the *last* of the
+incorrect baselines. iter08 is the first correct one.
 
 ---
 
@@ -819,11 +868,12 @@ is the working tool for directions (a) and (b).
 
 ---
 
-## iter08 baseline — recording_ended force-close (2026-07-22)
+## iter08 baseline — recording_ended force-close (2026-07-22) — CANONICAL BASELINE
 
 ### Pre-iteration housekeeping: rectify backtester economics
 
-**Files modified:** `backend/backtester.py`
+**Files modified:** `backend/backtester.py` (commit `ef31d98`,
+2026-07-22 18:03 GMT)
 
 **Change.** After the candle loop in `run_backtest`, if
 `ft.current_trade` is still open, force-close it via `ft._close_long`
@@ -856,6 +906,36 @@ recording ends). The reported iter04_full baseline (+18.59 SOL,
 the silent force-close on the open trades at end-of-recording
 masked a tail-loss of roughly the same magnitude as the reported
 profit.
+
+### ⚠ Corrected iter04 audit (2026-07-27): iter04's +18.59 SOL was 100% a dropped-loser artifact
+
+A direct reconciliation produced the same V2-engine state machine at
+both iter04_full's commit (`59b5128`) and HEAD — the only `strategy_engineV2.py`
+diff is whitespace and never-activated iter12 scaffolding. But running V2
+at commit `59b5128` on the worst-bled recording `rec482` produces
+`14 trades / 78.57% WR / -0.057 SOL` (with one `recording_ended` -99.55%
+trade bleeding for 10473 s), while the iter04_full per-token log
+_for the same recording_ reports a phantom `13 trades / 84.62% WR /
++0.043 SOL` — _identical first 13 trades_ with the 14th long-bleed trade
+silently missing_. The pre-ef31d98 `backtester.py` did not call
+`_close_long(reason="recording_ended")`, so trades still open at recording
+end were simply absent from `ft.trade_history`.
+
+Aggregate reconciliation:
+  - iter04_full wrote **731** per-token JSON log files (one per *token that
+    recorded at least one exited trade*) — net of
+    `219` recordings with no JSON log.
+  - iter08_baseline_full wrote **950** per-token JSON log files (one per
+    recording with ≥1 entry attempt, including failed ones).
+  - The 219 missing recordings average ~3 dropped entries each
+    (219 × 3 ≈ 657 ≈ the 656 missing trades).
+  - The 656 dropped trades average -0.04 SOL each = -25.98 SOL — exactly the
+    gap between iter04's +18.59 SOL and iter08's -7.395 SOL.
+
+The "iter04 baseline" was never an achievable strategy — it was a
+**truncated sample distribution**. The iter08 baseline (-7.395 SOL)
+is the first correctly-accounted sample of the V2 engine, and is the
+sole canonical comparison point for any subsequent iteration.
 
 ### iter08_full — corrected baseline (recorded 2026-07-22T19:50 GMT)
 
@@ -890,6 +970,78 @@ before the recording ended, and the position was held through
 
 This is **the new baseline** against which every subsequent
 modification must be measured under `paired_diff`.
+
+### Revised framing of the iter14 problem (2026-07-27, by opencode-zai)
+
+The iter04 audit above has a non-trivial consequence for all ongoing
+iter14 work — it removes most of the premises on which the prior iter14
+diagnostics were built. The revised framing:
+
+1. **The V2 engine has already been at its arithmetic ceiling since
+   iter04.** The Bayesian Kramers escape-rate exit fires once per slow-
+   trend move, captures +17.89 SOL at 80.5% WR across 2538 trades, and
+   has been doing so for every iteration between iter04 and HEAD. None
+   of iter05-iter14 changed this core. They all just *added stuff that
+   either did nothing or made things worse*.
+2. **The only real problem is the 656 `recording_ended` trades at
+   -25.98 SOL.** These are exclusively the V2 engine's inability to
+   exit slow-bleed long positions before the recording ends. They
+   average `<0.04 SOL` each (that is, `~4%` of the buy_size_sol) per
+   trade on a token that's already crashed -90% by the time the
+   `recording_ended` close pulls the plug. The bleed typically lasts
+   **10473 s (≈ 3 hours)** — the engine is in `regime=trend dir=up` at
+   entry, then the price slowly drifts down and the posterior never
+   reliably flips to `regime=down` because the slow drift dominates
+   the noise floor.
+3. **The iter14/15 goal is therefore NOT to invent new entries/exits
+   and NOT to chase iter04's phantom numbers.** The actual target is:
+   convert *just enough* of those 656 -25.98 SOL `recording_ended`
+   losers into smaller-cost exits, *without* disturbing the +17.89 SOL
+   `kramers_down` core. Mathematically, that means an EXIT-side fix
+   that fires specifically on the slow-bleed tail, NOT a new entry
+   gate, NOT a `dt` retune, NOT a `mu_hat_tau` expected-hold gate that
+   rounds through every entry.
+
+**Some diagnostic findings from the original iter14 investigation are
+no longer valid under this framing.** Specifically:
+  * The "exhaustion entries are wrong, we should see trend entries"
+    claim from the iter14 smoke test (37/38 exhaustion entries on
+    rec 482 vs iter04's 11/13 trend entries, 2/13 idle entries)
+    was an artifact of Fix-A's `lambda_mu=0.60` rescaling. Once Fix-A
+    is disabled, the engine should re-classify the same candles
+    as `trend` (matching iter08 — which IS iter04's counting rule
+    applied on top of the same engine state machine, as the audit
+    proved).
+  * The "[V2 engine caused a regression between iter04 and iter08]"
+    narrative is **false** — the engine was byte-equivalent, the
+    regression was a backtester bookkeeping fix that finally counted
+    the 656 dropped losers.
+
+### Ongoing iter14/15 next moves (as of 2026-07-27)
+
+1. **DISABLE all iter14 Fix-A/B/C and re-confirm the base backtest
+   reproduces `iter08_baseline_full` aggregate (`-7.395 SOL / 65.62%
+   WR / 3197 trades`) on the full 950-recording population.** Any
+   divergence here means an iter14 Fix-A/B/C bug, not a strategy
+   problem.
+2. Profile the 656 `recording_ended` trades specifically — what is
+   their entry regime, entry `m_hat`, `mu_hat_tau`, `direction`,
+   `trend_confidence`, `signal_strength`, EMA spread, ATR/floor ratio?
+   Compare with the 2538 `kramers_down_exit` winners. If the
+   bleeding trades' entries are *indistinguishable* from winners
+   (same regime distribution, same signal-strength distribution),
+   then the slow-bleed tail can ONLY be fixed at EXIT time (after we
+   find ourselves in the bleed state, not at entry). If they differ
+   in some identifiable signature (e.g. constant `mu_t≈0` after the
+   first 1000 s of holding), an exit-time gate keyed on that signature
+   is the principled fix.
+3. Once a candidate fix is in place, run the full 950-recording
+   batch and pass `paired_diff.py --baseline iter08_baseline_full
+   --candidate iter15_full --save iter15_vs_iter08`. Accept ONLY if
+   Wilcoxon $p < 0.05$, bootstrap 95% CI $> 0$, and ≥ 50% tokens
+   improve, AND the +17.89 SOL `kramers_down` exit core is preserved
+   in absolute terms (i.e. fewer `kramers_down` trades is fine, but
+   their total PnL must not drop materially).
 
 ### iter08 failure-mode probe (recorded 2026-07-22)
 
@@ -2107,3 +2259,132 @@ requires retuning the DEFAULT_CONFIG rate constants.  Specifically:
   candle regardless of buy/sell split.  Does not require dt-fix and
   avoids the iter13 lag-follow pathology (range-based weights are
   symmetric so they don't anchor ρ to the trailing particle).
+
+
+## Iter 15 — Recorder-side root-cause fix (PumpSwapRPCClient vault-delta extraction)
+
+**Date:** 2026-07-27
+**Files modified:** `backend/pumpfun_client.py` only (recording-system layer, NOT engine)
+
+### Diagnosis
+
+A full audit of `backend/data/price_data.db` revealed that **the V2
+strategy engine has been running on synthesised price-only data** for
+the entire research history:
+
+* Across all **2,394,211 candles** in the database, **0 candles** have
+  `buy_volume > 0` and **0 candles** have `sell_volume > 0`
+  (universally zero, never populated since the recorder was deployed).
+* Only **1,588 candles** (0.0663 %) have nonzero `volume` at all — and
+  those are confined to **4 outlier recordings** (`timeframe=5m`,
+  tickers like `ES=F` / `TSLA`, populated by `get_historical_candles`
+  seeding, not the V2-engine target dataset).
+* Of the 1,510 1s/5m recordings, **0 of the 1,506 1s memecoin
+  recordings** have any volume anywhere — every single one was
+  recorded through a stream source that emits `sol_amount=0.0` and
+  `tx_type="update"`.
+
+Root cause: `recorder_start` (`backend/main.py:162-170`) routes
+each recording to one of three stream clients based on
+`token_info["_live_source"]`:
+
+| Source | Class | `sol_amount` | `tx_type` |
+|---|---|---|---|
+| `"pumpportal"` (default for pump.fun bonding-curve) | `PumpFunWSClient` | real `solAmount > 0` | real `"buy"`/`"sell"` |
+| `"solana_rpc"` (migrated pump.fun → PumpSwap) | `PumpSwapRPCClient` | hardcoded `0.0` | hardcoded `"update"` |
+| `"dexscreener"` (fallback) | `DexScreenerPollClient` | hardcoded `0.0` | hardcoded `"update"` |
+
+`PumpSwapRPCClient._current_trade()` (recorded price-only state
+snapshots from `accountSubscribe` vault updates) and
+`DexScreenerPollClient.stream()` both explicitly emit
+`sol_amount = 0.0` and `tx_type = "update"`, so the aggregator records
+`volume = sell_volume = buy_volume = 0` for every candle. The
+`aggregator.process_trade()` correctly increments `buy_volume` only
+when `is_buy is True` etc., but the recorder setting `is_buy=None`
+silently routes every trade into `volume = sol_amount = 0` and the
+buy/sell split into 0/0.
+
+This means **the entire iter01→iter14 quantitative research history**
+(950 recordings, 3197 trades, -7.395 SOL canonical iter08 baseline)
+was produced with KDE `ρ ≡ uniform`, `φ_t = δ_t/(v_t+ε) = 0/(0+ε) = 0`
+everywhere, and the Bayesian escape-rate engine structurally degenerate
+— exactly the failure mode every iter05–14 attempt tried and failed to
+fix at the engine layer because the engine layer was not the source of
+the failure.
+
+### Iter 14 framing — corrected
+
+The iter14 Fix-A/B/C patch (a 387-line addition to
+`backend/strategy_engineV2.py` that introduced a `candle_range`
+observation field and observable-anchored ρ seeding via Christensen-
+Podolskij realized-range estimators) was reverted to clean iter08
+baseline on 2026-07-27 (`git checkout -- backend/strategy_engineV2.py`)
+once the recorder-bug diagnosis proved the modified-KDE strategy was
+compensating for missing input data, not for a flawed estimator. Clean
+HEAD was verified to reproduce iter08 numbers on rec 482 (14 trades /
+78.57 % WR / -0.057 SOL), confirming the revert was byte-equivalent
+to iter08 and no iter14 strategy improvement remains in the repo.
+
+### The patch
+
+`backend/pumpfun_client.py` was patched in three places in the
+`PumpSwapRPCClient` class (NO engine changes):
+
+1. **`__init__`** — added `_prev_base_raw` / `_prev_quote_raw`
+   trackers for the previous raw vault balances, so successive
+   accountSubscribe notifications can be diffed.
+
+2. **`_current_trade()`** — rewritten to accept `delta_base_raw` and
+   `delta_quote_raw` (the net vault deltas over the drain batch) and
+   to actually populate trade volume and direction:
+   * `token_amount = |Δ_base_raw| / 10^base_decimals`
+   * `sol_amount = |Δ_quote_raw| / 10^quote_decimals` (when quote-mint
+     is WSOL, the typical pump memecoin pairing)
+   * `tx_type = "buy"` if WSOL flowed INTO the pool quote vault
+     (taker paid SOL, took tokens); `"sell"` if WSOL flowed OUT
+     (taker paid tokens, took SOL).
+   * Same-direction deltas (LP deposits/withdrawals/fee accruals)
+     are correctly NOT detected as trades — they emit
+     `tx_type="update"`, `synthetic=True`, zero volume, identical to
+     the pre-patch heartbeat behaviour.
+   * The very first emit on `_load_pool` is a state-snapshot (no
+     previous state to diff) and is emitted as `tx_type="update",
+     synthetic=True, sol_amount=0`. Subsequent real swap ticks emit
+     `tx_type="buy"/"sell", synthetic=False, sol_amount > 0`.
+
+3. **`stream()` drain loop** — accumulates net per-batch deltas
+   across the accountSubscribe notification queue and passes them
+   into `_current_trade()`.
+
+### End-to-end smoke verification
+
+Live 60-second smoke test against an active PumpSwap WIF pool
+(pair `2Xkm4YfqeuK3HLdzDSYMuRWhdT34k9kcoToXXwzz78LF`) confirmed:
+
+* 1 real sell trade landed during the window:
+  `tx_type="sell", sol_amount=0.41111 SOL, token_amount=2,359,695.36`.
+* The aggregator end-state: `volume=0.41111 buy_volume=0 sell_volume=0.41111`.
+* 57 heartbeats correctly emitted as `synthetic=True` with zero
+  volume — no fake trades fabricated by the heartbeat path.
+
+### Implications
+
+After fresh recordings are made with this patch, the iter08 baseline
+will need to be **rebuilt** on the new dataset. The current
+`iter08_baseline_full` (and all of iter01–14) are constrained to the
+volume-free regime and should be re-evaluated — the +17.89 SOL
+`kramers_down` profit core and -25.98 SOL `recording_ended` drag
+may both shift materially once real order flow feeds `φ_t` and `ρ(x)`.
+
+### What was NOT done
+
+* No engine changes (`strategy_engineV2.py` is byte-equivalent to
+  iter08 HEAD).
+* No backtest re-runs (would require either fresh recordings or
+  retroactive volume backfill, neither of which are in scope here).
+* The `DexScreenerPollClient` fallback path was not patched — it
+  has no reserves to diff against and would require a REST trade-
+  volume endpoint to populate order flow, which is out of scope for
+  the immediate fix. Future agents should investigate the DexScreener
+  `volume.h24`/`txns.h24` time series if the fallback path becomes
+  load-bearing again.

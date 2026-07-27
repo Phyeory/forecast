@@ -900,6 +900,14 @@ class PumpSwapRPCClient:
         self._market_cap_sol = 0.0
         self._sol_usd = 0.0
         self._implied_supply_tokens = 0.0
+        # iter15 recorder-fix: previous raw vault balances for delta extraction.
+        # Persisted across drain batches so we can compute net trade volume and
+        # direction (WSOL inflow = buy, WSOL outflow = sell) on each vault
+        # accountSubscribe notification. None until the first observation is
+        # captured, so the first emitted sample carries zero trade volume
+        # (it is a state snapshot, not a trade).
+        self._prev_base_raw: Optional[int] = None
+        self._prev_quote_raw: Optional[int] = None
 
     def stop(self):
         self._stop = True
@@ -1011,7 +1019,12 @@ class PumpSwapRPCClient:
         if market_cap_usd > 0 and price_usd > 0:
             self._implied_supply_tokens = market_cap_usd / price_usd
 
-    def _current_trade(self, force: bool = False) -> Optional[dict]:
+    def _current_trade(
+        self,
+        force: bool = False,
+        delta_base_raw: int = 0,
+        delta_quote_raw: int = 0,
+    ) -> Optional[dict]:
         if not self._pool or not self._base_amount_raw or self._quote_amount_raw is None:
             return None
         state_key = (self._base_amount_raw, self._quote_amount_raw)
@@ -1040,19 +1053,55 @@ class PumpSwapRPCClient:
             market_cap_usd = live_price_usd * self._implied_supply_tokens
             market_cap_sol = market_cap_usd / self._sol_usd
 
+        # iter15 recorder-fix: translate raw vault deltas into trade volume +
+        # direction. PumpSwap CP-AMM swaps move reserves in opposite directions
+        # (one vault up, one vault down); a same-direction move or zero delta
+        # is a deposit/withdraw event (LP add/remove or fee accrual), treated
+        # as a non-trade (`tx_type="update"`, no volume).
+        token_amount = abs(delta_base_raw) / (10 ** base_decimals)
+        sol_amount = abs(delta_quote_raw) / (10 ** quote_decimals)
+        # When quote-mint is WSOL (the typical pump memecoin pairing), WSOL
+        # flowing IN (quote_delta > 0) means a taker paid SOL for tokens:
+        # that is a "buy" of the base token. WSOL flowing OUT is a "sell".
+        quote_is_sol = self._pool["quote_mint"] == WSOL_MINT
+        base_is_sol = self._pool["base_mint"] == WSOL_MINT
+        has_trade_deltas = (delta_base_raw != 0) and (delta_quote_raw != 0) and \
+            ((delta_base_raw > 0) != (delta_quote_raw > 0))
+
+        tx_type = "update"
+        synthetic = True
+        if has_trade_deltas and (quote_is_sol or base_is_sol):
+            # Direction by which vault the SOL flowed into.
+            # If quote-mint is WSOL: quote_delta > 0 -> WSOL into pool -> buy.
+            # If base-mint is WSOL:  base_delta  > 0 -> WSOL into pool -> sell of quote token;
+            #   for a memecoin-base pairing this is rare; we still label it
+            #   "buy" if the non-SOL reserve (quote token) decreased, i.e. taker
+            #   bought the quote token with SOL.
+            if quote_is_sol:
+                tx_type = "buy" if delta_quote_raw > 0 else "sell"
+            else:
+                # base_is_sol: SOL in the base vault. base_delta > 0 means
+                # WSOL flowed in (taker sold the quote token for SOL). From
+                # the quote-token's perspective that's a "sell".
+                tx_type = "sell" if delta_base_raw > 0 else "buy"
+            # sol_amount tracks WSOL moved regardless of orientation.
+            sol_amount = (abs(delta_quote_raw) if quote_is_sol
+                          else abs(delta_base_raw)) / (10 ** 9)
+            synthetic = False
+
         self._last_emit_ts = time.time()
         return {
             "mint": self._pool["base_mint"],
-            "tx_type": "update",
-            "sol_amount": 0.0,
-            "token_amount": 0.0,
-            "price": price,
-            "timestamp": self._last_emit_ts,
-            "trader": "",
-            "tx_hash": "",
+            "tx_type":        tx_type,
+            "sol_amount":     sol_amount,
+            "token_amount":   token_amount,
+            "price":          price,
+            "timestamp":      self._last_emit_ts,
+            "trader":         "",
+            "tx_hash":        "",
             "market_cap_sol": market_cap_sol,
             "market_cap_usd": market_cap_usd,
-            "synthetic": True,
+            "synthetic":      synthetic,
         }
 
     async def stream(self) -> AsyncGenerator[dict, None]:
@@ -1093,8 +1142,15 @@ class PumpSwapRPCClient:
                                     logger.debug(f"[PumpSwapRPC] mcap refresh: {e}")
                                 next_mcap_refresh = now + 5.0
 
-                            # Drain all pending notifications from shared hub
+                            # Drain all pending notifications from shared hub.
+                            # iter15 recorder-fix: accumulate net vault deltas
+                            # across the drain batch so a single swap (which
+                            # typically fires both base and quote
+                            # accountSubscribe notifications within milliseconds)
+                            # is recognised as ONE trade with both legs observed.
                             drained = False
+                            delta_base_raw = 0
+                            delta_quote_raw = 0
                             while True:
                                 try:
                                     _sub_id, amount = queue.get_nowait()
@@ -1103,9 +1159,13 @@ class PumpSwapRPCClient:
                                         base_sub = _solana_hub._account_to_sub.get(base_account)
                                         quote_sub = _solana_hub._account_to_sub.get(quote_account)
                                     if _sub_id == base_sub:
+                                        prev = self._base_amount_raw or 0
+                                        delta_base_raw += amount - prev
                                         self._base_amount_raw = amount
                                         dirty = True
                                     elif _sub_id == quote_sub:
+                                        prev = self._quote_amount_raw or 0
+                                        delta_quote_raw += amount - prev
                                         self._quote_amount_raw = amount
                                         dirty = True
                                     drained = True
@@ -1113,7 +1173,10 @@ class PumpSwapRPCClient:
                                     break
 
                             if dirty and drained:
-                                trade = self._current_trade()
+                                trade = self._current_trade(
+                                    delta_base_raw=delta_base_raw,
+                                    delta_quote_raw=delta_quote_raw,
+                                )
                                 if trade:
                                     dirty = False
                                     last_emit_ts = now
