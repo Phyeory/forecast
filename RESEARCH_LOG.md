@@ -38,6 +38,7 @@ recorded here.  No undocumented changes are permitted.
 | 13        | iter13_anchor_rho | 11/11 | 29.2% | -0.090 (subset vs +0.042 iter08) | n/a | REJECTED — ρ anchored to lag-komedi pattern ⇒ k_down=1e6 churn on every uptrend |
 | 14        | iter14_dt_fix / iter14_ig | 7/20 + 2/2 | 0% / 3.4% | 0.000 / -1.889 | n/a | REJECTED — dt=0.25 (iter14-A) silenced all kramers entries on 7/7 worst-20 records; IG catalyst (iter14-B) churned 519 trades on rec349 alone |
 | 15        | iter15_recorder_fix | (no backtest run) | n/a | n/a | n/a | **RECORDER PATCH (not engine)** — PumpSwapRPCClient now extracts vault deltas from accountSubscribe to populate `volume`/`buy_volume`/`sell_volume`/`tx_type=buy/sell`. Diagnosis: any iter01–14 dataset has zero order flow, so ALL prior engine experiments were on price-only data. iter14 Fix-A/B/C reverted to clean iter08. Next batch must be rerecorded fresh. |
+| 16        | iter16_data_landfall | (no backtest run) | n/a | n/a | n/a | **FRESH DATASET (no code change)** — User wiped legacy `price_data.db`.
 
 
 ## Iter 01 — Baseline (REJECTED — never traded)
@@ -2388,3 +2389,38 @@ may both shift materially once real order flow feeds `φ_t` and `ρ(x)`.
   the immediate fix. Future agents should investigate the DexScreener
   `volume.h24`/`txns.h24` time series if the fallback path becomes
   load-bearing again.
+
+
+## Iter 16 — Fresh recording dataset collected (2026-07-27 → 2026-07-28)
+
+**Date:** 2026-07-28
+**Files modified:** none (dataset landfall only; the user wiped
+`backend/data/price_data.db` of legacy recordings and let the post-
+iter15 recorder populate it fresh)
+**Engine:** unchanged (strategy_engineV2.py remains at iter08 byte-
+equivalent HEAD; iter15 recorder patch is at commit `195aa90`).
+
+### Dataset snapshot
+
+`backend/data/price_data.db` audited 2026-07-28 contains fresh
+1s memecoin recordings**, all collected with the iter15 recorder patch
+active.
+
+### Implications for the next research session
+
+1. First candidate batch on this dataset MUST be labelled
+   `iter16_baseline_full` — it becomes the new canonical baseline
+   against which all future candidate iterations are compared via
+   `paired_diff.py`.
+2. Do NOT compare candidate batches against `iter08_baseline_full`
+   (the legacy volume-free baseline preserved at
+   `backend/analysis/iter08_baseline_full.json`). Its absolute
+   magnitudes measure a regime that no longer exists.
+   
+5. `strategy_engineV2.py` is unchanged at iter08-byte-equivalent HEAD
+   (verified by `git diff` being empty after the iter14 Fix-A/B/C
+   revert). The iter11/iter12 scaffolding is still present but
+   disabled. No engine experiments have been run on the fresh dataset
+   yet — the entire iter01→14 failure-mode analysis (especially the
+   `φ_t ≡ 0` and `ρ ≡ uniform` claims) must be RE-DERIVED on the fresh
+   data, not carried over by intuition.
