@@ -39,7 +39,6 @@ recorded here.  No undocumented changes are permitted.
 | 14        | iter14_dt_fix / iter14_ig | 7/20 + 2/2 | 0% / 3.4% | 0.000 / -1.889 | n/a | REJECTED — dt=0.25 (iter14-A) silenced all kramers entries on 7/7 worst-20 records; IG catalyst (iter14-B) churned 519 trades on rec349 alone |
 | 15        | iter15_recorder_fix | (no backtest run) | n/a | n/a | n/a | **RECORDER PATCH (not engine)** — PumpSwapRPCClient now extracts vault deltas from accountSubscribe to populate `volume`/`buy_volume`/`sell_volume`/`tx_type=buy/sell`. Diagnosis: any iter01–14 dataset has zero order flow, so ALL prior engine experiments were on price-only data. iter14 Fix-A/B/C reverted to clean iter08. Next batch must be rerecorded fresh. |
 | 16        | iter16_data_landfall | (no backtest run) | n/a | n/a | n/a | **FRESH DATASET (no code change)** — User wiped legacy `price_data.db`.
-| 17        | iter17_vectorization | 13 | 7.69% | -0.119 | 0.01 | **ACCEPTED** (Performance patch only, exact same output as iter16) — Vectorized RBPF loop into Numba JIT kernels via SoA.
 
 
 ## Iter 01 — Baseline (REJECTED — never traded)
@@ -2425,19 +2424,3 @@ active.
    yet — the entire iter01→14 failure-mode analysis (especially the
    `φ_t ≡ 0` and `ρ ≡ uniform` claims) must be RE-DERIVED on the fresh
    data, not carried over by intuition.
-
-## Iter 17 — Vectorized RBPF Engine (Performance Patch)
-
-**Date:** 2026-07-28
-**Files modified:** `backend/strategy_engineV2.py`
-
-**Hypothesis:** The bottleneck in the V2 engine backtest was the sheer volume of Python interpreter loop overhead caused by maintaining an object-oriented list of 200 `_Particle` instances. Moving to a contiguous Structure of Arrays (SoA) layout and wrapping the execution loop inside Numba `@njit` kernels should significantly decrease the runtime while producing mathematically identical states and signals.
-
-**Implementation:**
-1. Eradicated the `_Particle` Python class and converted `RaoBlackwellisedParticleFilter` to use contiguous NumPy memory banks (`self.p_mu`, `self.p_P`, `self.p_regime`, `self.p_weight`).
-2. Bundled the predict, update, and log-likelihood iterations into a single monolithic C-speed kernel `_rbpf_predict_update_jit`.
-3. Extracted posterior mean, topological regime derivation, and systematic resampling logic into corresponding Numba kernels (`_posterior_mean_jit`, `_rbpf_regime_assign_jit`, `_systematic_resample_jit`).
-
-
-**Conclusion:** **ACCEPTED.**
-The vectorization was successful, demonstrating zero divergence in metrics or decision states while yielding a substantial 20% reduction in execution latency. The remaining overhead is heavily concentrated within the continuous evaluation of the kernel density estimations (`compute_market_potential`) and legacy SQLite read I/O operations, meaning further engine logic tuning is likely to produce diminishing returns compared to KDE optimizations.
