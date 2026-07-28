@@ -168,8 +168,6 @@ class LiveTrader:
         self.min_market_cap_usd: float = min_market_cap_usd
         self._last_market_cap_usd: float = 0.0
         self.mcap_stop_triggered: bool = False   # set True once triggered
-        self.no_motion_stop_triggered: bool = False
-        self.last_trade_time: float = time.time()
 
         self.stats = LiveTraderStats()
         self.current_trade: Optional[LiveTrade] = None
@@ -852,31 +850,6 @@ class LiveTrader:
         )
         return True
 
-    async def check_no_motion(self) -> bool:
-        """
-        Check if there has been no motion (no ticks) for 60 seconds.
-        If triggered, forces an exit and flags the session to stop.
-        """
-        if self.no_motion_stop_triggered:
-            return True
-
-        if time.time() - self.last_trade_time >= 60:
-            logger.warning(f"[NO MOTION STOP] No trades for 60s for {self.token_mint[:8]}…")
-            self.no_motion_stop_triggered = True
-
-            if self.current_trade is not None and not self._swap_in_flight:
-                logger.warning("[NO MOTION STOP] Position open — triggering emergency sell")
-                self.current_trade.status = "closing"
-                self.current_trade.exit_reason = "no_motion_stop"
-                asyncio.ensure_future(self.execute_sell("no_motion_stop"))
-
-            await self._broadcast_status(
-                "no_motion_stop",
-                "No trades for 1 minute — session stopped",
-            )
-            return True
-        return False
-
     # ── Intra-candle 4-state expansion (matches ForwardTester exactly) ──────
 
     def _process_completed_candle(self, t: int, o: float, h: float,
@@ -1068,8 +1041,6 @@ class LiveTrader:
             at once.  Only the engine's in_position flag is deferred to keep
             indicator math in sync with the backtester.
         """
-        if self._last_price != c or volume > 0:
-            self.last_trade_time = time.time()
         self._last_price = c
         trade_action = None
         opened_trade = None

@@ -1059,14 +1059,6 @@ async def live_trading_ws(
             await asyncio.sleep(15)
             if not await send({"type": "ping"}):
                 break
-            if await live_trader.check_no_motion():
-                logger.warning(
-                    f"[LIVE] No motion stop triggered for {real_mint[:8]}… — "
-                    f"stopping session in 5s"
-                )
-                await asyncio.sleep(5)
-                cancelled.set()
-                break
 
     # Allow LiveTrader to push trade updates directly to this WS
     live_trader.broadcast_fn = websocket.send_text
