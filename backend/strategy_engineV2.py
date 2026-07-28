@@ -783,18 +783,151 @@ def _chol_lower_5x5(P):
     return L
 
 
-class _Particle:
-    """One RBPF particle = (regime label, continuous UKF state)."""
-    __slots__ = ("regime", "mu", "P", "sqrt_P", "weight", "log_w")
+@njit(cache=False)
+def _rbpf_predict_update_jit(
+    N: int,
+    p_mu: np.ndarray,
+    p_P: np.ndarray,
+    p_sqrt_P: np.ndarray,
+    p_log_w: np.ndarray,
+    cfg_arr: np.ndarray,
+    dt: float,
+    obs_log_return: float,
+    obs_delta_ratio: float,
+    jump_indicator: float,
+    R_meas: float,
+    bar_phi: float,
+    bar_h: float,
+    bar_ell: float
+):
+    resid_acc = 0.0
+    pzz_acc = 0.0
+    valid_count = 0
+    
+    for i in range(N):
+        mu = p_mu[i]
+        P = p_P[i]
+        sqrt_P = p_sqrt_P[i]
+        
+        sigma_eff = math.exp(0.5 * mu[2]) if mu[2] < 15.0 else math.exp(7.5)
+        if sigma_eff < 1e-6:
+            sigma_eff = 1e-6
+            
+        prev_x = float(mu[0])
+        
+        mu_pred, P_pred, Y_sigma = _ukf_predict_step(
+            mu, P, sqrt_P, cfg_arr, dt,
+            bar_phi, bar_h, bar_ell,
+            sigma_eff, obs_delta_ratio, jump_indicator,
+        )
+        
+        mu_post, P_post, Pzz, z_pred_from_update = _ukf_update_step(
+            mu_pred, P_pred, Y_sigma, obs_log_return, R_meas, prev_x,
+        )
+        
+        resid = obs_log_return - z_pred_from_update
+        var_z = Pzz if Pzz > 0 else 1e-12
+        log_lik = -0.5 * (resid * resid) / var_z - 0.5 * math.log(2.0 * math.pi * var_z)
+        if not math.isfinite(log_lik):
+            log_lik = -50.0
+            
+        sqrt_P_post = _chol_lower_5x5(P_post)
+        
+        p_mu[i] = mu_post
+        p_P[i] = P_post
+        p_sqrt_P[i] = sqrt_P_post
+        p_log_w[i] += log_lik
+        
+        if math.isfinite(resid) and math.isfinite(Pzz):
+            resid_acc += resid * resid
+            pzz_acc += Pzz
+            valid_count += 1
+            
+    return resid_acc, pzz_acc, valid_count
 
-    def __init__(self, regime: int, mu: np.ndarray, P: np.ndarray,
-                 weight: float):
-        self.regime = regime
-        self.mu = mu.astype(np.float64).copy()
-        self.P  = P.astype(np.float64).copy()
-        self.sqrt_P = _chol_lower_5x5(self.P)
-        self.weight = float(weight)
-        self.log_w = math.log(self.weight) if self.weight > 0 else -1e18
+@njit(cache=False)
+def _posterior_mean_jit(
+    N: int,
+    p_mu: np.ndarray,
+    p_weight: np.ndarray
+):
+    x = 0.0
+    mu = 0.0
+    h = 0.0
+    phi = 0.0
+    ell = 0.0
+    weight_sum = 0.0
+    for i in range(N):
+        w = p_weight[i]
+        if (not math.isfinite(w)
+            or not math.isfinite(p_mu[i, 0])
+            or not math.isfinite(p_mu[i, 1])
+            or not math.isfinite(p_mu[i, 2])
+            or not math.isfinite(p_mu[i, 3])
+            or not math.isfinite(p_mu[i, 4])):
+            continue
+        weight_sum += w
+        x   += w * p_mu[i, 0]
+        mu  += w * p_mu[i, 1]
+        h   += w * p_mu[i, 2]
+        phi += w * p_mu[i, 3]
+        ell += w * p_mu[i, 4]
+    
+    if weight_sum > 0:
+        x   /= weight_sum
+        mu  /= weight_sum
+        h   /= weight_sum
+        phi /= weight_sum
+        ell /= weight_sum
+        
+    if not math.isfinite(x):   x = 0.0
+    if not math.isfinite(mu):  mu = 0.0
+    if not math.isfinite(h):   h = -4.0
+    if not math.isfinite(phi): phi = 0.0
+    if not math.isfinite(ell): ell = 0.0
+    return x, mu, h, phi, ell
+
+@njit(cache=False)
+def _systematic_resample_jit(
+    N: int,
+    p_regime: np.ndarray,
+    p_mu: np.ndarray,
+    p_P: np.ndarray,
+    p_sqrt_P: np.ndarray,
+    p_weight: np.ndarray,
+    p_log_w: np.ndarray,
+    positions: np.ndarray
+):
+    cum = np.zeros(N, dtype=np.float64)
+    c = 0.0
+    for i in range(N):
+        c += p_weight[i]
+        cum[i] = c
+    cum[-1] = 1.0 # guard
+    
+    new_regime = np.empty_like(p_regime)
+    new_mu = np.empty_like(p_mu)
+    new_P = np.empty_like(p_P)
+    new_sqrt_P = np.empty_like(p_sqrt_P)
+    
+    i = 0
+    for j in range(N):
+        pos = positions[j]
+        while i < N - 1 and pos > cum[i]:
+            i += 1
+            
+        new_regime[j] = p_regime[i]
+        new_mu[j] = p_mu[i]
+        new_P[j] = p_P[i]
+        new_sqrt_P[j] = p_sqrt_P[i]
+        
+    for j in range(N):
+        p_regime[j] = new_regime[j]
+        p_mu[j] = new_mu[j]
+        p_P[j] = new_P[j]
+        p_sqrt_P[j] = new_sqrt_P[j]
+        p_weight[j] = 1.0 / N
+        p_log_w[j] = math.log(1.0 / N)
 
 
 class RaoBlackwellisedParticleFilter:
@@ -818,15 +951,21 @@ class RaoBlackwellisedParticleFilter:
         # Spread particles across regimes initially — uniform prior.
         regimes_all = [R_IDLE, R_CONSOLIDATION, R_TREND, R_CONTINUATION,
                        R_EXHAUSTION, R_TRANSITION, R_REVERSAL]
-        self.particles: list[_Particle] = []
+        self.p_regime = np.zeros(N, dtype=np.int64)
+        self.p_mu = np.zeros((N, 5), dtype=np.float64)
+        self.p_P = np.zeros((N, 5, 5), dtype=np.float64)
+        self.p_sqrt_P = np.zeros((N, 5, 5), dtype=np.float64)
+        self.p_weight = np.full(N, 1.0 / N, dtype=np.float64)
+        self.p_log_w = np.full(N, math.log(1.0 / N), dtype=np.float64)
+
         for i in range(N):
-            r = regimes_all[i % len(regimes_all)]
-            mu = np.zeros(5)
-            mu[0] = x0
-            mu[2] = -4.0   # h=ln(σ²) → start at small var ≈ exp(-4)≈0.018
-            mu[3] = 0.0    # φ
-            mu[4] = math.log(1.0)  # ℓ=0 → L = 1
-            self.particles.append(_Particle(r, mu, P0, 1.0 / N))
+            self.p_regime[i] = regimes_all[i % len(regimes_all)]
+            self.p_mu[i, 0] = x0
+            self.p_mu[i, 2] = -4.0   # h=ln(σ²) → start at small var ≈ exp(-4)≈0.018
+            self.p_mu[i, 3] = 0.0    # φ
+            self.p_mu[i, 4] = math.log(1.0)  # ℓ=0 → L = 1
+            self.p_P[i] = P0
+            self.p_sqrt_P[i] = sqrt0
 
         # Global EMAs (recursive): bar_φ, bar_h, bar_ℓ.
         # ── OBSERVABLE-ANCHORED ANCHORS (iter02) ───────────────────────────────
@@ -908,42 +1047,18 @@ class RaoBlackwellisedParticleFilter:
             `step()` to update the adaptive R estimate (iter02 fix for
             failure mode B).
         """
-        sigma_eff = math.exp(0.5 * p.mu[2]) if p.mu[2] < 15.0 else math.exp(7.5)
-        # Clamp volatility for numerical safety.
-        if sigma_eff < 1e-6:
-            sigma_eff = 1e-6
-
-        # The previous x (posterior x at k-1) is the particle's current mu[0].
-        prev_x = float(p.mu[0])
-
-        mu_pred, P_pred, Y_sigma = _ukf_predict_step(
-            p.mu, p.P, p.sqrt_P, cfg_arr, dt,
-            self.bar_phi, self.bar_h, self.bar_ell,
-            sigma_eff, obs_delta_ratio, jump_indicator,
+        mu_post, P_post, sqrt_P_post, log_w_post, log_lik, resid, Pzz = _step_particle_jit(
+            p.mu, p.P, p.sqrt_P, p.log_w,
+            cfg_arr, dt, obs_log_return, obs_delta_ratio, jump_indicator, R_meas,
+            self.bar_phi, self.bar_h, self.bar_ell
         )
 
-        mu_post, P_post, Pzz, z_pred_from_update = _ukf_update_step(
-            mu_pred, P_pred, Y_sigma, obs_log_return, R_meas, prev_x,
-        )
-
-        # Measurement likelihood (Gaussian) for particle weight update.
-        # Per RBPF theory, the marginal likelihood uses the UKF INNOVATION
-        # variance `Pzz` (= predicted measurement covariance), NOT the
-        # prior state variance P_pred[0,0] + R.  The UKF has already
-        # accounted for cross-covariances (Pxz) when forming K, so Pzz is
-        # the correct uncertainty for the observation residual.
-        resid = obs_log_return - z_pred_from_update
-        var_z = Pzz if Pzz > 0 else 1e-12
-        log_lik = -0.5 * (resid * resid) / var_z - 0.5 * math.log(2.0 * math.pi * var_z)
-        if not math.isfinite(log_lik):
-            log_lik = -50.0
-
-        # Refresh state on the particle.
         p.mu = mu_post
-        p.P  = P_post
-        p.sqrt_P = _chol_lower_5x5(p.P)
-        p.log_w = p.log_w + log_lik
-        return float(log_lik), float(resid), float(Pzz)
+        p.P = P_post
+        p.sqrt_P = sqrt_P_post
+        p.log_w = log_w_post
+
+        return log_lik, resid, Pzz
 
     def step(
         self,
@@ -1006,131 +1121,75 @@ class RaoBlackwellisedParticleFilter:
         self.bar_h = bar_h_obs
         self.bar_phi = phi_obs
 
-        # 1. Step every particle.
-        # Collect residuals / Pzz for the innovation-based R update.
-        resid_acc = 0.0
-        pzz_acc = 0.0
-        n_part = len(self.particles)
-        for p in self.particles:
-            _, resid, pzz = self._step_particle(
-                p, cfg_arr, dt, obs_log_return, obs_delta_ratio,
-                jump_indicator, R_meas, True,
-            )
-            if math.isfinite(resid) and math.isfinite(pzz):
-                resid_acc += resid * resid
-                pzz_acc  += pzz
-        resid_mean_sq = (resid_acc / n_part) if n_part else 1e-6
-        pzz_mean = (pzz_acc / n_part) if n_part else 1e-6
+        # 1. Step every particle (fully vectorized).
+        resid_acc, pzz_acc, valid_count = _rbpf_predict_update_jit(
+            self.N, self.p_mu, self.p_P, self.p_sqrt_P, self.p_log_w,
+            cfg_arr, dt, obs_log_return, obs_delta_ratio, jump_indicator, R_meas,
+            self.bar_phi, self.bar_h, self.bar_ell
+        )
+        
+        resid_mean_sq = (resid_acc / valid_count) if valid_count > 0 else 1e-6
+        pzz_mean = (pzz_acc / valid_count) if valid_count > 0 else 1e-6
 
-        # ── Adaptive measurement variance R (iter02 fix for failure B) ──
-        # Standard Mehra 1970 "innovation covariance estimate" — EWMA of
-        # (residual²) per step.  This is no new free parameter: the
-        # smoothing coefficient `a` is the same EMA bandwidth already used
-        # by every other recursive estimator in this class, and the update
-        # is in standard form R_ema ← (1-a) R_ema + a r².
         if math.isfinite(resid_mean_sq) and resid_mean_sq > 0:
             new_R = (1.0 - a) * self.R_ema + a * resid_mean_sq
             if new_R > 0 and math.isfinite(new_R):
-                # Keep R_ema strictly positive; bin to a sensible range so a
-                # single wild observation can't drive R to NaN-domination
-                # in the next step.
                 if new_R < 1e-20:
                     new_R = 1e-20
                 if new_R > 1.0:
                     new_R = 1.0
                 self.R_ema = float(new_R)
 
-        # 2. Normalise weights in log-space (log-sum-exp).
-        log_ws = np.array([p.log_w for p in self.particles])
+        # 2. Normalise weights
+        log_ws = self.p_log_w
         m = float(log_ws.max())
         if not math.isfinite(m):
-            # All-NaN — reset to uniform.
-            for p in self.particles:
-                p.log_w = math.log(1.0 / self.N)
-                p.weight = 1.0 / self.N
+            self.p_log_w.fill(math.log(1.0 / self.N))
+            self.p_weight.fill(1.0 / self.N)
         else:
             shifted = log_ws - m
             w = np.exp(shifted)
             Z = float(w.sum())
             if Z <= 0:
-                w = np.full(self.N, 1.0 / self.N)
+                self.p_weight.fill(1.0 / self.N)
+                self.p_log_w.fill(math.log(1.0 / self.N))
             else:
-                w = w / Z
-            for i, p in enumerate(self.particles):
-                p.weight = float(w[i])
-                p.log_w = math.log(max(p.weight, 1e-300))
+                self.p_weight[:] = w / Z
+                # Re-compute log_w to ensure no -infs
+                np.maximum(self.p_weight, 1e-300, out=self.p_weight)
+                self.p_log_w[:] = np.log(self.p_weight)
 
-        # 3. ESS check + systematic resampling.
-        ess = 1.0 / float(np.sum(np.array([p.weight for p in self.particles]) ** 2))
+        # 3. ESS check + resampling
+        ess = 1.0 / float(np.sum(self.p_weight ** 2))
         if ess < self.N / 2.0:
             self._systematic_resample()
 
-        # 4. Global EMA updates on posterior mean (recursive EMAs of §2).
+        # 4. Global EMA updates
         x_post, mu_post, h_post, phi_post, ell_post = self._posterior_mean()
-        # NB: bar_phi and bar_h are now observable-anchored (above) — they
-        # are NOT re-EMA'd against the latent posterior mean, fixing the
-        # self-referential positive feedback that catastrophically
-        # collapsed every particle onto the -15 clamp in iter01.
         self.bar_ell = (1.0 - self._ema_alpha) * self.bar_ell + self._ema_alpha * ell_post
 
-        # μ̇ for topological regime derivation — needs a one-step finite
-        # difference of the posterior μ.  Iter05: also lift this so the
-        # adapter exit logic can detect sustained-decline exits before the
-        # kramers_down_exit threshold (P_down ≥ 0.5) fires.
         if not hasattr(self, "_mu_prev_for_dot"):
             self._mu_prev_for_dot = mu_post
         mu_dot_post = (mu_post - self._mu_prev_for_dot) / max(dt, 1e-6)
         self._mu_prev_for_dot = mu_post
         self.mu_dot_post = mu_dot_post
 
-        # ── Per-particle topological regime re-derivation (iter02 fix for
-        # failure D).  The spec §4 says regime is a *function* of the
-        # continuous posterior phase vector, sampled deterministically.
-        # Originally particle regime labels were frozen at initialisation,
-        # so the regime posterior distribution stayed near-uniform forever
-        # → entropy → confidence ≈ 0 → entry gate never opens.
-        #
-        # We re-derive each particle's regime label per step from its own
-        # continuous posterior state, exactly as spec §4 mandates.  The
-        # population distribution over particle regimes then becomes the
-        # Bayesian regime posterior: a strong trend collapses to a delta
-        # mass on R_TREND, ambiguous mixtures spread over 2-3 regimes, etc.
         sigma_t_post = math.exp(0.5 * h_post) if h_post < 15.0 else math.exp(7.5)
         if sigma_t_post < 1e-6:
             sigma_t_post = 1e-6
         sigma_phi_post = float(cfg["sigma_phi"]) / math.sqrt(
             2.0 * max(float(cfg["alpha"]), 1e-6))
-        for p in self.particles:
-            # Each particle's regime reflects its OWN continuous posterior —
-            # the spec §4 derives the regime from the phase vector, and a
-            # particle *is* a sample of the posterior phase vector.  Using
-            # the local μ protects against the entire population being
-            # locked onto the global mean mode (a particle with an
-            # opposing μ weighs into the regime posterior → smoother labelling).
-            # We approximate the per-particle μ̇ by the global μ̇_post
-            # (the posterior mean μ̇) because computing a per-particle
-            # derivative requires extra storage and offers little
-            # additional information — particles whose μ disagrees with
-            # the posterior mean will project onto a different regime
-            # through the *magnitude* terms in `derive_regime_topological`.
-            p.regime = derive_regime_topological(
-                mu=float(p.mu[1]),
-                mu_dot=mu_dot_post,
-                phi=float(p.mu[3]),
-                h=float(p.mu[2]),
-                ell=float(p.mu[4]),
-                spread=0.0,           # not used by `derive_regime_topological`
-                sigma_t=sigma_t_post,
-                sigma_phi=sigma_phi_post,
-                alpha=float(cfg["alpha"]),
-                tau=float(cfg["tau_max"]),
-            )
+            
+        _rbpf_regime_assign_jit(
+            self.N, self.p_regime, self.p_mu,
+            mu_dot_post, sigma_t_post, sigma_phi_post,
+            float(cfg["alpha"]), float(cfg["tau_max"])
+        )
 
-        # 5. Regime distribution.
         regime_counts = np.zeros(7)
-        for p in self.particles:
-            regime_counts[int(p.regime)] += p.weight
-        regime_dist = regime_counts  # already normalised post-resample
+        for i in range(self.N):
+            regime_counts[self.p_regime[i]] += self.p_weight[i]
+        regime_dist = regime_counts
 
         # Argmax regime = best-supported discrete label.
         best_regime = int(np.argmax(regime_counts))
@@ -1148,62 +1207,12 @@ class RaoBlackwellisedParticleFilter:
     # ── helpers ───────────────────────────────────────────────────────────
     def _posterior_mean(self) -> tuple[float, float, float, float, float]:
         """Weighted mean of particle state vectors (NaN-safe)."""
-        x = mu = h = phi = ell = 0.0
-        weight_sum = 0.0
-        for p in self.particles:
-            w = p.weight
-            # Skip a particle whose state became non-finite — a single
-            # NaN/Inf in the population would otherwise toxify the
-            # posterior mean and propagate forever via the global EMAs.
-            if (not math.isfinite(w)
-                    or not math.isfinite(p.mu[0])
-                    or not math.isfinite(p.mu[1])
-                    or not math.isfinite(p.mu[2])
-                    or not math.isfinite(p.mu[3])
-                    or not math.isfinite(p.mu[4])):
-                continue
-            weight_sum += w
-            x   += w * p.mu[0]
-            mu  += w * p.mu[1]
-            h   += w * p.mu[2]
-            phi += w * p.mu[3]
-            ell += w * p.mu[4]
-        if weight_sum > 0:
-            x   /= weight_sum
-            mu  /= weight_sum
-            h   /= weight_sum
-            phi /= weight_sum
-            ell /= weight_sum
-        if not math.isfinite(x):   x = 0.0
-        if not math.isfinite(mu):  mu = 0.0
-        if not math.isfinite(h):   h = -4.0
-        if not math.isfinite(phi): phi = 0.0
-        if not math.isfinite(ell): ell = 0.0
-        return x, mu, h, phi, ell
+        return _posterior_mean_jit(self.N, self.p_mu, self.p_weight)
 
     def _systematic_resample(self):
         """Standard systematic-resampling step on the particle indices."""
         positions = (np.random.random() + np.arange(self.N)) / self.N
-        cum = np.cumsum(np.array([p.weight for p in self.particles]))
-        cum[-1] = 1.0  # guard
-        i = 0
-        new_particles: list[_Particle] = []
-        for pos in positions:
-            while i < self.N - 1 and pos > cum[i]:
-                i += 1
-            src = self.particles[i]
-            # Copy state (newel object — regime preserved but could be
-            # re-derived topologically by the caller in `step`).
-            new_p = _Particle(
-                regime=src.regime,
-                mu=src.mu.copy(),
-                P=src.P.copy(),
-                weight=1.0 / self.N,
-            )
-            new_p.sqrt_P = src.sqrt_P.copy()
-            new_p.log_w = math.log(1.0 / self.N)
-            new_particles.append(new_p)
-        self.particles = new_particles
+        _systematic_resample_jit(self.N, self.p_regime, self.p_mu, self.p_P, self.p_sqrt_P, self.p_weight, self.p_log_w, positions)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1219,6 +1228,7 @@ class RaoBlackwellisedParticleFilter:
 #
 # No fixed numeric thresholds.
 
+@njit(cache=False)
 def derive_regime_topological(
     mu: float, mu_dot: float, phi: float, h: float, ell: float,
     spread: float,
@@ -1271,6 +1281,32 @@ def derive_regime_topological(
     # ── Continuation: drift aligned with flow, weak deceleration ────
     # (post-exhaustion re-launch in the same direction).
     return R_CONTINUATION
+
+
+@njit(cache=False)
+def _rbpf_regime_assign_jit(
+    N: int,
+    p_regime: np.ndarray,
+    p_mu: np.ndarray,
+    mu_dot_post: float,
+    sigma_t_post: float,
+    sigma_phi_post: float,
+    alpha: float,
+    tau: float
+):
+    for i in range(N):
+        p_regime[i] = derive_regime_topological(
+            float(p_mu[i, 1]),
+            mu_dot_post,
+            float(p_mu[i, 3]),
+            float(p_mu[i, 2]),
+            float(p_mu[i, 4]),
+            0.0,
+            sigma_t_post,
+            sigma_phi_post,
+            alpha,
+            tau
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
