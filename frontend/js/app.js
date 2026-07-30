@@ -122,13 +122,13 @@ let engineParamsV2 = {
   theta:      0.10,    // ℓ mean-reversion rate
   sigma_ell:  0.10,    // ℓ shock std
   zeta:       0.30,    // liquidity-jump decay magnitude on ℓ
-  // KDE / volume profile decay
-  lambda_0:   0.00333, // KDE exponential decay rate (1/300s = one 5-min window)
+  // KDE / volume profile decay  (iter16k: T_w = 14400 s structural KDE memory)
+  lambda_0:   0.00006944, // KDE exponential decay rate (1/14400s ≈ full recording lifetime)
   lambda_1:   0.10,    // secondary slow-decay component
   // Jump-intensity (Poisson rate per second)
   kappa_J:    0.05,    // λ_J  — governs ℓ jump frequency
-  // Execution cost model  s(n,ℓ) = s_0(ℓ) + s_1(ℓ)·n
-  s_0:        0.001,   // base slippage fraction
+  // Execution cost model  s(n,ℓ) = s_0(ℓ) + s_1(ℓ)·n   (iter16h cost-calibration)
+  s_0:        0.011,   // base slippage fraction (matched to ~1.11% one-way cost)
   s_1:        0.0005,  // marginal slippage per unit size
   // ── Regime topology tuning knobs ────────────────────────────────────
   regime_mu_star_scale:  0.10, // mu_star multiplier (0.1 = 10% of spec floor)
@@ -137,18 +137,18 @@ let engineParamsV2 = {
   n_particles:        200,   // RBPF particle count  (more = slower, accurate)
   n_grid:             200,   // spatial grid size for U(x,t)
   grid_sigma_extent:  5.0,   // grid half-width in units of σ_t·√T_w
-  tw_window_seconds:  300.0, // KDE memory window T_w (seconds)
+  tw_window_seconds:  14400.0, // KDE memory window T_w (seconds) — iter16k structural KDE memory
   tau_min:            5.0,   // shortest prediction horizon (s)
   tau_max:            30.0,  // longest prediction horizon (s)
   tau_step:           5.0,   // horizon sweep step (s)
   eps_div:            1.0,   // ε in δ_k/(v_k+ε)
-  fee_fraction:       0.001, // Jupiter fee fraction (~0.1%)
+  fee_fraction:       0.0011, // fee fraction  (iter16h cost-cal ~0.11%)
   latency_seconds:    0.5,   // execution latency Δ_lat
   liquidity_cap_frac: 0.10,  // Kelly position cap  (0.10 = up to 10% of L_t)
   warmup_seconds:     30,    // bars before any decision is emitted
   sigma_floor:        1e-6,  // numerical σ floor
   // ── Shared TP/SL parameters (V1 contract, adapter reads these) ──────
-  stoploss_pct: 0,
+  stoploss_pct: -25,        // iter16l: catastrophic-anchor hard_stop floor at -25%
   takeprofit_pct: 0,
   takeprofit_pct_low: 20,
   takeprofit_pct_high: 300,
@@ -171,6 +171,19 @@ let engineParamsV2 = {
   max_entry_bar_count: 5700,
   forbidden_bc_lo: 2000,
   forbidden_bc_hi: 3000,
+  // ── iter17: V2 entry gates + tail-preserving exit overlays ──────────
+  // Counterfactual-validated on the 404-trade logged-batch (see
+  // RESEARCH_LOG.md iter17); grinding iter17a defaults in both the
+  // backend adapter and here so the default frontend path reproduces
+  // the iter17a full-batch result (187 @ 56.2% WR / +0.572 SOL) without
+  // passing --params.
+  v2_p_up_min:         0.62,   // Bayesian entry floor on P_up (was 0.35)
+  v2_sigma_t_min:      0.021,  // entry gate on posterior σ_t (vol floor)
+  v2_require_past_peak: 0,     // iter17b REJECTED — keep default off
+  gain_retrace_arm_pct:  12,   // arm profit-lock at +12% peak gain
+  gain_retrace_give_frac: 0.6, // exit when gain retraces to peak_gain·(1−g)
+  breakeven_arm_dd_pct:   20,  // arm scratch exit once low ≤ −20% offside
+  breakeven_buffer_pct:   2.5, // scratch exit level (entry·(1+buf))
 };
 
 /* Engine version: 1 = V1 (Physics), 2 = V2 (RBPF/UKF/KDE/Kramers) */

@@ -157,27 +157,32 @@ DEFAULT_CONFIG = {
     "sigma_ell":  0.10,    # ℓ shock std
     "zeta":       0.30,    # liquidity-jump decay magnitude
 
-    # Volume-profile decay (λ_d = 1/T_w,  T_w = 300s)
-    "lambda_0":   1.0 / 300.0,   # KDE exponential decay rate
+    # Volume-profile decay (λ_d = 1/T_w).  iter16k: T_w = 14400 s (full
+    # recording-lifetime KDE); legacy 300 s wiggle window is gone.
+    "lambda_0":   1.0 / 14400.0,   # KDE exponential decay rate
     "lambda_1":   0.10,           # secondary slow-decay component
 
     # Jump-intensity Poisson rate per second (governs ℓ jumps)
     "kappa_J":    0.05,
 
     # Execution cost model coefficients  s(n, ℓ) = s_0(ℓ) + s_1(ℓ)·n
-    "s_0":        0.001,   # base slippage fraction
+    # iter16h cost-calibration to the real 1.11% one-way cost:
+    # ForwardTester at buy_size 0.1 SOL / 1% slippage ≈ 1.1% entry slippage
+    # + flat fees → pre-calibration the engine was modelling ~0.2% (10×
+    # undercount) and the spec §7 positive-EV gate was near-vacuous.
+    "s_0":        0.011,   # base slippage fraction
     "s_1":        0.0005,  # marginal slippage per unit size
 
     # Sz-fixed meta-parameters (NOT counted among the 16 — set via config too)
     "n_particles":       200,    # N_p  — particle count
     "n_grid":            200,    # spatial grid for U(x,t)
     "grid_sigma_extent":  5.0,    # ±k·σ_t·√T_w  grid half-width
-    "tw_window_seconds": 300.0,  # T_w
+    "tw_window_seconds": 14400.0,  # T_w  (iter16k structural KDE memory)
     "tau_min":           5.0,    # shortest prediction horizon
     "tau_max":           30.0,   # longest prediction horizon
     "tau_step":          5.0,    # horizon sweep step
     "eps_div":           1.0,    # ε in δ_k / (v_k + ε)  (spec: ε=1.0)
-    "fee_fraction":      0.001,  # f   (Jupiter ~0.1%)
+    "fee_fraction":      0.0011,  # f   (iter16h cost-cal, ~0.11%)
     "latency_seconds":   0.5,   # Δ_lat
     "liquidity_cap_frac":0.10,   # n*  ≤ 0.1 · L_t
     "warmup_seconds":    30,     # bars below which no decision is emitted
@@ -2312,7 +2317,10 @@ class StrategyEngineV2Adapter:
         self._v1_takeprofit_high = float(engine_kwargs.pop("takeprofit_pct_high", 300.0))
         self._v1_stoploss_low    = float(engine_kwargs.pop("stoploss_pct_low", 12.0))
         self._v1_stoploss_high   = float(engine_kwargs.pop("stoploss_pct_high", 25.0))
-        self.stoploss_pct         = float(engine_kwargs.pop("stoploss_pct", 0.0))
+        # iter16l: spec-listed hard_stop floor at -25% (catastrophic-anchor —
+        # spec §6.3 catastrophic-stop safeguard).  Counterfactual-validated
+        # optimum of the floor sweep on the fresh dataset.
+        self.stoploss_pct         = float(engine_kwargs.pop("stoploss_pct", -25.0))
         self.takeprofit_pct       = float(engine_kwargs.pop("takeprofit_pct", 0.0))
         self._warmup_seconds      = int(engine_kwargs.pop("warmup", 30))
 
@@ -2407,21 +2415,26 @@ class StrategyEngineV2Adapter:
         self.entry_confidence_high = float(engine_kwargs.pop("entry_confidence_high", 0.79))
         self.entry_confidence_low = float(engine_kwargs.pop("entry_confidence_low", 0.19))
         self.confidence_very_high = float(engine_kwargs.pop("confidence_very_high", 0.86))
-        # V2 Bayesian entry floor on P_up (iter16 calibration plumbing).
-        self._v2_p_up_min = float(engine_kwargs.pop("v2_p_up_min", 0.35))
+        # V2 Bayesian entry floor on P_up — iter17a counterfactual-validated
+        # (404-trade logged-batch replay) — 0.62 raised WR & PnL ~7× vs 0.35.
+        self._v2_p_up_min = float(engine_kwargs.pop("v2_p_up_min", 0.62))
         # iter17: counterfactual-validated entry/exit overlays (see
-        # RESEARCH_LOG.md iter17 — 404-trade logged batch replay).
-        # All default OFF/disabled → tree default behaviour unchanged.
+        # RESEARCH_LOG.md iter17 — 404-trade logged-batch replay).
+        # Defaults below = the iter17a validated config (the
+        # `iter17a.json` params file merely re-states them; the default
+        # path now reproduces iter17a exactly on a full batch).  All
+        # knobs remain overridable via engine_kwargs for sweeps:
         #   v2_sigma_t_min:        entry gate on posterior σ_t (vol floor)
+        #   v2_require_past_peak:  entry gate on _momentum_past_peak (iter17b REJECTED — default off)
         #   gain_retrace_arm_pct:  arm profit-lock at +A% peak gain
         #   gain_retrace_give_frac: exit when gain retraces to peak_gain*(1-g)
         #   breakeven_arm_dd_pct:  arm scratch exit after -X% drawdown
         #   breakeven_buffer_pct:  scratch exit level (entry*(1+buf))
-        self._v2_sigma_t_min       = float(engine_kwargs.pop("v2_sigma_t_min", 0.0))
+        self._v2_sigma_t_min       = float(engine_kwargs.pop("v2_sigma_t_min", 0.021))
         self._v2_require_past_peak = float(engine_kwargs.pop("v2_require_past_peak", 0.0))
-        self._gain_retrace_arm_pct  = float(engine_kwargs.pop("gain_retrace_arm_pct", 0.0))
+        self._gain_retrace_arm_pct  = float(engine_kwargs.pop("gain_retrace_arm_pct", 12.0))
         self._gain_retrace_give_frac = float(engine_kwargs.pop("gain_retrace_give_frac", 0.6))
-        self._breakeven_arm_dd_pct  = float(engine_kwargs.pop("breakeven_arm_dd_pct", 0.0))
+        self._breakeven_arm_dd_pct  = float(engine_kwargs.pop("breakeven_arm_dd_pct", 20.0))
         self._breakeven_buffer_pct  = float(engine_kwargs.pop("breakeven_buffer_pct", 2.5))
         self._entry_E_star = 0.0
         self.confidence_w1 = 0.3
