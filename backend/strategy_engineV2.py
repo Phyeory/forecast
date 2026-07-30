@@ -717,14 +717,22 @@ def _barrier_find_kernel(U_grid, x_idx):
 
 
 @njit(cache=False)
-def _second_derivative_grid(U_grid):
-    """Central-difference second derivative along a 1-D grid."""
+def _second_derivative_grid(U_grid, dx):
+    """Central-difference second derivative along a 1-D grid.
+
+    (iter16f: `dx` added — the previous form returned the raw second
+    DIFFERENCE ×0.5 without dividing by Δx², understating U'' by
+    ~Δx²/2 ≈ 4e-5 on typical grids.  That made the Kramers attempt
+    frequency √(ω₀²·ω_b²) ~160× too small and silenced all escapes once
+    the anti-physical vol_corr inflation was removed.)
+    """
     G = U_grid.shape[0]
     d2 = np.zeros(G)
-    if G < 3:
+    if G < 3 or dx <= 0:
         return d2
+    inv_dx2 = 1.0 / (dx * dx)
     for i in range(1, G - 1):
-        d2[i] = (U_grid[i + 1] - 2.0 * U_grid[i] + U_grid[i - 1]) * 0.5
+        d2[i] = (U_grid[i + 1] - 2.0 * U_grid[i] + U_grid[i - 1]) * inv_dx2
     return d2
 
 
@@ -913,6 +921,43 @@ def _posterior_mean_batched(mu_arr, weights):
     if not math.isfinite(out[2]): out[2] = -4.0
     if not math.isfinite(out[3]): out[3] = 0.0
     if not math.isfinite(out[4]): out[4] = 0.0
+    return out
+
+
+@njit(cache=False)
+def _posterior_var_batched(mu_arr, weights, mean):
+    """
+    NaN-safe weighted posterior VARIANCE of the N particle state vectors,
+    given the posterior mean 5-vector.  Returns the 5-vector of second
+    central moments (var_x, var_mu, var_h, var_phi, var_ell).
+
+    iter16j: the Kelly horizon-variance σ²_τ needs the posterior variance
+    of the flow state φ — Var(∫₀^τ φ ds) ≈ Var(φ)·τ².  The legacy code
+    plugged in E[φ]² instead, which by the variance identity
+    E[φ]² = Var(φ) + E[φ]² systematically overstates the second moment
+    by the squared posterior mean.
+    """
+    out = np.zeros(5)
+    weight_sum = 0.0
+    for i in range(mu_arr.shape[0]):
+        w = weights[i]
+        if (not math.isfinite(w)
+                or not math.isfinite(mu_arr[i, 0])
+                or not math.isfinite(mu_arr[i, 1])
+                or not math.isfinite(mu_arr[i, 2])
+                or not math.isfinite(mu_arr[i, 3])
+                or not math.isfinite(mu_arr[i, 4])):
+            continue
+        weight_sum += w
+        for a in range(5):
+            d = mu_arr[i, a] - mean[a]
+            out[a] += w * d * d
+    if weight_sum > 0:
+        for a in range(5):
+            out[a] /= weight_sum
+    for a in range(5):
+        if not math.isfinite(out[a]) or out[a] < 0.0:
+            out[a] = 0.0
     return out
 
 
@@ -1320,6 +1365,9 @@ class RaoBlackwellisedParticleFilter:
         x_post, mu_post, h_post, phi_post, ell_post = (float(pm[0]), float(pm[1]),
                                                        float(pm[2]), float(pm[3]),
                                                        float(pm[4]))
+        # iter16j: posterior second central moments (needed for the Kelly
+        # horizon-variance σ²_τ's flow term — see _kramers_escape_and_decision).
+        pv = _posterior_var_batched(self._mu_arr, self._weights, pm)
         # NB: bar_phi and bar_h are now observable-anchored (above) — they
         # are NOT re-EMA'd against the latent posterior mean, fixing the
         # self-referential positive feedback that catastrophically
@@ -1377,6 +1425,7 @@ class RaoBlackwellisedParticleFilter:
             "h":    h_post,
             "phi":  phi_post,
             "ell":  ell_post,
+            "var_phi": float(pv[3]),
             "regime": best_regime,
             "regime_dist": regime_dist,
         }
@@ -1631,14 +1680,34 @@ class MarketPotential:
 
         T_t = math.exp(h_t) * 0.5 if h_t < 15.0 else math.exp(15.0) * 0.5
 
-        # U(x) = - T_t · log ρ(x)  +  V_liq(x)
+        # U(x) = - T_t · log ρ(x)            (KDE-native potential)
+        #
+        # (iter16d, 2026-07-29: V_liq REMOVED from the potential.  On fresh
+        # 1 s memecoin data T_t = σ²/2 ≈ 5e-5 while V_liq ≈ 0.05–0.7, so
+        # the legacy composite U = -T·lnρ + V_liq was entirely dominated by
+        # the synthetic depth taper:  barrier-find then picked ~T-amplitude
+        # KDE wiggles on the V_liq ramp (noise barriers) and the Boltzmann
+        # factor exp(-ΔU/T) ≡ 0 degenerated k± to the {0, 1e6} clamp —
+        # the engine's decision collapsed to a binary 1 s drift-sign
+        # detector (24% WR in both drift-sign conventions; see iter16b).
+        # The spec's structure (§3.3 + §4.3) assigns V_liq the friction
+        # role — γ_t = 1/L_t in the rate prefactor (eq. 14) — while the
+        # escape geometry comes from the volume-density landscape.  With
+        # U = -T·lnρ (HVN = potential well — the dip-buy geometry whose
+        # entries were validated profitable in iter16k/l).  The iter16n
+        # experiment (U = +T·lnρ, HVN = barrier) fixed crash-detection
+        # but destroyed entry quality (smoke +0.43 → -0.05): the two
+        # interpretations are reconciled by keeping the well geometry
+        # for the landscape and fixing the boundary-barrier artifact in
+        # _barrier_find_kernel (iter16o) — during crashes the down side
+        # has NO barrier (monotonic to grid edge) → open escape at the
+        # attempt rate → P_down can fire, without touching the wells.
+        # V_lo/V_hi are still computed above for diagnostics.)
         eps_rho = 1e-12
-        U_up    = -T_t * np.log(np.maximum(rho, eps_rho)) + V_hi
-        U_down  = -T_t * np.log(np.maximum(rho, eps_rho)) + V_lo
-
-        # Symmetric composite potential (we'll need both sides at the caller).
-        # Use side-appropriate potential: above x_t -> U_up, below -> U_down.
-        U = np.where(grid >= x_t, U_up, U_down)
+        U_kde   = -T_t * np.log(np.maximum(rho, eps_rho))
+        U_up    = U_kde
+        U_down  = U_kde
+        U       = U_kde
 
         self.last_grid      = grid
         self.last_U         = U
@@ -1692,31 +1761,31 @@ def _kramers_escape_and_decision(
     # Find barriers around current basin.
     idx_basin, idx_up, idx_down, U_basin, U_up, U_down = _barrier_find_kernel(U, idx_t)
 
-    # Barrier energies per spec §3:
-    #   ΔU⁺_t = U(x⁺_t) - U(x_t) + ½ μ_t (x⁺_t - x_t)   (UPWARD escape — drift-assisted)
-    #   ΔU⁻_t = U(x⁻_t) - U(x_t) - ½ μ_t (x⁻_t - x_t)   (DOWNWARD escape — drift-opposed)
+    # Barrier energies — KDE-native (iter16e):
+    #   ΔU±_t = U(x±_t) - U(x_t)  =  -T_t · [ln ρ(x±) - ln ρ(x_t)]
     #
-    # The spec's directional sign "±" is the OUTWARD escape direction: the
-    # drift-work term RAISES the barrier on the side the drift is pushing
-    # AWAY from (particle must climb back against the trend) and LOWERS the
-    # barrier on the side the drift is pushing TOWARD (drift helps escape).
-    #
-    # When μ > 0 (uptrend):
-    #   ΔU⁺ (upward escape)   = U(x⁺) - U(x_t) + ½μ(x⁺ - x_t)  → drift helps, barrier LOWER
-    #   ΔU⁻ (downward escape) = U(x⁻) - U(x_t) - ½μ(x⁻ - x_t)  → drift impedes, barrier HIGHER
-    # This is the physically correct slow-variation Kramers forcing.
-    #
-    # (iter09, 2026-07-22: corrected the sign of the downward drift-work
-    # term — the original `+ ½μ·Δx⁻` was a transcription error of the
-    # empirically validated sign convention (preserves iter08's +17.89 SOL
-    # `kramers_down_exit` behaviour). DO NOT change signs based on a literal
-    # reading of the spec §3 formula — see RESEARCH_LOG.md §iter09 reject.
+    # Spec §4.1 eq. 12 replaces the Boltzmann factor with the empirical
+    # density ratio; the drift-work term of §3.4 is therefore subsumed in
+    # the escape exponent and the posterior drift enters the DECISION
+    # through the Kelly moments instead — μ̂_τ = P⁺d⁺ − P⁻d⁻ (§7.5
+    # eq. 34) and the latency cost C = f + s₀ + |μ_t|Δ_lat (§7.1).
+    # This is also a scale necessity: at the 1 s memecoin scale
+    # ½μΔx/T ~ 10–100, so any drift-inclusive exponent swamps the
+    # density geometry with tick-level μ noise (iter16d smoke: 1421
+    # trades / 8 recordings, 15.7% WR — the exponent reduced to a
+    # e^{±μΔx/2T} drift-sign detector again).
+    # With ΔU±/T = Δlnρ ~ O(0.1–5) the Boltzmann factor IS the density
+    # ratio, and the vol-of-vol correction ½(ΔU±/T)²·Var(h) is finite
+    # and unsaturated for the first time on any dataset.
     mu_t = float(state["mu"])
-    du_up = U_up - U_basin + 0.5 * mu_t * (grid[idx_up] - x_t)
-    du_down = U_down - U_basin + 0.5 * mu_t * (grid[idx_down] - x_t)
+    du_up = U_up - U_basin
+    du_down = U_down - U_basin
 
     # Second derivatives (curvatures) via central difference.
-    d2 = _second_derivative_grid(U)
+    # Grid spacing Δx is required for true U'' (iter16f).
+    n_g = int(grid.shape[0])
+    dx_g = float(grid[1] - grid[0]) if n_g > 1 else 1.0
+    d2 = _second_derivative_grid(U, dx_g)
     omega0_sq = float(d2[idx_t])  # U'' at the current basin (x ≈ x_min)
     if omega0_sq <= 0:
         omega0_sq = 1e-6   # numerical guard
@@ -1734,45 +1803,47 @@ def _kramers_escape_and_decision(
     ratio_up   = rho_up   / rho_at_t
     ratio_down = rho_down / rho_at_t
 
-    # Volatility correction: exp( ½ (ΔU/T)² · Var(h) ).
-    # Var(h) is approximated by the local OU stationary variance
-    # σ_h² / (2 η)  for the log-variance SDE in §2.3.
+    # Volatility correction: DISABLED (iter16f).
+    # Spec §4.2 eq. 13 averages the Boltzmann factor over the volatility
+    # posterior:  ⟨e^{-ΔU/T}⟩ ≈ e^{-ΔU/T_t} · exp[½(ΔU/T_t)²·Var(h)].
+    # That Gaussian-moment (lognormal-mgf) expansion is only valid for
+    # |ΔU/T|·√Var(h) ≪ 1.  On fresh 1 s data |ΔU/T| ~ 5–30 and the
+    # correction ANTI-INVERTS the physics: because exp[½(ΔU/T)²Var(h)]
+    # grows faster than e^{-ΔU/T} decays, FARTHER barriers receive
+    # HIGHER escape rates (rec205 trace: du_up/T ≈ 31 → Boltzmann 1e-14
+    # but vol_corr = e^50 clamp → k_up = 8e6 ≫ k_down → P_up ≡ 1.00 on
+    # 690/1352 bars — constant buy pressure, 33 churn trades).
+    # Moreover Var(h) was the hard-coded OU stationary variance
+    # σ_h²/(2η) = 0.2, not a posterior estimate.  The §4.1 eq. 12 exact
+    # density ratio already incorporates the finite-temperature escape
+    # statistics, so the moment correction is dropped entirely.
     var_h = (cfg["sigma_h"] ** 2) / (2.0 * max(cfg["eta"], 1e-6))
-    # Clamp the exponent to prevent math overflow — when (ΔU/T) is very
-    # large (deep barrier), the escape rate is dominated by exp(-ΔU/T)
-    # anyway and the multiplicative volatility correction saturating at
-    # exp(50) suffices for stability.
-    if T_t > 0:
-        arg_up   = 0.5 * (du_up   / T_t) ** 2 * var_h
-        arg_down = 0.5 * (du_down / T_t) ** 2 * var_h
-        arg_up   = min(arg_up,   50.0)
-        arg_down = min(arg_down, 50.0)
-        vol_corr_up   = math.exp(arg_up)   if arg_up   >= 0 else 1.0
-        vol_corr_down = math.exp(arg_down) if arg_down >= 0 else 1.0
-    else:
-        vol_corr_up = vol_corr_down = 1.0
+    vol_corr_up = 1.0
+    vol_corr_down = 1.0
 
     # ── Modified Kramers escape rates ──────────────────────────────────
-    # k = (ω_0 ω_b) / (2π γ) · exp(-ΔU / T)  · vol_correction  · rho_ratio
-    # Friction correction per §7.3 of the spec: replace γ with the Kyle
-    # lambda, γ_t = 1 / L_t, where L_t is the posterior liquidity
-    # (exp(ℓ_posterior)).  Illiquid markets ⇒ high friction ⇒ slow
-    # escape ⇒ the trend needs proportionally more evidence before a
-    # transition is credible.
+    # k± = (√(ω₀²·ω_b±²) / (2π γ)) · exp(-ΔU±/T) · vol_corr±
+    #
+    # With the KDE-native potential (iter16d), the Boltzmann factor
+    #   exp(-ΔU±/T) = [ρ(x±)/ρ(x_t)] · exp(±½μΔx/T)
+    # already IS the §4.1 eq. 12 empirical density ratio (times the
+    # drift-work Boltzmann factor of §3.4), so the legacy separate
+    # `ratio±` multiplier is subsumed — multiplying it again would square
+    # the density ratio.  The friction γ = 1/L_t (eq. 14) carries the
+    # liquidity term's non-equilibrium role.  The exponent is clamped to
+    # ±50 for numerical safety — this replaces the legacy `du ≤ 0 →
+    # k = 1e6` clamp that binary-degenerated the decision.
     gamma = 1.0 / max(L_t, 1e-6)
 
-    if du_up > 0:
-        k_up = (math.sqrt(omega0_sq * omega_b_up) / (2.0 * math.pi * gamma)) \
-               * math.exp(-du_up / T_t) * vol_corr_up * ratio_up
-    else:
-        k_up = math.inf   # barrier lower than basin — barrier off → "unlimited" rate
-        k_up = 1e6         # numerical proxy
+    arg_rate_up   = -du_up   / T_t if T_t > 0 else 0.0
+    arg_rate_down = -du_down / T_t if T_t > 0 else 0.0
+    arg_rate_up   = max(-50.0, min(50.0, arg_rate_up))
+    arg_rate_down = max(-50.0, min(50.0, arg_rate_down))
 
-    if du_down > 0:
-        k_down = (math.sqrt(omega0_sq * omega_b_down) / (2.0 * math.pi * gamma)) \
-                 * math.exp(-du_down / T_t) * vol_corr_down * ratio_down
-    else:
-        k_down = 1e6
+    k_up = (math.sqrt(omega0_sq * omega_b_up) / (2.0 * math.pi * gamma)) \
+           * math.exp(arg_rate_up) * vol_corr_up
+    k_down = (math.sqrt(omega0_sq * omega_b_down) / (2.0 * math.pi * gamma)) \
+             * math.exp(arg_rate_down) * vol_corr_down
 
     # ── Transition probabilities over horizon τ  (slow-variation approx) ──
     #   P±(τ) = (k± / k_total) · (1 - exp(-k_total · τ))
@@ -1786,11 +1857,32 @@ def _kramers_escape_and_decision(
     P_zero = exp_term
 
     # ── Kelly sizing n* ─────────────────────────────────────────────────────
-    # μ̂_τ  ≈  μ_t · τ  +  φ_t · (1 - exp(-α τ)) / α · τ  (cumulative expected move)
-    # We use a simplified predictor: μ̂_τ = μ_t · τ + φ_t · α⁻¹ · τ.
-    # σ²_τ ≈ σ_t² · τ + φ²·τ²  (driven by current σ and φ scaling)
-    mu_hat_tau = mu_t * tau + (state["phi"] / max(cfg["alpha"], 1e-6)) * tau
-    sigma2_tau = (sigma_t ** 2) * tau + (state["phi"] ** 2) * (tau ** 2)
+    # μ̂_τ per spec §7.5 eq. 34: the posterior expected log-return over the
+    # horizon is the probability-weighted distance to the barriers,
+    #   μ̂_τ = P⁺(τ)·d⁺ − P⁻(τ)·d⁻,
+    # with d± = |x± − x_t|.  BOUNDED by the barrier geometry, unlike the
+    # legacy extrapolation μ̂_τ = μ_t·τ + (φ_t/α)·τ which projected the
+    # instantaneous 1 s drift 30 s forward (μ̂_τ ~ 1.5–150 log units at
+    # entries → E_star ≈ +12 always → the Kelly gate was vacuous).
+    # σ²_τ keeps the existing posterior variance proxy.
+    d_up_dist = abs(float(grid[idx_up]) - x_t) if idx_up is not None else 0.0
+    d_down_dist = abs(x_t - float(grid[idx_down])) if idx_down is not None else 0.0
+    mu_hat_tau = P_up * d_up_dist - P_down * d_down_dist
+    # iter16j: σ²_τ = posterior variance of the log-return over horizon τ.
+    #   diffusion term:      σ_t²·τ           (random-walk variance ∝ τ)
+    #   flow-uncertainty:    Var_RBPF(φ)·τ²   (variance of ∫φ ds)
+    # The legacy plug-in used E[φ]² for the flow term — the squared
+    # posterior MEAN instead of the posterior VARIANCE.  With real order
+    # flow (|φ̄| ~ 0.1–0.15) that overstates σ²_τ by ~10⁴× vs the diffusion
+    # term (φ²·τ² ~ 324 vs σ_t²·τ ~ 0.03 at τ = 120), collapsing
+    # n* → ~0, making the ℰ* > 0 Kelly gate vacuous, and pinning the
+    # τ-sweep to its minimum (σ² ∝ τ² dominates).  Using the particle
+    # population's actual posterior variance restores the intended
+    # risk-discrimination of the Kelly gate.
+    var_phi = float(state.get("var_phi", state["phi"] ** 2))
+    if var_phi < 0.0 or not math.isfinite(var_phi):
+        var_phi = 0.0
+    sigma2_tau = (sigma_t ** 2) * tau + var_phi * (tau ** 2)
     if sigma2_tau <= 0:
         sigma2_tau = 1e-12
 
@@ -2251,8 +2343,8 @@ class StrategyEngineV2Adapter:
         # ── Position state tracked by V1 hooks ──
         self.in_position = False
         self.entry_price = 0.0
-        self.position_direction: _V1Direction = _V1Direction.NONE
         self._peak_price = 0.0
+        self._be_armed = False  # iter17 breakeven-scratch arming flag
         self.entry_bar_count = 0
         self.exit_signal_reason = ""
 
@@ -2310,11 +2402,28 @@ class StrategyEngineV2Adapter:
         # ── V1 config knobs the capture enumerates (cfg_*) ──
         # We echo them onto `eng` so the ForwardTester's _capture_entry_params
         # dictionary doesn't AttributeError.  All defaults, mirroring V1.
-        self.confidence_high = 0.79
-        self.confidence_low = 0.19
-        self.entry_confidence_high = 0.79
-        self.entry_confidence_low = 0.19
-        self.confidence_very_high = 0.86
+        self.confidence_high = float(engine_kwargs.pop("confidence_high", 0.79))
+        self.confidence_low = float(engine_kwargs.pop("confidence_low", 0.19))
+        self.entry_confidence_high = float(engine_kwargs.pop("entry_confidence_high", 0.79))
+        self.entry_confidence_low = float(engine_kwargs.pop("entry_confidence_low", 0.19))
+        self.confidence_very_high = float(engine_kwargs.pop("confidence_very_high", 0.86))
+        # V2 Bayesian entry floor on P_up (iter16 calibration plumbing).
+        self._v2_p_up_min = float(engine_kwargs.pop("v2_p_up_min", 0.35))
+        # iter17: counterfactual-validated entry/exit overlays (see
+        # RESEARCH_LOG.md iter17 — 404-trade logged batch replay).
+        # All default OFF/disabled → tree default behaviour unchanged.
+        #   v2_sigma_t_min:        entry gate on posterior σ_t (vol floor)
+        #   gain_retrace_arm_pct:  arm profit-lock at +A% peak gain
+        #   gain_retrace_give_frac: exit when gain retraces to peak_gain*(1-g)
+        #   breakeven_arm_dd_pct:  arm scratch exit after -X% drawdown
+        #   breakeven_buffer_pct:  scratch exit level (entry*(1+buf))
+        self._v2_sigma_t_min       = float(engine_kwargs.pop("v2_sigma_t_min", 0.0))
+        self._v2_require_past_peak = float(engine_kwargs.pop("v2_require_past_peak", 0.0))
+        self._gain_retrace_arm_pct  = float(engine_kwargs.pop("gain_retrace_arm_pct", 0.0))
+        self._gain_retrace_give_frac = float(engine_kwargs.pop("gain_retrace_give_frac", 0.6))
+        self._breakeven_arm_dd_pct  = float(engine_kwargs.pop("breakeven_arm_dd_pct", 0.0))
+        self._breakeven_buffer_pct  = float(engine_kwargs.pop("breakeven_buffer_pct", 2.5))
+        self._entry_E_star = 0.0
         self.confidence_w1 = 0.3
         self.confidence_w2 = 0.25
         self.confidence_w3 = 0.25
@@ -2459,12 +2568,14 @@ class StrategyEngineV2Adapter:
         self.position_direction = direction
         self._peak_price = float(entry_price)
         self.entry_bar_count = self.bar_count
+        self._be_armed = False  # iter17 breakeven-scratch arming flag
 
     def notify_trade_closed(self):
         self.in_position = False
         self.entry_price = 0.0
         self.position_direction = _V1Direction.NONE
         self._peak_price = 0.0
+        self._be_armed = False
 
     def _update_peak_price(self, h: float, l: float):
         if not self.in_position:
@@ -2718,8 +2829,20 @@ class StrategyEngineV2Adapter:
             self.direction = _V1Direction.NONE
 
         # ── Compute the V2 trading decision → V1 Signal ────────────
-        decision = self.core.get_decision(horizon=30)
+        # (iter16i: horizon wired to cfg["tau_max"] so the existing
+        # tau_min/tau_max/tau_step parameters actually control the sweep —
+        # previously hardcoded to 30 engine-s = 7.5 physical s, 4× below
+        # the spec's own 5–30 s horizon range at the 4-state cadence.)
+        decision = self.core.get_decision(horizon=int(self.core.cfg.get("tau_max", 30)))
         v1_signal: _V1Signal = _V1Signal.NONE
+
+        # iter17: parity-safe logging stash — the latest V2 decision snapshot,
+        # consumed by ForwardTester._capture_entry_params for per-trade entry
+        # feature logging (counterfactual analysis).  Write-only; no effect on
+        # signal/exit logic.  Reflects the most recent update() call, so at a
+        # fill (state 1 of the entry bar) it holds the fill-bar decision —
+        # consistent with the rest of the entry_params snapshot semantics.
+        self._v2_last_decision = decision
 
         if self.bar_count <= max(self.warmup, 60):
             v1_signal = _V1Signal.NONE
@@ -2737,6 +2860,7 @@ class StrategyEngineV2Adapter:
                 # Apply V1-style entry gate (confidence).
                 if self._v2_passes_entry_gate(c, decision):
                     v1_signal = _V1Signal.BUY
+                    self._entry_E_star = float(decision.get("E_star", 0.0))
                     self.exit_signal_reason = ""
 
         # ── Update peak price AFTER exit checks (matches V1) ────────
@@ -2869,6 +2993,36 @@ class StrategyEngineV2Adapter:
             if sl_pct < 0 and entry > 0 and c <= entry * (1.0 + sl_pct / 100.0):
                 self.exit_signal_reason = "eff_hard_v2"
                 return _V1Signal.EXIT
+            # 2b. iter17 gain-retrace profit lock (tail-preserving trail).
+            #     Counterfactual on the 404-trade logged batch: converts
+            #     give-back-all-the-way losers into locked wins WITHOUT
+            #     capping the right tail (a +60% peak with g=0.6 exits at
+            #     +24%, not +6%).  Arm at +A% peak gain; exit when the
+            #     current gain retraces to peak_gain*(1-g).  Justification:
+            #     path-dependent trailing Kramers barrier — recapture of
+            #     the trailing level = escape from the profit region; same
+            #     execution-risk family as the spec-listed hard_stop.
+            #     Peak tracked from state highs via _update_peak_price.
+            if self._gain_retrace_arm_pct > 0.0 and entry > 0:
+                peak_gain = self._peak_price / entry - 1.0
+                if peak_gain * 100.0 >= self._gain_retrace_arm_pct:
+                    floor_gain = peak_gain * (1.0 - self._gain_retrace_give_frac)
+                    if c <= entry * (1.0 + floor_gain):
+                        self.exit_signal_reason = "gain_retrace"
+                        return _V1Signal.EXIT
+            # 2c. iter17 breakeven scratch.  Arm once the trade has been
+            #     ≥X% offside (low touches entry*(1-X/100)); if price then
+            #     recovers to entry*(1+buf), exit at a cost-covering
+            #     scratch instead of riding the second leg down.  Winner
+            #     intra-MAE p5=-30% on the fresh dataset, so X=20 arms
+            #     only on genuinely-distressed trades.
+            if self._breakeven_arm_dd_pct > 0.0 and entry > 0:
+                if (not self._be_armed and l > 0.0
+                        and l <= entry * (1.0 - self._breakeven_arm_dd_pct / 100.0)):
+                    self._be_armed = True
+                if self._be_armed and c >= entry * (1.0 + self._breakeven_buffer_pct / 100.0):
+                    self.exit_signal_reason = "breakeven_scratch"
+                    return _V1Signal.EXIT
             # 3. Reversal regime (spec §4 reversal label).
             if self.regime == _V1Regime.REVERSAL:
                 self.exit_signal_reason = "reversal_exit"
@@ -2935,7 +3089,19 @@ class StrategyEngineV2Adapter:
         # Need both confidence above threshold and Kramers upward prob.
         if self.trend_confidence < self.entry_confidence_high:
             return False
-        if decision.get("P_up", 0.0) < 0.35:
+        if decision.get("P_up", 0.0) < self._v2_p_up_min:
+            return False
+        # iter17: posterior-vol floor — counterfactual showed σ_t ≥ 0.021
+        # entries carry the PnL (removes break-even churn, PF 1.57→1.87).
+        if self._v2_sigma_t_min > 0.0:
+            if float(getattr(self.core, "_last_sigma_t", 0.0) or 0.0) < self._v2_sigma_t_min:
+                return False
+        # iter17b: require momentum_past_peak — on the 404-trade logged
+        # batch, entries made WHILE momentum is past peak carried the win
+        # rate and 96% of the PnL on just 34% of the trades (the past-peak
+        # flag marks a parabolic breakout/continuation rather than a knife
+        # catch); past_peak=False entries were 28% hard-stop crashes vs 9%.
+        if self._v2_require_past_peak > 0.0 and not self._momentum_past_peak():
             return False
         # Long-only: drift must be positive.
         if float(decision.get("direction", 0)) != 1:

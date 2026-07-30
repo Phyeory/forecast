@@ -1,301 +1,256 @@
-# A Bayesian State-Space Framework for Short-Horizon Memecoin Trading
+# A Non-Equilibrium Statistical Mechanics Framework for Short-Horizon Memecoin Trading
 
-**Jaime Mok**
+*Quantitative Research*
 
 ## Abstract
 
-This document specifies a complete mathematical framework for a short-horizon (5–30 second) trading engine designed for highly volatile, organically driven Solana memecoins. The framework abandons standard Langevin dynamics in favor of a non-equilibrium statistical mechanics approach. By combining a Rao-Blackwellised Particle Filter (RBPF) with a volume-weighted Kernel Density Estimate (KDE) market potential and modified Kramers escape rates, the engine derives Bayesian posterior probabilities of barrier crossings. Trading decisions are ultimately driven by a Kelly-optimal expected log-wealth increment, ensuring mathematical rigor in the presence of transaction costs, slippage, and latency.
-
----
+This document rigorously specifies a stochastic trading engine designed to predict short-term (5–30 second) continuation and reversal probabilities in highly volatile, organic Solana memecoins. The framework abandons standard Langevin dynamics in favor of a continuous-discrete Bayesian state-space model, driven by a Rao-Blackwellised Particle Filter (RBPF). Price dynamics are governed by a non-equilibrium market potential derived from volume-weighted kernel density estimation and liquidity costs. Transition probabilities are mathematically derived via modified Kramers escape rates. We conclude by rigorously deriving the expected return $E[X]$ and the expected profit objective.
 
 ## 1. State Space Formulation
 
-Let the traded asset be a memecoin with mid-price $S_t$ and log-price $x_t = \log S_t$. We construct a continuous-time stochastic framework to model the dynamics of $x_t$ on a horizon $\tau \in [5, 30]$ seconds.
+Let the traded asset be a Solana memecoin with log-price $x_t = \log S_t$. We seek a model for $x_t$ on a horizon $\tau \in [5, 30]$ seconds. The latent state vector is defined as the tuple:
 
-### 1.1 Observable Variables
+$$
+\Psi_t := \bigl(x_t, \mu_t, h_t, \phi_t, \ell_t, r_t\bigr) \in \mathbb{R}^5 \times \mathcal{R} \tag{1}
+$$
 
-The observation at second $k$ is the discrete-time multivariate process:
+where $x_t$ is log-price, $\mu_t$ is instantaneous drift, $h_t = \log \sigma_t^2$ is log-volatility, $\phi_t$ is signed order-flow pressure, $\ell_t$ is log-effective-liquidity, and $r_t \in \mathcal{R}$ is a discrete regime label.
 
-$$y_k = \left(\Delta x_k,\ v_k,\ \delta_k,\ q_k,\ d_k^{(b)},\ d_k^{(a)}\right), \quad t_k = k\Delta t \tag{1}$$
+### 1.1 Stochastic Differential Equations
 
-where $\Delta x_k$ is the log-return over $\Delta t = 1$s, $v_k$ is the total traded volume, $\delta_k$ is the signed volume imbalance (Lee–Ready classification), $q_k$ is the quoted bid-ask spread, and $d_k^{(b)}, d_k^{(a)}$ are the bid and ask depths within a proximal range.
+The continuous-time dynamics are governed by the following system of stochastic differential equations (SDEs):
 
-### 1.2 Latent Variables
+**Price Dynamics**
 
-The latent state vector is defined as the tuple $\Psi_t := (x_t, \mu_t, h_t, \phi_t, \ell_t, r_t) \in \mathbb{R}^5 \times \mathbb{R}$, where:
+The log-price evolves as an Itô process with drift, order-flow impact, diffusion, and jumps:
 
-- $x_t$: Log mid-price.
-- $\mu_t = \lim_{\Delta \downarrow 0} \mathbb{E}[\Delta x_t / \Delta \mid \mathcal{F}_t]$: Instantaneous expected log-return (drift).
-- $h_t = \log \sigma_t^2$: Log instantaneous variance.
-- $\phi_t = \mathbb{E}[\delta_t / \ell_t \mid \mathcal{F}_t]$: Order-flow pressure normalized by liquidity.
-- $\ell_t = \log L_t$: Log instantaneous Kyle depth (price impact per unit volume).
-- $r_t \in \mathbb{R}$: Discrete market regime label.
+$$
+dx_t = \mu_t dt + \frac{\phi_t}{L_t} dt + \sigma_t dW^{(x)}_t + J_t dN_t \tag{2}
+$$
 
----
+where $L_t = e^{\ell_t}$ is the Kyle depth, $W^{(x)}_t$ is a standard Wiener process, $N_t$ is a Cox process with volume-dependent intensity $\lambda_J(t) = \lambda_0 + \lambda_1 v_t$, and $J_t$ are i.i.d. double-exponential jump sizes.
 
-## 2. Governing Stochastic Differential Equations
+**Drift Evolution**
 
-The continuous latent state evolves according to a system of stochastic differential equations derived from microstructural equilibrium arguments.
+Drift is mean-reverting and updated by unexpected order-flow:
 
-### 2.1 Price Dynamics
+$$
+d\mu_t = -\lambda_\mu \mu_t dt + \kappa_\mu (\phi_t - \bar{\phi}_t) dt + \sigma_\mu dW^{(\mu)}_t \tag{3}
+$$
 
-The log-price obeys a jump-diffusion process where the drift is explicitly coupled to the order-flow pressure via Kyle's lambda ($1/L_t$):
+**Volatility Evolution**
 
-$$dx_t = \mu_t\, dt + \frac{\phi_t}{L_t}\, dt + e^{h_t/2}\, dW_t^{(x)} + J_t\, dN_t \tag{2}$$
+Log-variance follows a mean-reverting Ornstein-Uhlenbeck (OU) process:
 
-where $W_t^{(x)}$ is a standard Wiener process, $N_t$ is a Cox process with volume-dependent intensity $\lambda_J(t) = \lambda_0 + \lambda_1 v_t$, and $J_t$ are i.i.d. double-exponential jump sizes.
+$$
+dh_t = -\eta (h_t - \bar{h}_t) dt + \sigma_h dW^{(h)}_t \tag{4}
+$$
 
-### 2.2 Drift Evolution
+**Order-Flow Pressure**
 
-Drift is modeled as mean-reverting (sentiment decay) and is pushed by sustained, unexpected order flow:
+Order-flow pressure is modeled as an OU process driven by the normalized signed volume $\delta_t / (v_t + \varepsilon)$:
 
-$$d\mu_t = -\lambda_\mu \mu_t\, dt + \kappa_\mu(\phi_t - \bar\phi_t)\, dt + \sigma_\mu\, dW_t^{(\mu)} \tag{3}$$
+$$
+d\phi_t = -\alpha \phi_t dt + \beta \frac{\delta_t}{v_t + \varepsilon} dt + \sigma_\phi dW^{(\phi)}_t \tag{5}
+$$
 
-where $\bar\phi_t$ is the rolling mean of order-flow pressure, and $\kappa_\mu(\phi_t - \bar\phi_t)$ encodes that only deviations from the running baseline update sentiment.
+**Liquidity Evolution**
 
-### 2.3 Volatility Evolution
+Log-liquidity follows an OU process with a jump component to model sudden liquidity withdrawal:
 
-Log-variance follows a mean-reverting Ornstein–Uhlenbeck (OU) process, guaranteeing positivity without boundary constraints:
+$$
+d\ell_t = -\theta(\ell_t - \bar{\ell}) dt + \sigma_\ell dW^{(\ell)}_t - \zeta dN^{(\ell)}_t \tag{6}
+$$
 
-$$dh_t = -\eta(h_t - \bar h_t)\, dt + \sigma_h\, dW_t^{(h)} \tag{4}$$
+### 1.2 Observation Model
 
-where $\bar h_t$ is the long-run log-variance, tracked recursively as an exponential moving average of realized log-variance.
+Observations occur at discrete 1-second intervals $t_k = k\Delta t$. The observation vector is $\mathbf{y}_k = (\Delta x_k, v_k, \delta_k, q_k, d^{(b)}_k, d^{(a)}_k)$. The measurement equation for log-returns is:
 
-### 2.4 Order-Flow Pressure
+$$
+\Delta x_k = \int_{t_{k-1}}^{t_k} \Bigl(\mu_s + \frac{\phi_s}{L_s}\Bigr) ds + \sigma_k^{(\text{eff})} \varepsilon^{(x)}_k + \sum_{j:N_j \in (t_{k-1}, t_k]} J_j \tag{7}
+$$
 
-The autocorrelation of order flow on short horizons is empirically single-exponential, allowing a Markovian embedding via an OU process:
+where $\sigma_k^{(\text{eff})} = \int e^{h_s} ds$ and $\varepsilon^{(\cdot)}_k \sim \mathcal{N}(0, 1)$.
 
-$$d\phi_t = -\alpha \phi_t\, dt + \beta \left(\frac{\delta_t}{v_t + \varepsilon}\right) dt + \sigma_\phi\, dW_t^{(\phi)} \tag{5}$$
+## 2. Non-Equilibrium Market Potential
 
-where $\varepsilon \ll 1$ is a mathematical regularizer to prevent division-by-zero in vacuum intervals.
+We construct a market potential $U(x, t)$ such that price motion is *as if* $x_t$ were an overdamped particle in $U$ with temperature $T_t = \sigma_t^2 / 2$.
 
-### 2.5 Liquidity Evolution
+### 2.1 Volume-Weighted Density
 
-Effective Kyle depth $L_t$ is observable via $\hat L_k = v_k \cdot q_k / |\Delta x_k|$. The log-liquidity follows:
+Let $\{(x_i, v_i, t_i)\}$ be the trade tape. The volume-weighted price density is:
 
-$$d\ell_t = -\theta(\ell_t - \bar\ell)\, dt + \sigma_\ell\, dW_t^{(\ell)} - \zeta\, \mathbb{1}_{\{|dN_t| > 0\}}\, dN_t \tag{6}$$
+$$
+\rho(x, t) = \frac{1}{Z(t)} \sum_{i:\, t_i \in [t - T_w, t]} v_i K_h(x - x_i) \tag{8}
+$$
 
-where the jump term $\zeta > 0$ models sudden liquidity withdrawal.
+where $K_h(u) = h^{-1} K(u/h)$ is a Gaussian kernel with Silverman bandwidth $h$, $T_w$ is the memory window, and $Z(t) = \sum v_i$.
 
----
+### 2.2 Liquidity Cost Field
 
-## 3. Market Potential
+The liquidity cost field is defined as the marginal price-impact cost:
 
-We construct a non-equilibrium market potential $U(x,t)$ such that price motion is modeled as an overdamped particle in $U$ with structural temperature $T_t = \sigma_t^2/2$.
+$$
+V_{\text{liq}}(x, t) = \int_{x_0}^{x} \frac{|u - x_t|}{\sqrt{L_t \cdot D(u, t)}} du \tag{9}
+$$
 
-### 3.1 Volume-Weighted KDE
+where $D(u, t)$ is the local depth density at price level $u$.
 
-Let $\{(x_i, v_i, t_i)\}$ be the trade tape. The empirical price density is:
+### 2.3 Composite Potential
 
-$$\rho(x,t) = \frac{1}{Z(t)} \sum_{i:\, t_i \in [t - T_w,\, t]} v_i\, K_h(x - x_i) \tag{7}$$
+The total market potential is:
 
-where $K_h(\cdot) = h^{-1}K(\cdot/h)$ is a Gaussian kernel, $T_w = 300$s is the memory window, and $Z(t) = \sum v_i$ is the normalizer. The bandwidth $h$ is determined by Silverman's rule adapted for volume weights.
+$$
+U(x, t) = -T_t \log \rho(x, t) + V_{\text{liq}}(x, t) \tag{10}
+$$
 
-### 3.2 Liquidity Cost Field
+### 2.4 Barrier Energy
 
-The marginal price-impact cost of moving price from $x_t$ to $u$ is:
+Define local minima of $U$ as basins and local maxima as barriers $x^{(\pm)}_t$. The upward and downward barrier energies are:
 
-$$V_{liq}(x,t) = \int_{x_t}^{x} \frac{|u - x_t|}{\sqrt{L_t \cdot D(u,t)}}\, du \tag{8}$$
+$$
+\Delta U^{\pm}_t = U(x^{(\pm)}_t, t) - U(x_t, t) \pm \frac{1}{2}\mu_t (x^{(\pm)}_t - x_t) \tag{11}
+$$
 
-where $D(u,t)$ is the local depth density obtained by interpolating L2 snapshots.
+The $\pm \frac{1}{2}\mu_t \Delta x$ term represents the work done by the drift in climbing the barrier.
 
-### 3.3 Non-Equilibrium Potential
+## 3. Modified Kramers Escape Rates
 
-The market potential is defined as:
+Classical Kramers theory assumes equilibrium and constant temperature. We modify the escape rates to account for non-equilibrium driving, stochastic volatility, and Kyle-lambda friction.
 
-$$U(x,t) = -T_t \log \rho(x,t) + V_{liq}(x,t) \tag{9}$$
+The modified upward and downward escape rates $k^{\pm}_t$ are:
 
-In equilibrium, an overdamped Langevin particle in $U$ at temperature $T$ has stationary density $\rho^{eq}(x) \propto e^{-U(x)/T}$. Our construction inverts this: given an empirical $\rho$, the potential that generates it is $-T\log\rho$. The liquidity term encodes the non-equilibrium friction.
-
-### 3.4 Barrier Energy
-
-Local minima of $U(\cdot,t)$ represent basins of attraction (support). Local maxima $x_t^{(b)}$ represent barriers (resistance). The upward and downward barrier energies are defined as:
-
-$$\Delta U_t^+ = U(x_t^{(+)}, t) - U(x_t, t) + \frac{1}{2}\mu_t\left(x_t^{(+)} - x_t\right) \tag{10}$$
-
-$$\Delta U_t^- = U(x_t^{(-)}, t) - U(x_t, t) - \frac{1}{2}\mu_t\left(x_t^{(-)} - x_t\right) \tag{11}$$
-
-The drift-work terms correctly adjust the barrier height: a positive drift lowers the upward barrier (drift-assisted) and raises the downward barrier (drift-opposed).
-
----
-
-## 4. Modified Kramers Escape Rates
-
-Classical Kramers escape rate $k \propto \exp(-\Delta U/T)$ assumes equilibrium, constant $T$, and time-independent $U$. We modify this to handle non-equilibrium driving, stochastic volatility, and Kyle-lambda friction.
-
-### 4.1 Non-Equilibrium Density Ratio
-
-We replace the Boltzmann factor with the exact empirical density ratio (Large Deviation Principle):
-
-$$e^{-\Delta U/T} \longrightarrow \frac{\rho_{emp}(x_t^{(\pm)}, t)}{\rho_{emp}(x_t, t)} \tag{12}$$
-
-### 4.2 Stochastic Temperature Correction
-
-We average the Boltzmann factor over the volatility posterior:
-
-$$\left\langle e^{-\Delta U/T} \right\rangle_{h_t} \approx e^{-\Delta U/T_t} \cdot \exp\left[\frac{1}{2}\left(\Delta U/T_t\right)^2 \operatorname{Var}(h_t \mid \mathcal{F}_t)\right] \tag{13}$$
-
-This mathematically captures that volatility-of-volatility increases escape probability.
-
-### 4.3 Friction Correction
-
-Friction $\gamma$ is replaced by the Kyle lambda inverse:
-
-$$\gamma_t = \frac{1}{L_t} \tag{14}$$
-
-### 4.4 Final Escape Rates
-
-The modified Kramers rates over the barriers are:
-
-$$k_t^{\pm} = \frac{\sqrt{U''(x_t)\,|U''(x_t^{(\pm)})|}}{2\pi L_t} \cdot \frac{\rho(x_t^{(\pm)}, t)}{\rho(x_t, t)} \cdot \exp\left[\frac{1}{2}\left(\Delta U_t^{\pm}/T_t\right)^2 \operatorname{Var}(h_t \mid \mathcal{F}_t)\right] \tag{15}$$
-
-### 4.5 Transition Probabilities
-
-Using a competing-risk exit model and the slow-variation approximation over horizon $\tau$, the probabilities of upward and downward escape are:
-
-$$P_t^+(\tau) \approx \frac{k_t^+}{k_t^+ + k_t^-}\left(1 - e^{-(k_t^+ + k_t^-)\tau}\right) \tag{16}$$
-
-$$P_t^-(\tau) \approx \frac{k_t^-}{k_t^+ + k_t^-}\left(1 - e^{-(k_t^+ + k_t^-)\tau}\right) \tag{17}$$
-
-$$P_t^0(\tau) = e^{-(k_t^+ + k_t^-)\tau} \tag{18}$$
-
-where $P_t^0(\tau)$ is the probability of consolidation (no barrier crossing).
-
----
-
-## 5. Bayesian Estimation: Rao-Blackwellised Particle Filter
-
-Because the system is non-linear, non-Gaussian, and contains a discrete regime variable $r_t$, we employ a Rao-Blackwellised Particle Filter (RBPF).
-
-### 5.1 Continuous Layer (UKF)
-
-Conditional on $r_t = i$ and the jump path, the continuous subsystem $(x_t, \mu_t, h_t, \phi_t, \ell_t)$ is approximately linear-Gaussian. It is propagated via an Unscented Kalman Filter (UKF) per particle. The UKF uses the scaled unscented transform with sigma points $\chi_i = \mu \pm \left(\sqrt{(L+\lambda)P}\right)_i$.
-
-The marginal measurement likelihood for the particle weight update strictly uses the UKF innovation variance $P_{zz}$:
-
-$$p(y_k \mid \Psi_k^{(i)}) \propto \exp\left[-\frac{1}{2}(y_k - \hat z_k)^2 P_{zz}^{-1}\right] \tag{19}$$
-
-### 5.2 Discrete Layer (Particle Filter)
-
-The discrete layer maintains $N_p$ particles. Each particle carries a regime label $r_t^{(i)}$ and a UKF instance. The transition rates $Q_{ij}(\Psi_t)$ between regimes are derived from the rate at which the phase vector crosses topological separating surfaces, rather than being imposed exogenously. Systematic resampling is triggered when the Effective Sample Size (ESS) falls below $N_p/2$.
-
----
-
-## 6. Kelly-Optimal Trading Decisions
-
-Trading decisions are driven by the Kelly criterion, specifically maximizing the expected log-wealth increment.
-
-### 6.1 Expected Log-Wealth
-
-For a trade of signed size $z \in \{-1, +1\}$ and notional $n$ executed at slippage $s(n, \ell_t)$ and fee rate $f$, the post-trade log-wealth change over horizon $\tau$ is:
-
-$$\Delta \log W = z \cdot n \cdot \left[\Delta x_{t,t+\tau} - z\left(s(n, \ell_t) + f\right)\right] - \frac{1}{2}n^2 \sigma_{res}^2\, \tau \tag{20}$$
-
-### 6.2 Bayesian Edge
-
-The Bayesian edge of a long trade is:
-
-$$E^+(n, t, \tau) := \mathbb{E}\left[\Delta \log W \mid \mathcal{F}_t, z=+1, n=n\right] = n\left(\hat\mu_\tau - s(n, \hat\ell_t) - f\right) - \frac{1}{2}n^2 \hat\sigma_\tau^2 \tag{21}$$
-
-where $\hat\mu_\tau = \mathbb{E}[x_{t+\tau} - x_t \mid \mathcal{F}_t]$ and $\hat\sigma_\tau^2 = \operatorname{Var}[x_{t+\tau} - x_t \mid \mathcal{F}_t]$ are computed from the RBPF posterior and escape rates.
-
-### 6.3 Entry and Exit Logic
-
-The optimal entry triggers iff there exists $(z, n)$ such that $E^z(n, t, \tau^\star) > 0$, where $\tau^\star$ is the horizon maximizing the edge. The optimal size is the analytical maximum:
-
-$$n^\star = \frac{\hat\mu_{\tau^\star} - f - s_0}{\hat\sigma_{\tau^\star}^2 + \partial s/\partial n} \tag{22}$$
-
-The position is held until the optimal stopping time:
-
-$$\tau_{exit} = \inf\left\{s > t : E^z(n^\star, s, \tau_{rem}) \le 0\right\} \tag{23}$$
-
-This ensures the engine exits the moment the expected future drift no longer covers the marginal cost of holding (fees + slippage + latency drift).
-
----
-
-## 7. Trade Expectancy and Positive EV Proof
-
-To rigorously demonstrate that the engine only executes trades with a mathematical advantage, we derive the closed-form expectancy of a trade and prove it is strictly positive.
-
-### 7.1 Defining the Trade Expectancy
-
-Let $X$ be the expected log-wealth increment of a single trade. At entry time $t$, for a chosen direction $z \in \{-1,+1\}$ and horizon $\tau$, the expectancy is given by the Bayesian Edge equation:
-
-$$\mathbb{E}[X \mid \mathcal{F}_t, z, n] = E^z(n, t, \tau) = n(\hat\mu_\tau - C) - \frac{1}{2}n^2\hat\sigma_\tau^2 \tag{24}$$
+$$
+k^{\pm}_t = \frac{\sqrt{U''(x_t) |U''(x^{(\pm)}_t)|}}{2\pi \gamma_t} \cdot \frac{\rho(x^{(\pm)}_t, t)}{\rho(x_t, t)} \cdot \exp\left(-\frac{\Delta U^{\pm}_t}{T_t}\right) \cdot \mathcal{V}^{\pm}_t \tag{12}
+$$
 
 where:
 
-- $\hat\mu_\tau = \mathbb{E}[x_{t+\tau} - x_t \mid \mathcal{F}_t]$ is the posterior expected log-return.
-- $\hat\sigma_\tau^2 = \operatorname{Var}[x_{t+\tau} - x_t \mid \mathcal{F}_t]$ is the posterior variance.
-- $C = f + s_0 + |\hat\mu_t|\Delta_{lat}$ is the aggregate cost function (fees, base slippage, latency drift). For simplicity, we fold the marginal slippage $s_1$ into the variance term, letting $\hat\sigma_\tau^2$ represent $\hat\sigma_\tau^2 + s_1$.
+- $\gamma_t = 1/L_t$ is the Kyle-lambda friction coefficient.
+- $\dfrac{\rho(x^{(\pm)}_t, t)}{\rho(x_t, t)}$ is the exact non-equilibrium density ratio.
+- $\mathcal{V}^{\pm}_t = \exp\left( \frac{1}{2} \left(\frac{\Delta U^{\pm}_t}{T_t}\right)^2 \text{Var}(h_t \mid \mathcal{F}_t) \right)$ is the volatility-of-volatility correction.
 
-### 7.2 Finding the Optimal Size $n^\star$
+### 3.1 Transition Probabilities
 
-The engine sizes the trade to maximize the expected log-wealth (Kelly criterion). We find $n^\star$ by taking the derivative of $E$ with respect to $n$ and setting it to zero:
+Using the slow-variation approximation over horizon $\tau$, the competing-risk exit probabilities are:
 
-$$\frac{\partial E}{\partial n} = (\hat\mu_\tau - C) - n\hat\sigma_\tau^2 = 0 \tag{25}$$
+$$
+P^+_t(\tau) \approx \frac{k^+_t}{k^+_t + k^-_t}\Bigl(1 - e^{-(k^+_t + k^-_t)\tau}\Bigr) \tag{13a}
+$$
 
-Solving for $n$ yields the optimal Kelly size:
+$$
+P^-_t(\tau) \approx \frac{k^-_t}{k^+_t + k^-_t}\Bigl(1 - e^{-(k^+_t + k^-_t)\tau}\Bigr) \tag{13b}
+$$
 
-$$n^\star = \frac{\hat\mu_\tau - C}{\hat\sigma_\tau^2} \tag{26}$$
+$$
+P^0_t(\tau) \approx e^{-(k^+_t + k^-_t)\tau} \tag{13c}
+$$
 
-### 7.3 Deriving the Closed-Form Expectancy
+## 4. Decision Theory and Trading Rules
 
-Substitute the optimal size $n^\star$ back into the original expectancy equation to find the maximized expectancy $\mathbb{E}[X^\star]$:
+### 4.1 Directional Decision
 
-$$\mathbb{E}[X^\star] = n^\star(\hat\mu_\tau - C) - \frac{1}{2}(n^\star)^2\hat\sigma_\tau^2 \tag{27}$$
+The direction $z^* \in \{-1, 0, 1\}$ is determined strictly by the Bayesian posterior probabilities of barrier escape:
 
-$$\mathbb{E}[X^\star] = \left(\frac{\hat\mu_\tau - C}{\hat\sigma_\tau^2}\right)(\hat\mu_\tau - C) - \frac{1}{2}\left(\frac{\hat\mu_\tau - C}{\hat\sigma_\tau^2}\right)^2 \hat\sigma_\tau^2 \tag{28}$$
+$$
+z^* = \begin{cases}
++1 & \text{if } P^+_t(\tau) > P^-_t(\tau) \text{ and } P^+_t(\tau) > P^0_t(\tau) \\
+-1 & \text{if } P^-_t(\tau) > P^+_t(\tau) \text{ and } P^-_t(\tau) > P^0_t(\tau) \\
+0 & \text{otherwise}
+\end{cases}
+$$
 
-$$\mathbb{E}[X^\star] = \frac{(\hat\mu_\tau - C)^2}{\hat\sigma_\tau^2} - \frac{1}{2}\frac{(\hat\mu_\tau - C)^2}{\hat\sigma_\tau^2} \tag{29}$$
+### 4.2 Trade Execution and Sizing
 
-$$\mathbb{E}[X^\star] = \frac{1}{2}\frac{(\hat\mu_\tau - C)^2}{\hat\sigma_\tau^2} \tag{30}$$
+A trade is triggered in direction $z^*$ if the posterior probabilities indicate a statistically meaningful escape likelihood. The trade size $n$ is bounded by the instantaneous market liquidity to prevent adverse market impact and slippage exhaustion:
 
-### 7.4 Proof that $\mathbb{E}[X] > 0$
+$$
+n \le 0.1 \cdot L_t \tag{14}
+$$
 
-**Claim.** The expectancy of any executed trade in the framework is strictly positive ($\mathbb{E}[X^\star] > 0$).
+where $L_t = e^{\ell_t}$ is the posterior Kyle depth. This ensures the position size scales dynamically with the market's capacity to absorb the trade without catastrophic slippage.
+
+## 5. Rigorous Derivation of Expected Return $E[X]$
+
+We now rigorously derive the expected return over the trading horizon $\tau$, denoted $E[X]$, where $X = x_{t+\tau} - x_t$.
+
+> **Theorem (Expected Log-Return).** Given the latent state $\Psi_t$ at time $t$, the expected log-return over horizon $\tau$ is:
+>
+> $$
+> \mathbb{E}[X \mid \Psi_t] \approx \mu_t \tau + \frac{\phi_t}{L_t \alpha} \Bigl(1 - e^{-\alpha \tau}\Bigr) + \lambda_J \mathbb{E}[J] \tau
+> $$
 
 **Proof.**
 
-1. By definition of the stochastic processes, the posterior variance over a finite horizon $\tau$ is strictly positive: $\hat\sigma_\tau^2 > 0$.
-2. Therefore, the denominator $\hat\sigma_\tau^2$ is strictly positive.
-3. The numerator is a squared term: $(\hat\mu_\tau - C)^2 \ge 0$. It equals zero if and only if $\hat\mu_\tau = C$.
-4. The engine's entry logic strictly mandates that a trade is only executed if:
-   $$E^z(n^\star, t, \tau^\star) > 0 \tag{31}$$
-   Which implies:
-   $$\frac{1}{2}\frac{(\hat\mu_\tau - C)^2}{\hat\sigma_\tau^2} > 0 \tag{32}$$
-5. For this strict inequality to hold, the numerator cannot be zero. Therefore, $\hat\mu_\tau \ne C$.
-6. Because the engine only enters when the expected move exceeds the cost ($\hat\mu_\tau > C$), we have $(\hat\mu_\tau - C)^2 > 0$.
-7. A strictly positive numerator divided by a strictly positive denominator yields a strictly positive result.
+By definition, $X = x_{t+\tau} - x_t = \int_t^{t+\tau} dx_s$. Substituting the price SDE from Eq. (2):
 
-$$\therefore \mathbb{E}[X^\star] > 0 \qquad \blacksquare \tag{33}$$
+$$
+X = \int_t^{t+\tau} \mu_s ds + \int_t^{t+\tau} \frac{\phi_s}{L_s} ds + \int_t^{t+\tau} \sigma_s dW^{(x)}_s + \int_t^{t+\tau} J_s dN_s
+$$
 
-### 7.5 Expanding $\hat\mu_\tau$ via Transition Probabilities
+Taking the conditional expectation $\mathbb{E}[X \mid \Psi_t]$, the Itô integral vanishes since $\mathbb{E}\left[\int \sigma_s dW_s\right] = 0$. We are left with:
 
-To make the expectancy fully observable in terms of the engine's math, we substitute the posterior expected return $\hat\mu_\tau$. Using the modified Kramers escape probabilities, the expected return is the probability-weighted distance to the barriers:
+$$
+\mathbb{E}[X \mid \Psi_t] = \mathbb{E}\left[\int_t^{t+\tau} \mu_s ds \mid \Psi_t\right] + \mathbb{E}\left[\int_t^{t+\tau} \frac{\phi_s}{L_s} ds \mid \Psi_t\right] + \mathbb{E}\left[\int_t^{t+\tau} J_s dN_s \mid \Psi_t\right]
+$$
 
-$$\hat\mu_\tau = P_t^+(\tau) \cdot d^+ - P_t^-(\tau) \cdot d^- \tag{34}$$
+Under the slow-variation approximation over the short horizon $\tau \le 30\text{s}$, we treat the drift and liquidity as locally constant: $\mu_s \approx \mu_t$ and $L_s \approx L_t$. The first term trivially integrates to:
 
-Where $d^+$ and $d^-$ are the distances to the upward and downward barriers. Substituting this into the expectancy formula yields the complete, mathematically rigorous expectancy of the system:
+$$
+\mathbb{E}\left[\int_t^{t+\tau} \mu_s ds \mid \Psi_t\right] \approx \mu_t \tau
+$$
 
-$$\mathbb{E}[X^\star] = \frac{1}{2}\frac{\left(P_t^+(\tau)d^+ - P_t^-(\tau)d^- - C\right)^2}{\hat\sigma_\tau^2} \tag{35}$$
+For the order-flow term, we require the conditional expectation of the order-flow pressure $\phi_s$. Since $\phi_t$ follows an OU process $d\phi_t = -\alpha \phi_t dt + \dots$, its deterministic evolution from an initial state $\phi_t$ is known exactly:
 
-Because the entry gate strictly requires $P_t^+(\tau)d^+ - P_t^-(\tau)d^- > C$, the square of this difference is strictly positive, mathematically guaranteeing that every trade taken by the engine has a positive expected log-wealth increment.
+$$
+\phi_s = \phi_t e^{-\alpha(s-t)} \quad \text{for } s \in [t, t+\tau]
+$$
 
----
+Substituting this into the integral yields:
 
-## 8. Topological Regime Derivation
+$$
+\mathbb{E}\left[\int_t^{t+\tau} \frac{\phi_s}{L_s} ds \mid \Psi_t\right] \approx \frac{1}{L_t} \int_0^\tau \phi_t e^{-\alpha u} du = \frac{\phi_t}{L_t} \left[ \frac{-e^{-\alpha u}}{\alpha} \right]_0^\tau = \frac{\phi_t}{L_t \alpha} \Bigl(1 - e^{-\alpha \tau}\Bigr)
+$$
 
-Regimes are not defined by arbitrary thresholds, but by the topology of the phase vector $p_t = (\mu_t, \dot\mu_t, \phi_t, h_t, \ell_t, d_t)$ relative to derived noise floors:
+For the jump component, $N_s$ is a Cox process with intensity $\lambda_J$. The expected number of jumps is $\lambda_J \tau$, and the expected jump size is $\mathbb{E}[J]$. Thus:
 
-$$\mu_t^\star = \sigma_t / \sqrt{\tau} \quad \text{(drift noise floor)} \tag{36}$$
+$$
+\mathbb{E}\left[\int_t^{t+\tau} J_s dN_s \mid \Psi_t\right] \approx \lambda_J \mathbb{E}[J] \tau
+$$
 
-$$\phi_t^\star = \sigma_\phi / \sqrt{\alpha} \quad \text{(flow noise floor)} \tag{37}$$
+Summing these components, we arrive at the exact expected log-return:
 
-The partition identifies **Trend** ($\|\mu_t\| > \mu_t^\star$, accelerating, flow-aligned), **Exhaustion** ($\|\mu_t\| > \mu_t^\star$, decelerating), **Reversal** ($\mu_t$ crossed zero, opposing flow), and **Consolidation** ($\|\mu_t\| < \mu_t^\star$, near basin center). The transition rates between these topological regions are fully determined by the SDE dynamics.
+$$
+\mathbb{E}[X \mid \Psi_t] \approx \mu_t \tau + \frac{\phi_t}{L_t \alpha} \Bigl(1 - e^{-\alpha \tau}\Bigr) + \lambda_J \mathbb{E}[J] \tau
+$$
 
----
+For sufficiently small $\alpha \tau$ (which holds for $\tau \le 30\text{s}$), we can apply the first-order Taylor expansion $1 - e^{-\alpha \tau} \approx \alpha \tau$, simplifying the expression to:
 
-## 9. Computational Architecture
+$$
+\hat{\mu}_\tau \equiv \mathbb{E}[X \mid \Psi_t] \approx \left( \mu_t + \frac{\phi_t}{L_t} \right) \tau + \lambda_J \mathbb{E}[J] \tau
+$$
 
-To meet the sub-2ms latency requirement for live trading, the math-critical inner loops (UKF propagation, KDE evaluation, barrier grid search) are Just-In-Time (JIT) compiled using `numba`. The RBPF runs $N_p = 200$ particles, resulting in a per-tick computational cost of $\mathcal{O}(N_p \cdot n^3) \approx 2.5 \times 10^4$ FLOPs, ensuring real-time streaming capability without look-ahead bias.
+$\blacksquare$
+
+### 5.1 Expected Profit $E[\Pi]$
+
+Let a trade be opened at time $t$ with signed direction $z \in \{-1, 1\}$ and notional $n$. The expected profit over horizon $\tau$, net of proportional fees $f$, base slippage $s_0$, and latency drift cost, is:
+
+$$
+\mathbb{E}[\Pi \mid z, n] = n \left( z \hat{\mu}_\tau - f - s_0 - |z \mu_t| \Delta_{\text{lat}} \right)
+$$
+
+The engine triggers a trade if and only if the expected profit is strictly positive, $\mathbb{E}[\Pi \mid z^*, n] > 0$, subject to the liquidity constraint on $n$ defined in Eq. (13).
+
+## 6. Estimation via Rao-Blackwellised Particle Filter
+
+The latent state $\Psi_t$ is estimated online using a Rao-Blackwellised Particle Filter (RBPF).
+
+- **Particle Layer**: $N_p = 200$ particles are maintained, each carrying a discrete regime label $r^{(i)}_t$ and a continuous state sample. Resampling is triggered when the Effective Sample Size (ESS) falls below $N_p / 2$.
+- **Kalman Layer**: Conditional on the particle's discrete state, the continuous 5-dimensional state is propagated and updated using an Unscented Kalman Filter (UKF). The UKF employs the scaled unscented transform to handle the nonlinearities in $1/L_t$ and $e^{h_t/2}$.
+
+The posterior mean $\widehat{\Psi}_t = \sum_i w^{(i)}_t \Psi^{(i)}_t$ provides the inputs for the Kramers escape and decision logic.
+
+## 7. Conclusion
+
+This document mathematically specifies a complete stochastic trading engine. By grounding short-horizon memecoin price action in a non-equilibrium statistical mechanics framework, we derive continuous transition probabilities and a rigorous expected return $E[X]$ that forms the mathematical basis of the trading decision and expected profit objective.

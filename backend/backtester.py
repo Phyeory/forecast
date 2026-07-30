@@ -126,8 +126,12 @@ def run_backtest_batch(
         engine_version=engine_version,
     )
 
-    # For typical batch sizes, sequential is faster (no spawn overhead)
-    if len(completed) <= 20:
+    # Scheduling only (per-recording computation is identical either way):
+    # sequential for single-recording runs or when the caller didn't ask
+    # for parallelism; parallel pool whenever max_workers > 1 is requested.
+    # (Previously batches of ≤20 were forced sequential regardless of
+    # max_workers, which made 8-rec smoke sweeps crawl on one core.)
+    if len(completed) == 1 or not max_workers or max_workers <= 1:
         results = []
         for rec in completed:
             try:

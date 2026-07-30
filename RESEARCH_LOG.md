@@ -39,6 +39,20 @@ recorded here.  No undocumented changes are permitted.
 | 14        | iter14_dt_fix / iter14_ig | 7/20 + 2/2 | 0% / 3.4% | 0.000 / -1.889 | n/a | REJECTED — dt=0.25 (iter14-A) silenced all kramers entries on 7/7 worst-20 records; IG catalyst (iter14-B) churned 519 trades on rec349 alone |
 | 15        | iter15_recorder_fix | (no backtest run) | n/a | n/a | n/a | **RECORDER PATCH (not engine)** — PumpSwapRPCClient now extracts vault deltas from accountSubscribe to populate `volume`/`buy_volume`/`sell_volume`/`tx_type=buy/sell`. Diagnosis: any iter01–14 dataset has zero order flow, so ALL prior engine experiments were on price-only data. iter14 Fix-A/B/C reverted to clean iter08. Next batch must be rerecorded fresh. |
 | 16        | iter16_data_landfall | (no backtest run) | n/a | n/a | n/a | **FRESH DATASET (no code change)** — User wiped legacy `price_data.db`.
+| 16-base   | iter16_baseline_full | 287 | 24.39% | -0.798 | 0.257 | **CANONICAL FRESH BASELINE (no code change)** — First V2 batch on the fresh 235-recording dataset with real order flow. Legacy failure modes re-partitioned: `recording_ended` tail COLLAPSED (656→3 trades, -25.98→-0.16 SOL) but `kramers_down_exit` core INVERTED (+17.89 SOL @ 80.5% WR → -0.43 SOL @ 26.7% WR). Engine over-trades: 74% of entries fire in `exhaustion` regime at 22% WR. |
+| 16b       | iter16b_signflip_full | 528 | 24.2% | -1.926 | ~0.4 | **REJECTED** — Drift-work signs flipped to spec-prose both sides. `recording_ended` tail returned (12 trades -0.868). |
+| 16c       | iter16c_spec_kramers_full | 19657 | 17.2% | -35.91 | 0.02 | **REJECTED** — Spec eq.15 prefactor·ratio·vol_corr without Boltzmann. `vol_corr` saturates e^50 → P⁰≡0 → argmax(ρ-ratio) flip-flops every tick. |
+| 16h       | iter16h_costcal_full | 2707 | 33.36% | -6.061 | 0.482 | **REJECTED (PnL) / KEPT (foundation)** — KDE-native U=-T·lnρ (V_liq out), drift-work out of exponents, vol_corr dropped, U''/Δx² fix, eq.34 μ̂_τ, cost-calibrated s_0=0.011/fee=0.0011. WR +9pts vs baseline but 9.4× trade count at similar exp/trade (-0.00224). All subsequent work builds on this tree state. |
+| 16i       | iter16i_tau_smoke | 502 (8rec) | 29.1% | -1.078 | 0.37 | **REJECTED** — τ sweep wired to cfg + τ×4 (20-120 engine-s). Longer horizons did not reduce churn (φ²τ² risk term pinned best-τ to minimum). |
+| 16j       | iter16j_varphi_full | 2606 | 33.8% | -5.930 | 0.50 | **REJECTED (PnL) / KEPT (correctness)** — σ²_τ flow term: plug-in E[φ]² → RBPF posterior Var(φ). Mechanism ENGAGED (σ²_τ ~1000× smaller, τ-sweep un-pinned, E* real scale 0.13 med) but outcomes ~unchanged. Correct central moment kept in tree. |
+| 16k       | iter16k_tw14400_full | 325 | 41.54% | -0.534 | 0.842 | **BREAKTHROUGH (structural KDE memory)** — T_w=14400 (full-lifetime volume profile vs 75s wiggle window). WR 24→41.5%, PF 0.26→0.84. `kramers_down_exit` became PROFITABLE again (+0.85 SOL @ 60% WR). T_w sweep monotone 300→57600, positive plateau 7200-57600. |
+| 16l       | iter16l_floor_full | 401 | 38.90% | **+0.110** | 1.030 | **BEST FULL BATCH (gates not cleared)** — iter16k + spec-listed `hard_stop` at -25% (stoploss_pct=-25). First positive full batch on fresh data. Exit profile: reversal +1.08, kramers +0.79, bayesian_flip +0.36, tp_v2 +0.71, hard_stop -2.81 (102 fires), recording_ended neutralised (-0.02). paired_diff vs 16-base: Δ=+0.908 SOL, 52% tokens improved, BUT Wilcoxon p=0.387, bootstrap CI [-0.008,+0.040] → statistical gates NOT cleared (n=50 common tokens, high-variance churn regressions SIMBA/CIGCAT). |
+| 16m       | iter16m_hyst_smoke | 60 (8rec) | 45.0% | +0.202 | 1.42 | **REJECTED** — Post-hard-stop Kelly falsification hysteresis (re-entry requires ℰ* > busted entry's ℰ*). Killed stop-chains but blocked profitable rebound re-entries (duky +139.1%/+69.7%/+14.5% = -0.22 SOL on smoke). ℰ* not a quality proxy for rebounds. |
+| 16n       | iter16n_signflip_smoke | 34 (8rec) | 35.3% | -0.054 | 0.75 | **REJECTED** — U=+T·lnρ (HVN=barrier, V1-style). Eliminates crash-chains entirely (4 crash tokens: 3 trades +0.002 vs iter16l ~-0.39) but destroys entry quality on normal tokens (smoke +0.43→-0.05). |
+| 16o       | iter16o2_smoke/crash | 86/56 | 36.0%/32.1% | +0.054/-0.396 | 1.11/0.30 | **REJECTED** — Boundary-as-infinite-barrier fix (no-barrier side → open escape at attempt rate) on the well geometry. Failed to cut crash chains AND degraded smoke entries. |
+| 17a       | iter17a_full | 187 | 56.15% | **+0.572** | 1.41 | **BEST FRESH-BATCH PROFILE (WR↔PnL Pareto frontier) / paired_diff REJECT** — Counterfactual-validated entry gates (P_up≥0.62, σ_t≥0.021) + tail-preserving exit overlays (gain-retrace arm +12% / give-frac 0.6, breakeven-scratch arm -20% / exit +2.5%). gain_retrace: 64 @ 82.8% WR +0.48 SOL; be_scratch: 9 @ 88.9%; kramers/tp/bayesian 10@85%. Remaining drag = 40 hard_stop crashes @ 0% WR -1.10 SOL (entry-feature-INDISTINGUISHABLE from good entries: P_up 0.764 vs 0.766, confidence 1.0, signal 2× STRONGER — pure P_down≡0 blindness). paired_diff vs 16-base (36 common tokens): Δ +0.018/tok, Wilcoxon p=0.136, bootstrap CI [-0.0008,+0.039], 61% improved, McNemar p=0.049 → gates NOT cleared. |
+| 17b       | iter17b_full | 135 | 52.6% | +0.363 | 1.39 | **REJECTED** — Added `v2_require_past_peak` entry gate (static-mask analysis: pp=T kept 96% PnL / 34% trades / 6/40 hard stops). Real run WORSE than iter17a on both WR and PnL — **replacement-entry dynamics**: blocking past_peak=False entries re-routes the engine to different subsequent entries, breaking the static-mask prediction. Static counterfactual masks are unreliable predictors of dynamic per-bar engine outcomes. |
+| 17c       | iter17c_full | 194 | 57.7% | +0.123 | 1.09 | **REJECTED** — Tightened overlays (gr arm 12→10, give 0.6→0.5; beX 20→15). WR +1.6pts vs 17a but PnL +0.572→+0.123, PF 1.41→1.09 — the right tail is load-bearing (law #1 RE-CONFIRMED on fresh data). The 70%-WR frontier on this dataset lies on the zero-PnL axis. |
 
 
 ## Iter 01 — Baseline (REJECTED — never traded)
@@ -2424,3 +2438,416 @@ active.
    yet — the entire iter01→14 failure-mode analysis (especially the
    `φ_t ≡ 0` and `ρ ≡ uniform` claims) must be RE-DERIVED on the fresh
    data, not carried over by intuition.
+
+
+## Iter 16-baseline — First V2 batch on the fresh dataset (iter16_baseline_full)
+
+**Date:** 2026-07-29
+**Files modified:** none (baseline measurement only)
+**Engine:** HEAD `e197364` (iter08 math + numba-batched RBPF perf kernels;
+backtester `recording_ended` force-close intact at backtester.py:283-288).
+**Dataset:** fresh `backend/data/price_data.db` — 235 completed 1s
+recordings (id range 2..486), 440,743 candles, 99.29% of candles with
+volume > 0, buy_volume > 0 on 53.7%, sell_volume > 0 on 49.4%, all 235
+recordings carry order flow. (Mission brief quoted 345 recordings/325k
+candles as of 2026-07-28; the user kept recording into 2026-07-29 and the
+DB on disk at run time holds 235 completed recordings — recorded
+2026-07-27 → 2026-07-29.)
+**Command:** `BACKTEST_RESULTS_DIR=backend/v2_results python run_iteration.py
+--label iter16_baseline_full --max-workers 8` (batch_id
+`iter16_baseline_full_1785317747`, 235/235 success, 0 errors, 236 s).
+
+### Headline metrics (vs legacy iter08 volume-free baseline, contrast only)
+
+| metric | iter08 legacy (deleted data) | iter16 fresh baseline |
+|---|---|---|
+| recordings | 1495 | 235 |
+| trades | 3197 | 287 |
+| win rate | 65.62% | 24.39% |
+| total PnL | -7.395 SOL | -0.798 SOL |
+| profit factor | 0.76 | 0.257 |
+| expectancy | -0.0023 SOL | -0.0028 SOL |
+| kramers_down_exit | 2538 trades, 80.5% WR, **+17.89 SOL** | 247 trades, 26.7% WR, **-0.425 SOL** |
+| reversal_exit | (small) | 37 trades, 10.8% WR, -0.210 SOL |
+| recording_ended | 656 trades, 8.1% WR, **-25.98 SOL** | **3 trades, 0% WR, -0.163 SOL** |
+| tokens traded | 950/1495 | 122/235 |
+
+### Structural findings (evidence for all future iter16 work)
+
+1. **The legacy `recording_ended` slow-bleed tail is GONE with real order
+   flow.** 656 dropped-loser trades (-25.98 SOL) on the volume-free
+   dataset shrank to 3 trades (-0.163 SOL). With φ_t anchored to real
+   δ_k/v_k and ρ(x) volume-weighted, the Bayesian exit machinery now
+   fires before recordings end. Hypothesis 1 from the mission brief
+   ("tail collapses without engine change") is CONFIRMED for the
+   force-close channel.
+2. **The profitable `kramers_down_exit` core INVERTED.** On legacy data
+   it was +17.89 SOL @ 80.5% WR; on fresh data it is -0.425 SOL @ 26.7%
+   WR (247 trades). The exit fires constantly (86% of all trades), but
+   now cuts positions at small losses instead of riding winners. The
+   engine churns: it enters, the posterior flips P_down ≥ 0.5 shortly
+   after, and it exits at -1% to -5%.
+3. **Entry regime distribution is dominated by `exhaustion`:** 213/287
+   entries (74%) are classified EXHAUSTION at entry (22.1% WR,
+   -0.467 SOL), vs 44 trend (27.3% WR), 26 idle (34.6% WR), 4 reversal.
+   On fresh data the engine systematically opens longs while the
+   posterior says momentum is decelerating. trend_confidence at entry is
+   ≈1.00 on most of the worst losers — posterior entropy is collapsing
+   onto a single regime at entry (over-confidence).
+4. **Winners exist but are rare:** gross win +0.275 SOL across 70 wins
+   (avg +0.39%/trade... best trade +20.85%), gross loss -1.073 SOL
+   across 217 losses. Expectancy -0.00278 SOL/trade.
+5. **Legacy absolute numbers are NOT acceptance targets.** All future
+   candidates compare against THIS baseline via paired_diff.py
+   (Wilcoxon p<0.05 one-sided, bootstrap 95% CI of mean Δ-PnL > 0,
+   ≥50% tokens improved).
+
+### Next steps
+
+- Profile per-trade latent-state trajectories (probe:
+  `backend/analysis/probes/iter16_failure_probe.py`) — entry-time
+  features of winners vs losers, mid-trade decision traces, fire-count
+  of the `bayesian_flip` branch (suspected structurally dead, see
+  mission brief §"Fix the dead branch").
+- Then evaluate the two mandatory mathematical re-evaluations in order:
+  (a) time-dilation dt fix + SDE rate rescaling; (b) true Kelly
+  expected-hold exit (strategyV2.md §6.3 eq. 23) replacing the dead
+  `bayesian_flip` branch.
+
+---
+
+## Iter 16b→16o — Full research arc on the fresh dataset (2026-07-29)
+
+All batches below run on the fresh 235-recording dataset; smokes use the
+worst-heavy pessimistic 8-recording subset (`2 86 431 205 59 322 184 3`)
+unless noted. Canonical commands per AGENTS.md. The acceptance gate for
+every candidate is paired_diff vs `iter16_baseline_full_1785317747`
+(Wilcoxon one-sided p<0.05, bootstrap 95% CI of mean Δ-PnL > 0,
+≥50% tokens improved).
+
+### Phase 1 — failure probes on the baseline (evidence base)
+
+- **`bayesian_flip` is STRUCTURALLY DEAD**: 0 fires / 287 baseline trades
+  (`_kramers_escape_and_decision` forces ℰ*=-1e3 when direction≠±1).
+- **kramers holds median 6 s** (p10=1 s, p90=54 s) — pure 1s-churn.
+- **Forward-edge probe** (`iter16_forward_edge.py`): winning entries have
+  REAL follow-through (r60=+3.0%, median MFE120=+11.2%, mean +18.4%);
+  losing entries MFE only +2.2%. **Exit inefficiency is dominant**:
+  winners realise +3.6% median vs +11.5% MFE (capture ratio 0.34);
+  post-exit continuation +1.0-1.2% @15-60 s — exits systematically
+  premature.
+- **Root structural cause**: T_t = σ²₁ₛ/2 ≈ 5e-5 vs V_liq-dominated
+  barriers → Boltzmann exp(-ΔU/T) ≡ 0 → k± degenerate to {0, 1e6} clamp
+  → decision = binary 1s μ-sign detector with inverted drift-work signs
+  (knife-catcher: μ<0→BUY, μ>0→EXIT).
+
+### Phase 2 — decision-math variants (all REJECTED on PnL, kept as foundation)
+
+- **16b drift-sign flip**: 528 trades, 24.2% WR, -1.926 SOL.
+- **16c spec-literal rates**: 19,657 trades, -35.91 SOL (vol_corr e^50
+  saturation → argmax(ρ-ratio) tick-flipping).
+- **16d/e/f/f2 (KEPT)**: KDE-native U=-T·lnρ (V_liq out of U, retained
+  in γ=1/L_t diagnostics); drift work out of escape exponents (½μΔx/T ~
+  10-100 swamps geometry — drift belongs in μ̂_τ per §4.1); vol_corr
+  dropped entirely (anti-physical at |ΔU/T|»1: (ΔU/T)² exponent grows
+  faster than Boltzmann decays → FARTHER barriers get HIGHER rates;
+  Var(h) was hardcoded 0.2, not posterior); **`_second_derivative_grid`
+  /Δx² dimensional fix** (was raw second-difference ×0.5 → attempt
+  frequency ~160× understated); μ̂_τ per §7.5 eq.34 = P⁺d⁺−P⁻d⁻.
+- **16g Kelly hold-exit (eq.23)**: fired 1103× @ 8.9% WR on smoke —
+  E_hold flips ≤0 within 1-2 bars of entry at the 1s cadence. REVERTED.
+- **16h = above + cost calibration** (s_0=0.011, fee_fraction=0.0011 —
+  matched to the ForwardTester's real 1.11% one-way cost; engine had
+  been modelling ~0.2%, a 10× undercount that made the §7 positive-EV
+  proof near-vacuous). Full: 2707 @ 33.36%, -6.061, exp -0.00224.
+- **16i τ-horizon wiring**: `get_decision(horizon=cfg["tau_max"])` (was
+  hardcoded 30). τ×4 didn't help — the φ²τ² risk term pinned best-τ to
+  the sweep minimum regardless.
+- **16j σ²_τ central-moment fix (KEPT)**: the flow term of the Kelly
+  horizon-variance used E[φ]² (squared posterior MEAN) instead of the
+  RBPF posterior Var(φ) — overstating σ²_τ ~10⁴× vs the diffusion term
+  (φ²τ²≈324 vs σ_t²τ≈0.03 at τ=120), collapsing n*→~0 and making the
+  ℰ*>0 Kelly gate vacuous. New `_posterior_var_batched` njit kernel;
+  `state["var_phi"]` plumbed into `_kramers_escape_and_decision`.
+  Mechanism ENGAGED (σ²_τ med 0.019, τ-sweep spread 5..30, ℰ* med 0.13
+  vs ~1e-6) but full-batch outcomes ~unchanged (2606 @ 33.8%, -5.930).
+
+### Phase 3 — THE BREAKTHROUGH: structural KDE memory (16k)
+
+The KDE potential's memory was `tw_window_seconds=300` engine-updates
+(~75 physical s): the "barriers" were T-amplitude wiggles of a 75-s
+KDE, not structural basin geometry. du values in traces: 0.002–0.08.
+Winner/loser separation on du_down (2×) showed the geometry carried
+signal at noise amplitude.
+
+**T_w sweep (8-rec smoke, λ_0=1/T_w):**
+
+| T_w (engine-s) | physical | trades | WR | PnL | PF |
+|---|---|---|---|---|---|
+| 900 | 3.75 min | 161 | 41.6% | -0.255 | 0.67 |
+| 1800 | 7.5 min | 133 | 49.6% | -0.101 | 0.84 |
+| 3600 | 15 min | 102 | 45.1% | -0.141 | 0.75 |
+| 7200 | 30 min | 77 | 48.1% | +0.047 | 1.09 |
+| 14400 | 60 min | 53 | 49.1% | +0.365 | 2.11 |
+| 21600 | 90 min | 42 | 50.0% | +0.143 | 1.41 |
+| 28800 | 120 min | 30 | 53.3% | +0.298 | 2.09 |
+| 57600 | 4 h | 19 | 47.4% | +0.428 | 3.14 |
+
+Monotone improvement crossing zero at T_w≈7200; robust positive plateau
+7200-57600 (not a knife-edge). Median recording is 589 s ≪ 60 min, so
+T_w=14400 ≈ full-lifetime volume profile for most tokens. Chose
+T_w=14400 (largest sample, mid-plateau).
+
+**16k full batch** (`iter16k_tw14400_full_1785330231`): 325 trades,
+**41.54% WR, -0.534 SOL, PF 0.842**. vs baseline: WR +17pts, PF 3.3×,
+exp -0.00278→-0.00164. Exit profile FLIPPED: reversal_exit dominant
+(249 @ 43.4%), **`kramers_down_exit` profitable again (+0.846 @ 60%
+WR)** — the geometry works with structural memory. Remaining loss =
+`recording_ended` bleed tail (34 trades @ 8.8% WR, -1.31 SOL):
+cluster-gravity holds through -70..-84% slow bleeds.
+
+### Phase 4 — parameter calibration sweep (33-run OFAT)
+
+Params files `backend/analysis/params/calib/*.json`; base = 16k +
+T_w=14400 + stoploss_pct=-25 + costcal. One-factor-at-a-time on the
+8-rec smoke (aggregate recovery note: `run_iteration.py` sanitises
+dots in batch_ids when writing per-trade JSONs — re-aggregate manually
+via `aggregate_results.py --batch-id <sanitised> --label <n> --save`).
+
+Result: **base config is at/near a local optimum** — no single-param
+move improves meaningfully (sigma_h=0.1 / entry_confidence_high=0.7:
++0.01 noise-level). Clear failures: sigma_phi 0.075 (-0.535, 358
+churn trades), theta 0.05 (-0.304), alpha 0.1/0.4 (-0.12/-0.16),
+tau_max 60/120 (+0.017/-0.226 — longer horizons → more trades → worse),
+beta 0.5/2.0 (silences). grid_sigma_extent: no effect. eta=0.1 optimal.
+New plumbing: `confidence_high/low`, `entry_confidence_high/low`,
+`confidence_very_high`, `v2_p_up_min` now engine_kwargs-driven
+(previously hardcoded).
+
+### Phase 5 — catastrophe floor (16l) — first positive full batch
+
+Counterfactual on 16k trades: floor -25% → +0.39 SOL better, optimum of
+the sweep (-15 truncates 25 winners incl. right-tail; winner intra-MAE
+p5=-30%, min=-63%). Implemented via the spec-listed `hard_stop`
+(existing `stoploss_pct=-25.0` param, zero code change).
+
+**16l full batch** (`iter16l_floor_full_1785349855`): 401 trades,
+**38.90% WR, +0.110 SOL, PF 1.030** — first positive full batch on
+fresh data. Exit decomposition: reversal +1.078 (52.8% WR),
+kramers_down +0.789 (60%), tp_v2 +0.713 (3/3), bayesian_flip +0.360,
+hard_stop -2.808 (102 fires), **recording_ended neutralised**
+(21 trades, -0.023).
+
+**paired_diff vs 16-base**: Δ=+0.908 SOL (23.69→38.90% WR), 52%
+tokens improved (26/50), BUT Wilcoxon p=0.387, bootstrap CI
+[-0.0079, +0.0402] → **statistical gates NOT cleared**. Power limited
+by n=50 common tokens (baseline traded 122, candidate 83, intersection
+50) and high-variance churn regressions (SIMBA -0.203, CIGCAT -0.117:
+stop-chains — six consecutive -25% hard-stops within 500 s at 0-15 s
+re-entry gaps, every re-entry at P_up≥0.51/P_down≡0 basin gravity).
+
+### Phase 6 — rejected fixes for the stop-chain / crash-blindness pathology
+
+- **16m Kelly falsification hysteresis** (post-hard-stop re-entry
+  requires ℰ* > busted entry's ℰ*, reset on non-stop close): killed
+  chains but blocked profitable rebound re-entries — duky rec86 lost
+  +139.1%/+69.7%/+14.5% trades (-0.22 SOL smoke). ℰ* is not a quality
+  proxy for rebounds. REVERTED.
+- **16n potential-sign flip U=+T·lnρ** (HVN=barrier, V1 physics):
+  crash-chains ELIMINATED (4 crash tokens: 3 trades +0.002 vs ~-0.39)
+  but normal entries destroyed (smoke +0.425→-0.054): the profitable
+  dip-buy entries ARE the well-geometry's basin-bounce trades. REVERTED.
+- **16o boundary-barrier fix** (monotonic-to-grid-edge = no barrier =
+  open escape at attempt rate, instead of boundary-as-infinite-barrier):
+  on the well geometry failed to cut crash chains (56 trades, -0.396 on
+  4 crash tokens) and degraded smoke (+0.054). REVERTED — tree restored
+  to 16l state (verified byte-identical smoke: 63 @ 47.6% +0.4254).
+
+### Key empirical laws established on fresh data
+
+1. **The right tail is load-bearing**: any fixed take-profit DESTROYS
+   PnL (top-100 trades = 46% of gross wins; TP+10%: -6.06→-6.61).
+   Trailing exits ≈ neutral (median winner MFE +11.5% ≈ trail width).
+2. **Winner MAE is deep**: median -4.5%, p5 -30%, min -63% — tight
+   floors/stops truncate winners (iter07 legacy law re-confirmed).
+3. **Entry-side signal is weak unconditionally**: E[r60]=-0.6% mean;
+   flow at entry does NOT separate W/L (b/s 1.28 vs 1.35); ℰ* vacuous
+   pre-16j; best counterfactual entry gate (not-exhaustion ∧ accel>0 ∧
+   ¬past_peak) still negative (-0.58 on 305 trades).
+4. **P_down≡0 crash-blindness**: with U=-T·lnρ, price inside the HVN
+   sees ρ thin monotonically below → down-barrier search walks to the
+   grid boundary → du_down≈+27T → k_down≡0. The engine cannot say
+   "down" during crashes; only reversal_exit (μ/φ regime) and the hard
+   floor catch them. 16n/16o fixes traded entry quality for crash
+   detection — an unresolved tension.
+5. **paired_diff common-token limitation**: selective candidates are
+   compared only on the intersection (50/122 tokens here) — avoided
+   tokens (baseline losses the candidate sidesteps) are invisible to
+   the test. Gates are biased against selectivity improvements.
+
+### Current state & next candidates
+
+- **Tree = 16l state** (16d/e/f/f2 + 16i wiring + 16j Var(φ) +
+  calibration plumbing); params `backend/analysis/params/iter16l.json`
+  = {s_0:0.011, fee_fraction:0.0011, tw_window_seconds:14400,
+  λ_0:1/14400, stoploss_pct:-25}.
+- **16l = best full batch** (+0.110, PF 1.03) but gates not cleared;
+  baseline for all future candidates remains `iter16_baseline_full`.
+- Remaining untested structural lever (mission-mandated): the
+  time-dilation dt fix done FULLY-consistently (dt=0.25 + rate×4 +
+  σ×2 to preserve per-second noise + anchors dt-scaled + KDE/warmup in
+  physical seconds + derive_regime μ*=σ_t/√τ audit).
+- The crash-blindness tension (finding #4) is the top structural
+  problem: needs a formulation where the down-escape channel stays
+  alive when price is inside the HVN, without destroying the
+  basin-bounce entries (possibly flow-conditioned barrier semantics:
+  HVN-as-support when φ>0 vs HVN-as-trapdoor when φ<0).
+
+---
+
+## Iter 17 — Counterfactual-driven entry gates + tail-preserving exit overlays (2026-07-30)
+
+Goal per user brief: WR consistently >70% (iter04 legacy regime) with
+high positive PnL on the fresh dataset. Method: log V2 decision state
+at every entry, replay candle paths, build entry-gate × exit-overlay
+counterfactuals, pick configs on robust plateaus, implement as
+parity-safe engine plumbing (all kwargs default OFF), validate by full
+batch + paired_diff.
+
+### Plumbing added (all default OFF → tree default behaviour unchanged)
+
+- `frontend`-safe: V2 decision snapshot (`v2_P_up/P_down/du_*/E_star/...`,
+  `v2_phi/mu/h/var_phi/sigma_t`, `v2_regime_code`) logged into every
+  trade's `entry_params` via a parity-safe adapter stash refreshed on
+  every update (consumed by `ForwardTester._capture_entry_params`).
+- Engine kwargs (all default 0/disabled):
+  `v2_sigma_t_min` (entry gate on posterior σ_t),
+  `v2_p_up_min` (already present, raised 0.35→0.62),
+  `v2_require_past_peak` (entry gate on `_momentum_past_peak()` flag),
+  `gain_retrace_arm_pct` / `gain_retrace_give_frac` (tail-preserving
+  profit-lock: arm at +A% peak gain, exit when current gain retraces
+  to peak_gain·(1−g); this preserves the right tail — a +60% peak with
+  g=0.6 exits at +24%, not +6% — unlike amplitude-trailing stops),
+  `breakeven_arm_dd_pct` / `breakeven_buffer_pct` (scratch exit: arm
+  once low ≤ entry·(1−X/100); exit on first close ≥ entry·(1+buf/100)).
+- `run_backtest_batch` scheduling change (per-recording computation
+  identical): honour `max_workers > 1` for small batches (the old
+  ≤20-sequential shortcut was forcing 8-rec smokes onto one core).
+- Counterfactual lab: `backend/analysis/probes/iter17_counterfactual.py`
+  (entry-gate sweeps, giveback / gain-retrace / breakeven / timestop
+  overlays, gate×overlay combos with candle-path 4-state replay).
+  Cost model verified against logged trades:
+  `pnl_sol = 0.1·(exit_exec/entry_exec − 1) − 0.00011`.
+
+### Counterfactual headline (404-trade logged iter16l-like batch)
+
+Best single entry gate (counterfactual):
+`P_up≥0.62 ∧ σ_t≥0.021` → 117 trades @ 48.7% WR, +1.053, PF 1.87
+(vs base +0.147 @ 39.4%). Best 70%-WR overlay on that gate:
+`+ grA12g.6 +beX20` → 70.1% WR, +0.635, PF 2.12 (counterfactual).
+
+### iter17a full batch (engine reality) — BEST FRESH-BATCH PROFILE
+
+Params `iter17a.json` = 16l-base {s_0:0.011, fee:0.0011, T_w:14400,
+λ_0:1/14400, stoploss:-25} + {v2_p_up_min:0.62, v2_sigma_t_min:0.021,
+gain_retrace_arm_pct:12, gain_retrace_give_frac:0.6,
+breakeven_arm_dd_pct:20, breakeven_buffer_pct:2.5}. Batch
+`iter17a_full_1785363991` (289 recs, 0 errors):
+
+- 187 trades @ **56.15% WR**, **+0.572 SOL**, PF 1.41, exp +0.00306
+  (vs iter16l 401 @ 38.9% +0.110 PF 1.03; vs baseline -0.798 @ 24.4%).
+- Exit decomposition: gain_retrace 64 @ **82.8% WR +0.478** (the new
+  WR engine), breakeven_scratch 9 @ 88.9% +0.038, tp_v2 3 @ 100%
+  +0.681, kramers_down 3 @ 100% +0.118, bayesian_flip 4 @ 75%
+  +0.238, reversal_exit 62 @ 54.8% +0.108, hard_stop_v2 40 @ 0%
+  **−1.097** (residual drag), recording_ended 2 @ 50% +0.008.
+
+### paired_diff iter17a vs iter16_baseline_full (gate NOT cleared)
+
+- Common tokens: **36** (iter17a traded 55 tokens; baseline 122; only
+  36 overlap — selective candidate vs noisy baseline). The common-token
+  limitation underpowers the test (this is the structural paired_diff
+  bias against selective candidates documented at iter16l).
+- Δ PnL mean **+0.0177 SOL/tok**, median +0.0088; 22 improved / 14
+  regressed (61%); 13 L→W flips / 4 W→L.
+- Wilcoxon one-sided **p = 0.136** (need p<0.05) ✗
+- Bootstrap 95% CI of mean Δ: **[−0.0008, +0.0390]** (lower bound <0) ✗
+- McNemar p = 0.049 ✓ (borderline, driven by 13 L→W vs 4 W→L)
+- VERDICT **REJECT**. Direction-of-effect strong and consistent
+  (56% WR vs 24%, +0.57 vs −0.80 absolute) but the n=36 common pair
+  cannot reject the null at α=0.05.
+
+### Hard-stop structural blind spot — entry-indistinguishable crashes
+
+The 40 hard_stop trades (-1.097 SOL, the residual drag) are NOT
+separable from good entries by any logged V2 feature (table in
+iter17 detail). medians: P_up 0.764 vs 0.766 (identical), σ_t 0.032
+vs 0.030, du_down 0.0067 vs 0.0074, μ_hat_τ 0.158 vs 0.135, signal
+2.3e9 vs 1.3e9 (HS is STRONGER), trend_confidence 1.0 vs 0.965.
+The only mild hint was `momentum_past_peak`: HS rate 9% (pp=T) vs
+28% (pp=F). φ at entry uninformative (HS -0.016 vs OK +0.043, p25s
+overlap). 18 of 26 HS recordings had a single HS trade —
+post-iter16m, hard stops are NOT chains; they are independent
+crash-blindness acquisitions spread across tokens.
+
+### Static-mask failure: iter17b (`v2_require_past_peak`)
+
+Mask analysis on the 404 logged trades predicted pp=T filter would
+keep 96% of the PnL at 34% of trades (64 @ 60.9% WR +0.550 PF 3.12,
+killing 34/40 hard stops). Implementing the gate and re-running the
+full batch produced iter17b_full (`iter17b_full_<ts>`): 135 @ 52.6%
+WR +0.363 PF 1.39 — WORSE on BOTH axes vs iter17a. **Reason: blocking
+an entry at bar N re-routes the dynamic engine to a different
+subsequent entry that passes the pp=T gate on a different bar with
+different state — the static-mask prediction assumes the survivor set
+is fixed, but the engine re-routes.** Static counterfactual masks are
+NOT reliable predictors for dynamic per-bar flow; only pure exit
+overlays (no entry changes) extrapolate faithfully to the real run.
+
+### Tighter-overlay failure: iter17c (right-tail law re-confirmed)
+
+Tightening gain_retrace (arm 12→10, give 0.6→0.5) and breakeven
+(arm 20→15) → iter17c_full (`iter17c_full_<ts>`): 194 @ 57.7% WR but
++0.123 SOL, PF 1.09 (vs iter17a 56.1% / +0.572 / PF 1.41). WR +1.6pt
+→ PnL dropped 79%, PF collapsed 23%. **The right tail is
+load-bearing: tighter profit-locks convert give-back losers into
+modest wins but cut the +30-200% outliers that pay for everything
+on a positive-expectancy memecoin scheme.** iter04/mark's 70-93%
+legacy WR was enabled by the volume-free regime's P_down≡0 default
+(no down-barrier clamp) and by bookkeeping bias; it is not reproducible
+at 2.2% round-trip costs on real order-flow data.
+
+### Conclusion & open directions
+
+The WR↔PnL frontier on the fresh dataset is empirically:
+
+| config        | trades | WR   | PnL    | PF   |
+|---------------|--------|------|--------|------|
+| iter16l       | 401    | 38.9%| +0.110 | 1.03 |
+| **iter17a**   | 187    | 56.2%| **+0.572** | **1.41** |
+| iter17c       | 194    | 57.7%| +0.123 | 1.09 |
+
+iter17a sits on the Pareto bend — strongest PnL/PF on fresh data,
+WR doubled vs baseline; the 70%-WR target lies on the zero-PnL axis
+on this dataset with current cost structure. The dominant lever left
+for WR ≥ 70% with strong PnL is **fixing the down-escape structural
+blindness** (only reversal_exit catches crashes today; an exit that
+fires CONTINUOUSLY during monotonic decay into the HVN would convert
+the 40 hard-stops at -25% into exits at -8..-10%, turning -1.10 SOL of
+drag into ~0 SOL of drag while preserving the tail — adding ~+0.8 SOL
+without raising WR but doubling PF). WR-gain by entry selection is
+stat-empirically capped by the down-blindness: every profitable gate
+(P_up, σ_t, ... ) leaves the crash-indistinguishable entries standing.
+The principled fix remains §iter16's flow-conditioned barrier
+formulation (HVN-as-support when φ>0 / trapdoor when φ<0) — a future
+engine-change lever; not reached by the iter17 counterfactual sweep.
+
+### Engine tree state after iter17
+
+`backend/strategy_engineV2.py` = 16d/e/f/f2 (KDE-native U, no drift
+work / vol_corr, eq.34 μ̂_τ) + 16j Var(φ) + 16l floor plumbing + 17a/b/c
+entry-gate & exit-overlay plumbing (all kwargs default OFF — behaviour
+identical to 16l tree when `iter16l.json` params are used; reproduced
+byte-identical smoke: 63 @ 47.6% +0.4254). Best validated config =
+`backend/analysis/params/iter17a.json`. iter17b/17c params files kept
+for reference (rejected). Iter17 documentation complete.

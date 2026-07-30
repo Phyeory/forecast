@@ -46,6 +46,50 @@ from strategy_engine import Signal, Direction, Regime
 from engine_factory import create_engine
 
 
+def _v2_entry_snapshot(eng) -> dict:
+    """
+    iter17: extract the V2 Kramers/Kelly decision snapshot for per-trade
+    entry-feature logging (counterfactual entry-gate analysis).
+
+    Parity-safe: read-only on the engine, write-only into the trade record.
+    V1 engines have no `_v2_last_decision` attribute → returns {}.
+    The stash is refreshed on every adapter update(), so at capture time
+    (state 1 of the fill bar) it reflects the fill-bar decision — matching
+    the rest of the entry_params snapshot semantics.
+    """
+    dec = getattr(eng, "_v2_last_decision", None)
+    if not dec:
+        return {}
+    st = dec.get("state", {}) or {}
+    def f(d, k):
+        v = d.get(k)
+        try:
+            return round(float(v), 8)
+        except (TypeError, ValueError):
+            return None
+    return {
+        "v2_k_up":        f(dec, "k_up"),
+        "v2_k_down":      f(dec, "k_down"),
+        "v2_P_up":        f(dec, "P_up"),
+        "v2_P_down":      f(dec, "P_down"),
+        "v2_P_zero":      f(dec, "P_zero"),
+        "v2_du_up":       f(dec, "du_up"),
+        "v2_du_down":     f(dec, "du_down"),
+        "v2_mu_hat_tau":  f(dec, "mu_hat_tau"),
+        "v2_sigma2_tau":  f(dec, "sigma2_tau"),
+        "v2_E_star":      f(dec, "E_star"),
+        "v2_n_star":      f(dec, "n_star"),
+        "v2_direction":   dec.get("direction"),
+        "v2_tau":         f(dec, "tau"),
+        "v2_mu":          f(st, "mu"),
+        "v2_phi":         f(st, "phi"),
+        "v2_h":           f(st, "h"),
+        "v2_var_phi":     f(st, "var_phi"),
+        "v2_sigma_t":     round(float(getattr(getattr(eng, "core", None), "_last_sigma_t", 0.0) or 0.0), 8),
+        "v2_regime_code": st.get("regime"),
+    }
+
+
 @dataclass
 class Trade:
     entry_time: int
@@ -343,6 +387,9 @@ class ForwardTester:
             "effective_stoploss_pct":   round(eng._effective_stoploss_pct(), 4),
             "effective_takeprofit_pct": round(eng._effective_takeprofit_pct(), 4),
             "global_stoploss_pct":      round(eng._global_stoploss_pct(), 4),
+
+            # ── V2 decision snapshot (iter17; getattr-guarded, V1-safe) ──
+            **_v2_entry_snapshot(eng),
 
             # ── Config / hyperparameters (all of them) ───────────────────
             "cfg_ema_fast_p":                    eng.ema_fast_p,
