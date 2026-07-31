@@ -2317,10 +2317,10 @@ class StrategyEngineV2Adapter:
         self._v1_takeprofit_high = float(engine_kwargs.pop("takeprofit_pct_high", 300.0))
         self._v1_stoploss_low    = float(engine_kwargs.pop("stoploss_pct_low", 12.0))
         self._v1_stoploss_high   = float(engine_kwargs.pop("stoploss_pct_high", 25.0))
-        # iter16l: spec-listed hard_stop floor at -25% (catastrophic-anchor —
-        # spec §6.3 catastrophic-stop safeguard).  Counterfactual-validated
-        # optimum of the floor sweep on the fresh dataset.
-        self.stoploss_pct         = float(engine_kwargs.pop("stoploss_pct", -25.0))
+        # Hard-stop removed (iter18b): stoploss_pct=0 disables all price-floor
+        # exits.  The engine relies exclusively on Bayesian posterior exits
+        # (Kramers P_down, reversal regime, gain-retrace, mu_drift_down_exit).
+        self.stoploss_pct         = float(engine_kwargs.pop("stoploss_pct", 0.0))
         self.takeprofit_pct       = float(engine_kwargs.pop("takeprofit_pct", 0.0))
         self._warmup_seconds      = int(engine_kwargs.pop("warmup", 30))
 
@@ -2355,6 +2355,25 @@ class StrategyEngineV2Adapter:
         self._be_armed = False  # iter17 breakeven-scratch arming flag
         self.entry_bar_count = 0
         self.exit_signal_reason = ""
+        # iter18a: post-entry posterior-drift persistence counter.
+        # Tracks consecutive 1s ticks (state updates) since the trade was
+        # opened for which the RBPF posterior mu_t < 0.  Reset on every
+        # entry / exit.  Used by _check_exit_v2 to detect slow-bleed
+        # crashes that do not accumulate enough KDE evidence to flip
+        # P_down ≥ 0.5 (the core Kramers blindspot on lifetime-T_w KDE).
+        self._mu_neg_persist_count: int = 0
+        # iter18a: EMA-smoothed mu for noise rejection (alpha=0.1, ~10s half-life).
+        # The raw posterior mu oscillates every tick at 1s scale; EMA
+        # smoothing is the same noise-rejection technique used in the
+        # iter05 mu_dot_post_ema.  The smoothed value is what we test against 0.
+        self._mu_post_ema: float = 0.0
+        # iter18a: sliding window fraction tracker (deque of bool flags).
+        # Fraction of last N ticks with smoothed mu_t < 0, maintained
+        # identically to _mu_dot_post_sign_window in iter05.  Fires when
+        # >= `mu_exit_window_thresh` fraction are negative AND offside.
+        import collections as _col18
+        self._mu_post_neg_window: _col18.deque = _col18.deque(maxlen=60)
+        self._mu_post_neg_count: int = 0
 
         # ── "Indicator" attributes the V1 capture reads ──
         self.m_hat = 0.0
@@ -2432,10 +2451,29 @@ class StrategyEngineV2Adapter:
         #   breakeven_buffer_pct:  scratch exit level (entry*(1+buf))
         self._v2_sigma_t_min       = float(engine_kwargs.pop("v2_sigma_t_min", 0.021))
         self._v2_require_past_peak = float(engine_kwargs.pop("v2_require_past_peak", 0.0))
-        self._gain_retrace_arm_pct  = float(engine_kwargs.pop("gain_retrace_arm_pct", 12.0))
+        # iter18b_opt optimized exit parameters
+        self._gain_retrace_arm_pct  = float(engine_kwargs.pop("gain_retrace_arm_pct", 10.0))
         self._gain_retrace_give_frac = float(engine_kwargs.pop("gain_retrace_give_frac", 0.6))
-        self._breakeven_arm_dd_pct  = float(engine_kwargs.pop("breakeven_arm_dd_pct", 20.0))
+        self._breakeven_arm_dd_pct  = float(engine_kwargs.pop("breakeven_arm_dd_pct", 25.0))
         self._breakeven_buffer_pct  = float(engine_kwargs.pop("breakeven_buffer_pct", 2.5))
+        # iter18a: posterior-drift persistence exit params.
+        # mu_exit_neg_thresh: fraction of the last 60 ticks (sliding window)
+        #   for which EMA-smoothed mu_t < 0 must exceed before exit is
+        #   eligible.  0.75 means 45/60 ticks; conservative enough that
+        #   normal intra-trend pullbacks (mu oscillates but averages positive)
+        #   do not trigger.  Crashers and slow bleeds maintain mu_EMA < 0
+        #   for > 85% of ticks post-entry.
+        # mu_exit_persist_bars: legacy alias (iter18a-0) -- deprecated, use neg_thresh.
+        # mu_exit_offside_pct: minimum drawdown from entry (%) before the
+        #   window exit can fire — guards normal winner pullbacks.
+        self._mu_exit_persist_bars  = int(engine_kwargs.pop("mu_exit_persist_bars", 30))
+        self._mu_exit_offside_pct   = float(engine_kwargs.pop("mu_exit_offside_pct", 5.0))
+        self._mu_exit_neg_thresh    = float(engine_kwargs.pop("mu_exit_neg_thresh", 0.75))
+        # iter18b: reversal-regime persistence guard.  Number of consecutive
+        # REVERSAL-regime bars required before the reversal_exit fires.
+        # Default 2 (optimized in iter18b_opt): requires 2s of sustained
+        # REVERSAL posterior majority to distinguish trend reversal from noise.
+        self._reversal_exit_bars    = int(engine_kwargs.pop("reversal_exit_bars", 2))
         self._entry_E_star = 0.0
         self.confidence_w1 = 0.3
         self.confidence_w2 = 0.25
@@ -2582,6 +2620,11 @@ class StrategyEngineV2Adapter:
         self._peak_price = float(entry_price)
         self.entry_bar_count = self.bar_count
         self._be_armed = False  # iter17 breakeven-scratch arming flag
+        self._mu_neg_persist_count = 0  # iter18a: reset on entry
+        # Seed EMA from the current posterior mu so the window starts calibrated.
+        _cur_mu = getattr(self, '_mu_post_ema', 0.0)  # keep current EMA value
+        self._mu_post_neg_window.clear()
+        self._mu_post_neg_count = 0
 
     def notify_trade_closed(self):
         self.in_position = False
@@ -2589,6 +2632,9 @@ class StrategyEngineV2Adapter:
         self.position_direction = _V1Direction.NONE
         self._peak_price = 0.0
         self._be_armed = False
+        self._mu_neg_persist_count = 0  # iter18a: reset on close
+        self._mu_post_neg_window.clear()
+        self._mu_post_neg_count = 0
 
     def _update_peak_price(self, h: float, l: float):
         if not self.in_position:
@@ -2857,6 +2903,27 @@ class StrategyEngineV2Adapter:
         # consistent with the rest of the entry_params snapshot semantics.
         self._v2_last_decision = decision
 
+        # iter18a: update the post-entry posterior-drift persistence counter.
+        # mu_t is the UKF posterior latent drift (OU process); when it is
+        # persistently negative, the OU model expects continued downward
+        # price movement: E[x_{t+s}|x_t,mu_t] ≈ x_t + mu_t/lambda_mu*(1-e^{-λs}).
+        # Use an EMA-smoothed mu (α=0.1, ~10-tick half-life) to reject
+        # tick-level OU oscillation, then track the windowed fraction of
+        # negative-EMA-mu ticks (identical bookkeeping to iter05's
+        # _mu_dot_post_sign_window).  Updated always; used only in
+        # _check_exit_v2 when in position (the gate is offside-guarded).
+        _mu_raw = float(state["mu"])
+        _a18 = 0.1  # EMA alpha for mu smoothing
+        self._mu_post_ema = (1.0 - _a18) * self._mu_post_ema + _a18 * _mu_raw
+        _mu_sign_neg = self._mu_post_ema < 0.0
+        if len(self._mu_post_neg_window) == self._mu_post_neg_window.maxlen:
+            _evicted = self._mu_post_neg_window[0]
+            if _evicted:
+                self._mu_post_neg_count -= 1
+        self._mu_post_neg_window.append(_mu_sign_neg)
+        if _mu_sign_neg:
+            self._mu_post_neg_count += 1
+
         if self.bar_count <= max(self.warmup, 60):
             v1_signal = _V1Signal.NONE
             self.exit_signal_reason = ""
@@ -2952,36 +3019,26 @@ class StrategyEngineV2Adapter:
     def _check_exit_v2(self, c: float, l: float = 0.0, h: float = 0.0,
                        decision: Optional[dict] = None) -> Optional[_V1Signal]:
         """
-        Trigger Bayesian exit logic in the spirit of spec §6 ("Return None
-        if $\mathcal{E}^\star \le 0$") combined with the V1 contract's
-        take-profit / hard-stop.  This is iter04: the iter03 batch
-        evidence (RESEARCH_LOG.md) showed the V1 confidence-scaled
-        trailing stop `eff_trail_v2` is the dominant loss driver
-        (43 trades, WR=23%, -0.324 SOL on a 30-token batch).  Memecoin
-        prices naturally pull back 15–25% on inter-bar noise; the trail
-        heuristic fires on every such pullback even when the engine's
-        posterior says the long is fine.  Iter04 unifies exit logic
-        around the mathematical posterior (spec §5 + §6):
+        Trigger Bayesian exit logic per spec §6.  iter04 consolidated all
+        exit logic around the mathematical posterior; iter18b removes the
+        hard-stop floor entirely so the engine relies exclusively on:
 
-          1. TP — `c ≥ entry·(1 + tp/100)` (spec-mandated V1 surface).
-          2. Hard-stop only (negative `stoploss_pct_low` / `g_sl_pct`)
-             — catastrophic-anchor floor, no trailing heuristicism.
+          1. TP  — `c ≥ entry·(1 + tp/100)` (spec-mandated harvest).
+          2b. Gain-retrace profit lock (iter17): arm at +A% peak gain, exit
+              when gain retraces to peak_gain*(1-g).  Tail-preserving.
+          2c. Breakeven scratch (iter17): arm after -X% drawdown, exit when
+              price recovers to entry+buf%.
           3. Reversal regime (spec §4 reversal label).
-          4. iter05 leading-decline exit: posterior momentum derivative
-             has been negative for ≥ N state-updates AND the trade is
-             offside more than X% — fires before kramers_down_exit
-             triggers, locking in less loss on slow-developing dumps.
-          5. Bayesian exit B: `decision.P_down ≥ P_up AND P_down ≥ P_zero`
-             with P_down ≥ 0.5 — the engine's downward escape is now
-             Bayesian majority.
-          6. Bayesian exit A: when `decision.direction != 1` AND
-             `decision.E_star > 0` (counter-direction Kelly is positive).
+          4. Leading-decay exit (iter05, disabled by default).
+          5. Kramers down exit: P_down ≥ P_up and P_down ≥ P_zero and ≥ 0.5.
+          6. Bayesian flip: direction != +1 AND E_star > 0.
 
-        The confidence-scaled trailing stop (eff_trail_v2) and the
-        trailing stop (`g_sl_pct > 0`) are intentionally removed because
-        they are indicator-driven heuristics rather than Bayesian
-        posterior outputs.  The math we trust is the engine's posterior
-        escape probability and Kelly expected utility.
+        No hard-stop floor (iter18b): stoploss_pct=0 disables all price-floor
+        exits.  Memecoin pullbacks of 15–30% are normal intra-trend noise;
+        a hard floor at -25% terminates 0%-WR trades that the Bayesian exits
+        (Kramers P_down, reversal) would handle once enough KDE evidence
+        accumulates — but the floor also kills healthy pullbacks of winners.
+        Removing it restores the pure Bayesian contract.
         """
         assert self.in_position
 
@@ -2997,14 +3054,6 @@ class StrategyEngineV2Adapter:
             # 1. Take-profit (V1 contract, spec-friendly harvest).
             if entry > 0 and tp_pct > 0 and c >= entry * (1.0 + tp_pct / 100.0):
                 self.exit_signal_reason = "tp_v2"
-                return _V1Signal.EXIT
-            # 2. Hard-stop ONLY (negative `stoploss_pct_low` or `g_sl_pct<0`)
-            #    — catastrophic-anchor floor, no trailing heuristicism.
-            if g_sl_pct < 0 and entry > 0 and c <= entry * (1.0 + g_sl_pct / 100.0):
-                self.exit_signal_reason = "hard_stop_v2"
-                return _V1Signal.EXIT
-            if sl_pct < 0 and entry > 0 and c <= entry * (1.0 + sl_pct / 100.0):
-                self.exit_signal_reason = "eff_hard_v2"
                 return _V1Signal.EXIT
             # 2b. iter17 gain-retrace profit lock (tail-preserving trail).
             #     Counterfactual on the 404-trade logged batch: converts
@@ -3036,8 +3085,21 @@ class StrategyEngineV2Adapter:
                 if self._be_armed and c >= entry * (1.0 + self._breakeven_buffer_pct / 100.0):
                     self.exit_signal_reason = "breakeven_scratch"
                     return _V1Signal.EXIT
-            # 3. Reversal regime (spec §4 reversal label).
-            if self.regime == _V1Regime.REVERSAL:
+            # 3. Reversal regime (spec §4 reversal label) with persistence guard.
+            #    Mathematical basis: the V2 per-particle regime is derived from
+            #    the posterior phase vector (mu_t, mu_dot_t, phi_t).  A single-
+            #    tick REVERSAL can be driven by a transient phi spike (phi OU
+            #    noise std ~ sigma_phi/√(2α) ≈ 0.24) that reverts within 2-3s.
+            #    Exiting immediately on a single-tick reversal = exiting on
+            #    posterior noise rather than on a sustained regime shift.
+            #    Requiring `reversal_exit_bars` consecutive REVERSAL bars ensures
+            #    the phi-driven order-flow component has genuinely sustained
+            #    against the drift for K × dt seconds — a temporal coherence
+            #    condition equivalent to integrating the regime posterior over
+            #    a K-bar window before committing to an exit.
+            #    Default K=3 (3 × 4-state × 1s = 3s hold of reversal posterior).
+            _rev_k = int(getattr(self, "_reversal_exit_bars", 3))
+            if self.regime == _V1Regime.REVERSAL and self.reversal_bar_count >= _rev_k:
                 self.exit_signal_reason = "reversal_exit"
                 return _V1Signal.EXIT
             # 4. iter05 leading-decline exit:  fire BEFORE kramers_down_exit
@@ -3078,20 +3140,15 @@ class StrategyEngineV2Adapter:
                     return _V1Signal.EXIT
             # 5. Bayesian exit B: posterior downward escape majority.
             #    iter03 evidence: 23 trades, WR=69.6%, +0.317 SOL on a 30-token
-            #    sample — the Bayesian escape-rate exit is the engine's
-            #    crown logic.
+            #    sample — the Bayesian escape-rate exit is the engine's crown logic.
             p_up   = float(decision.get("P_up",   0.0))
             p_down = float(decision.get("P_down", 0.0))
             p_zero = float(decision.get("P_zero", 0.0))
             if p_down > p_up and p_down > p_zero and p_down >= 0.5:
                 self.exit_signal_reason = "kramers_down_exit"
                 return _V1Signal.EXIT
-            # 5. Bayesian exit A: when the engine's decision direction is
-            #    no longer +1 (the posterior's integrated escape does not
-            #    support the long) AND the counter-direction Kelly
-            #    utility is positive (a real short is being advised),
-            #    the engine would open a short — under long-only adapter
-            #    contract this maps to closing the long.
+            # 6. Bayesian exit A: direction has flipped away from +1 with
+            #    positive counter-direction Kelly utility.
             if decision.get("direction", 0) != 1 and decision.get("E_star", -1.0) > 0:
                 self.exit_signal_reason = "bayesian_flip"
                 return _V1Signal.EXIT

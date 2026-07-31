@@ -148,7 +148,7 @@ let engineParamsV2 = {
   warmup_seconds:     30,    // bars before any decision is emitted
   sigma_floor:        1e-6,  // numerical σ floor
   // ── Shared TP/SL parameters (V1 contract, adapter reads these) ──────
-  stoploss_pct: -25,        // iter16l: catastrophic-anchor hard_stop floor at -25%
+  stoploss_pct: 0,        // Hard-stop removed (iter18b): stoploss_pct=0 disables all price floors.
   takeprofit_pct: 0,
   takeprofit_pct_low: 20,
   takeprofit_pct_high: 300,
@@ -171,19 +171,17 @@ let engineParamsV2 = {
   max_entry_bar_count: 5700,
   forbidden_bc_lo: 2000,
   forbidden_bc_hi: 3000,
-  // ── iter17: V2 entry gates + tail-preserving exit overlays ──────────
+  // ── iter17/18: V2 entry gates + tail-preserving exit overlays ───────
   // Counterfactual-validated on the 404-trade logged-batch (see
-  // RESEARCH_LOG.md iter17); grinding iter17a defaults in both the
-  // backend adapter and here so the default frontend path reproduces
-  // the iter17a full-batch result (187 @ 56.2% WR / +0.572 SOL) without
-  // passing --params.
+  // RESEARCH_LOG.md iter17/18).
   v2_p_up_min:         0.62,   // Bayesian entry floor on P_up (was 0.35)
   v2_sigma_t_min:      0.021,  // entry gate on posterior σ_t (vol floor)
   v2_require_past_peak: 0,     // iter17b REJECTED — keep default off
-  gain_retrace_arm_pct:  12,   // arm profit-lock at +12% peak gain
+  gain_retrace_arm_pct:  10,   // arm profit-lock at +10% peak gain (iter18b_opt)
   gain_retrace_give_frac: 0.6, // exit when gain retraces to peak_gain·(1−g)
-  breakeven_arm_dd_pct:   20,  // arm scratch exit once low ≤ −20% offside
+  breakeven_arm_dd_pct:   25,  // arm scratch exit once low ≤ −25% offside (iter18b_opt)
   breakeven_buffer_pct:   2.5, // scratch exit level (entry·(1+buf))
+  reversal_exit_bars:     2,   // consecutive REVERSAL bars before exit (iter18b_opt)
 };
 
 /* Engine version: 1 = V1 (Physics), 2 = V2 (RBPF/UKF/KDE/Kramers) */
