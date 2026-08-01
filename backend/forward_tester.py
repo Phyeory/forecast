@@ -525,6 +525,11 @@ class ForwardTester:
             "effective_stoploss_pct":   round(eng._effective_stoploss_pct(), 4),
             "effective_takeprofit_pct": round(eng._effective_takeprofit_pct(), 4),
             "global_stoploss_pct":      round(eng._global_stoploss_pct(), 4),
+
+            # ── V2 decision snapshot at the exit bar (iter20 diagnostic) ──
+            # Same getattr-guarded extractor used in _capture_entry_params.
+            # Write-only; consumed by iter20 diagnostic & paired-diff analytics.
+            **_v2_entry_snapshot(eng),
         }
 
     def _close_long(self, o: float, h: float, l: float, c: float, time: int, reason: str = "") -> Optional[Trade]:
