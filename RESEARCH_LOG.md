@@ -54,6 +54,7 @@ recorded here.  No undocumented changes are permitted.
 | 17b       | iter17b_full | 135 | 52.6% | +0.363 | 1.39 | **REJECTED** — Added `v2_require_past_peak` entry gate (static-mask analysis: pp=T kept 96% PnL / 34% trades / 6/40 hard stops). Real run WORSE than iter17a on both WR and PnL — **replacement-entry dynamics**: blocking past_peak=False entries re-routes the engine to different subsequent entries, breaking the static-mask prediction. Static counterfactual masks are unreliable predictors of dynamic per-bar engine outcomes. |
 | 17c       | iter17c_full | 194 | 57.7% | +0.123 | 1.09 | **REJECTED** — Tightened overlays (gr arm 12→10, give 0.6→0.5; beX 20→15). WR +1.6pts vs 17a but PnL +0.572→+0.123, PF 1.41→1.09 — the right tail is load-bearing (law #1 RE-CONFIRMED on fresh data). The 70%-WR frontier on this dataset lies on the zero-PnL axis. |
 | 18b_opt   | iter18b_opt_full | 217 | 75.58% | **+0.437** | 1.31 | **ACCEPTED (Statistical Breakthrough)** — Replaced hard stoploss entirely with pure V2 Bayesian exits and added a 2-bar persistence guard on the REVERSAL regime. Winrate raised to **75.6%** while clearing all three strict statistical gates against baseline (`iter16_baseline_full`): Wilcoxon p=0.007, paired t-test p=0.038, bootstrap 95% CI strictly positive. |
+| 19        | iter19_clean | 229 | **78.60%** | **+0.547** | **1.36** | **ACCEPTED** — Tightened `gain_retrace_give_frac` 0.6 → 0.4 (exit at peak_gain·0.6 instead of peak_gain·0.4). Counterfactual simulation showed iter18b_opt captured only 32.9% of peak gain on winning trades (avg peak +25.2%, exited at +8.3%); a cross-arm give sweep proved (arm=10, give=0.4) optimal at +0.815 SOL projected. Actual full batch: gain_retrace harvester jumped to 91.4% WR (+0.586 SOL), total PnL +0.110 SOL over iter18b_opt. ALL 5 statistical gates cleared vs `iter16_baseline_full`: Wilcoxon p=0.0088, paired t-test p=0.0344, bootstrap 95% CI [+0.0018, +0.0273], McNemar p=0.0026, 69.4% tokens improved. NOT cleared vs `iter18b_opt` on t-test/CI due to skewed per-token distribution, but Wilcoxon p=3.1e-6 (extremely strong). |
 
 
 ## Iter 01 — Baseline (REJECTED — never traded)
@@ -2878,3 +2879,75 @@ The trade distribution is highly positive-skewed (median trade is positive with 
 - `v2_p_up_min` = 0.62, `v2_sigma_t_min` = 0.021, `gain_retrace_give_frac` = 0.6, `breakeven_buffer_pct` = 2.5.
 Exposed config mirrored in `frontend/js/app.js` under `engineParamsV2`. Verification test suite fully passing. All statistical gates cleared.
 
+
+## Iter 19 — Tighter gain_retrace Give-Frac (ACCEPTED)
+
+**Date:** 2026-08-01
+**Files modified:** `backend/strategy_engineV2.py`, `frontend/js/app.js`, `backend/analysis/params/iter19.json`
+
+### Hypothesis
+Profile analysis of iter18b_opt revealed a massive asymmetry between win and loss size:
+- Wins averaged +11.6% pnl_pct (+0.012 SOL); losses averaged -24.6% (-0.025 SOL)
+- The loss:win ratio was 2:1, dragging PnL despite 75.6% WR
+- Replaying every trade's full candle path through to its natural exit showed the dominant `gain_retrace` exit captured only **32.9% of peak gain** on winning trades (avg peak +25.2%, exited at +8.3%)
+- The `give_frac = 0.6` setting (exit at peak_gain × 0.4) was giving back too much of the realized profit before triggering the lock
+
+A cross-arm / cross-give sweep on the iter18b_opt per-trade candle data tested every combination of `arm ∈ {5, 8, 10, 12, 15}` and `give ∈ {0.4, 0.5, 0.6, 0.7, 0.8}`. The simulation predicted `(arm=10, give=0.4)` would yield +0.815 SOL (+0.379 SOL improvement) at 76.5% WR; the dominant parameter axis was `give_frac`, with `0.4` beating baseline at every arm level.
+
+### Implementation
+- `gain_retrace_give_frac`: 0.6 → 0.4 (exit at peak_gain × 0.6 instead of peak_gain × 0.4)
+- All other engine params held at iter18b_opt defaults (arm=10, breakeven_arm_dd=25, breakeven_buffer=2.5, reversal_exit_bars=2, stoploss_pct=0, v2_p_up_min=0.62, v2_sigma_t_min=0.021)
+
+### Results
+Batch `iter19_clean` on 94 active recordings (229 trades, 0 errors):
+- **Win rate: 78.60%** (raised +3.0pt from iter18b_opt's 75.58%)
+- **Total PnL: +0.547 SOL** (gain +0.110 SOL over iter18b_opt's +0.437, +25% relative improvement)
+- **Profit factor: 1.36** (vs 1.31)
+- **Expectancy: +0.00239 SOL / trade** (vs +0.00201, +19% improvement)
+- Exit decomposition:
+  - `gain_retrace`: 162 @ **91.4% WR**, **+1.501 SOL** (was 149 @ 86% = +0.915) — **+0.586 SOL improvement!**
+  - `breakeven_scratch`: 27 @ **81.5% WR**, **+0.064 SOL**
+  - `recording_ended`: 26 @ **0% WR**, **-1.285 SOL** (the residual bleed is intrinsic)
+  - `kramers_down_exit`: 4 @ **100% WR**, **+0.150 SOL**
+  - `tp_v2`: 1 @ **100% WR**, **+0.234 SOL**
+  - `bayesian_flip`: 8 @ **62.5% WR**, **-0.084 SOL**
+  - `reversal_exit`: 1 @ **0% WR**, **-0.033 SOL**
+
+### Statistical paired_diff vs iter16_baseline_full (ALL GATES CLEARED)
+- **Wilcoxon signed-rank (greater)**: W=183.0, **p = 0.0088** (< 0.05) ✓
+- **Paired t-test**: t=2.20, **p = 0.0344** (< 0.05) ✓
+- **Bootstrap 95% CI of mean Δ PnL**: **[+0.0018, +0.0273]** SOL (strictly positive) ✓
+- **McNemar (flip test)**: **p = 0.0026** (< 0.01) ✓
+- **Majority token improvement**: **69.4%** (25 improved / 11 regressed) ✓
+- **Flips L→W / W→L**: **17 L→W / 3 W→L** ✓
+- Aggregate Δ PnL: **+1.345 SOL** lift over iter16_baseline_full (-0.798 → +0.547)
+
+### Statistical paired_diff vs iter18b_opt (improvement NOT strictly gated)
+- **Wilcoxon signed-rank (greater)**: W=258.0, **p = 3.14e-6** (extremely strong) ✓
+- Paired t-test: p = 0.209 ✗ (skewed distribution)
+- Bootstrap 95% CI: [-0.0014, +0.0051] — crosses zero ✗
+- Tokens improved: 48/40 (54.5%); 4 L→W / 1 W→L flips
+- Conclusion: iter19 is a strong-point improvement over iter18b_opt (Wilcoxon extremely significant), with mean Δ +0.0021 SOL per recording. The t-test weakness reflects high per-token variance (some big regressions: FRANK -0.07955, DARRIN -0.06902, duky -0.06543) rather than absence of effect.
+
+### Why gain_retrace tightening works (structural insight)
+The `give_frac` parameter controls the trailing profit-lock: when peak gain reaches `arm_pct`, the exit fires at `entry * (1 + peak_gain * (1 - give_frac))`. Lowering `give_frac` from 0.6 → 0.4 raises the exit floor from 40% of peak gain to 60% of peak gain. On the iter18b_opt per-trade data:
+- gain_retrace winners had p50 peak +17.2%, p90 +46.1%, but exited at p50 +4.4%, p90 +15.4% (32.9% capture rate)
+- Replaying with give_frac=0.4 raised p50 exit to +6.8% and p90 to +21.7% (better capture)
+- The marginal winners that previously retraced all the way back to small losses (-2% to -7% range) are now locked before they reverse that far
+- gain_retrade WR jumped from 85.9% → 91.4% (the retrace-fell-too-far losers became locked wins)
+
+### Investigated but REJECTED in iter19 development
+- **Hard stop at -40%**: Simulation predicted +0.133 SOL improvement (capping recording_ended losers at -0.05 SOL each), but actual engine run on the full batch showed SAME PnL with worse WR (70.9% vs 75.6%) and 32 new hard_stop losses (-1.36 SOL) that were never realized in the "counterfactual" because stopped trades re-entered on subsequent signals and lost again. The MAE-based counterfactual missed re-entry dynamics — the same "replacement entry dynamics" lesson from iter17b.
+- **Liquidity-decay entry gate (ATR-pct pulse):** ATR was hypothesized to collapse on dead coins but actual recording_ended losers showed ELEVATED ATR (2-14% of close) — they're active crashes, not dead tape. Gate never triggered on losers, only false positives.
+- **Drawdown-from-600s-peak entry gate:** Tested thresholds -30% to -80%; EVERY threshold hurt net PnL because winning knife-catches are statistically inseparable from losing ones at entry time. The posterior at entry already encodes both classes equally.
+
+### Engine Tree State after Iter 19
+`backend/strategy_engineV2.py` defaults baked in (line ~2456):
+- `stoploss_pct` = 0.0 (hard stop disabled, unchanged)
+- `reversal_exit_bars` = 2 (unchanged)
+- `gain_retrace_arm_pct` = 10.0 (unchanged)
+- `breakeven_arm_dd_pct` = 25.0 (unchanged)
+- `gain_retrace_give_frac` = **0.4** (was 0.6 — the only change)
+- `v2_p_up_min` = 0.62, `v2_sigma_t_min` = 0.021, `breakeven_buffer_pct` = 2.5 (unchanged)
+- `v2_hard_stop_pct` = 0.0 (param exists but disabled; never shipped)
+Frontend `engineParamsV2` updated to mirror. Param file `backend/analysis/params/iter19.json` saved.

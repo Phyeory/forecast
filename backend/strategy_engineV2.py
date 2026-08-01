@@ -2453,7 +2453,7 @@ class StrategyEngineV2Adapter:
         self._v2_require_past_peak = float(engine_kwargs.pop("v2_require_past_peak", 0.0))
         # iter18b_opt optimized exit parameters
         self._gain_retrace_arm_pct  = float(engine_kwargs.pop("gain_retrace_arm_pct", 10.0))
-        self._gain_retrace_give_frac = float(engine_kwargs.pop("gain_retrace_give_frac", 0.6))
+        self._gain_retrace_give_frac = float(engine_kwargs.pop("gain_retrace_give_frac", 0.4))
         self._breakeven_arm_dd_pct  = float(engine_kwargs.pop("breakeven_arm_dd_pct", 25.0))
         self._breakeven_buffer_pct  = float(engine_kwargs.pop("breakeven_buffer_pct", 2.5))
         # iter18a: posterior-drift persistence exit params.
