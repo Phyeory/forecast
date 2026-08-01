@@ -187,9 +187,16 @@ let engineParamsV2 = {
 /* Engine version: 1 = V1 (Physics), 2 = V2 (RBPF/UKF/KDE/Kramers) */
 let engineVersion = 1;
 
+/* Live-trader engine version — independent from the chart engine toggle */
+let ltEngineVersion = 1;
+
 /* Active params getter — returns the params for the current engine version */
 function getEngineParams() {
   return engineVersion === 2 ? engineParamsV2 : engineParamsV1;
+}
+/* Params for live trader (based on its own engine version selector) */
+function getLtEngineParams() {
+  return ltEngineVersion === 2 ? engineParamsV2 : engineParamsV1;
 }
 /* Legacy compat — direct references to `engineParams` throughout the file */
 let engineParams = engineParamsV1;
@@ -1494,6 +1501,20 @@ document.querySelectorAll("#settings-engine-toggle .engine-ver-btn").forEach(btn
   btn.addEventListener("click", () => setEngineVersion(parseInt(btn.dataset.ver, 10)));
 });
 
+/* ── Live-trader engine version switching ─────────────────────────────── */
+
+function setLtEngineVersion(v) {
+  ltEngineVersion = v;
+  const v1Btn = document.getElementById("lt-engine-v1");
+  const v2Btn = document.getElementById("lt-engine-v2");
+  if (v1Btn) v1Btn.classList.toggle("active", v === 1);
+  if (v2Btn) v2Btn.classList.toggle("active", v === 2);
+}
+
+document.querySelectorAll("#lt-engine-toggle .engine-ver-btn").forEach(btn => {
+  btn.addEventListener("click", () => setLtEngineVersion(parseInt(btn.dataset.ver, 10)));
+});
+
 /* Re-render volume profiles when chart view changes */
 function setupChartRedraw() {
   if (!chart) return;
@@ -2268,6 +2289,7 @@ function updateTraderCard(mint) {
       <div class="lt-card-header">
         <div><span class="lt-card-name" id="lth-name-${mint}"></span><span class="lt-card-symbol" id="lth-sym-${mint}"></span></div>
         <div style="display:flex;gap:6px;align-items:center">
+          <span class="engine-badge${ctx.engineVersion === 2 ? ' v2' : ''}" title="Strategy engine">${ctx.engineVersion === 2 ? 'V2' : 'V1'}</span>
           <div id="lth-trend-${mint}" class="direction-badge" style="font-size:10px; padding:2px 6px; display:none"></div>
           <div id="lth-regime-${mint}" class="regime-badge" style="font-size:10px; padding:2px 6px; display:none"></div>
           <div id="lth-status-${mint}"></div>
@@ -2394,8 +2416,8 @@ function startLiveTrader(mint, _delayOverride = null) {
   _ltConnectResetTimer = setTimeout(() => { _ltConnectCount = 0; }, 2000);
 
   const config = getLtConfig();
-  const paramsStr = encodeURIComponent(JSON.stringify(getEngineParams()));
-  const wsUrl = `${LT_WS_BASE}/${mint}?timeframe=${config.timeframe}&private_key=${encodeURIComponent(_privateKey)}&buy_size=${config.buySize}&slippage_bps=${config.slippageBps}&priority_fee=${config.priorityFeeLamports}&params=${paramsStr}&engine_version=${engineVersion}`;
+  const paramsStr = encodeURIComponent(JSON.stringify(getLtEngineParams()));
+  const wsUrl = `${LT_WS_BASE}/${mint}?timeframe=${config.timeframe}&private_key=${encodeURIComponent(_privateKey)}&buy_size=${config.buySize}&slippage_bps=${config.slippageBps}&priority_fee=${config.priorityFeeLamports}&params=${paramsStr}&engine_version=${ltEngineVersion}`;
 
   // Register the card immediately so the UI shows "Connecting…" right away
   const ctx = {
@@ -2410,6 +2432,7 @@ function startLiveTrader(mint, _delayOverride = null) {
     regime: "idle",
     direction: "none",
     sVal: 0,
+    engineVersion: ltEngineVersion,
   };
   ltActiveTraders[mint] = ctx;
   ltStopAllBtn.style.display = "inline-flex";
