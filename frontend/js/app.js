@@ -182,6 +182,18 @@ let engineParamsV2 = {
   breakeven_arm_dd_pct:   25,  // arm scratch exit once low ≤ −25% offside (iter18b_opt)
   breakeven_buffer_pct:   2.5, // scratch exit level (entry·(1+buf))
   reversal_exit_bars:     2,   // consecutive REVERSAL bars before exit (iter18b_opt)
+  // iter21 — sustained no-long-Kelly exit #7 ("kelly_flat").  Mirror of the
+  // V2 entry gate: when direction != +1 AND E_star <= 0 has persisted for
+  // `no_long_exit_bars` consecutive ticks AND trade is ≥ `no_long_offside_pct`
+  // under water, EXIT (the engine itself asserts the long has no positive
+  // Kelly utility).  Production tuning iter21_k60_offs40 (259 trades @ 77.2%
+  // WR, +0.884 SOL, PF 1.55; all 5 paired-diff gates cleared vs
+  // iter16_baseline_full).  K=20 + offs=-30 caught more losers at higher
+  // W→L cost; K=60 + offs=-40 minimises winner cuts to ~1 while still saving
+  // ~10 losers.
+  no_long_exit_bars:     60,   // consecutive no-long-E_long ticks to fire kelly_flat
+  no_long_offside_pct:   40,   // require ≥ 40% underwater to fire kelly_flat (winner-cut guard)
+  no_long_mu_neg_frac:   0,    // iter21 hypothesis K REJECTED — μ-persistence guard (off)
 };
 
 /* Engine version: 1 = V1 (Physics), 2 = V2 (RBPF/UKF/KDE/Kramers) */

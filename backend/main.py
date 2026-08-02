@@ -1114,6 +1114,12 @@ async def live_trading_ws(
     finally:
         cancelled.set()
         ws_client.stop()
+        
+        # ── Emergency position cleanup before disconnect ──────────────────────
+        # If a position is open when the WebSocket terminates, execute an
+        # emergency sell to avoid leaving positions unattended.
+        await live_trader.cleanup()
+        
         # Finalize the auto-recording so it's available for backtesting
         data_store.stop_recording(rec_id)
         logger.info(f"[LIVE] Finalized recording {rec_id}")

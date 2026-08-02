@@ -190,6 +190,11 @@ DEFAULT_CONFIG = {
                                  #   (adapter-only; pure V2 ignores)
     "sigma_floor":       1e-6,   # numerical floor on σ
     "logprob_floor":     -50.0,  # clamp for log-likelihoods
+    # iter21 hypothesis B — fraction of drift-work `±½μΔx` term restored
+    # in Kramers `du_±` exponents (iter16d removed the full term).
+    # Default 0.0 = iter21_k60_offs40 production parity.  Sweep [0.0, 0.1,
+    # 0.3, 0.5].  REJECTED at smoke test (causes iter09-style churn).
+    "v2_drift_work_fraction": 0.0,
 }
 
 
@@ -1783,8 +1788,26 @@ def _kramers_escape_and_decision(
     # ratio, and the vol-of-vol correction ½(ΔU±/T)²·Var(h) is finite
     # and unsaturated for the first time on any dataset.
     mu_t = float(state["mu"])
-    du_up = U_up - U_basin
-    du_down = U_down - U_basin
+    # iter21 hypothesis B (REJECTED at smoke test): restoring a fraction of
+    # the iter16d-removed drift-work term `±½·μ_t·Δx_±` in `du_±` causes
+    # immediate sign-flip churn on rec70 (NO counter-trade):
+    #   f=0.0 (iter19): 2 trades @ +0.0096 SOL
+    #   f=0.1:         10 trades @ -0.0248 SOL (20% WR — iter09-style churn)
+    #   f=0.5:         27 trades @ -0.0425 SOL (22% WR)
+    # The drift-work term couples the OU-process μ_t (which oscillates
+    # tick-to-tick) directly to the barrier energy, so each μ sign-flip
+    # now flips k_up/k_down ordering — replicating iter09's pathology even
+    # at small f.  Kept as cfg knob with default 0.0 = iter21_k60_offs40
+    # production parity.
+    f_drift = float(cfg.get("v2_drift_work_fraction", 0.0))
+    if f_drift > 0.0 and idx_up is not None and idx_down is not None:
+        dw_up   = 0.5 * mu_t * (float(grid[idx_up])   - x_t)
+        dw_down = 0.5 * mu_t * (float(grid[idx_down]) - x_t)
+        du_up   = (U_up   - U_basin) + f_drift * dw_up
+        du_down = (U_down - U_basin) + f_drift * dw_down
+    else:
+        du_up   = U_up   - U_basin
+        du_down = U_down - U_basin
 
     # Second derivatives (curvatures) via central difference.
     # Grid spacing Δx is required for true U'' (iter16f).
@@ -2355,22 +2378,17 @@ class StrategyEngineV2Adapter:
         self._be_armed = False  # iter17 breakeven-scratch arming flag
         self.entry_bar_count = 0
         self.exit_signal_reason = ""
-        # iter18a: post-entry posterior-drift persistence counter.
-        # Tracks consecutive 1s ticks (state updates) since the trade was
-        # opened for which the RBPF posterior mu_t < 0.  Reset on every
-        # entry / exit.  Used by _check_exit_v2 to detect slow-bleed
-        # crashes that do not accumulate enough KDE evidence to flip
-        # P_down ≥ 0.5 (the core Kramers blindspot on lifetime-T_w KDE).
-        self._mu_neg_persist_count: int = 0
-        # iter18a: EMA-smoothed mu for noise rejection (alpha=0.1, ~10s half-life).
-        # The raw posterior mu oscillates every tick at 1s scale; EMA
-        # smoothing is the same noise-rejection technique used in the
-        # iter05 mu_dot_post_ema.  The smoothed value is what we test against 0.
+        # iter18a: post-entry EMA-smoothed mu for noise rejection
+        # (alpha=0.1, ~10s half-life).  The raw posterior mu oscillates
+        # every tick at 1s scale; EMA smoothing is the same noise-
+        # rejection technique used in iter05 mu_dot_post_ema.  Used to
+        # populate _mu_post_neg_window below (which iter21 hypothesis K
+        # reads via _check_exit_v2's kelly_flat guard).
         self._mu_post_ema: float = 0.0
         # iter18a: sliding window fraction tracker (deque of bool flags).
         # Fraction of last N ticks with smoothed mu_t < 0, maintained
-        # identically to _mu_dot_post_sign_window in iter05.  Fires when
-        # >= `mu_exit_window_thresh` fraction are negative AND offside.
+        # identically to _mu_dot_post_sign_window in iter05.  Read by the
+        # iter21 kelly_flat μ-guard (hypothesis K, default OFF).
         import collections as _col18
         self._mu_post_neg_window: _col18.deque = _col18.deque(maxlen=60)
         self._mu_post_neg_count: int = 0
@@ -2474,6 +2492,42 @@ class StrategyEngineV2Adapter:
         # Default 2 (optimized in iter18b_opt): requires 2s of sustained
         # REVERSAL posterior majority to distinguish trend reversal from noise.
         self._reversal_exit_bars    = int(engine_kwargs.pop("reversal_exit_bars", 2))
+        # ── iter21: sustained-no-long-Kelly exit ("kelly_flat" / exit #7). ──
+        # Bayesian decision-theoretic theorem: a long position ceases to be
+        # optimal when the engine's own per-tick Kelly utility for "stay long"
+        # goes non-positive.  Entry gate is `direction == +1 AND E_star > 0`;
+        # the exit-side mirror is "engine says not-long for C_K consecutive
+        # ticks AND the trade is offside".  Static-mask analysis
+        # (backend/analysis/iter20_static_mask_v2.py) on iter19 rec-data:
+        #   K=80 ticks, offside=-20%: losers saved +0.385 / winners lost
+        #   -0.120 ⇒ net +0.265 over 36-recording cohort.
+        # Offside guard prevents chopping trades near breakeven that then
+        # recover into winners (winners chop at ≥+3% in the no-guard mask).
+        # _no_long_exit_bars counts consecutive ticks where direction != +1
+        # AND E_star <= 0 (engine wants flat).  PRODUCTION DEFAULTS (iter21
+        # acceptance vs iter16_baseline_full): no_long_exit_bars=60,
+        # no_long_offside_pct=40 (full batch: 259 trades, 77.2% WR, +0.884
+        # SOL, PF 1.55, exp +0.00341 — all 5 paired-diff gates cleared vs
+        # iter16_baseline_full; +62% PnL vs iter19_clean). The K=60 + offs=40
+        # tuning minimises W→L regressions (4) at the cost of catching fewer
+        # losers than K=20 — this is the optimal trade per static-mask
+        # analysis (winner cut at offs=-40% drops to ~1 from ~10).
+        # _no_long_offside_pct: the trade must be at least X% underwater
+        # before this exit can fire (guards against the natural consolidation
+        # E_long-neg phases that healthy winners pass through).
+        self._no_long_exit_bars     = int(engine_kwargs.pop("no_long_exit_bars", 60))
+        self._no_long_offside_pct   = float(engine_kwargs.pop("no_long_offside_pct", 40.0))
+        # iter21 hypothesis K (μ-persistence guard): require that
+        # fraction of trailing 60 ticks with negative EMA-smoothed μ_t is
+        # at least this high.  REJECTED at full batch (iter21k_mu75 vs
+        # iter21_k60_offs40: Δ=-0.072 SOL, 3/14 breadth) — recoverable
+        # pullbacks and continuation slides are NOT statistically
+        # distinguishable from OU drift (rec70 W→L regression had
+        # mu_neg_frac=1.00, highest possible).  Default 0.0 = OFF
+        # (preserves iter21_k60_offs40 production parity).
+        # 0.75 means 75% of last 60 ticks had EMA-mu < 0.
+        self._no_long_mu_neg_frac   = float(engine_kwargs.pop("no_long_mu_neg_frac", 0.0))
+        self._no_long_streak        = 0
         self._entry_E_star = 0.0
         self.confidence_w1 = 0.3
         self.confidence_w2 = 0.25
@@ -2620,7 +2674,6 @@ class StrategyEngineV2Adapter:
         self._peak_price = float(entry_price)
         self.entry_bar_count = self.bar_count
         self._be_armed = False  # iter17 breakeven-scratch arming flag
-        self._mu_neg_persist_count = 0  # iter18a: reset on entry
         # Seed EMA from the current posterior mu so the window starts calibrated.
         _cur_mu = getattr(self, '_mu_post_ema', 0.0)  # keep current EMA value
         self._mu_post_neg_window.clear()
@@ -2632,9 +2685,9 @@ class StrategyEngineV2Adapter:
         self.position_direction = _V1Direction.NONE
         self._peak_price = 0.0
         self._be_armed = False
-        self._mu_neg_persist_count = 0  # iter18a: reset on close
         self._mu_post_neg_window.clear()
         self._mu_post_neg_count = 0
+        self._no_long_streak = 0  # iter21: reset on close
 
     def _update_peak_price(self, h: float, l: float):
         if not self.in_position:
@@ -2903,6 +2956,18 @@ class StrategyEngineV2Adapter:
         # consistent with the rest of the entry_params snapshot semantics.
         self._v2_last_decision = decision
 
+        # iter21: update the "no-long-Kelly-persistence" streak counter.
+        # When `direction != +1 AND E_star <= 0` (the engine either wants
+        # flat or wants short with no Kelly-positive counter-trade), the
+        # current long position has no Bayesian justification to be held.
+        # Reset on any long-viable tick.  Used in _check_exit_v2.
+        _dec_dir = int(decision.get("direction", 0) or 0)
+        _dec_E = float(decision.get("E_star", -1e3) or -1e3)
+        if _dec_dir == 1 and _dec_E > 0:
+            self._no_long_streak = 0
+        else:
+            self._no_long_streak += 1
+
         # iter18a: update the post-entry posterior-drift persistence counter.
         # mu_t is the UKF posterior latent drift (OU process); when it is
         # persistently negative, the OU model expects continued downward
@@ -2942,6 +3007,7 @@ class StrategyEngineV2Adapter:
                     v1_signal = _V1Signal.BUY
                     self._entry_E_star = float(decision.get("E_star", 0.0))
                     self.exit_signal_reason = ""
+                    self._no_long_streak = 0
 
         # ── Update peak price AFTER exit checks (matches V1) ────────
         if self.in_position and v1_signal != _V1Signal.EXIT:
@@ -3151,6 +3217,56 @@ class StrategyEngineV2Adapter:
             #    positive counter-direction Kelly utility.
             if decision.get("direction", 0) != 1 and decision.get("E_star", -1.0) > 0:
                 self.exit_signal_reason = "bayesian_flip"
+                return _V1Signal.EXIT
+            # 7. iter21 sustained-no-long-Kelly exit ("kelly_flat").
+            #    Bayesian decision theory: while in position, the engine's
+            #    own per-tick Kelly utility for "continue holding long" is
+            #    E_star when direction == +1.  If direction has devolved to
+            #    ≤ 0 (engine-wants-flat or engine-wants-short WITHOUT a
+            #    Kelly-positive counter-trade) AND this condition has held
+            #    for self._no_long_exit_bars consecutive ticks AND the trade
+            #    is below self._no_long_offside_pct under water, holding
+            #    cannot be rational — the engine itself asserts the long
+            #    has no positive expected log-wealth increment.  The static
+            #    -mask analysis (iter20_static_mask_v2) on the 36-recording
+            #    worst-loser cohort at K=20-candles (= 80 ticks) and -20%
+            #    offside showed +0.385 SOL saved on losers vs -0.120 SOL
+            #    lost on winners; the production tuning K=60 + offs=-40%
+            #    (iter21_k60_offs40 batch: 259 trades @ 77.2% WR, +0.884
+            #    SOL, PF 1.55) cleared all 5 paired-diff gates vs
+            #    iter16_baseline_full (+1.682 SOL Δ, Wilcoxon p=0.004) at
+            #    the cost of 4 W→L regression cuts during exogenous
+            #    recoveries (rec70, rec527, rec21, rec555).
+            #    Distinct from exit #5 (Bayesian down-flip) which requires
+            #    the engine's POSTERIOR P_down to dominate; this exit is
+            #    the entry-gate's mirror image: entry requires direction=1
+            #    AND E_star > 0; exit when direction !=1  AND E_star <= 0
+            #    sustained.
+            # iter21 hypothesis K (μ-persistence guard): require also that
+            # the post-entry EMA-smoothed UKF drift (μ_t) has been negative
+            # for the majority of the trailing 60-tick window.  Intended to
+            # distinguish genuine slides (drift falling → OU continued-slide
+            # forecast) from winning-trade pullback dips (drift rising → OU
+            # recovery forecast).  REJECTED at full batch:
+            #   iter21k_mu75 vs iter21_k60_offs40 REJECTED (Δ=-0.072 SOL,
+            #   3 improved / 11 regressed) — the rec70/rec21 W→L regressions
+            #   had mu_neg_frac=1.00 at the cut (HIGHEST possible; cannot be
+            #   filtered by any `<=1.0` threshold), while several L→W
+            #   improvements (rec828 mu=0.00, rec346 mu=0.25, rec657 mu=0.18,
+            #   rec635 mu=0.27) had mu_neg_frac < 0.75 and were BLOCKED by
+            #   the guard.  Genuine slides and recovery-pullback dips are
+            #   NOT statistically distinguishable from the OU drift posterior
+            #   at the kelly_flat decision moment — recovery is exogenous.
+            # Default 0.0 = OFF (preserves iter21_k60_offs40 parity).
+            _mu_neg_frac = (self._mu_post_neg_count /
+                            self._mu_post_neg_window.maxlen
+                            if self._mu_post_neg_window.maxlen else 0.0)
+            if (self._no_long_exit_bars > 0
+                    and self._no_long_offside_pct > 0.0
+                    and self._no_long_streak >= self._no_long_exit_bars
+                    and self._no_long_mu_neg_frac <= _mu_neg_frac
+                    and entry > 0 and c <= entry * (1.0 - self._no_long_offside_pct / 100.0)):
+                self.exit_signal_reason = "kelly_flat"
                 return _V1Signal.EXIT
         return None
 

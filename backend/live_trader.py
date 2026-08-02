@@ -226,6 +226,35 @@ class LiveTrader:
             )
         return self._session
 
+    async def cleanup(self):
+        """
+        Emergency cleanup before WebSocket disconnect.
+        
+        If a position is open, execute an emergency sell to avoid leaving
+        open positions when the connection terminates unexpectedly.
+        """
+        if self.current_trade is not None and not self._swap_in_flight:
+            logger.warning(
+                f"[CLEANUP] Position open on disconnect for {self.token_mint[:8]}… "
+                f"— executing emergency sell"
+            )
+            self.current_trade.status = "closing"
+            self.current_trade.exit_reason = "connection_closed"
+            # Wait for the sell to complete (or timeout) before closing session
+            try:
+                sig = await asyncio.wait_for(
+                    self.execute_sell("connection_closed"),
+                    timeout=30.0,  # 30s grace period for emergency exit
+                )
+                if sig:
+                    logger.info(f"[CLEANUP] Emergency sell completed: {sig}")
+                else:
+                    logger.error("[CLEANUP] Emergency sell failed")
+            except asyncio.TimeoutError:
+                logger.error("[CLEANUP] Emergency sell timed out after 30s")
+        
+        await self.close()
+
     async def close(self):
         """Gracefully close the persistent HTTP session."""
         if self._session and not self._session.closed:

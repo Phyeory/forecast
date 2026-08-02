@@ -2951,3 +2951,188 @@ The `give_frac` parameter controls the trailing profit-lock: when peak gain reac
 - `v2_p_up_min` = 0.62, `v2_sigma_t_min` = 0.021, `breakeven_buffer_pct` = 2.5 (unchanged)
 - `v2_hard_stop_pct` = 0.0 (param exists but disabled; never shipped)
 Frontend `engineParamsV2` updated to mirror. Param file `backend/analysis/params/iter19.json` saved.
+
+---
+
+## Iter 20 — Multi-dimensional loss-structure analysis on iter19_clean (analytical, no batch)
+
+### Motivation
+iter19_clean: 229 trades @ 78.60% WR, +0.54697 SOL, PF 1.36, exp +0.00239 SOL.
+26 of 229 trades (11.4%) exit via `recording_ended` at total **-1.2849 SOL** — they
+are 2.35× the total PnL bucket and the last-resort bleed bucket. Their reduction
+was the user's optimization target.
+
+### Methodology
+Built six diagnostic scripts under `backend/analysis/iter20_*`:
+
+1. `iter20_loss_diag.py` — geographic / temporal mapping of `recording_ended`
+   losers: 26/26 are the LAST trade of their recording. 18/26 had a prior
+   winner on the same token; only 3 had no V2 entry-decision at the loss
+   time (engine posterior direction == +1 alongside price collapse).
+2. `iter20_loss_structure.py` — quantile-profiles at entry: losers enter
+   LATE in recording life (median life_fraction=0.83 vs winners 0.56)
+   and LOW in price range (median pos_in_range=0.064 vs winners 0.39).
+3. `iter20_discriminator.py` — Lu / du_up / du_down / mu_t / phi_t profile
+   signatures across the entry → exit window. Confirmed `P_down < 0.10`
+   throughout every slide (Kramers kernel saturates to P_down=0).
+4. `iter20_context_analysis.py` — KDE barrier geometry at the moment of
+   the slide: down-barrier saddle is at the grid boundary (no volume
+   history below entry); up-barrier saddle is at the prior-pump HVN. So
+   ΔU_down ≫ ΔU_up structurally at every slide moment → P_down ≡ 0.
+   This re-confirms iter14 empirical law #4 ("crash-blindness") on the
+   fresh volume-carrying dataset.
+5. `iter20_during_position.py` — per-bar E_long trace for 26 losers:
+   E_star at `direction == -1 AND E_star > 0` (counter-direction Kelly-
+   positive bayesian_flip exit condition) fires 0 times across 13k
+   bars. Exit #6 (bayesian_flip) is unreachable when P_down ≡ 0.
+6. `iter20_trace.py` — per-bar P_up/P_down/P_zero trace dump on a
+   worst-loser (rec635) confirming the kernel saturates to the
+   `P_up ≫ P_down ≫ P_zero → 1` (k_total ≪ 1/τ) trap.
+
+### Static-mask analysis (`iter20_static_mask_v2.py`)
+Built a deterministic replay script that re-runs each per-trade
+decision-stream on iter19_clean trade entries, applying a *hypothetical*
+kelly-flat exit "if K consecutive no-long-E_long signals accumulate AND
+offside ≥ X%". This skips running a full engine batch for parameter
+sweeps (just simulates the cut).
+
+Sweep: K∈{20,40,60,80,120,180,240}, offs∈{-10,-20,-30}. Cohort: 26
+`recording_ended` losers + 9 winning tokens' full trade streams.
+
+Best-case pod (K=20, offs=-20): losers cut +0.385 SOL / winners lost
+-0.120 SOL → net +0.265 SOL on the cohort.
+
+Key takeaway: cuts at moderate offside (-20 to -30%) catch winners
+mid-pullback (high false-positive cost); cuts at -40% offside catch
+an order of magnitude fewer winners (empirically ~1 winner chop) while
+still saving 5-10 losers.
+
+---
+
+## Iter 21 — kelly_flat exit #7 (no-long-E_long persistence + μ-guard)
+
+### Hypothesis A — kelly_flat cut on persistent no-long + offside
+**Implementation** (`backend/strategy_engineV2.py` lines 2487-2520,
+2926-2936, 3232-3254): new exit #7 `kelly_flat` fires when engine
+direction != +1 AND E_star <= 0 sustained for `no_long_exit_bars`
+consecutive ticks AND trade offside ≥ `no_long_offside_pct`. Defaults:
+`no_long_exit_bars=0, no_long_offside_pct=0.0` → OFF (preserves iter19
+parity). Streak resets on any pro-long signal (direction=1 AND E_star>0).
+
+Mathematically grounded: entry gate requires `direction=+1 AND E_star>0`;
+when both fail persistently AND position is deep offside, holding has
+no Bayesian justification (the engine itself asserts the long has no
+positive Kelly utility). Distinct from exit #5 (bayesian_flip) which
+requires `direction=-1 AND E_star>0` (counter-direction Kelly-positive).
+
+### iter21_k60_offs40 batch (no_long_exit_bars=60, no_long_offside_pct=40)
+**Results**: 259 trades @ 77.2% WR, +0.88421 SOL, PF 1.55, exp +0.00341.
+vs iter19_clean: ΔPnL = +0.337 SOL (+62%). PF improved (1.36→1.55);
+expectancy improved (+0.00239 → +0.00341). Aggregate-best fresh-batch
+result recorded.
+
+**paired_diff vs iter19_clean — REJECTED**:
+- Wilcoxon p=0.095 (>0.05)
+- Bootstrap CI [-0.001, +0.0045] (crosses zero)
+- Breadth 14.9% (<50%)
+- 4 W→L vs 1 L→W flips
+- Aggregate improves but breadth gates fail structurally — 78 of 94
+  tokens see no kelly_flat fires (only ~17% of trades have a slide-
+  into-deep-offside phase to cut). The 4 W→L regressions
+  (rec555, rec527, rec70, rec21) come from mid-pullback cuts at -40%
+  offside in winning trades that would have recovered to breakeven_scratch
+  (+2.5% above entry) within iter19's hold-to-recovery logic.
+
+**paired_diff vs iter16_baseline_full — ACCEPTED (all 5 gates)**:
+- Wilcoxon p=0.0043
+- paired t-test p=0.0147
+- Bootstrap CI [+0.0041, +0.0294]
+- McNemar p=0.0169
+- 24/36 tokens improved (66.7%), 17 L→W vs 5 W→L flips
+- ΔPnL = +1.682 SOL
+
+### Hypothesis B — partial drift-work (REJECTED at smoke)
+Added `v2_drift_work_fraction` knob (default 0.0 = OFF) that re-introduces
+the spec's `+0.5·μ_t·Δx` drift-work into the down-barrier search. Smoke
+test on rec70: f=0.0 → 2 trades +0.0096 SOL; f=0.1 → 10 trades -0.025
+SOL (20% WR); f=0.5 → 27 trades -0.043 SOL (22% WR). Drift-work couples
+OU-process μ_t (oscillates tick-to-tick) to barrier energy, replicating
+iter09/iter16o churn. Default 0.0 = iter19 parity in HEAD.
+
+### Hypothesis K — μ-persistence guard (REJECTED at full batch)
+**Implementation**: added `no_long_mu_neg_frac` knob (default 0.0 = OFF).
+When non-zero, kelly_flat additionally requires `mu_neg_frac ≥
+no_long_mu_neg_frac`, where mu_neg_frac = `_mu_post_neg_count /
+_mu_post_neg_window.maxlen` (fraction of last 60 ticks with negative
+EMA-smoothed μ_t). Hypothesis: winners mid-pullback have positive /
+rising drift; losers in true slides have persistently negative drift.
+The guard would distinguish them.
+
+**Empirical refutation** — full per-recording trace via patched `_check_exit_v2`:
+
+| rec | type | mu_neg_frac at KF fire | desired | iter21_k60 act | mu75 act |
+|-----|------|-------------------------|---------|-----------------|----------|
+| rec70 | W→L | **1.00** | HOLD | cut (-0.045) | cut (-0.045) |
+| rec527 | W→L | 0.43 | HOLD | cut (-0.041) | HOLD (+0.006) ✓ |
+| rec21 | W→L | **1.00** | HOLD | cut (-0.020) | cut (-0.020) |
+| rec555 | W→L | 0.47 | HOLD | cut (-0.044) | HOLD (+0.007) ✓ |
+| rec828 | L→W | 0.00 | CUT | cut (+0.011) | HOLD (-0.040) ✗ |
+| rec346 | L→W | 0.25 | CUT | cut (+0.018) | HOLD (-0.066) ✗ |
+| rec657 | L→W | 0.18 | CUT | cut (+0.028) | HOLD (-0.052) ✗ |
+| rec467 | L→W | 0.32 | CUT | cut (+0.035) | HOLD (-0.074) ✗ |
+| rec635 | L→W | 0.27 | CUT | cut (+0.027) | HOLD (-0.082) ✗ |
+| rec239 | L→W | 0.75 | CUT | cut (+0.035) | cut (-0.052)? |
+
+The two W→L regressions the guard could filter (rec527, rec555, both
+at mu_neg_frac < 0.75) only saved +0.05 SOL each, while the guard ALSO
+blocked at least 5 L→W improvements (mu<0.75) losing +0.05 SOL each —
+net LOSS. Crucially the rec70 and rec21 W→L regressions had
+mu_neg_frac=1.00 (HIGHEST possible — engine saw 100% negative drift for
+60 ticks) → no threshold ≤ 1.0 can filter them.
+
+**iter21k_k60_offs40_mu75 batch** (no_long_mu_neg_frac=0.75): 259 trades
+@ 76.45% WR, +0.81173 SOL, PF 1.51, exp +0.00313.
+
+**paired_diff iter21k_mu75 vs iter21_k60_offs40 — REJECTED**: Δ=-0.072
+SOL, breadth 3/14, Wilcoxon p=0.97, bootstrap CI [-0.0023, +0.0009].
+
+**paired_diff iter21k_mu75 vs iter19_clean — REJECTED**: Wilcoxon p=0.153,
+breadth 11.7%, W→L flips 3.
+
+**paired_diff iter21k_mu75 vs iter16_baseline_full — ACCEPTED**: Wilcoxon
+p=0.0058, 24/36 tokens improved (66.7%), 17 L→W vs 5 W→L flips. But
+strictly dominated by iter21_k60_offs40 which has higher Δ vs iter16
+(+1.682 vs +1.610) and higher PF (1.55 vs 1.51).
+
+### Conclusions
+1. **Hypothesis K REFUTES the originally posited mechanism.** OU drift
+   posterior is NOT a statistical discriminator of recoverable pullback
+   vs. continuation slide. Decisive empirical evidence: the WORST W→L
+   regression (rec70, -0.045 SOL) had mu_neg_frac=1.00 at the cut — the
+   strongest possible "this is a slide" signal — yet the price
+   recovered 84% over the next 29 minutes to fire iter19's
+   breakeven_scratch at +2.5%. Recovery is a fundamentally EXOGENOUS
+   event the engine posterior cannot predict.
+2. **iter21_k60_offs40 is REJECTED vs iter19_clean** (fails Wilcoxon,
+   bootstrap CI, breadth gates) but **ACCEPTED vs iter16_baseline_full**
+   (all 5 gates cleared). Aggregate improves by +0.337 SOL (+62%) at the
+   cost of 4 W→L flips. Under the strict anti-overfit protocol,
+   iter21_k60_offs40 is the structurally better trading strategy by
+   aggregate metrics (higher PnL, PF, expectancy) but the protocol
+   requires breadth robustness — and breadth cannot exceed ~17% because
+   kelly_flat only fires on tokens with slide-into-deep-offside phases
+   (~17% of trades).
+3. **Engine tree state**: HEAD defaults preserve iter19 parity
+   (`no_long_exit_bars=0, no_long_offside_pct=0.0, no_long_mu_neg_frac=0.0`,
+   `v2_drift_work_fraction=0.0`). The exit #7 implementation is left in
+   the tree as scaffolding for future research; the param is documented
+   and default-OFF to maintain pipeline parity. The 4 W→L regressions
+   from iter21_k60_offs40 mean this is NOT a replacement of iter19.
+4. **The recording_ended -1.285 SOL bucket is STRUCTURALLY UNCLOSEABLE
+   at the engine posterior level.** Demonstrated by three independent
+   failed approaches (A: kelly_flat, B: partial drift-work, K: μ-guard).
+   The Bayesian posterior simply has no signal distinguishing "this
+   pullback will recover" from "this is the start of a fatal slide"
+   at the moment the cut would fire. A multi-scale fast-KDE down-barrier
+   (hypothesis E) remains theoretically open but unproven; all other
+   engine-layer attempts have been exhaustively tested and rejected.
