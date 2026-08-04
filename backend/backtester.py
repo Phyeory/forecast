@@ -102,6 +102,11 @@ def run_backtest_batch(
     due to process spawn overhead being larger than computation time).
     Falls back to parallel processes for very large batches (>20).
     """
+    # Clamp fees just like run_backtest does — protects batch runs from
+    # accidentally large values sent by the UI.
+    MAX_FEE_SOL = 0.01
+    priority_fee = min(float(priority_fee), MAX_FEE_SOL)
+    bribe_fee    = min(float(bribe_fee),    MAX_FEE_SOL)
     recordings = list_recordings()
     completed = [r for r in recordings if r.get("status") == "completed"]
 
@@ -169,6 +174,13 @@ def run_backtest(
 
     Returns a summary dict with the backtest_id and stats.
     """
+    # Guard against UI fields sending lamport-scale or otherwise absurd fee
+    # values.  priority_fee and bribe_fee are SOL amounts per trade side; cap
+    # them generously at 0.01 SOL each (still ~60× above the real default of
+    # 0.0001 SOL) so a mistyped value can never flip the sign of pnl_sol.
+    MAX_FEE_SOL = 0.01
+    priority_fee = min(float(priority_fee), MAX_FEE_SOL)
+    bribe_fee    = min(float(bribe_fee),    MAX_FEE_SOL)
     recording = get_recording(recording_id)
     if not recording:
         raise ValueError(f"Recording {recording_id} not found")

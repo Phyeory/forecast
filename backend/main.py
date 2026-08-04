@@ -891,6 +891,8 @@ async def live_trading_ws(
         skip_simulation=skip_sim,
         engine_version=engine_version,
     )
+    # Arm the never-give-up sell watchdog as soon as the trader exists.
+    live_trader.start_watchdog()
 
     cancelled = asyncio.Event()
     _active_live_traders[real_mint] = {

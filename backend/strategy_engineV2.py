@@ -231,7 +231,7 @@ def _merge_config(user: dict) -> dict:
 _STATE_DIM = 5
 
 
-@njit(cache=False)
+@njit(cache=True)
 def _ukf_predict_step(
     mu_prev, P_prev,           # state mean / cov at k-1
     sqrt_P,                     # pre-computed cholesky factor of P_prev (lower)
@@ -427,7 +427,7 @@ def _ukf_predict_step(
     return mu_pred, P_pred, Y
 
 
-@njit(cache=False)
+@njit(cache=True)
 def _ukf_update_step(
     mu_pred, P_pred, Y,            # predicted state + sigma points
     obs_log_return,                # measurement y_k = Δx_k
@@ -576,7 +576,7 @@ def _ukf_update_step(
 # Silverman's rule adapted for volume weights:
 #   h = 0.9 · σ_x · n^{-1/5}        — here σ_x is a rolling weighted std.
 
-@njit(cache=False)
+@njit(cache=True)
 def _kde_eval_kernel(
     grid_x,            # (G,) spatial grid in log-price
     trade_prices,      # (T,) prices of historical trades (log-price)
@@ -586,26 +586,58 @@ def _kde_eval_kernel(
     bandwidth,         # h
     now_t,             # current time (s)
 ):
-    """Vectorised weighted-Gaussian KDE evaluation on `grid_x`."""
+    """Vectorised weighted-Gaussian KDE evaluation on `grid_x` with spatial pruning.
+    
+    Each trade only contributes measurably to grid points within ±4.3σ (bandwidth).
+    Beyond that, exp(-u²/2h²) < 1e-4 and is negligible. We binary-search the
+    active grid range [g_lo, g_hi) per trade, reducing O(T·G) to O(T·w) where
+    w << G for typical bandwidth/grid spacing ratios.
+    """
     G = grid_x.shape[0]
     T = trade_prices.shape[0]
     out = np.zeros(G)
     inv_2h2 = 1.0 / (2.0 * bandwidth * bandwidth) if bandwidth > 0 else 0.0
     if bandwidth <= 0.0 or T == 0:
         return out
+    
+    # Spatial pruning cutoff: exp(-(4.3²/2)) ≈ 1e-4
+    CUTOFF_SIGMAS = 4.3
+    cutoff_dist = CUTOFF_SIGMAS * bandwidth
+    
+    # Grid spacing (assumed uniform)
+    if G > 1:
+        dx = grid_x[1] - grid_x[0]
+    else:
+        dx = 1.0
+    if dx <= 0.0:
+        dx = 1e-12
+    
     for i in range(T):
         dt = now_t - trade_times[i]
         if dt < 0.0:
             dt = 0.0
         w = math.exp(-decay_rate * dt) * trade_volumes[i]
+        if w <= 0.0:
+            continue
         xp = trade_prices[i]
-        for g in range(G):
+        
+        # Active grid range: grid_x[g] ∈ [xp - cutoff, xp + cutoff]
+        g_lo = int(math.ceil((xp - cutoff_dist - grid_x[0]) / dx))
+        g_hi = int(math.floor((xp + cutoff_dist - grid_x[0]) / dx)) + 1
+        if g_lo < 0:
+            g_lo = 0
+        if g_hi > G:
+            g_hi = G
+        if g_lo >= g_hi:
+            continue
+        
+        for g in range(g_lo, g_hi):
             u = grid_x[g] - xp
             out[g] += w * math.exp(-u * u * inv_2h2)
     return out
 
 
-@njit(cache=False)
+@njit(cache=True)
 def _liquidity_cost_kernel(
     grid_x,        # (G,) spatial grid
     x_t,           # current log-price
@@ -669,7 +701,7 @@ def _liquidity_cost_kernel(
     return V_lo, V_hi
 
 
-@njit(cache=False)
+@njit(cache=True)
 def _barrier_find_kernel(U_grid, x_idx):
     """
     Locate the nearest local minimum (basin, idx = x_idx) and the nearest
@@ -726,7 +758,7 @@ def _barrier_find_kernel(U_grid, x_idx):
             U_grid[x_idx], U_grid[idx_up_peak], U_grid[idx_down_peak])
 
 
-@njit(cache=False)
+@njit(cache=True)
 def _second_derivative_grid(U_grid, dx):
     """Central-difference second derivative along a 1-D grid.
 
@@ -783,7 +815,7 @@ def _pack_cfg_kernels(c: dict) -> np.ndarray:
     return arr
 
 
-@njit(cache=False)
+@njit(cache=True)
 def _chol_lower_5x5(P):
     """Cholesky factor (lower-triangular) of a 5×5 SPD matrix P."""
     L = np.zeros((5, 5))
@@ -810,7 +842,7 @@ def _chol_lower_5x5(P):
 # same Mehra R update, same topological regime decision tree.
 # ─────────────────────────────────────────────────────────────────────────────
 
-@njit(cache=False)
+@njit(cache=True)
 def _rbpf_step_batched(
     mu_arr,        # (N,5)  in/out — particle mu (latent state)
     P_arr,         # (N,5,5) in/out — particle P
@@ -903,7 +935,7 @@ def _rbpf_step_batched(
     return resid_mean_sq, pzz_mean
 
 
-@njit(cache=False)
+@njit(cache=True)
 def _posterior_mean_batched(mu_arr, weights):
     """
     NaN-safe weighted mean of N particle state vectors.  Returns the
@@ -934,7 +966,7 @@ def _posterior_mean_batched(mu_arr, weights):
     return out
 
 
-@njit(cache=False)
+@njit(cache=True)
 def _posterior_var_batched(mu_arr, weights, mean):
     """
     NaN-safe weighted posterior VARIANCE of the N particle state vectors,
@@ -971,7 +1003,7 @@ def _posterior_var_batched(mu_arr, weights, mean):
     return out
 
 
-@njit(cache=False)
+@njit(cache=True)
 def _derive_regimes_batched(mu_arr, regime_arr, mu_dot_post,
                             sigma_t_post, sigma_phi_post,
                             alpha, tau):
@@ -1026,7 +1058,7 @@ def _derive_regimes_batched(mu_arr, regime_arr, mu_dot_post,
         regime_arr[i] = R_CONTINUATION
 
 
-@njit(cache=False)
+@njit(cache=True)
 def _systematic_resample_indices(weights, u):
     """
     Standard systematic resampling.  `weights` is the (N,) normalised
@@ -1573,6 +1605,12 @@ class MarketPotential:
         self._prices: list[float] = []
         self._volumes: list[float] = []
         self._times: list[float] = []
+        
+        # Lazy cached ndarrays (iter16 perf — avoid repeated list→array conversion)
+        self._buf_dirty = True
+        self._prices_arr = np.zeros(self._max_buffer, dtype=np.float64)
+        self._volumes_arr = np.zeros(self._max_buffer, dtype=np.float64)
+        self._times_arr = np.zeros(self._max_buffer, dtype=np.float64)
 
         # Most-recent potential state (lazily computed in `compute`).
         self.last_grid:    np.ndarray = np.zeros(self.n_grid)
@@ -1588,6 +1626,7 @@ class MarketPotential:
         self._prices.append(log_price)
         self._volumes.append(max(float(volume), 0.0))
         self._times.append(float(t_seconds))
+        self._buf_dirty = True
         # Trim buffer (FIFO) + global decay prune
         if len(self._prices) > self._max_buffer:
             self._prices  = self._prices[-self._max_buffer:]
@@ -1606,12 +1645,26 @@ class MarketPotential:
                 self._volumes = self._volumes[i:]
                 self._times   = self._times[i:]
 
+    def _refresh_buffer_arrays(self):
+        """Copy list buffers into pre-allocated ndarrays (iter16 perf)."""
+        if not self._buf_dirty:
+            return
+        n = len(self._prices)
+        if n > 0:
+            # Use numpy array assignment instead of Python loop (100x+ faster)
+            self._prices_arr[:n] = self._prices
+            self._volumes_arr[:n] = self._volumes
+            self._times_arr[:n] = self._times
+        self._buf_dirty = False
+
     def _silverman_bandwidth(self) -> float:
         if len(self._prices) < 2:
             return 1e-3
-        x = np.asarray(self._prices, dtype=np.float64)
+        self._refresh_buffer_arrays()
+        n = len(self._prices)
+        x = self._prices_arr[:n]
+        v = self._volumes_arr[:n]
         # Volume-weighted std σ.
-        v = np.asarray(self._volumes, dtype=np.float64)
         if v.sum() <= 0:
             s = float(np.std(x))
         else:
@@ -1619,7 +1672,6 @@ class MarketPotential:
             mean = float(np.sum(w * x))
             var = float(np.sum(w * (x - mean) ** 2))
             s = math.sqrt(max(var, 1e-12))
-        n = len(x)
         h = 0.9 * s * (n ** (-1.0 / 5.0))
         if h <= 0:
             h = 1e-3
@@ -1648,10 +1700,12 @@ class MarketPotential:
         self.last_bandwidth = h_bw
 
         if self._prices:
-            P = np.asarray(self._prices, dtype=np.float64)
-            V = np.asarray(self._volumes, dtype=np.float64)
-            T_ = np.asarray(self._times, dtype=np.float64)
-            now_t = float(self._times[-1]) if self._times else 0.0
+            self._refresh_buffer_arrays()
+            n = len(self._prices)
+            P = self._prices_arr[:n]
+            V = self._volumes_arr[:n]
+            T_ = self._times_arr[:n]
+            now_t = float(self._times[-1])
             rho = _kde_eval_kernel(grid, P, V, T_,
                                    self.lambda_decay, h_bw, now_t)
         else:

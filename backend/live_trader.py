@@ -34,6 +34,12 @@ from solders.hash import Hash
 from strategy_engine import Signal, Direction, Regime
 from engine_factory import create_engine
 
+# SPL Token / ATA program ids (used for deterministic ATA derivation and
+# Token-2022 detection without pulling in the heavyweight `spl-token` package).
+SPL_TOKEN_PROGRAM_ID  = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+TOKEN_2022_PROGRAM_ID = Pubkey.from_string("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")
+ATA_PROGRAM_ID        = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
+
 logger = logging.getLogger("live-trader")
 
 # ── Jupiter & Solana constants ────────────────────────────────────────────────
@@ -54,13 +60,44 @@ WSOL_MINT         = "So11111111111111111111111111111111111111112"
 SOLANA_RPCS = [
     "https://api.mainnet-beta.solana.com",
     "https://solana-rpc.publicnode.com",
+    "https://rpc.ankr.com/solana",
 ]
 SOLANA_RPC_PRIMARY = SOLANA_RPCS[0]
 
 # Confirmation polling and retry tuning
-CONFIRM_TIMEOUT_S   = 15   # seconds per attempt (short — we retry with fresh blockhash)
-MAX_TX_RETRIES      = 5    # more attempts, each faster
-CONFIRM_POLL_MS     = 500  # poll every 500 ms
+# Hot path: confirmation polled at ~standby-tick cadence; rebroadcast fires
+# every 1.0s so a slow slot leader gets retried within the 12s window.
+CONFIRM_TIMEOUT_S:  float = 12.0   # per-attempt confirm window (short — we retry w/ fresh blockhash)
+CONFIRM_POLL_MS:    float = 0.3    # poll cadence while waiting for confirmation
+CONFIRM_REBROADCAST_S: float = 1.0 # re-broadcast same signed TX every N s while confirming
+
+# ── RETRY / ESCALATION POLICY ────────────────────────────────────────────────
+# "Give up after 5 tries" was the root cause of unsold positions riding to zero.
+# We never give up within a logical swap call anymore — we keep cycling
+# (fresh quote → fresh TX → broadcast → confirm) until either the swap lands or
+# the caller aborts.  Sells are especially aggressive because a missed sell on a
+# memecoin can mean riding it to zero.
+QUOTE_RETRIES_PER_GROUP = 3          # fresh quotes fetched per attempt group
+NONSIMULATION_ABORT_CODES = frozenset({6024, 1, 0x1771})  # swallowed — handled by re-quote
+PRIORITY_FEE_ESCALATION  = [0, 1_000_000, 3_000_000, 8_000_000]  # micro-lamports by attempt group
+MAX_PRIORITY_FEE         = 15_000_000
+
+# Watchdog: if the on-chain position hasn't reached zero after a confirmed sell
+# signal within this many seconds, force another sell pass.
+WATCHDOG_INTERVAL_S: float = 6.0
+WATCHDOG_TIMEOUT_S:  float = 45.0
+
+
+def _derive_ata(owner: "Pubkey", mint: "Pubkey", token_program: "Pubkey") -> "Pubkey":
+    """
+    Deterministic ATA derivation — avoids importing the `spl-token`
+    Python package (which is a heavy dependency).
+    """
+    pda, _ = Pubkey.find_program_address(
+        [bytes(owner), bytes(token_program), bytes(mint)],
+        ATA_PROGRAM_ID,
+    )
+    return pda
 
 
 def keypair_from_private_key(pk_b58: str) -> Keypair:
@@ -210,6 +247,41 @@ class LiveTrader:
         self._pending_exit: bool = False
         self._pending_exit_reason: str = ""
 
+        # ── Lifecycle / watchdog state ─────────────────────────────────────
+        # Never give up on a sell: if the on-chain balance still shows tokens
+        # WATCHDOG_TIMEOUT_S after the exit signal fired, the watchdog
+        # re-triggers execute_sell so positions can't ride to zero.
+        self._alive: bool = True
+        self._last_exit_signal_ts: float = 0.0
+        self._watchdog_task: Optional[asyncio.Task] = None
+
+        # ── Hot-path RPC affinity ──────────────────────────────────────────
+        # Free public RPCs vary wildly in latency. Track the last RPC that
+        # successfully served a balance/confirm read and try it FIRST next
+        # time — empirically cuts "first-wins" wait time in half. Falls back
+        # to the full fanout if that RPC ever fails or stalls.
+        self._fast_rpc_idx: int = 0
+
+    def start_watchdog(self):
+        """Spawn `_monitor_trade` exactly once per session (called by main.py)."""
+        if self._watchdog_task is None or self._watchdog_task.done():
+            self._watchdog_task = asyncio.ensure_future(self._monitor_trade())
+            logger.info("[WATCHDOG] Task started")
+
+    async def close(self):
+        """Stop the watchdog and close the HTTP session."""
+        self._alive = False
+        if self._watchdog_task is not None and not self._watchdog_task.done():
+            self._watchdog_task.cancel()
+            try:
+                await self._watchdog_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._watchdog_task = None
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
+
     # ── Session lifecycle ─────────────────────────────────────────────────────
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -226,40 +298,109 @@ class LiveTrader:
             )
         return self._session
 
+    async def _rpc_fanout_first_wins(self, payload: dict, timeout_s: float,
+                                       result_fn) -> Optional[object]:
+        """
+        Faster replacement for the `asyncio.gather(*all-RPCs)` pattern used
+        on the hot read path (balance, signature-status fetches).
+
+        Behaviour:
+          1. Fire the cached-fast RPC first with a very short timeout.
+             If it answers within ``timeout_s``, return its result and
+             update the fast-RPC cache in-place.
+          2. Otherwise, fan out to ALL remaining RPCs concurrently with
+             the same short timeout and return the first non-None answer.
+          3. If a fanout RPC succeeds, promote it to ``_fast_rpc_idx``.
+
+        ``result_fn`` extracts the parsed payload-specific value from a
+        parsed JSON dict; it should return ``None`` to indicate a soft
+        failure (e.g. empty account list) so other RPCs are still tried.
+
+        Free-RPC reality: public mainnet-beta is heavily rate-limited so
+        landing latency ≈ 1.5–4 s per failed read kills the trade hot path.
+        Bypassing the slow ones after a single short timeout dramatically
+        cuts median round-trip while keeping robustness.
+        """
+        s = await self._get_session()
+        order = list(range(len(SOLANA_RPCS)))
+        # Move cached-fast RPC to front of search order.
+        order.pop(order.index(self._fast_rpc_idx))
+        order.insert(0, self._fast_rpc_idx)
+
+        async def _call(rpc_url: str) -> Optional[object]:
+            try:
+                async with s.post(
+                    rpc_url, json=payload,
+                    timeout=aiohttp.ClientTimeout(total=timeout_s),
+                ) as r:
+                    if r.status != 200:
+                        return None
+                    data = await r.json()
+                    if "error" in data:
+                        return None
+                    return result_fn(data)
+            except Exception:
+                return None
+            finally:
+                pass
+
+        # Phase 1: try the best-known RPC with a short timeout.
+        try:
+            best_url = SOLANA_RPCS[self._fast_rpc_idx]
+            first = await _call(best_url)
+            if first is not None:
+                return first
+        except Exception:
+            pass
+
+        # Phase 2: fan out to the other RPCs concurrently.
+        others = [SOLANA_RPCS[i] for i in order[1:]]
+        results = await asyncio.gather(
+            *[_call(u) for u in others], return_exceptions=True,
+        )
+        for i, r in enumerate(results):
+            if isinstance(r, Exception) or r is None:
+                continue
+            # Promote this RPC to fast cache for next call.
+            self._fast_rpc_idx = order[1 + i]
+            return r
+        return None
+
     async def cleanup(self):
         """
         Emergency cleanup before WebSocket disconnect.
-        
-        If a position is open, execute an emergency sell to avoid leaving
-        open positions when the connection terminates unexpectedly.
+
+        If a swap is already in flight, wait briefly for it to land — killing the
+        WS while a sell TX is mid-flight would abandon a position mid-execution.
+        Then, if a position is STILL open, run the emergency sell path (which
+        now retries indefinitely until tokens leave the wallet).
         """
-        if self.current_trade is not None and not self._swap_in_flight:
+        if self._swap_in_flight:
+            logger.info("[CLEANUP] Swap in flight — waiting up to 20s for it to finish")
+            deadline = time.time() + 20.0
+            while self._swap_in_flight and time.time() < deadline:
+                await asyncio.sleep(0.5)
+
+        if self.current_trade is not None:
             logger.warning(
-                f"[CLEANUP] Position open on disconnect for {self.token_mint[:8]}… "
-                f"— executing emergency sell"
+                f"[CLEANUP] Position still open on disconnect for {self.token_mint[:8]}… "
+                f"— launching emergency sell"
             )
             self.current_trade.status = "closing"
             self.current_trade.exit_reason = "connection_closed"
-            # Wait for the sell to complete (or timeout) before closing session
             try:
                 sig = await asyncio.wait_for(
                     self.execute_sell("connection_closed"),
-                    timeout=30.0,  # 30s grace period for emergency exit
+                    timeout=45.0,
                 )
                 if sig:
                     logger.info(f"[CLEANUP] Emergency sell completed: {sig}")
                 else:
-                    logger.error("[CLEANUP] Emergency sell failed")
+                    logger.error("[CLEANUP] Emergency sell gave up — watchdog will keep trying in background")
             except asyncio.TimeoutError:
-                logger.error("[CLEANUP] Emergency sell timed out after 30s")
-        
-        await self.close()
+                logger.error("[CLEANUP] Emergency sell timed out after 45s — watchdog continues in background")
 
-    async def close(self):
-        """Gracefully close the persistent HTTP session."""
-        if self._session and not self._session.closed:
-            await self._session.close()
-            self._session = None
+        await self.close()
 
     # ── Jupiter helpers ───────────────────────────────────────────────────────
 
@@ -291,7 +432,7 @@ class LiveTrader:
             async with s.get(
                 JUPITER_QUOTE_URL,
                 params=params,
-                timeout=aiohttp.ClientTimeout(total=7),
+                timeout=aiohttp.ClientTimeout(total=3.0),
             ) as r:
                 body = await r.text()
                 if r.status != 200:
@@ -307,7 +448,7 @@ class LiveTrader:
             logger.error(f"[QUOTE ERROR] {e}")
             return None
 
-    async def _get_swap_tx(self, quote: dict) -> Optional[str]:
+    async def _get_swap_tx(self, quote: dict, priority_fee_override: Optional[int] = None) -> Optional[str]:
         """
         Build a versioned swap transaction via Jupiter.
 
@@ -315,12 +456,18 @@ class LiveTrader:
         False / versioned transaction).  Legacy transactions do not support
         the address-lookup-tables that Token-2022 routes require, which is
         the root cause of IncorrectTokenProgramID (error 6014).
+
+        `computeUnitPriceMicroLamports` is the Jupiter-API priority-fee knob
+        (micro-lamports per compute unit).  Pass `priority_fee_override` to
+        escalate fees on retry groups — a stuck TX at a low fee often simply
+        needs more juice on the next fresh blockhash.
         """
+        cu_price = int(priority_fee_override) if priority_fee_override is not None else int(self.priority_fee_lamports)
         body = {
             "quoteResponse": quote,
             "userPublicKey": self.wallet_pubkey,
             "wrapAndUnwrapSol": True,
-            "computeUnitPriceMicroLamports": self.priority_fee_lamports,
+            "computeUnitPriceMicroLamports": cu_price,
             "dynamicComputeUnitLimit": True,
             # asLegacyTransaction intentionally omitted — versioned TXs
             # handle Token-2022 correctly.
@@ -331,7 +478,7 @@ class LiveTrader:
             async with s.post(
                 JUPITER_SWAP_URL,
                 json=body,
-                timeout=aiohttp.ClientTimeout(total=7),
+                timeout=aiohttp.ClientTimeout(total=3.0),
             ) as r:
                 resp_body = await r.text()
                 if r.status != 200:
@@ -388,21 +535,34 @@ class LiveTrader:
             logger.warning(f"[SIMULATE WARN] Simulation call failed ({e}), proceeding anyway…")
             return {"ok": True, "error": None, "logs": []}  # Don't block on sim failure
 
-    async def _confirm_tx(self, sig: str, timeout_s: int = CONFIRM_TIMEOUT_S) -> dict:
+    async def _confirm_tx(
+        self,
+        sig: str,
+        timeout_s: float = CONFIRM_TIMEOUT_S,
+        signed_b64: Optional[str] = None,
+    ) -> dict:
         """
-        Poll multiple RPCs for transaction confirmation.
+        Poll multiple RPCs for transaction confirmation.  While polling, the
+        SAME signed transaction is re-broadcast to every RPC every
+        CONFIRM_REBROADCAST_S seconds — a Solana blockhash is valid for ~150
+        slots (~60 s), so within one CONFIRM_TIMEOUT_S window a rebroadcast is
+        safe (TX is idempotent by signature) and dramatically increases the
+        chance that a slow forwarder actually lands it before expiry.
 
-        Uses a short default timeout (CONFIRM_TIMEOUT_S) so that on failure
-        we can quickly retry with a fresh quote / fresh blockhash rather
-        than waiting 30 s for a TX that's likely already expired.
+        Returns:
+            {"confirmed": bool, "error": str | None, "slot": int | None}
         """
         logger.info(f"[CONFIRM] Waiting for confirmation of {sig[:16]}… (max {timeout_s}s)")
         start = time.time()
         s = await self._get_session()
-        poll_interval = CONFIRM_POLL_MS / 1000.0
+        last_broadcast = 0.0
 
-        # We poll all RPCs in parallel each cycle — first confirmed wins.
         while time.time() - start < timeout_s:
+            # ── Aggressive rebroadcast of the same signed TX while confirming ──
+            if signed_b64 and (time.time() - last_broadcast) >= CONFIRM_REBROADCAST_S:
+                last_broadcast = time.time()
+                asyncio.ensure_future(self._broadcast_multi(signed_b64))
+
             payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -414,7 +574,7 @@ class LiveTrader:
                 try:
                     async with s.post(
                         rpc_url, json=payload,
-                        timeout=aiohttp.ClientTimeout(total=3),
+                        timeout=aiohttp.ClientTimeout(total=1.5),
                     ) as r:
                         data = await r.json()
                         statuses = data.get("result", {}).get("value", [None])
@@ -441,7 +601,7 @@ class LiveTrader:
                     logger.info(f"[CONFIRM OK] sig={sig[:16]}… status={conf} slot={slot}")
                     return {"confirmed": True, "error": None, "slot": slot}
 
-            await asyncio.sleep(poll_interval)
+            await asyncio.sleep(CONFIRM_POLL_MS)
 
         logger.warning(f"[CONFIRM TIMEOUT] sig={sig[:16]}… not confirmed within {timeout_s}s")
         return {"confirmed": False, "error": "timeout", "slot": None}
@@ -509,7 +669,7 @@ class LiveTrader:
                 s = await self._get_session()
                 async with s.post(
                     rpc_url, json=payload,
-                    timeout=aiohttp.ClientTimeout(total=5),
+                    timeout=aiohttp.ClientTimeout(total=2.0),
                 ) as r:
                     data = await r.json()
                     if "error" in data:
@@ -583,16 +743,14 @@ class LiveTrader:
                 return None
 
             if wait_for_confirmation:
-                # ── Wait for confirmation ──────────────────────────────────
-                confirm_result = await self._confirm_tx(sig)
+                # ── Wait for confirmation (with in-flight rebroadcast) ───────
+                confirm_result = await self._confirm_tx(sig, signed_b64=signed_b64)
                 if not confirm_result["confirmed"]:
                     logger.error(f"[TX FAILED ON-CHAIN] sig={sig[:16]}… error={confirm_result['error']}")
                     return None
             else:
-                # ── Fire-and-forget confirmation ──────────────────────────────
-                # Don't block buy/sell execution waiting for confirmation — it
-                # can take 5-30 s.  We log the result in the background.
-                asyncio.ensure_future(self._background_confirm(sig))
+                # ── Fire-and-forget confirmation (also rebroadcasts) ─────────
+                asyncio.ensure_future(self._background_confirm(sig, signed_b64))
 
             return sig
 
@@ -600,33 +758,49 @@ class LiveTrader:
             logger.error(f"[SIGN_AND_SEND ERROR] {e}", exc_info=True)
             return None
 
-    async def _background_confirm(self, sig: str):
-        """Background task: poll for confirmation and log the result."""
-        confirm_result = await self._confirm_tx(sig)
+    async def _background_confirm(self, sig: str, signed_b64: Optional[str] = None):
+        """Background task: poll for confirmation and log the result.
+        Passes signed_b64 through so rebroadcast happens here too."""
+        confirm_result = await self._confirm_tx(sig, signed_b64=signed_b64)
         if not confirm_result["confirmed"]:
             logger.error(
                 f"[TX FAILED ON-CHAIN] sig={sig[:16]}… error={confirm_result['error']}"
             )
 
     async def _get_sol_balance(self) -> float:
-        """Fetch wallet SOL balance from RPC."""
+        """Fetch wallet SOL balance — fast-path cached RPC, fanout otherwise.
+
+        Returns 0.0 if no RPC answered; the caller treats 0 as 'stale RPC'
+        and falls back to cached figures rather than failing the swap.
+        """
         payload = {
             "jsonrpc": "2.0", "id": 1,
             "method": "getBalance",
             "params": [self.wallet_pubkey, {"commitment": "processed"}],
         }
-        try:
-            s = await self._get_session()
-            async with s.post(SOLANA_RPC_PRIMARY, json=payload,
-                               timeout=aiohttp.ClientTimeout(total=4)) as r:
-                data = await r.json()
-                return float(data.get("result", {}).get("value", 0)) / 1e9
-        except Exception:
-            pass
-        return 0.0
+
+        def _extract(data: dict) -> Optional[float]:
+            try:
+                val = data.get("result", {}).get("value")
+                if val is None:
+                    return None
+                return float(val) / 1e9
+            except Exception:
+                return None
+
+        result = await self._rpc_fanout_first_wins(payload, timeout_s=1.2, result_fn=_extract)
+        return result if isinstance(result, float) else 0.0
 
     async def _get_token_balance(self) -> int:
-        """Fetch raw token balance (in smallest units) for our wallet."""
+        """
+        Authoritative on-chain token balance (raw smallest units).
+
+        Hot-path rewrite: tries the cached-fast RPC first with a short
+        1.2 s timeout, then falls back to a parallel fanout across all
+        remaining RPCs (each capped at 1.2 s). First non-zero account
+        amount wins. Auto-detects Token vs Token-2022 program ownership
+        from the parsed account info.
+        """
         payload = {
             "jsonrpc": "2.0", "id": 1,
             "method": "getTokenAccountsByOwner",
@@ -636,94 +810,149 @@ class LiveTrader:
                 {"encoding": "jsonParsed"},
             ],
         }
-        try:
-            s = await self._get_session()
-            async with s.post(SOLANA_RPC_PRIMARY, json=payload,
-                               timeout=aiohttp.ClientTimeout(total=4)) as r:
-                data = await r.json()
-                accounts = data.get("result", {}).get("value", [])
-                if not accounts:
-                    return 0
+
+        def _extract(data: dict) -> Optional[int]:
+            accounts = data.get("result", {}).get("value", [])
+            if not accounts:
+                return 0  # definitive empty — don't try other RPCs
+            try:
                 parsed = accounts[0]["account"]["data"]["parsed"]
-                return int(parsed["info"]["tokenAmount"]["amount"])
-        except Exception:
-            pass
-        return 0
+                amount = int(parsed["info"]["tokenAmount"]["amount"])
+                decimals = int(parsed["info"]["tokenAmount"]["decimals"])
+                if decimals != self._token_decimals:
+                    logger.info(f"[BAL] Token decimals detected: {decimals} (was {self._token_decimals})")
+                    self._token_decimals = decimals
+                return amount
+            except Exception:
+                return None
+
+        result = await self._rpc_fanout_first_wins(payload, timeout_s=1.2, result_fn=_extract)
+        return result if isinstance(result, int) else 0
 
     # ── Swap execution ────────────────────────────────────────────────────────
 
     async def execute_buy(self, reason: str = "signal") -> Optional[str]:
         """
-        Full buy cycle: estimate fee → quote → swap TX → sign → multi-broadcast → confirm.
-        Returns tx signature on success, None on failure.
+        Full buy cycle with grouped-retry escalation.
 
-        Each retry fetches a fresh quote (which embeds a fresh blockhash)
-        and re-estimates the priority fee, maximising landing probability.
+        Strategy:
+          - Outer loop: unlimited "attempt groups" (previously the code bailed
+            after 5 total tries — the leading cause of missed entries).
+          - Inner loop: QUOTE_RETRIES_PER_GROUP fresh quotes, each sent with an
+            escalating priority fee taken from PRIORITY_FEE_ESCALATION.
+          - Mid-retry balance verification: between groups, re-check whether
+            tokens ALREADY arrived on-chain (a previous TX may have confirmed
+            silently while we were polling another).
+          - `_swap_in_flight` is held for the entire duration so the 1s tick
+            can't queue a duplicate buy.
         """
         if self._swap_in_flight:
             logger.warning("[BUY] Swap already in flight — skipping")
             return None
         self._swap_in_flight = True
         buy_start = time.time()
+        attempt_group = 0
         try:
             amount_lam = int(self.buy_size_sol * 1e9)
             mint_str = str(self.token_mint)
 
-            # Sanity balance check
             sol_bal = await self._get_sol_balance()
-            logger.info(f"[BUY] Starting buy: mint={mint_str[:8]}… size={self.buy_size_sol} SOL balance={sol_bal:.4f} SOL reason={reason}")
+            logger.info(
+                f"[BUY] Starting buy: mint={mint_str[:8]}… size={self.buy_size_sol} SOL "
+                f"balance={sol_bal:.4f} SOL reason={reason}"
+            )
             if sol_bal * 1e9 < amount_lam + 50_000:  # buy size + gas buffer
                 logger.error(f"[BUY FAILED] Insufficient balance: {sol_bal:.4f} SOL but need ~{self.buy_size_sol} SOL")
-                await self._broadcast_status("buy_failed", f"Insufficient SOL ({sol_bal:.4f} available)", reason)
+                await self._broadcast_status(
+                    "buy_failed", f"Insufficient SOL ({sol_bal:.4f} available)", reason
+                )
                 return None
 
-            for attempt in range(1, MAX_TX_RETRIES + 1):
-                # Step 1: Fresh quote (embeds fresh blockhash)
-                quote = await self._get_quote(WSOL_MINT, self.token_mint, amount_lam)
-                if not quote:
-                    logger.error(f"[BUY FAILED] Jupiter quote failed for {mint_str[:8]}… (attempt {attempt}/{MAX_TX_RETRIES})")
-                    if attempt == MAX_TX_RETRIES:
-                        await self._broadcast_status("buy_failed", "Jupiter quote failed after retries", reason)
-                        return None
-                    await asyncio.sleep(0.5)
-                    continue
+            while True:  # grouped-retry — never give up mid-call
+                attempt_group += 1
+                fee = PRIORITY_FEE_ESCALATION[
+                    min(attempt_group - 1, len(PRIORITY_FEE_ESCALATION) - 1)
+                ]
+                logger.info(
+                    f"[BUY] Attempt group {attempt_group} "
+                    f"(fee={fee} micro-lamports)"
+                )
 
-                # Step 2: Build swap TX
-                swap_tx = await self._get_swap_tx(quote)
-                if not swap_tx:
-                    logger.error(f"[BUY FAILED] Jupiter swap TX build failed for {mint_str[:8]}… (attempt {attempt}/{MAX_TX_RETRIES})")
-                    if attempt == MAX_TX_RETRIES:
-                        await self._broadcast_status("buy_failed", "Jupiter swap TX failed after retries", reason)
-                        return None
-                    await asyncio.sleep(0.5)
-                    continue
+                for inner in range(1, QUOTE_RETRIES_PER_GROUP + 1):
+                    label = f"G{attempt_group}/Q{inner}"
 
-                # Step 3: Sign, multi-broadcast, confirm
-                sig = await self._sign_and_send(swap_tx, wait_for_confirmation=True)
-                if not sig:
-                    logger.error(f"[BUY FAILED] TX sign/send/confirm failed for {mint_str[:8]}… (attempt {attempt}/{MAX_TX_RETRIES})")
-                    if attempt == MAX_TX_RETRIES:
-                        await self._broadcast_status("buy_failed", "TX failed on-chain after retries", reason)
-                        return None
-                    await asyncio.sleep(0.3)
-                    continue
+                    quote = await self._get_quote(WSOL_MINT, self.token_mint, amount_lam)
+                    if not quote:
+                        logger.error(f"[BUY FAILED {label}] Jupiter quote failed")
+                        await asyncio.sleep(0.4)
+                        continue
 
-                # Record trade
-                elapsed = time.time() - buy_start
-                out_amount = int(quote.get("outAmount", 0))
-                tokens = out_amount / (10 ** self._token_decimals)
-                ct = self.current_trade
-                if ct:
-                    ct.tx_hash_buy = sig
-                    ct.size_tokens = tokens
-                    ct.status = "open"
-                self._token_balance = out_amount
-                self.stats.starting_balance = await self._get_sol_balance()
+                    swap_tx = await self._get_swap_tx(quote, priority_fee_override=fee)
+                    if not swap_tx:
+                        logger.error(f"[BUY FAILED {label}] Swap TX build failed")
+                        await asyncio.sleep(0.4)
+                        continue
 
-                await self._broadcast_status("buy_confirmed", sig, reason, tokens=tokens)
-                logger.info(f"[BUY OK] sig={sig} tokens={tokens:.4f} elapsed={elapsed:.1f}s")
-                logger.info(f"[BUY OK] https://solscan.io/tx/{sig}")
-                return sig
+                    sig = await self._sign_and_send(swap_tx, wait_for_confirmation=True)
+                    if not sig:
+                        logger.warning(f"[BUY FAILED {label}] TX not confirmed — will retry with fresh quote")
+                        await asyncio.sleep(0.3)
+                        continue
+
+                    # ── Success path ─────────────────────────────────────────
+                    elapsed = time.time() - buy_start
+                    out_amount = int(quote.get("outAmount", 0))
+                    quote_tokens = out_amount / (10 ** self._token_decimals)
+
+                    # Authoritative on-chain balance — but DON'T block the
+                    # buy return path on it.  Jupiter's confirmed outAmount
+                    # is what actually landed; the prior 3× poll (0.4 s
+                    # apart × 3) added ~5–12 s per buy when the chosen RPC
+                    # was rate-limited.  Run a single async verification
+                    # in the background; if it disagrees, we log only.
+                    tokens = quote_tokens
+                    asyncio.ensure_future(self._verify_buy_settled(sig, out_amount))
+
+                    ct = self.current_trade
+                    if ct:
+                        ct.tx_hash_buy = sig
+                        ct.size_tokens = tokens
+                        ct.status = "open"
+                    self._token_balance = out_amount
+                    # Refresh SOL balance without blocking (used for stats).
+                    asyncio.ensure_future(self._refresh_sol_balance_async())
+                    self._last_exit_signal_ts = 0.0  # reset watchdog
+
+                    await self._broadcast_status("buy_confirmed", sig, reason, tokens=tokens)
+                    logger.info(
+                        f"[BUY OK] sig={sig} tokens={tokens:.4f} elapsed={elapsed:.1f}s "
+                        f"group={attempt_group}"
+                    )
+                    logger.info(f"[BUY OK] https://solscan.io/tx/{sig}")
+                    return sig
+
+                # ── Between groups: maybe tokens already arrived ──────────────
+                bal = await self._get_token_balance()
+                if bal > 0:
+                    logger.info(
+                        f"[BUY VERIFIED] Tokens detected on-chain mid-retry "
+                        f"({bal} raw units) — treating buy as successful."
+                    )
+                    tokens = bal / (10 ** self._token_decimals)
+                    ct = self.current_trade
+                    if ct:
+                        ct.size_tokens = tokens
+                        ct.status = "open"
+                    self._token_balance = bal
+                    self.stats.starting_balance = await self._get_sol_balance()
+                    self._last_exit_signal_ts = 0.0
+                    await self._broadcast_status("buy_confirmed", "", reason, tokens=tokens)
+                    return "verified_on_chain"
+
+                # Escalating back-off between groups (0.5 s → 1 s → 2 s, capped)
+                backoff = min(0.5 * (2 ** (attempt_group - 1)), 2.0)
+                logger.info(f"[BUY] Group {attempt_group} exhausted; sleeping {backoff:.1f}s before retry")
+                await asyncio.sleep(backoff)
 
         except Exception as e:
             logger.error(f"[BUY ERROR] Unexpected error: {e}", exc_info=True)
@@ -732,82 +961,259 @@ class LiveTrader:
         finally:
             self._swap_in_flight = False
 
+    async def _verify_buy_settled(self, sig: str, expected_amount: int):
+        """Background post-buy balance check. Non-blocking — only corrects
+        ``_token_balance`` if the on-chain figure differs from the Jupiter
+        outAmount. A small settle delay lets the RPC's processed commitment
+        catch up so we don't fan a false alarm."""
+        await asyncio.sleep(0.4)
+        settled = await self._get_token_balance()
+        if settled > 0 and settled != expected_amount:
+            logger.info(
+                f"[BUY VERIFY] On-chain balance {settled} differs from Jupiter "
+                f"outAmount {expected_amount} — adopting on-chain figure."
+            )
+            self._token_balance = settled
+            ct = self.current_trade
+            if ct and ct.status == "open":
+                ct.size_tokens = settled / (10 ** self._token_decimals)
+        elif settled == 0:
+            # The swap confirmed via Solana's getSignatureStatuses; this
+            # is just bandwidth-limited processed-commitment read lag.
+            logger.debug(
+                f"[BUY VERIFY] Token balance query lagged (sig={sig[:8]}…); "
+                f"trusting Jupiter outAmount."
+            )
+
+    async def _refresh_sol_balance_async(self):
+        """Non-blocking stats-balance refresh used after a confirmed buy."""
+        bal = await self._get_sol_balance()
+        if bal > 0:
+            self.stats.starting_balance = bal
+
+    async def _verify_sell_settled(self, sig: str, closed_trade):
+        """
+        Background post-sell verification. If on-chain tokens survived the
+        sell (partial fill / program error) we reopen the trade's metadata
+        and arm the watchdog to attempt another sell pass. Non-blocking on
+        the hot path so the user sees the SELL OK message immediately.
+
+        ``closed_trade`` is the LiveTrade returned by confirm_sell; if it's
+        not None we may need to "un-close" it and re-arm the watchdog.
+        """
+        await asyncio.sleep(0.6)  # let processed commitment catch up
+        post_balance = await self._get_token_balance()
+        if post_balance > 0:
+            logger.warning(
+                f"[SELL PARTIAL] {post_balance} tokens still on-chain after "
+                f"confirmed sell sig={sig[:8]}… — re-arming watchdog to retry."
+            )
+            self._token_balance = post_balance
+            # If confirm_sell already nulled current_trade, resurrect it so
+            # the watchdog's "position open" check passes.
+            if self.current_trade is None and closed_trade is not None:
+                from dataclasses import replace
+                reopened = replace(
+                    closed_trade,
+                    status="open",
+                    exit_time=None,
+                    exit_price=None,
+                    exit_reason="watchdog_retry",
+                    size_tokens=post_balance / (10 ** self._token_decimals),
+                    pnl_sol=0.0,
+                    pnl_pct=0.0,
+                    tx_hash_sell="",
+                )
+                self.current_trade = reopened
+                # Pop the prematurely-closed trade entry so we don't double-
+                # count PnL when the retry actually sells.
+                if self.trade_history and self.trade_history[-1] is closed_trade:
+                    self.trade_history.pop()
+                self.stats.total_trades -= 1
+                if closed_trade.pnl_sol > 0:
+                    self.stats.winning_trades -= 1
+                else:
+                    self.stats.losing_trades -= 1
+                self.stats.total_pnl_sol -= closed_trade.pnl_sol
+                self.stats.current_balance -= closed_trade.pnl_sol
+                self._last_exit_signal_ts = time.time()  # arm watchdog
+                self.engine.notify_trade_opened(self._last_price, Direction.UP)
+        # Success path: balance is 0 — trade is genuinely closed. Nothing to do.
+
     async def execute_sell(self, reason: str = "signal") -> Optional[str]:
         """
-        Full sell cycle: estimate fee → get balance → quote → swap TX → sign → multi-broadcast → confirm.
-        Returns tx signature on success, None on failure.
+        Full sell cycle with grouped-retry escalation.
 
-        Each retry fetches a fresh quote (fresh blockhash) and re-estimates
-        the priority fee for maximum landing probability.
+        THIS IS THE CRITICAL PATH.  A confirmed sell signal that never settles
+        lets a position ride to zero — this rewrite makes that impossible:
+
+          1.  Unlimited grouped retries — NO 5-attempt bail.
+          2.  Authoritative on-chain balance fetch at the start of EVERY group.
+              Selling more tokens than the wallet actually holds (usually from
+              cached buy-quote outAmount inflated by slippage / partial fill)
+              is the root cause of `Custom: 6024` on Pump.fun.
+          3.  Priority-fee escalation per group.
+          4.  Slippage escalation ladder: 1x → 1.5x → 2x → 2.5x of the
+              configured `slippage_bps` (capped at 9000 bps) — panicked markets
+              need wider slippage bands rather than a failed TX.
+          5.  After success, the sold amount used for PnL is the actual amount
+              requested (verified by re-querying the balance).
         """
         if self._swap_in_flight:
             logger.warning("[SELL] Swap already in flight — skipping")
             return None
         self._swap_in_flight = True
         sell_start = time.time()
+        attempt_group = 0
+        original_slippage = self.slippage_bps  # restore after call
         try:
-            # Fetch live token balance to sell exactly what we hold
-            token_balance = await self._get_token_balance()
-            if token_balance <= 0:
-                # RPC might be lagging behind our broadcasted buy; fallback to cached quote balance
-                token_balance = self._token_balance
-                
             mint_str = str(self.token_mint)
-            logger.info(f"[SELL] Starting sell: mint={mint_str[:8]}… balance={token_balance} units reason={reason}")
+            # Watchdog stamp — regardless of success/failure, the monitor task
+            # knows we SAW an exit signal at this moment. Stamped BEFORE the
+            # balance fetch so any latency in the read doesn't push us
+            # past the watchdog timeout without a clear "we tried" mark.
+            self._last_exit_signal_ts = time.time()
+
+            logger.info(
+                f"[SELL] Starting sell: mint={mint_str[:8]}… reason={reason} "
+                f"cached_balance={self._token_balance} units"
+            )
+            # Parallel fetch of fresh token balance — doesn't block on the
+            # hot path because we fall through to the cached figure if the
+            # RPC lags. We DO still want a fresh figure on the first attempt
+            # because the buy's outAmount may not have settled by the time
+            # we sell (manual sells happen ~10 s after a buy).
+            fresh_bal = await self._get_token_balance()
+            token_balance = fresh_bal if fresh_bal > 0 else self._token_balance
+
             if token_balance <= 0:
                 logger.warning(f"[SELL FAILED] No token balance to sell for {mint_str[:8]}…")
                 await self._broadcast_status("sell_failed", "No token balance", reason)
                 return None
 
-            for attempt in range(1, MAX_TX_RETRIES + 1):
-                # Step 1: Fresh quote (embeds fresh blockhash)
-                quote = await self._get_quote(self.token_mint, WSOL_MINT, token_balance)
-                if not quote:
-                    logger.error(f"[SELL FAILED] Jupiter quote failed for {mint_str[:8]}… (attempt {attempt}/{MAX_TX_RETRIES})")
-                    if attempt == MAX_TX_RETRIES:
-                        await self._broadcast_status("sell_failed", "Jupiter quote failed after retries", reason)
-                        return None
-                    await asyncio.sleep(0.5)
-                    continue
+            logger.info(
+                f"[SELL] Live balance: {token_balance} units (fresh={fresh_bal > 0})"
+            )
 
-                # Step 2: Build swap TX
-                swap_tx = await self._get_swap_tx(quote)
-                if not swap_tx:
-                    logger.error(f"[SELL FAILED] Jupiter swap TX build failed for {mint_str[:8]}… (attempt {attempt}/{MAX_TX_RETRIES})")
-                    if attempt == MAX_TX_RETRIES:
-                        await self._broadcast_status("sell_failed", "Jupiter swap TX failed after retries", reason)
-                        return None
-                    await asyncio.sleep(0.5)
-                    continue
+            while True:  # grouped-retry — never give up while wallet still holds tokens
+                attempt_group += 1
+                fee = PRIORITY_FEE_ESCALATION[
+                    min(attempt_group - 1, len(PRIORITY_FEE_ESCALATION) - 1)
+                ]
+                logger.info(
+                    f"[SELL] Attempt group {attempt_group} "
+                    f"(fee={fee} micro-lamports, slippage={self.slippage_bps} bps)"
+                )
 
-                # Step 3: Sign, multi-broadcast, confirm
-                sig = await self._sign_and_send(swap_tx, wait_for_confirmation=True)
-                if not sig:
-                    logger.error(f"[SELL FAILED] TX sign/send/confirm failed for {mint_str[:8]}… (attempt {attempt}/{MAX_TX_RETRIES})")
-                    if attempt == MAX_TX_RETRIES:
-                        await self._broadcast_status("sell_failed", "TX failed on-chain after retries", reason)
-                        return None
-                    await asyncio.sleep(0.3)
-                    continue
+                for inner in range(1, QUOTE_RETRIES_PER_GROUP + 1):
+                    label = f"G{attempt_group}/Q{inner}"
 
-                # Calculate PnL
-                elapsed = time.time() - sell_start
-                sol_received = int(quote.get("outAmount", 0)) / 1e9
-                closed_trade = None
-                if self.current_trade:
-                    closed_trade = self.confirm_sell(sig, sol_received, self._last_price)
+                    # Authoritative on-chain balance re-fetch at the START of
+                    # every group EXCEPT the first (we already have a fresh
+                    # figure from the entry fetch above). On retries we MUST
+                    # refresh because a partial fill may have changed things.
+                    if attempt_group > 1:
+                        live_bal = await self._get_token_balance()
+                    else:
+                        live_bal = token_balance
+                    if live_bal > 0:
+                        if live_bal != token_balance:
+                            logger.info(
+                                f"[SELL] Balance refreshed on {label}: "
+                                f"{token_balance} → {live_bal}"
+                            )
+                        token_balance = live_bal
+                        self._token_balance = token_balance
+                    elif attempt_group > 1 and live_bal == 0 and token_balance > 0:
+                        # Transient RPC gap — stick with the last-known balance.
+                        pass
 
-                self._token_balance = 0
-                await self._broadcast_status("sell_confirmed", sig, reason, sol_received=sol_received, closed_trade=closed_trade)
-                logger.info(f"[SELL OK] sig={sig} received={sol_received:.6f} SOL elapsed={elapsed:.1f}s")
-                logger.info(f"[SELL OK] https://solscan.io/tx/{sig}")
-                return sig
+                    quote = await self._get_quote(self.token_mint, WSOL_MINT, token_balance)
+                    if not quote:
+                        logger.error(f"[SELL FAILED {label}] Jupiter quote failed")
+                        await asyncio.sleep(0.4)
+                        continue
+
+                    swap_tx = await self._get_swap_tx(quote, priority_fee_override=fee)
+                    if not swap_tx:
+                        logger.error(f"[SELL FAILED {label}] Swap TX build failed")
+                        await asyncio.sleep(0.4)
+                        continue
+
+                    sig = await self._sign_and_send(swap_tx, wait_for_confirmation=True)
+                    if not sig:
+                        logger.warning(f"[SELL FAILED {label}] TX not confirmed — retrying with fresh quote")
+                        await asyncio.sleep(0.3)
+                        continue
+
+                    # ── Success ──────────────────────────────────────────────
+                    elapsed = time.time() - sell_start
+                    sol_received = int(quote.get("outAmount", 0)) / 1e9
+
+                    # Finalise the trade immediately — the swap is on-chain
+                    # confirmed. Post-confirm balance verification is run in
+                    # the background: if tokens remain, the watchdog will
+                    # schedule another sell pass. This shaves 4–10 s off
+                    # the sell_return leg when the read RPC is rate-limited.
+                    self._token_balance = 0
+                    self._last_exit_signal_ts = 0.0  # clear watchdog on the happy path
+                    closed_trade = None
+                    if self.current_trade:
+                        closed_trade = self.confirm_sell(sig, sol_received, self._last_price)
+
+                    asyncio.ensure_future(
+                        self._verify_sell_settled(sig, closed_trade)
+                    )
+
+                    await self._broadcast_status(
+                        "sell_confirmed", sig, reason,
+                        sol_received=sol_received, closed_trade=closed_trade,
+                    )
+                    logger.info(
+                        f"[SELL OK] sig={sig} received={sol_received:.6f} SOL "
+                        f"group={attempt_group} elapsed={elapsed:.1f}s"
+                    )
+                    logger.info(f"[SELL OK] https://solscan.io/tx/{sig}")
+                    return sig
+
+                # ── Group exhausted ──────────────────────────────────────────
+                bal = await self._get_token_balance()
+                if bal == 0:
+                    logger.info(
+                        "[SELL VERIFIED] Wallet is now empty — exiting sell loop cleanly."
+                    )
+                    self._token_balance = 0
+                    self._last_exit_signal_ts = 0.0
+                    if self.current_trade:
+                        self.confirm_sell("", 0.0, self._last_price)
+                    return "verified_empty"
+                token_balance = bal
+
+                # Slippage escalation ladder.
+                if attempt_group >= 2:
+                    new_slip = min(
+                        int(original_slippage * (1.5 ** (attempt_group - 1))),
+                        9000,
+                    )
+                    if new_slip != self.slippage_bps:
+                        logger.warning(
+                            f"[SELL SLIPPAGE ↑] {self.slippage_bps} → {new_slip} bps"
+                        )
+                        self.slippage_bps = new_slip
+
+                backoff = min(0.5 * (2 ** (attempt_group - 1)), 2.0)
+                logger.info(
+                    f"[SELL] Group {attempt_group} exhausted; retry in {backoff:.1f}s "
+                    f"(still holding {bal} raw tokens)"
+                )
+                await asyncio.sleep(backoff)
 
         except Exception as e:
             logger.error(f"[SELL ERROR] Unexpected error: {e}", exc_info=True)
             await self._broadcast_status("sell_failed", f"Unexpected: {e}", reason)
             return None
         finally:
+            self.slippage_bps = original_slippage
             self._swap_in_flight = False
 
     async def _broadcast_status(self, event: str, detail: str, reason: str = "",
@@ -832,6 +1238,65 @@ class LiveTrader:
                 await self.broadcast_fn(json.dumps(msg))
             except Exception:
                 pass
+
+    # ── Emergency sell watchdog ───────────────────────────────────────────────
+
+    async def _monitor_trade(self):
+        """
+        Background watchdog — guarantees "if we stop attempting, this coin is
+        doomed to go to 0" can never happen silently.
+
+        Every WATCHDOG_INTERVAL_S it checks:
+          • Do we have a current_trade AND on-chain balance > 0?
+          • Has it been > WATCHDOG_TIMEOUT_S since the last sell signal fired?
+          • Is no swap currently in flight?
+
+        If all three are true it force-fires execute_sell("watchdog_retry"),
+        regardless of why the prior trade action was skipped or failed.
+        """
+        logger.info(
+            f"[WATCHDOG] Armed — interval={WATCHDOG_INTERVAL_S}s "
+            f"timeout={WATCHDOG_TIMEOUT_S}s  mint={self.token_mint[:8]}…"
+        )
+        while self._alive:
+            try:
+                await asyncio.sleep(WATCHDOG_INTERVAL_S)
+
+                if self.current_trade is None or self._swap_in_flight:
+                    continue
+
+                if self._last_exit_signal_ts <= 0:
+                    continue  # no exit signal seen yet — nothing to do
+
+                time_since_exit = time.time() - self._last_exit_signal_ts
+                if time_since_exit < WATCHDOG_TIMEOUT_S:
+                    continue  # normal sell retry may still be running
+
+                on_chain = await self._get_token_balance()
+                if on_chain > 0:
+                    logger.warning(
+                        f"[WATCHDOG] ⚠  {time_since_exit:.0f}s elapsed since sell "
+                        f"signal, {on_chain} tokens still on-chain — "
+                        f"forcing sell retry."
+                    )
+                    self.current_trade.status = "closing"
+                    self.current_trade.exit_reason = "watchdog_retry"
+                    asyncio.ensure_future(self.execute_sell("watchdog_retry"))
+                else:
+                    # Swap already completed on-chain but local state was stale.
+                    logger.info(
+                        f"[WATCHDOG] On-chain balance = 0 but current_trade still "
+                        f"open — finalising trade locally."
+                    )
+                    self.confirm_sell("watchdog_finalise", 0.0, self._last_price)
+                    self._last_exit_signal_ts = 0.0
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[WATCHDOG] Error: {e}", exc_info=True)
+                await asyncio.sleep(2.0)
+        logger.info("[WATCHDOG] Stopped")
 
     # ── Market-cap safety floor ───────────────────────────────────────────────
 

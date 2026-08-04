@@ -572,8 +572,9 @@ class ForwardTester:
         # PnL in SOL: actual proceeds vs SOL we put in
         pnl = proceeds - trade.size_sol
 
-        # PnL % using the realistic slipped entry/exit prices
-        pnl_pct = (exec_price - trade.entry_price) / trade.entry_price * 100.0 if trade.entry_price > 0 else 0.0
+        # PnL % as net return on the SOL committed (includes fees & slippage),
+        # so its sign always agrees with pnl_sol.
+        pnl_pct = (pnl / trade.size_sol * 100.0) if trade.size_sol > 0 else 0.0
 
         trade.exit_time = time
         trade.exit_price = exec_price
