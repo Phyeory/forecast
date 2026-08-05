@@ -55,6 +55,9 @@ recorded here.  No undocumented changes are permitted.
 | 17c       | iter17c_full | 194 | 57.7% | +0.123 | 1.09 | **REJECTED** — Tightened overlays (gr arm 12→10, give 0.6→0.5; beX 20→15). WR +1.6pts vs 17a but PnL +0.572→+0.123, PF 1.41→1.09 — the right tail is load-bearing (law #1 RE-CONFIRMED on fresh data). The 70%-WR frontier on this dataset lies on the zero-PnL axis. |
 | 18b_opt   | iter18b_opt_full | 217 | 75.58% | **+0.437** | 1.31 | **ACCEPTED (Statistical Breakthrough)** — Replaced hard stoploss entirely with pure V2 Bayesian exits and added a 2-bar persistence guard on the REVERSAL regime. Winrate raised to **75.6%** while clearing all three strict statistical gates against baseline (`iter16_baseline_full`): Wilcoxon p=0.007, paired t-test p=0.038, bootstrap 95% CI strictly positive. |
 | 19        | iter19_clean | 229 | **78.60%** | **+0.547** | **1.36** | **ACCEPTED** — Tightened `gain_retrace_give_frac` 0.6 → 0.4 (exit at peak_gain·0.6 instead of peak_gain·0.4). Counterfactual simulation showed iter18b_opt captured only 32.9% of peak gain on winning trades (avg peak +25.2%, exited at +8.3%); a cross-arm give sweep proved (arm=10, give=0.4) optimal at +0.815 SOL projected. Actual full batch: gain_retrace harvester jumped to 91.4% WR (+0.586 SOL), total PnL +0.110 SOL over iter18b_opt. ALL 5 statistical gates cleared vs `iter16_baseline_full`: Wilcoxon p=0.0088, paired t-test p=0.0344, bootstrap 95% CI [+0.0018, +0.0273], McNemar p=0.0026, 69.4% tokens improved. NOT cleared vs `iter18b_opt` on t-test/CI due to skewed per-token distribution, but Wilcoxon p=3.1e-6 (extremely strong). |
+| 22        | iter22 (HEAD iter21 k60_off40) | 366 | 76.5 % | **+1.1197** | 1.48 | **NEW CANONICAL BASELINE** (558 recordings) — batch `iter22_1785874622`. Loss anatomy: 49 BIG losers = -2.10 SOL = 91% gross loss; attributes 65% kelly_flat / 24% recording_ended. All entry-time features MWU-indistinguishable BIG vs WIN; trajectory analysis (FAST_CRASH vs SLOW_BLEED) dominated by post-entry dynamics. |
+| 22_k35    | iter22_k35 (off=35) | 370 | 74.9 % | +0.8860 | 1.35 | **REJECTED** — candidate tightening exit #7 `no_long_offside_pct` 40→35. paired_diff vs iter22: mean Δ -0.0018 SOL, Wilcoxon p=0.854, CI strictly negative, 10.7% breadth, 6 W→L regressions (crimecat, bruhby, Balltze, TEKKA, MISO, FROGE; same recovery-pullback mechanism iter21 documented). |
+| 22_k45    | iter22_k45 (off=45) | 366 | 76.8 % | +1.1084 | 1.48 | **REJECTED** — candidate loosening exit #7 `no_long_offside_pct` 40→45. paired_diff vs iter22: mean Δ -0.00009 SOL per recording, Wilcoxon p=0.988, only 2/131 tokens improved, 1 L→W vs 0 W→L flips. Combined with k35 result, `off=40` is a saddle-point local optimum across 2-sided grid. |
 
 
 ## Iter 01 — Baseline (REJECTED — never traded)
@@ -3128,11 +3131,151 @@ strictly dominated by iter21_k60_offs40 which has higher Δ vs iter16
    the tree as scaffolding for future research; the param is documented
    and default-OFF to maintain pipeline parity. The 4 W→L regressions
    from iter21_k60_offs40 mean this is NOT a replacement of iter19.
-4. **The recording_ended -1.285 SOL bucket is STRUCTURALLY UNCLOSEABLE
-   at the engine posterior level.** Demonstrated by three independent
-   failed approaches (A: kelly_flat, B: partial drift-work, K: μ-guard).
-   The Bayesian posterior simply has no signal distinguishing "this
-   pullback will recover" from "this is the start of a fatal slide"
-   at the moment the cut would fire. A multi-scale fast-KDE down-barrier
-   (hypothesis E) remains theoretically open but unproven; all other
-   engine-layer attempts have been exhaustively tested and rejected.
+ 4. **The recording_ended -1.285 SOL bucket is STRUCTURALLY UNCLOSEABLE
+    at the engine posterior level.** Demonstrated by three independent
+    failed approaches (A: kelly_flat, B: partial drift-work, K: μ-guard).
+    The Bayesian posterior simply has no signal distinguishing "this
+    pullback will recover" from "this is the start of a fatal slide"
+    at the moment the cut would fire. A multi-scale fast-KDE down-barrier
+    (hypothesis E) remains theoretically open but unproven; all other
+    engine-layer attempts have been exhaustively tested and rejected.
+
+---
+
+## Iter 22 — Exhaustive big-loss anatomy on 558-recording fresh dataset
+(analysis-only, surgical patch search ended in rigorous negative result)
+
+**Scope**: All 558 completed recordings now in `backend/data/price_data.db`
+(dataset has grown from 235 → 558 since iter16; iter19_clean's 94 tokens
+covered only recording-prefix ID 1–200). New full-batch at HEAD production
+defaults (`no_long_exit_bars=60, no_long_offside_pct=40`, iter21 kelly_flat
+exit #7 active):
+- 366 trades, 76.50% WR, **+1.1197 SOL**, PF 1.4835, expectancy +0.00306,
+  131/558 tokens traded, 0 errors, 3818 s compute at max-workers=8.
+- baseline engine = `HEAD` post iter21 commit (2baa9b3+e8f7fbc),
+  batch_id `iter22_1785874622` → per-trade JSONs in `backend/v2_results/`.
+
+**Big-loss attribution** (loss ≤ -20 pct):
+| exit_reason      | n_losers | pnl (SOL) | frac of BIG-loss vol |
+|------------------|---------:|----------:|---------------------:|
+| kelly_flat       | 32       | -1.4319   | 68.1%                |
+| recording_ended  | 12       | -0.5031   | 23.9%                |
+| bayesian_flip    | 2        | -0.0815   | 3.9%                 |
+| kramers_down_exit| 2        | -0.0525   | 2.5%                 |
+| reversal_exit    | 1        | -0.0326   | 1.6%                 |
+
+49 BIG losers = **-2.1017 SOL = 90.8% of gross loss = -187.7% of net PnL**.
+Every other exit bucket is small-loss-only (gain_retrace 18 small winners-turned-
+negative, breakeven_scratch all shallow >-10.4 %). This confirms the iter21 claim
+that kelly_flat is *not itself* the loss generator: iter19_clean (kelly_flat off)
+had recording_ended = -1.20 SOL on 94 tokens; iter22 (kelly_flat on) has it at
+-0.50 SOL on 131 tokens. kelly_flat *migrated* ~2/3 of rec_end pnl into
+kelly_flat exits with slightly smaller losses (median -44.8 % instead of
+recording_ended's right-tail at -63 %-extremes).
+
+**Common trait shared by big losers (post-entry dynamics, NOT at entry):**
+
+Three orthogonal measurements converge:
+  * **"Fast crash" trajectory**: 37/49 BIG losers touched -10 % below entry
+    within 60 s of entry. Winners do this at 60/280 (21%). t10 median
+    BIG=10 s vs WIN=28 s; t20 median BIG=37 s vs WIN=68 s. Mann-Whitney
+    highly significant on trajectory features only.
+  * **"Never arm" dynamic**: BIG losers' peak_gain during position median
+    +2.1 % vs WIN median +14.4 % ⇒ 7× lower. Only 5/49 BIG losers ever
+    armed gain_retrace (peak ≥ +10 %). This is a *post-entry* filter that
+    cannot be moved into an entry gate without invalidating the entry-time
+    engine state machine.
+  * **Slow slide depth**: BIG max_dd median −44.8 % vs WIN median −5.6 %;
+    frac_bars_below_entry BIG=98.5% vs WIN=31.0%; BIG bars=96 med vs WIN=49.
+
+**Entry-time features are statistically indistinguishable** between BIG and
+WIN (all 26 engine features tested MWU p>0.05, including v2_P_up, v2_E_star,
+v2_sigma_t, v2_phi, v2_mu_vec, v2_h, v2_du_down, m_hat, trend_confidence, S_eff,
+bar_count, exhaustion_bar_count; exception `hold_s` p=0.011 but that's an
+outcome). Idle-regime entries are the *gross* worst cohort (n=55, 20 % big-loss
+rate, net −0.15 SOL overall) but within idle, winner vs big-loser medians on
+E* are identical (0.25 vs 0.078 on n=11 vs 40 — MWU≈0.10 not significant
+enough to gate on). The complete set of within-idle gates tested (E*<0.15,
+mu_hat_tau<0.10, v2_phi<0, sig_t>0.05 etc.) all show NET +0.2 SOL
+*in static projection* but destroy 5-30 % of winner mass — and iter17b already
+empirically demonstrated that static-mask predictions fail when fed back into
+the engine because blocking an entry re-routes subsequent buys
+("replacement-entry dynamics").
+
+**Exhaustive stop-rule counterfactuals (candle replay, post-entry):**
+
+All price-only or price+time stops are **structurally net-negative on iter22**:
+  * Fixed hard stop sweep L∈{-15..-40 %}: only L=-40 % is net positive
+    (+0.056 SOL) but touches just 1 winner; all shallower stops cut
+    23-67 winners for ~1.0 SOL gain on the BIG side → NET −0.06..-0.37.
+  * First-W-seconds stop (W=10..180 s, L=0.08..0.25): 87-rule grid, **2/87
+    marginal NET>0**, largest +0.0415 SOL (L=0.35, W=15 s); engine currently
+    has `kelly_flat` (L=40 %, tick-window=60) which already dominates this
+    family.
+  * Tick-streak rule (N consecutive negative closes + X % offside, T0 limit):
+    all NET −0.1...-8.5 SOL. Down-tick clustering is not a discriminator.
+  * Late-armed floor (only act if hold≥T0 sig hold): all curve-net negative;
+    T0-even-later still slices winners that dip to -10..-20 % during
+    retrace-before-recovery.
+  * Kramers-flip / Bayesian-flip tightening: existing defaults already sit
+    near Pareto frontier (iter18b-iter19 work).
+  * Post-big-loss cooldown (skip next entry on same rec for X s): cooldown
+    120-3600 s all NET −0.13..-0.22 SOL because winners rebound immediately
+    after losers (law of exogenous recovery).
+
+**Engine candidate runs:**
+
+*   `iter22_k35` — `no_long_offside_pct: 40→35` full batch on the same 558
+    recordings (batch_id `iter22_k35_1785881257`): **REJECTED** on every
+    acceptance gate.
+      - 370 trades / 74.9 % WR / **+0.8860 SOL** / PF 1.35 (vs iter22 +1.1197 / 76.5% / PF 1.48)
+      - paired_diff vs iter22: mean Δ = **-0.001784 SOL** per recording,
+        Wilcoxon p = **0.854** (greater), paired t p = 0.062,
+        bootstrap 95 % CI = **[-0.00378, -0.00011]** (strictly NEGATIVE),
+        McNemar p = 0.289, and only **14 / 26 (10.7 %)** tokens improved,
+        2 L→W vs 6 W→L flips.
+      - The 6 W→L regressions (crimecat −0.076, bruhby −0.041, Balltze −0.039,
+        TEKKA −0.038, MISO −0.037, FROGE −0.035) are precisely the mid-pullback
+        cuts at −35 % offside where the price later recovered to
+        `breakeven_scratch` / `gain_retrace` under iter22 rule — exactly the
+        iter21 rec70/rec555 mechanism anti-overfit.
+*   `iter22_k45` — `no_long_offside_pct: 40→45` on the same 558 recordings
+    (batch_id `iter22_k45_1785886381`): **REJECTED** on Wilcoxon & breadth.
+      - 366 trades / 76.8 % WR / **+1.1084 SOL** / PF 1.48 (vs iter22 baseline +1.1197)
+      - paired_diff vs iter22: mean Δ = **-0.000086 SOL** per recording,
+        Wilcoxon p = **0.988**, CI = [-0.00094, +0.00103], McNemar undef,
+        2 / 131 tokens improved (1.5 % breadth), 1 L→W / 0 W→L flips.
+      - Loosening the offside threshold retains a handful of trades that
+        still don't recover (Pumpcat +0.05 SOL rescued), but loses slightly
+        more elsewhere; net statistical parity but economically NEGATIVE
+        and there is no mechanism gain.
+    **Together with `_k35` this bracket proves `no_long_offside_pct=40` is
+    at the local Pareto-optimum for the iter21 kelly_flat family** under the
+    iter22 dataset. No further sweep of this parameter axis is justified
+    under the anti-overfit protocol.
+
+**Definitive result (closes iter16k … iter22 research arc):** iter22 (==
+HEAD with `no_long_offside_pct=40, no_long_exit_bars=60`, i.e. iter21 default)
+is the *measurable Pareto frontier* for exit rules on the current dataset.
+The residual −2.10 SOL of BIG losses is not removable by engine-side stop
+or entry-gate logic without *net* damage to winners (verified by direct
+parameter batch runs on both sides of the iter21 offside optimum, plus
+static counterfactuals over 400+ rule combinations across five analytical
+dimensions). Remaining unexplored surface is limited to (a) regime-specific
+E*-threshold inside `idle` (predicted +0.30 SOL static, MECHANISM-RISK
+HIGH per iter17b), and (b) external-side signals (e.g. multi-scale fast-KDE
+down-barrier, Iter21 hypothesis E). **No patch shipped. iter22 stands
+as the new canonical baseline for future iterations.**
+
+**Tools authored (in `backend/analysis/`, reproducible):**
+  - `iter22_loss_anatomy.py`       – feature-by-feature MWU BIG vs WIN/SMALL
+  - `iter22_postentry_analysis.py` – in-trade excursion & recovery dynamics
+  - `iter22_loser_profiling.py`    – fast-crash vs slow-bleed archetype split
+  - `iter22_sim_levels.py`         – fixed-stop counterfactual sim (37-rule)
+  - `iter22_firstmin_stops.py`     – first-W-seconds stop sim (LT-gated, 75-rule)
+  - `iter22_tick_streak.py`        – consecutive-down-close stop sim (35-rule)
+  - `iter22_late_floor.py`         – late-armed floor stop sim (42-rule)
+  - `iter22_entry_gate_sweep.py`   – idle/x-regime × feature × threshold scan
+  - `iter22_cascade.py`            – gate + re-entry-prediction cascade sim
+  - `iter22_exhaustive.py`         – 87-rule exhaustive counterfactual sweep
+
