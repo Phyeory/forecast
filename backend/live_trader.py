@@ -79,8 +79,8 @@ CONFIRM_REBROADCAST_S: float = 1.0 # re-broadcast same signed TX every N s while
 # memecoin can mean riding it to zero.
 QUOTE_RETRIES_PER_GROUP = 3          # fresh quotes fetched per attempt group
 NONSIMULATION_ABORT_CODES = frozenset({6024, 1, 0x1771})  # swallowed — handled by re-quote
-PRIORITY_FEE_ESCALATION  = [0, 1_000_000, 3_000_000, 8_000_000]  # micro-lamports by attempt group
-MAX_PRIORITY_FEE         = 15_000_000
+PRIORITY_FEE_ESCALATION  = [100_000, 100_000, 100_000, 100_000]  # micro-lamports — fixed 0.0001 SOL
+MAX_PRIORITY_FEE         = 100_000  # micro-lamports — 0.0001 SOL, never exceeded
 
 # Watchdog: if the on-chain position hasn't reached zero after a confirmed sell
 # signal within this many seconds, force another sell pass.
@@ -177,7 +177,7 @@ class LiveTrader:
         keypair: Keypair,
         buy_size_sol: float = 0.01,
         slippage_bps: int = 1500,
-        priority_fee_lamports: int = 500_000,
+        priority_fee_lamports: int = 100_000,
         min_market_cap_usd: float = 6_000.0,
         engine_kwargs: Optional[dict] = None,
 
@@ -195,7 +195,7 @@ class LiveTrader:
         self.wallet_pubkey = str(keypair.pubkey())
         self.buy_size_sol = buy_size_sol
         self.slippage_bps = slippage_bps
-        self.priority_fee_lamports = priority_fee_lamports
+        self.priority_fee_lamports = 100_000  # fixed: 0.0001 SOL per transaction
         self.skip_simulation = skip_simulation
 
         # ── Market-cap safety floor ───────────────────────────────────────
@@ -1179,13 +1179,22 @@ class LiveTrader:
                 # ── Group exhausted ──────────────────────────────────────────
                 bal = await self._get_token_balance()
                 if bal == 0:
+                    # Wallet empty — the sell DID go through on-chain (otherwise
+                    # we'd still hold tokens). Estimate SOL received from the
+                    # last known token price rather than using 0.0 (which would
+                    # produce a bogus -100% PnL).
+                    est_sol_received = 0.0
+                    if self.current_trade:
+                        est_price = self._last_price or self.current_trade.entry_price
+                        if est_price > 0 and self.current_trade.size_tokens > 0:
+                            est_sol_received = self.current_trade.size_tokens * est_price
                     logger.info(
                         "[SELL VERIFIED] Wallet is now empty — exiting sell loop cleanly."
                     )
                     self._token_balance = 0
                     self._last_exit_signal_ts = 0.0
                     if self.current_trade:
-                        self.confirm_sell("", 0.0, self._last_price)
+                        self.confirm_sell("", est_sol_received, self._last_price)
                     return "verified_empty"
                 token_balance = bal
 
@@ -1284,11 +1293,18 @@ class LiveTrader:
                     asyncio.ensure_future(self.execute_sell("watchdog_retry"))
                 else:
                     # Swap already completed on-chain but local state was stale.
+                    # Estimate SOL received from the last known price rather than
+                    # using 0.0 (which would produce a bogus -100% PnL).
+                    est_sol_received = 0.0
+                    if self.current_trade:
+                        est_price = self._last_price or self.current_trade.entry_price
+                        if est_price > 0 and self.current_trade.size_tokens > 0:
+                            est_sol_received = self.current_trade.size_tokens * est_price
                     logger.info(
                         f"[WATCHDOG] On-chain balance = 0 but current_trade still "
-                        f"open — finalising trade locally."
+                        f"open — finalising trade locally (est_sol={est_sol_received:.6f})"
                     )
-                    self.confirm_sell("watchdog_finalise", 0.0, self._last_price)
+                    self.confirm_sell("watchdog_finalise", est_sol_received, self._last_price)
                     self._last_exit_signal_ts = 0.0
 
             except asyncio.CancelledError:

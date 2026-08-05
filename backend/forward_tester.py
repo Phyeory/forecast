@@ -4,8 +4,7 @@ Forward Tester — Realistic LONG-ONLY trade simulation for the strategy engine.
 Settings:
   - Starting balance: 1 SOL
   - Buy size: 0.1 SOL (10% of portfolio)
-  - Priority fee: 0.0001 SOL
-  - Bribe fee: 0.00001 SOL
+  - Priority fee: 0.0001 SOL (fixed, no bribe fee)
   - Slippage: 10%
 
 Execution model (timed-delay fill):
@@ -23,7 +22,7 @@ Execution model (timed-delay fill):
                        (larger order → more queue depth → slower fill)
       slippage_penalty = 1 + slippage_pct / 100
                          (higher slippage tolerance adds modest extra latency)
-      reference_fee  = 0.0005 SOL  (median competitive priority+bribe fee)
+      reference_fee  = 0.0001 SOL  (fixed per-transaction fee)
       ref_size       = 0.1  SOL    (typical retail buy size)
 
   - The intra-bar price at fill_fraction is interpolated along the realistic
@@ -140,7 +139,7 @@ class ForwardTester:
         starting_balance: float = 1.0,
         buy_size_sol: float = 0.1,
         priority_fee: float = 0.0001,
-        bribe_fee: float = 0.00001,
+        bribe_fee: float = 0.0,
         slippage_pct: float = 10.0,
         engine_kwargs: Optional[dict] = None,
         engine_version: int = 1,
@@ -151,8 +150,8 @@ class ForwardTester:
         self.engine = create_engine(engine_version, **engine_kwargs)
         self.balance = starting_balance
         self.buy_size_sol = buy_size_sol
-        self.priority_fee = priority_fee
-        self.bribe_fee = bribe_fee
+        self.priority_fee = 0.0001   # fixed: 0.0001 SOL per transaction
+        self.bribe_fee = 0.0          # fixed: no bribe fee
         self.slippage_pct = slippage_pct
 
         self.stats = ForwardTestStats(
@@ -203,7 +202,7 @@ class ForwardTester:
         return raw_price * size_tokens * slip
 
     # ── Timed-delay fill parameters ────────────────────────────────────────
-    _REFERENCE_FEE:  float = 0.0005   # SOL — median competitive priority+bribe
+    _REFERENCE_FEE: float = 0.0001   # SOL — fixed per-transaction fee
     _REFERENCE_SIZE: float = 0.1      # SOL — typical retail order size
 
     def _fill_fraction(self) -> float:

@@ -1101,10 +1101,8 @@ function connect(mint, timeframe) {
   const testerConfig = {
     buy_size_sol: parseFloat(document.getElementById("tester-buy-size").value) || 0.1,
     slippage_pct: parseFloat(document.getElementById("tester-slippage").value) || 1.0,
-    priority_fee: parseFloat(document.getElementById("tester-priority-fee").value) || 0.0001,
-    bribe_fee: parseFloat(document.getElementById("tester-bribe-fee").value) || 0.000
   };
-  const testerStr = `&buy_size=${testerConfig.buy_size_sol}&slippage_pct=${testerConfig.slippage_pct}&priority_fee=${testerConfig.priority_fee}&bribe_fee=${testerConfig.bribe_fee}`;
+  const testerStr = `&buy_size=${testerConfig.buy_size_sol}&slippage_pct=${testerConfig.slippage_pct}`;
 
   engineParams = getEngineParams();
   const paramsStr = encodeURIComponent(JSON.stringify(engineParams));
@@ -2006,8 +2004,6 @@ document.getElementById("bt-run-btn").addEventListener("click", async () => {
   const testerConfig = {
     buy_size_sol: parseFloat(document.getElementById("tester-buy-size").value) || 0.1,
     slippage_pct: parseFloat(document.getElementById("tester-slippage").value) || 1.0,
-    priority_fee: parseFloat(document.getElementById("tester-priority-fee").value) || 0.0001,
-    bribe_fee: parseFloat(document.getElementById("tester-bribe-fee").value) || 0.00001
   };
 
   try {
@@ -2241,8 +2237,8 @@ function getLtConfig() {
     buySize: parseFloat($("lt-buy-size").value) || 0.1,
     slippagePct: parseFloat($("lt-slippage").value) || 10,
     slippageBps: Math.round((parseFloat($("lt-slippage").value) || 10) * 100),
-    priorityFeeSol: parseFloat($("lt-priority-fee").value) || 0.0001,
-    priorityFeeLamports: Math.round((parseFloat($("lt-priority-fee").value) || 0.0001) * 1e9),
+    priorityFeeSol: 0.0001,               // fixed: 0.0001 SOL per transaction
+    priorityFeeLamports: 100000,          // fixed: 100,000 micro-lamports
     timeframe: $("lt-timeframe").value,
   };
 }
@@ -2429,7 +2425,7 @@ function startLiveTrader(mint, _delayOverride = null) {
 
   const config = getLtConfig();
   const paramsStr = encodeURIComponent(JSON.stringify(getLtEngineParams()));
-  const wsUrl = `${LT_WS_BASE}/${mint}?timeframe=${config.timeframe}&private_key=${encodeURIComponent(_privateKey)}&buy_size=${config.buySize}&slippage_bps=${config.slippageBps}&priority_fee=${config.priorityFeeLamports}&params=${paramsStr}&engine_version=${ltEngineVersion}`;
+  const wsUrl = `${LT_WS_BASE}/${mint}?timeframe=${config.timeframe}&private_key=${encodeURIComponent(_privateKey)}&buy_size=${config.buySize}&slippage_bps=${config.slippageBps}&params=${paramsStr}&engine_version=${ltEngineVersion}`;
 
   // Register the card immediately so the UI shows "Connecting…" right away
   const ctx = {
@@ -2639,7 +2635,7 @@ ltTokenInput.addEventListener("keydown", e => { if (e.key === "Enter") ltAddBtn.
 ltStopAllBtn.addEventListener("click", stopAllTraders);
 
 /* Config change listeners — hot-update all active traders */
-["lt-buy-size", "lt-slippage", "lt-priority-fee"].forEach(id => {
+["lt-buy-size", "lt-slippage"].forEach(id => {
   $(id).addEventListener("change", () => {
     const config = getLtConfig();
     for (const ctx of Object.values(ltActiveTraders)) {
@@ -2648,7 +2644,7 @@ ltStopAllBtn.addEventListener("click", stopAllTraders);
           type: "update_config",
           buy_size: config.buySize,
           slippage_bps: config.slippageBps,
-          priority_fee: config.priorityFeeLamports,
+          // priority_fee is fixed at 0.0001 SOL — not sent
         }));
       }
     }

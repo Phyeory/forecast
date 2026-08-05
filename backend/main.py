@@ -336,8 +336,8 @@ async def run_backtest_endpoint(body: dict = Body(...)):
             recording_id=int(recording_id),
             engine_params=engine_params,
             buy_size_sol=body.get("buy_size_sol", 0.1),
-            priority_fee=body.get("priority_fee", 0.0001),
-            bribe_fee=body.get("bribe_fee", 0.00001),
+            priority_fee=0.0001,
+            bribe_fee=0.0,
             slippage_pct=body.get("slippage_pct", 1.0),
             starting_balance=body.get("starting_balance", 1.0),
             engine_version=engine_version,
@@ -361,8 +361,8 @@ async def run_backtest_batch_endpoint(body: dict = Body(default={})):
             run_backtest_batch,
             engine_params=engine_params,
             buy_size_sol=body.get("buy_size_sol", 0.1),
-            priority_fee=body.get("priority_fee", 0.0001),
-            bribe_fee=body.get("bribe_fee", 0.00001),
+            priority_fee=0.0001,
+            bribe_fee=0.0,
             slippage_pct=body.get("slippage_pct", 1.0),
             starting_balance=body.get("starting_balance", 1.0),
             batch_id=batch_id,
@@ -420,8 +420,6 @@ async def chart_ws(
     params: str = Query(default="{}"),
     buy_size: float = Query(default=0.1),
     slippage_pct: float = Query(default=1.0),
-    priority_fee: float = Query(default=0.0001),
-    bribe_fee: float = Query(default=0.00001),
     engine_version: int = Query(default=1),
 ):
     # Guard: reject reserved path segments that have dedicated routes.
@@ -485,8 +483,8 @@ async def chart_ws(
     forward_tester = ForwardTester(
         starting_balance=1.0,
         buy_size_sol=buy_size,
-        priority_fee=priority_fee,
-        bribe_fee=bribe_fee,
+        priority_fee=0.0001,
+        bribe_fee=0.0,
         slippage_pct=slippage_pct,
         engine_kwargs=engine_params,
         engine_version=engine_version,
@@ -842,7 +840,6 @@ async def live_trading_ws(
     private_key: str = Query(default=""),
     buy_size: float = Query(default=0.1),
     slippage_bps: int = Query(default=1000),
-    priority_fee: int = Query(default=100000),
     skip_sim: bool = Query(default=True),
     params: str = Query(default="{}"),
     engine_version: int = Query(default=1),
@@ -886,7 +883,7 @@ async def live_trading_ws(
         keypair=keypair,
         buy_size_sol=buy_size,
         slippage_bps=slippage_bps,
-        priority_fee_lamports=priority_fee,
+        priority_fee_lamports=100_000,
         engine_kwargs=engine_params,
         skip_simulation=skip_sim,
         engine_version=engine_version,
@@ -1081,8 +1078,7 @@ async def live_trading_ws(
                         live_trader.buy_size_sol = float(msg["buy_size"])
                     if "slippage_bps" in msg:
                         live_trader.slippage_bps = int(msg["slippage_bps"])
-                    if "priority_fee" in msg:
-                        live_trader.priority_fee_lamports = int(msg["priority_fee"])
+                    # priority_fee is fixed at 100_000 micro-lamports (0.0001 SOL) — ignored
                 elif msg_type == "manual_trade":
                     action = msg.get("action")
                     tx_sig = None
