@@ -178,7 +178,7 @@ let engineParamsV2 = {
   v2_sigma_t_min:      0.021,  // entry gate on posterior σ_t (vol floor)
   v2_require_past_peak: 0,     // iter17b REJECTED — keep default off
   gain_retrace_arm_pct:  10,   // arm profit-lock at +10% peak gain (iter18b_opt)
-  gain_retrace_give_frac: 0.4, // exit when gain retraces to peak_gain·(1−g) (iter19: 0.6→0.4)
+  gain_retrace_give_frac: 0.5, // exit when gain retraces to peak_gain·(1−g) (iter19: 0.6→0.4)
   breakeven_arm_dd_pct:   25,  // arm scratch exit once low ≤ −25% offside (iter18b_opt)
   breakeven_buffer_pct:   2.5, // scratch exit level (entry·(1+buf))
   reversal_exit_bars:     2,   // consecutive REVERSAL bars before exit (iter18b_opt)
