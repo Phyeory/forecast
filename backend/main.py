@@ -204,6 +204,7 @@ async def recorder_start(body: dict = Body(...)):
                     trade["price"], trade["sol_amount"], trade["timestamp"],
                     synthetic=is_synthetic,
                     is_buy=is_buy_rec,
+                    pool_sol=trade.get("pool_sol", 0.0),
                 )
                 # Persist every tick (real or synthetic) so the candle row in
                 # the DB always reflects the current accumulated OHLCV state.
@@ -216,6 +217,7 @@ async def recorder_start(body: dict = Body(...)):
                     candle_dict.get("volume", 0),
                     candle_dict.get("buy_volume", 0.0),
                     candle_dict.get("sell_volume", 0.0),
+                    candle_dict.get("pool_sol", 0.0),
                 )
                 last_candle_time = ct
         finally:
@@ -983,6 +985,7 @@ async def live_trading_ws(
                 trade["price"], trade["sol_amount"], trade["timestamp"],
                 synthetic=is_synthetic,
                 is_buy=is_buy_live,
+                pool_sol=trade.get("pool_sol", 0.0),
             )
             candle_dict = candle.to_dict()
             current_price = candle_dict["close"]
@@ -996,6 +999,7 @@ async def live_trading_ws(
                 candle_dict.get("volume", 0),
                 candle_dict.get("buy_volume", 0.0),
                 candle_dict.get("sell_volume", 0.0),
+                candle_dict.get("pool_sol", 0.0),
             )
 
             if last_sent_price is not None and current_price == last_sent_price and not is_new:

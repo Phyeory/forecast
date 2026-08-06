@@ -631,6 +631,7 @@ class ForwardTester:
         volume: float = 0.0,
         buy_volume: float = 0.0,
         sell_volume: float = 0.0,
+        pool_sol: float = 0.0,
         _build_full_result: bool = True,
     ) -> dict:
         """
@@ -675,6 +676,7 @@ class ForwardTester:
         result = self.engine.update(time, o, h, l, c, volume,
                                     buy_volume=buy_volume,
                                     sell_volume=sell_volume,
+                                    pool_sol=pool_sol,
                                     _build_full_result=_build_full_result)
         signal = result.get("signal", "none")
         regime = result.get("regime", "idle")

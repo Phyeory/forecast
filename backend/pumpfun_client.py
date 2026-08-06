@@ -624,6 +624,10 @@ class PumpFunWSClient:
                 "trader":         msg.get("traderPublicKey", ""),
                 "tx_hash":        msg.get("signature", ""),
                 "market_cap_sol": float(msg.get("marketCapSol", 0)) if float(msg.get("marketCapSol", 0)) > 0 else (price * 1_000_000_000),
+                # iter28: pool liquidity depth (SOL in bonding curve) — the live
+                # signal that flags dead-coin liquidity-drain dumps, absent from
+                # OHLCV.  0.0 when the source message does not carry reserves.
+                "pool_sol":       (v_sol / 1e9) if v_sol > 0 else 0.0,
             }
         except Exception:
             return None

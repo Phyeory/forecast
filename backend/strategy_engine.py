@@ -2150,6 +2150,7 @@ class StrategyEngine:
         volume: float = 0.0,
         buy_volume: float = 0.0,
         sell_volume: float = 0.0,
+        pool_sol: float = 0.0,
         _build_full_result: bool = True,
     ) -> dict:
         self.bar_count += 1

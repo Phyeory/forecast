@@ -2429,6 +2429,7 @@ class StrategyEngineV2Adapter:
         self.in_position = False
         self.entry_price = 0.0
         self._peak_price = 0.0
+        self._pool_sol = 0.0   # iter28: latest pool liquidity depth (SOL in curve)
         self._be_armed = False  # iter17 breakeven-scratch arming flag
         self.entry_bar_count = 0
         self.exit_signal_reason = ""
@@ -2926,9 +2927,14 @@ class StrategyEngineV2Adapter:
         volume: float = 0.0,
         buy_volume: float = 0.0,
         sell_volume: float = 0.0,
+        pool_sol: float = 0.0,
         _build_full_result: bool = True,
     ) -> dict:
         self.bar_count += 1
+        # iter28: real pool liquidity depth (SOL in bonding curve), 0.0 when the
+        # feed does not carry reserves.  Tracks the latest non-zero observation.
+        if pool_sol > 0.0:
+            self._pool_sol = pool_sol
 
         # Snapshot the previous close BEFORE `_maintain_v1_indicators`
         # overwrites it with the current bar's close — otherwise the V2

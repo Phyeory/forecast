@@ -215,6 +215,7 @@ def run_backtest(
         vol = candle.get("volume", 0)
         buy_vol  = candle.get("buy_volume", 0.0)
         sell_vol = candle.get("sell_volume", 0.0)
+        pool_sol = candle.get("pool_sol", 0.0)
 
         # Bull bar: high comes before low; bear bar: low before high
         bullish = c >= o
@@ -256,6 +257,7 @@ def run_backtest(
         # State 4: close tick — buy/sell split lands here
         result = ft_update(time=t, o=o, h=h, l=l, c=c, volume=vol,
                            buy_volume=buy_vol, sell_volume=sell_vol,
+                           pool_sol=pool_sol,
                            _build_full_result=False)
         fwd = result.get("forward_test")
         if fwd and trade_action_for_candle is None and fwd.get("trade_action"):

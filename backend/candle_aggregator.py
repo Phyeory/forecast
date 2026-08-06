@@ -23,6 +23,7 @@ class Candle:
     confirmed: bool = False   # True once a real (non-synthetic) trade lands
     buy_volume: float = 0.0   # sum of sol_amount for buy trades
     sell_volume: float = 0.0  # sum of sol_amount for sell trades
+    pool_sol: float = 0.0     # iter28: last trade's pool liquidity depth (SOL in curve)
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -59,6 +60,7 @@ class CandleAggregator:
         timestamp: float,
         synthetic: bool = False,
         is_buy: Optional[bool] = None,   # True=buy, False=sell, None=unknown
+        pool_sol: float = 0.0,           # iter28: pool liquidity depth (SOL in curve)
     ):
         bucket = self._bucket(timestamp)
 
@@ -69,6 +71,7 @@ class CandleAggregator:
                 time=bucket, open=price, high=price, low=price, close=price,
                 volume=volume, confirmed=not synthetic,
                 buy_volume=buy_vol, sell_volume=sell_vol,
+                pool_sol=pool_sol,
             )
             return self.current_candle, True
 
@@ -95,6 +98,7 @@ class CandleAggregator:
                 time=bucket, open=price, high=price, low=price, close=price,
                 volume=volume, confirmed=not synthetic,
                 buy_volume=buy_vol, sell_volume=sell_vol,
+                pool_sol=pool_sol if pool_sol > 0 else closed_candle.pool_sol,
             )
             return self.current_candle, True
 
@@ -103,6 +107,8 @@ class CandleAggregator:
         if price < c.low:  c.low  = price
         c.close = price
         c.volume += volume
+        if pool_sol > 0:
+            c.pool_sol = pool_sol
         if is_buy is True:
             c.buy_volume += volume
         elif is_buy is False:
