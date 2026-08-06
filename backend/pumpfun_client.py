@@ -1094,6 +1094,12 @@ class PumpSwapRPCClient:
             synthetic = False
 
         self._last_emit_ts = time.time()
+        # iter28: pool liquidity depth.  The SOL-side vault of a PumpSwap pool
+        # holds WSOL, so its current balance IS the pool's SOL depth — the
+        # exact liquidity-drain observable that flags dead-coin dumps.
+        sol_vault_raw = (self._quote_amount_raw if quote_is_sol
+                         else (self._base_amount_raw if base_is_sol else 0)) or 0
+        pool_sol = sol_vault_raw / (10 ** 9)
         return {
             "mint": self._pool["base_mint"],
             "tx_type":        tx_type,
@@ -1106,6 +1112,7 @@ class PumpSwapRPCClient:
             "market_cap_sol": market_cap_sol,
             "market_cap_usd": market_cap_usd,
             "synthetic":      synthetic,
+            "pool_sol":       pool_sol,
         }
 
     async def stream(self) -> AsyncGenerator[dict, None]:
