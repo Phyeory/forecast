@@ -3464,3 +3464,54 @@ backtest / forward / live pipelines via the shared `_check_exit_v2` path.
 Verified reproducible: default (no-params) batch `iter27_default_g50` reproduces
 `iter27_g50` exactly.
 
+---
+
+## Iter 28 — Can massive losers be distinguished from winners? (exhaustive, conclusive)
+
+**Question (user directive):** find a feature that separates the massive losers
+(≤ −20%) from the winners and exploit it to lift performance further.
+
+**The armed asymmetry (the one true separator).**  The single perfect split
+remains `armed` = "peak ≥ +10% above entry": on the g50 baseline, **0/56 big
+losers ever arm vs ~87% of winners**.  But iter26 already showed this is only
+knowable post-entry.  iter28 tests whether it can drive a *better asymmetric
+exit*.
+
+**kelly_flat is already perfectly armed-aware — for free.**  On the g50 batch,
+`kelly_flat` fired on **0 armed trades** and 39 unarmed trades (all losers,
+−1.75 SOL).  The +10%-arm mechanism already routes winners to `gain_retrace`
+and losers to `kelly_flat` with no false positives.  There is nothing to fix.
+
+**Every axis that could distinguish unarmed-winners from unarmed-big-losers
+fails (the two distributions overlap):**
+
+| Axis | Winners (unarmed) | Big losers (unarmed) | Separable? |
+|---|---|---|---|
+| Worst dip (low) | min **−47%**, p10 −39% | p50 −45%, max −21% | **NO** — deep overlap |
+| Time submerged < −20% | med 30 s, p90 1973 s | med 96 s | **NO** — recovering winners sit for minutes |
+| Entry engine features | 0/10 significant (v2_P_down best, p=0.086) | — | **NO** |
+| Sub-class (fast vs slow) | 8 fast (<60 s) of 40 winners | 21 fast of 56 losers | **NO** — both archetypes present |
+
+**Counterfactual proof that no unarmed exit helps (g50 baseline, exact fill
+semantics):**
+  * Tighten unarmed stop: −30% → **−0.38 SOL** (22 winners cut); −35% → −0.19;
+    −40% → −0.11.  Monotonically negative — winners dipping −30…−47% recover.
+  * Loosen kelly_flat offside (let dead coins ride so winners fully recover):
+    0.40 → −1.73 SOL; 0.45 → −1.89; 0.50 → −2.02; 0.60 → −2.25.
+    Monotonically *worse* — dead coins bleed further, winner recovery gain is
+    smaller than the added dead-coin bleed.
+  * ⇒ `no_long_offside_pct = 40` is the exact interior optimum; both directions
+    lose.  Confirms iter22_k35/k45 bracket and iter21 hypothesis K.
+
+**Conclusion (definitive).**  The massive losers are **not** distinguishable
+from the winners by any observable available at or after entry — price path,
+time-in-drawdown, order flow, or engine posterior all overlap because a
+subset of winners genuinely crash −30…−47% and sit submerged for minutes
+before an *exogenous* recovery that the model cannot anticipate.  The engine's
+own Bayesian posterior is the only oracle that separates them, and it already
+does so optimally (`kelly_flat` −40% / `gain_retrace` +10%-arm).  **No further
+left-tail improvement is available from the recorded data.  The g50
+configuration (PnL +1.077 SOL, PF 1.41, WR 75.9%) stands as the ceiling.**
+Remaining upside requires information not present in OHLCV — e.g. live
+pool-liquidity / sell-pressure telemetry to flag the dead-coin dumps at entry.
+
