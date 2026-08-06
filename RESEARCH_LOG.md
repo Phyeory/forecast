@@ -3279,3 +3279,136 @@ as the new canonical baseline for future iterations.**
   - `iter22_cascade.py`            – gate + re-entry-prediction cascade sim
   - `iter22_exhaustive.py`         – 87-rule exhaustive counterfactual sweep
 
+---
+
+## Iter 26 — Left-tail elimination study on the 606-recording fresh dataset
+(rigorous negative result + structural breadth-impossibility proof; NO PATCH SHIPPED)
+
+**Task**: eliminate the large left-tail (trades with loss > 20%) while preserving
+winner behaviour, prove improvement on a full-batch backtest, and clear the
+paired-diff anti-overfit gate (Wilcoxon p<0.05, bootstrap CI>0, ≥50% token breadth).
+
+**Fresh canonical baseline (`iter26_baseline_1786039286`, full 606 completed
+recordings, HEAD production defaults = iter21 kelly_flat `no_long_exit_bars=60,
+no_long_offside_pct=40`):**
+  407 trades, **77.64% WR, +0.81791 SOL, PF 1.3065**, expectancy +0.00201,
+  149/606 tokens traded, 0 errors.  **Byte-identical to iter25_diag** (the
+  dataset has not grown since 2026-07-06 and the engine is deterministic) —
+  confirms reproducibility and matches the user's expected ~75% WR / ~+1 SOL.
+
+**Loss decomposition (the left tail dominates):**
+  * BIG losers (pnl ≤ −20%): **57 trades, −2.4646 SOL = 92.4% of gross loss
+    (−2.668 SOL) = −301% of net PnL.**  Removing the entire left tail would
+    ~4× net PnL.
+  * Exit-reason attribution of BIG: `kelly_flat` 40 (−1.794), `recording_ended`
+    12 (−0.567), `bayesian_flip` 2, `kramers_down_exit` 2, `reversal_exit` 1.
+  * Small losers (−20% < pnl ≤ 0): 34 trades, −0.2037 SOL.  Winners: 316, +3.4862.
+
+**Root cause (confirmed, three orthogonal lenses):**
+
+1.  **Entry-time engine state carries zero signal.**  All 14 V1/V2 entry features
+    (`v2_P_up/P_down/E_star/mu/phi/h/sigma_t/du_down`, `m_hat`,
+    `trend_confidence`, `s_effective`, `bar_count`, `overextension_ratio`,
+    `atr`) are statistically indistinguishable between BIG and WIN — **0/14
+    survive a Bonferroni correction** (α=0.0036); best raw |AUC−0.5|=0.057
+    (`v2_P_down`, p=0.11).  iter25's 72-gate entry sweep reproduced: every
+    entry gate destroys +0.6…+2.8 SOL of winner mass to save ≤+0.7 SOL of
+    loser mass, and iter17b proved static entry masks fail in-engine anyway
+    (replacement-entry dynamics).
+
+2.  **The perfect discriminator is post-entry and non-actionable at entry.**
+    `armed` = "position peak ever reaches ≥ +10% above entry" (the
+    `gain_retrace` arming threshold).  **0/57 BIG losers ever arm vs 276/316
+    (87.3%) winners** — Fisher exact p = 2.8×10⁻⁴¹, the strongest effect
+    measured in this codebase.  Out-of-sample stable: rec-half A BIG armed-rate
+    0/29 vs WIN 0.850; rec-half B 0/28 vs 0.897.  Armed trades: 93.9% WR, 0%
+    big-loss rate, +3.28 SOL.  Unarmed: 35.4% WR, 50.4% big-loss rate,
+    −2.46 SOL.  But `armed` is only knowable *after* entry, so it can only
+    drive an exit, not an entry gate.
+
+3.  **The user's end-of-recording suspicion is a minority mechanism.**  BIG
+    losers exit a median 2380 s before recording end; only 13/57 (23%) exit
+    within 120 s of the end (vs 5% of winners).  12/57 BIG are `recording_ended`
+    force-closes — mostly *immediate* dead-coin dumps (Zeus −53% in 4 s,
+    Memehunter −34% in 7 s, POCK −63% in 18 s, CRAB −51% in 11 s) that enter,
+    crash, and are still offside when the tape stops.  The remaining 45/57 BIG
+    are mid-recording bleeds already handled (late) by `kelly_flat`.
+
+**Why every candidate intervention fails the acceptance gate (the payoff overlap):**
+
+Counterfactual candle-replay over the full 407-trade baseline, with exact
+execution semantics (0.1 SOL size, 1% sell slip, 0.0002 SOL fees), testing
+>150 rule variants across five families:
+
+  * **Unarmed-conditional hard floor** (exit if close ≤ −L and never armed):
+    L=0.40 → NET −0.108; L=0.42 → −0.015; L=0.45 → −0.062; L=0.50 → −0.070.
+    All NET ≤ 0.
+  * **Early fast-crash window** (close ≤ −L within first W s): best W=90,
+    L=0.35 → NET +0.059 but **not OOS stable** (half A +0.060, half B −0.001);
+    all other (W,L) NET ≤ 0 or equally unstable.
+  * **kelly_flat offside re-tightening** (L=0.40→0.38/0.35/0.32/0.30):
+    NET −0.16/−0.19/−0.27/−0.37 — monotone worse (confirms iter22_k35/k45
+    bracket: 0.40 is the local optimum).
+  * **Persistence-gated floors** (unarmed + K consecutive bars below entry +
+    floor): all NET < 0.
+  * **Winner-converting "dead-cat scratch"** (dip ≥ −10% in ≤60 s then exit on
+    recovery to breakeven): best NET +0.237 but **hurts 37 tokens vs helps 20
+    → breadth 13%**, and cuts 67 winners.
+
+The structural reason: **winner intra-trade max-drawdown overlaps the big-loser
+distribution.**  Winner MAE p5 = −33%, min = −47% (Bully −47%→+1.4%,
+Balltze −41%→+1.2%, Wyvern −41%→+1.7%, all recovered via `breakeven_scratch`).
+Any price floor shallow enough to catch big losers early also amputates these
+recovering winners; any floor deep enough to spare them catches fewer big losers
+than `kelly_flat` already does.  Recovery is *exogenous* — not predictable from
+the OU-drift posterior at the decision moment (iter21 hypothesis K proved this:
+`mu_neg_frac`=1.00 at both genuine slides and recovering pullbacks).
+
+**The structural breadth impossibility (decisive):**
+
+  * 46/149 traded tokens (30.9%) contain a ≤ −20% trade; 103 tokens have none.
+  * An exit-only rule that reduces big-loss *magnitude* can improve **at most**
+    those 46 tokens → **maximum breadth 30.9% < 50%**.  The gate is unreachable.
+  * Widening touch-set to shallow exits (to convert losers→wins on more tokens)
+    flips NET negative because it amputates deep-dipping winners (the +2.8 SOL
+    `gain_retrace` engine is untouched by any rule that cuts earlier).
+  * Empirical confirmation: kelly_flat itself, a *validated good* exit, would
+    score only ~15–17% breadth on this dataset — its iter21 acceptance rode on
+    the older 94-token cohort.  **On the current 149-token geometry, no
+    big-loss-cutting exit rule can clear the ≥50% breadth gate.**  The metric
+    requirement and the left-tail-elimination objective are mutually exclusive
+    on this dataset.
+
+**Formal statement.**  Objective: maximise E[Σ per-recording ΔPnL] subject to
+the acceptance gate.  For any exit rule R, breadth(R) ≤ |{tokens with a ≤−20%
+trade}| / |traded tokens| = 46/149 = 0.309 < 0.50.  Therefore the feasible set
+of gate-passing exit rules is empty; the constrained optimum is the null rule
+(no change).  The current engine (iter21 kelly_flat at the iter22-verified
+offside optimum) **is the measurable Pareto frontier** for left-tail exits on
+this dataset.
+
+**Deliverables / reproducibility** (read-only analysis; engine untouched):
+  * baseline batch `iter26_baseline_1786039286` → `backend/v2_results/`,
+    aggregate `backend/analysis/iter26_baseline.json`.
+  * per-trade feature master + MWU/KS/AUC tests + gate sims →
+    `backend/analysis/iter26/` (via `iter25_loss_anatomy.py --batch
+    iter26_baseline_1786039286`).
+  * No `strategy_engineV2.py` / `forward_tester.py` / `backtester.py` changes —
+    none survive the anti-overfit gate.  Pipeline parity and the 4-state
+    expansion are untouched.
+
+**Residual risks & next experiments (the only open avenues):**
+  (a) **Replacement-aware entry simulation.**  The one mechanism that could pass
+      breadth is an *entry* improvement that lifts many tokens at once.  Static
+      masks fail in-engine (iter17b); a candidate must be evaluated by re-running
+      the engine, not by trade-subtraction.  Highest-priority next step.
+  (b) **Regime-conditional entry tightening inside `idle`** (static projection
+      +0.30 SOL, but mechanism-risk HIGH per iter17b) — idle entries are 62
+      trades at 71% WR / −0.19 SOL, the only negative-PnL entry regime.
+  (c) **Live dead-pool signal.**  The 12 `recording_ended` dumps are
+      liquidity-death events; a real-time pool-liquidity / sell-pressure feed
+      (not derivable from recorded OHLCV) could gate these entries.  Requires
+      new recorder fields — out of scope for a pure backtest fix.
+  (d) Re-examine after the dataset grows: 46→more big-loser tokens may lift the
+      breadth ceiling above 50%, re-opening exit-rule candidacy.
+
