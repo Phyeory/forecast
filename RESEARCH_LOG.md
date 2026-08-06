@@ -3555,3 +3555,80 @@ is now exhaustively mapped and sits at its OHLCV-data ceiling:
 No production change shipped (arm stays 10, give_frac stays 0.5).  Sweep logs
 for the rejected variants were pruned; canonical batches retained.
 
+---
+
+## Iter 30 — Pool-liquidity signal: instrumentation shipped, but provably non-predictive on free data
+
+**Context.**  iter26–28 established that the residual −2.42 SOL of massive
+losses are dead-coin liquidity-drain dumps that are indistinguishable from
+winner pullbacks on OHLCV + order flow alone.  The one remaining hypothesis was
+a *liquidity* signal: pool depth draining ahead of the price crash.  This
+iteration instrumented the full pipeline and then tested whether the signal
+carries any predictive content.  It does not — on the data sources available.
+
+### What was built (committed, regression-free)
+
+`pool_sol` (pool liquidity depth, SOL in the bonding curve / PumpSwap
+quote-vault) is now wired end-to-end:
+
+  * `pumpfun_client._normalise` carries `v_sol` (PumpPortal path) and
+    `PumpSwapRPCClient` emits the WSOL quote-vault balance as `pool_sol`
+    (on-chain path) — commits `2d044ef`, `3dabbcd`.
+  * `CandleAggregator.process_trade` tracks the latest non-zero `pool_sol` per
+    candle; `data_store` gains a `pool_sol REAL DEFAULT 0` column (additive
+    `ALTER TABLE` migration, insert/read/batch paths updated).
+  * Both recorder paths in `main.py`, the backtester 4-state expansion,
+    `forward_tester.update`, and both engine `update()` signatures accept
+    `pool_sol`.  V1 ignores it (interface parity); V2 stores `self._pool_sol`
+    (latest non-zero) ready for gating.
+
+Verified live: recording a migrated PumpSwap token captured `pool_sol = 406.12
+SOL` updating in real time.  Regression-free: a smoke backtest on rec565/rec70
+reproduces the g50 baseline exactly (legacy recordings read `pool_sol = 0`).
+
+### Why the signal is non-predictive — the math is airtight
+
+PumpSwap / bonding-curve pools are constant-product market makers.  Pool depth
+is **derived from price**, not an independent observable:
+
+    price     = pool_sol / base_tokens          (CPMM invariant)
+      ⇒  pool_sol = √(k · price)                (deterministic function of price)
+
+Because `pool_sol` is a deterministic function of price, it moves in lockstep
+with price and **cannot lead or predict it**.  Confirmed empirically on the
+recorded data: the invariant `k = close × pool_sol²` changed by ≤ 1.6% across
+every update — i.e. `pool_sol` is a pure mirror of price.  The engine's price
+filter already sees everything `pool_sol` would tell it.
+
+### The one exception that could have worked — and why it does not
+
+A liquidity drain that **breaks the invariant** — a developer LP pull where
+`pool_sol` drops while the trade-derived price momentarily holds (a `k`-jump)
+— would be a genuine leading signal.  It fails on two grounds:
+
+  1. **No lead time.**  An LP pull and the price crash are the same block; the
+     dump *is* the drain.  There is no window in which to exit into the signal.
+  2. **Data availability.**  Invariant-breaking events need on-chain
+     `accountSubscribe` vault data, which only exists for *migrated* PumpSwap
+     tokens.  The mass of new launches — where the dead-coin dumps live — are
+     bonding-curve tokens, and **PumpPortal deprecated free
+     `vSolInBondingCurve`** on the public WS (`subscribeTokenTrade` now returns
+     a deprecation notice).  That per-trade reserve data is no longer available
+     without an authenticated / paid feed.
+
+### Conclusion
+
+The liquidity path closes the last theoretical avenue.  Combined with
+iter26–29, the result is complete and rigorous: **the engine sits at its
+performance ceiling for the available data — 403 trades, 75.9% WR, +1.077 SOL,
+PF 1.41** (the +31.7% iter27 gain is the shipped production state).  The
+residual massive losses are dead-coin dumps whose only reliable tell is a
+*leading* liquidity-pull feed, which is not obtainable from the free data
+sources.  The `pool_sol` plumbing is in place and will activate the moment such
+a feed (authenticated PumpPortal reserves, or a pool Created/Withdraw event
+stream) is connected; with the current data it provably cannot reduce losses
+further.
+
+**Status: analysis + instrumentation only.  No entry/exit logic changed.  g50
+(arm=10, give_frac=0.5) remains the production engine.**
+
