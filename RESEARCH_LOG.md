@@ -3515,3 +3515,43 @@ configuration (PnL +1.077 SOL, PF 1.41, WR 75.9%) stands as the ceiling.**
 Remaining upside requires information not present in OHLCV — e.g. live
 pool-liquidity / sell-pressure telemetry to flag the dead-coin dumps at entry.
 
+---
+
+## Iter 29 — gain_retrace arm-threshold sweep (arm=10 confirmed optimal)
+
+**Motivation.**  The `gain_retrace_arm_pct` threshold defines the armed/unarmed
+boundary — the single perfect discriminator (iter26/28).  It had never been
+swept on the fresh dataset.  Sweep it to see if re-placing the boundary lifts
+the winner/loser split.
+
+**Hypothesis.**  Lower arm (7%) arms more eventual winners → higher win rate;
+higher arm (14%) keeps more winners on the tight trail → protect modest gains.
+
+**Full-batch results (606 recordings, engine_version=2, g=0.5 throughout):**
+
+| batch | arm | trades | WR | total PnL | PF |
+|---|---|---|---|---|---|
+| iter29_arm7 | 7% | 426 | 75.4% | +0.3816 | 1.15 |
+| **iter27_g50 (base)** | **10%** | **403** | **75.9%** | **+1.0772** | **1.41** |
+| iter29_arm14 | 14% | 379 | 73.1% | +0.9591 | 1.29 |
+
+**Result: arm=10 is the exact interior optimum — both directions are worse.**
+  * **arm=7 (lower):** arms too eagerly.  Trades that spike a transient +7% then
+    collapse get locked into a floor at 0.5·peak; the trade count rises to 426
+    (more churn) and PnL collapses to +0.38.  The +7% arm catches the *dump
+    wick* before the trend confirms.
+  * **arm=14 (higher):** trades peaking at +10…+13% never arm, so their retrace
+    is not locked — they give the gain back to breakeven/loss.  PnL −0.12 vs
+    base, WR −2.8pt.
+
+**iter27–29 together establish the complete local optimum for the gain_retrace
+profit-lock:**  `(arm=10%, give_frac=0.5)` is the peak of both axes on the
+606-recording fresh dataset.  Combined with iter21/22's kelly_flat optimum
+(`no_long_exit_bars=60, offside=40`) and iter16's entry-gate settings
+(`v2_p_up_min=0.62, sigma_t_min=0.021`), the engine's full exit/entry surface
+is now exhaustively mapped and sits at its OHLCV-data ceiling:
+**403 trades, 75.9% WR, +1.077 SOL, PF 1.41.**
+
+No production change shipped (arm stays 10, give_frac stays 0.5).  Sweep logs
+for the rejected variants were pruned; canonical batches retained.
+
