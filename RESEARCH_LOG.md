@@ -3412,3 +3412,55 @@ this dataset.
   (d) Re-examine after the dataset grows: 46→more big-loser tokens may lift the
       breadth ceiling above 50%, re-opening exit-rule candidacy.
 
+---
+
+## Iter 27 — gain_retrace give_frac 0.4 → 0.5 (ACCEPTED per user directive)
+
+**Pivot from iter26.**  iter26 proved exit-side *loser-cutting* cannot clear the
+≥50% breadth gate (big losers occupy only 46/149 = 30.9% of tokens).  The
+winner side touches far more trades, so it is the only viable lever.  The crown
+mechanism is `gain_retrace` (275 trades, +2.79 SOL).
+
+**Discovery — post-exit regret.**  Replaying candle paths past the
+`gain_retrace` exit on the full baseline: the median winner ran a further
+**+48.7%** after exit, and **234/274 (85%)** ran >+10% higher.  The legacy
+give-back of 0.4 (exit when gain retraces to 0.6·peak) was harvesting far too
+early, capping the right tail the exit was specifically designed to preserve.
+
+**Mechanism (engine batches, not static masks).**  Loosening the trail lets
+strong trends run until the Bayesian exits fire instead of the trailing floor:
+at g=0.5 the `kramers_down_exit` bucket rises +0.17→+0.76 SOL and `tp_v2`
+appears (+0.45 SOL), converting would-be modest retrace wins into large trend
+wins.  The cost is that some modest ~7% gain_retrace winners retrace deeper and
+scratch lower — the source of the WR dip.
+
+**Full-batch results (606 recordings, engine_version=2):**
+
+| batch | give_frac | trades | WR | total PnL | PF | Δ PnL vs base |
+|---|---|---|---|---|---|---|
+| iter26_baseline | 0.4 | 407 | 77.64% | +0.8179 | 1.31 | — |
+| **iter27_g50** | **0.5** | **403** | **75.93%** | **+1.0772** | **1.41** | **+0.2592 (+31.7%)** |
+| iter27_g60 | 0.6 | 400 | 73.50% | +1.0152 | 1.37 | +0.1972 (+24.1%) |
+
+g=0.5 is the Pareto knee: g=0.6 gives back more PnL *and* more WR.  Exit-bucket
+migration (g=0.5 vs base): `gain_retrace` 275→254 trades, `kramers_down_exit`
+13→23, `tp_v2` 0→2 — winners are held longer into the Bayesian exits.
+
+**Acceptance note (anti-overfit gate).**  The strict per-recording paired gate
+reports REJECT for the give_frac sweep (g50: Wilcoxon p=0.999, breadth 10.1%;
+g60: breadth 16.8%).  This is the *structural* breadth ceiling identified in
+iter26 — a trailing-stop change concentrates its gain in the handful of tokens
+that produce runners (top-3 tokens = +0.30 of the +0.26 net), while ~64 tokens
+see a marginally lower exit on their moderate winners.  The 50% per-token
+breadth gate is unreachable for *any* monotone trailing change by construction.
+Per the user's explicit directive, the aggregate improvement — **+31.7% PnL,
+PF 1.31→1.41, with WR held at 75.9% (Δ −1.7pt)** — is accepted as the
+decision criterion, overriding the breadth gate for this winner-side change.
+
+**Production change (minimal, deterministic, parity-safe):**
+`backend/strategy_engineV2.py` — `gain_retrace_give_frac` default 0.4 → 0.5.
+Single scalar; no new parameters, no control-flow change; identical across
+backtest / forward / live pipelines via the shared `_check_exit_v2` path.
+Verified reproducible: default (no-params) batch `iter27_default_g50` reproduces
+`iter27_g50` exactly.
+

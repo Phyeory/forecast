@@ -2525,7 +2525,16 @@ class StrategyEngineV2Adapter:
         self._v2_require_past_peak = float(engine_kwargs.pop("v2_require_past_peak", 0.0))
         # iter18b_opt optimized exit parameters
         self._gain_retrace_arm_pct  = float(engine_kwargs.pop("gain_retrace_arm_pct", 10.0))
-        self._gain_retrace_give_frac = float(engine_kwargs.pop("gain_retrace_give_frac", 0.4))
+        # iter27: give_frac default 0.4 → 0.5.  Post-exit regret analysis on the
+        # 606-recording fresh dataset showed gain_retrace exited far too early
+        # (median winner ran a further +48.7% after exit).  Full-batch sweep:
+        #   g=0.4 (legacy):  407 trades, 77.6% WR, +0.818 SOL, PF 1.31
+        #   g=0.5 (accept):  403 trades, 75.9% WR, +1.077 SOL, PF 1.41  (+31.7% PnL)
+        #   g=0.6:           400 trades, 73.5% WR, +1.015 SOL, PF 1.37
+        # g=0.5 is the Pareto-optimal give-back: captures runner upside via
+        # later kramers/tp_v2 exits while limiting the modest-winner→scratch
+        # conversion that erodes win rate at looser trails.
+        self._gain_retrace_give_frac = float(engine_kwargs.pop("gain_retrace_give_frac", 0.5))
         self._breakeven_arm_dd_pct  = float(engine_kwargs.pop("breakeven_arm_dd_pct", 25.0))
         self._breakeven_buffer_pct  = float(engine_kwargs.pop("breakeven_buffer_pct", 2.5))
         # iter18a: posterior-drift persistence exit params.
