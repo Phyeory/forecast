@@ -336,6 +336,34 @@ future agent must therefore:
 
 ---
 
+> **Post-iter15 fresh-dataset era (iters 16–32, recorded 2026-07-27 onward).**
+> After the iter15 recorder fix, all benchmarking moved to the fresh
+> `backend/data/price_data.db`.  Key production-accepted changes on the fresh
+> dataset: **iter21** kelly_flat exit #7 (`no_long_exit_bars=60,
+> no_long_offside_pct=40`), **iter27** `gain_retrace_give_frac 0.4→0.5`
+> (+31.7% PnL).  iters 22–32 were a long series of **rigorous negative
+> results** establishing that the engine sits at its OHLCV-data ceiling: the
+> residual left-tail losses are dead-coin liquidity-drain dumps that are NOT
+> separable from winners by entry-time engine features (iter26), exit-side
+> stops (iter22/26 breadth-impossibility), order-flow microstructure
+> (iter31), or pool-liquidity (iter30 theory + **iter32 real-vault
+> confirmation**).  **iter31 (local pre-entry regime / manipulated-dump entry
+> gate): 0/49 causal microstructure features survive Bonferroni; the one
+> marginal candidate (`volcollapse`) is non-monotone, insignificant,
+> split-half unstable, and REJECTED in-engine (`iter31_vc90`: Δ=−0.19 SOL,
+> Wilcoxon p=0.975, breadth 5.8%) via replacement-entry dynamics.  iter32
+> (live pool-liquidity on the 49 new `pool_sol`-carrying recordings):
+> `pool_sol` is a 0.99-corr CPMM price mirror on real vault data; genuine
+> LP-pull k-jumps exist (25 events / 114k bars) and *do* lead crashes by
+> 5–15 s, but they (a) never appear at entry time, (b) are confounded by
+> pump-dump k-distortions, and (c) fire too rarely/late post-entry to beat
+> `kelly_flat` — not exploitable as an entry or exit gate.  No production
+> change in iter31/32; engine byte-identical to HEAD.**  Current canonical
+> baseline `iter31_baseline_full`: 427 trades, 75.6% WR, +0.965 SOL, PF 1.33
+> on 652 recordings.  See RESEARCH_LOG.md iters 16–32.
+
+---
+
 ## Guidelines for Engine Developers & AI Agents
 
 1. **Never Touch Pipeline Parity**: When adding or modifying strategy engine parameters, ensure `Backtester`, `ForwardTester`, and `LiveTrader` receive and process identical state transitions.

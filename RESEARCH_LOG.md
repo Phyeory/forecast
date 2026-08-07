@@ -3632,3 +3632,194 @@ further.
 **Status: analysis + instrumentation only.  No entry/exit logic changed.  g50
 (arm=10, give_frac=0.5) remains the production engine.**
 
+---
+
+## Iter 31 — Local pre-entry regime vs global: the manipulated-dump entry gate (rigorous negative result + in-engine confirmation)
+
+**Question (user directive).**  Investigate the *local* price-dynamics regime
+around losing-trade entries vs the global regime and vs winning entries, find a
+*causal* threshold that blocks entries into "manipulated dumps," and prove the
+improvement on batch + full-batch with the paired-diff statistical gate.  The
+no-lookahead requirement is satisfied by construction: any such gate is a
+function of candles strictly at-or-before the entry bar and is intended to fire
+at the entry moment itself.
+
+**Fresh canonical baseline (`iter31_baseline_1786096269`, 652 completed
+recordings — the dataset grew from 606 → 652 since iter26).**  HEAD production
+defaults (iter21 kelly_flat `no_long_exit_bars=60, offside=40`, iter27
+`give_frac=0.5`, iter16 entry gates `v2_p_up_min=0.62, sigma_t_min=0.021`):
+  **427 trades, 75.64% WR, +0.96465 SOL, PF 1.3272**, expectancy +0.00226,
+  159/652 tokens traded, 0 errors, 1567 s at max-workers=8.  Reproducible
+  (deterministic engine; `iter31_parity` re-run is byte-identical).
+
+**What is new here vs iter25/26/28.**  The prior loss-anatomy sweeps tested
+*aggregate / level* pre-entry context — trailing return, return percentile,
+position-in-range, volume ratio, sell-fraction — and found no separability.
+This iteration tests the *microstructure signature of manipulation* that those
+level features miss: the fresh dataset carries real per-bar buy/sell volume
+(89.7% of 1 s candles have `buy_volume>0`), so we can compute **signed
+order-flow imbalance, down-tick autocorrelation, close-location-value,
+sell-dominance of range, and dead-tape interaction terms** — none of which were
+tested before.  Tool: `backend/analysis/iter31_regime_anatomy.py` (49 causal
+features over 15/30/60/120-tick windows + 300-tick drawdown/abandon terms),
+strictly point-in-time (candles ≤ entry_time).
+
+**Result 1 — entry-time microstructure is statistically indistinguishable
+between BIG losers and winners (extends iter26/28 to order flow).**
+  * BIG cohort: 63 trades, −2.7224 SOL.  WIN: 323.  SMALL: 41.
+  * **0/49 features survive Bonferroni** (α = 0.05/49 = 0.0010).  Best
+    |AUC−0.5| = 0.085 (`ms_dd_peak300`, MWU p=0.033); `ms_ofi15` AUC 0.583
+    (p=0.038); `ms_downfrac30` AUC 0.567 (p=0.094).  All other order-flow /
+    autocorrelation / CLV / sell-dominance features have p ≥ 0.17.
+  * `ms_abandon` (deep-drawdown × volume-collapse interaction, the literal
+    "post-pump abandoned dump" score) is **exactly 0 for every trade** —
+    memecoin tape *never* goes quiet into the dump; the manipulated dump is a
+    *hot* sell cascade, not a cold fade.  The "dead tape" hypothesis in its
+    naive form is false on this data.
+
+**Result 2 — the single marginal candidate is non-monotone, insignificant, and
+OOS-unstable.**  `ms_volcollapse` = (recent 60 s vol rate)/(prior 300 s vol
+rate) was the only feature with positive counterfactual net-ΔPnL at every
+quantile tested (q10 +0.29 / q20 +0.27 / q30 +0.43 SOL).  But:
+  * threshold sweep is **non-monotone** — net peaks at thr=1.0 (+0.374) then
+    degrades (thr=1.25 → −0.069); a genuine gate should improve monotonically;
+  * MWU p=0.101 (fails significance);
+  * **split-half unstable**: half A net flips negative at thr=1.1 (−0.076)
+    while half B stays positive (+0.210) — the sign is not robust at a fixed
+    threshold.  This mirrors iter26's rejected unstable gates.
+
+**Result 3 — definitive in-engine test (replacement-aware) REJECTS the gate.**
+Static masks cannot capture replacement-entry dynamics (iter17b), so the gate
+was implemented in the engine (`v2_volcollapse_max`, causal trailing 360-s
+volume buffer, default OFF) and run full-batch.  Default-OFF parity confirmed
+exact (`iter31_parity` = baseline, 427 trades / +0.9647 SOL).  Candidate at the
+static knee (`v2_volcollapse_max=0.90`, batch `iter31_vc90`):
+
+| batch | trades | WR | total PnL | PF |
+|---|---|---|---|---|
+| iter31_baseline | 427 | 75.64% | **+0.96465** | 1.33 |
+| iter31_vc90 | 378 | 74.34% | **+0.77358** | 1.30 |
+
+paired_diff vs baseline (`iter31_vc90_vs_base`): mean Δ = **−0.001083 SOL** per
+recording, Wilcoxon p = **0.975** (greater), bootstrap 95 % CI = **[−0.00442,
++0.00162]** (straddles 0), McNemar p = 1.0, and only **9 / 159 (5.8%)** tokens
+improved vs 30 regressed (2 L→W / 3 W→L flips).  **VERDICT: REJECT on every
+gate.**  Blocking a low-volume-collapse entry does not skip the loss — the
+engine re-enters the same dump one bar later at a worse fill (the iter17b
+replacement-entry mechanism, confirmed again in-engine).  The worst regressions
+(바오 −0.18, Dave −0.03, Goosey −0.02) are exactly the re-routed fills.
+
+**Conclusion (definitive, closes the local-regime entry-gate hypothesis).**
+The local pre-entry regime at losing entries is **not profitably separable**
+from the global/winning regime by any causal OHLCV + order-flow microstructure
+feature available in the recorded data.  The manipulated dump does not announce
+itself in the seconds before entry — neither in level (iter25), engine
+posterior (iter26/28), nor signed order-flow microstructure (iter31) — and the
+one marginal candidate fails monotonicity, significance, split-half stability,
+and the replacement-aware in-engine test simultaneously.  This is the third
+orthogonal confirmation (after iter26's exit-side breadth-impossibility proof
+and iter30's pool-liquidity proof) that the residual −2.72 SOL left tail is a
+dead-coin liquidity-drain event whose only reliable tell is *leading*
+off-book / LP-pull telemetry not present in the recorded OHLCV + trade-volume
+stream.  **The engine remains at its measurable data ceiling: 427 trades,
+75.6% WR, +0.965 SOL, PF 1.33 on the 652-recording fresh dataset.**
+
+**Production change: NONE.**  The candidate gate was reverted;
+`strategy_engineV2.py` is byte-identical to HEAD (g50 / iter21 production).
+No `app.js` parameter change (no accepted production parameter exists to sync).
+
+**Deliverables / reproducibility:**
+  * baseline batch `iter31_baseline_1786096269` + parity re-run `iter31_parity`
+    → `backend/v2_results/`; aggregate `backend/analysis/iter31_baseline.json`.
+  * candidate batch `iter31_vc90` + paired-diff `backend/analysis/iter31_vc90_vs_base.json`.
+  * analysis tool `backend/analysis/iter31_regime_anatomy.py`; outputs
+    `backend/analysis/iter31/{iter31_trade_master.json, iter31_feature_tests.json, iter31_report.md}`.
+
+---
+
+## Iter 32 — Live pool-liquidity (`pool_sol`) as a leading dump signal: conclusive negative on real vault data
+
+**Premise (user directive).**  iter30 *proved* `pool_sol` is a CPMM price-mirror
+**in theory**, but that proof ran on recordings with `pool_sol ≡ 0` (the
+instrumentation shipped 2026-08-05/06, commits `2d044ef`/`3dabbcd`, *after* the
+bulk of the dataset was recorded).  iter28/30's residual hypothesis — a
+developer **LP pull** that breaks the CPMM invariant and *leads* the price crash
+— could not be tested without real vault data.  The 2026-08-06 → 08-07
+recordings are the first to carry genuine `pool_sol` vault balances.  This
+iteration tests the liquidity signal on that real data.
+
+**Data availability.**  49 completed recordings carry `pool_sol > 0` on 100% of
+their candles (rec1234…rec1325, recorded 2026-08-06 23:22 → 08-07 09:51 UTC).
+Source: PumpPortal `vSolInBondingCurve` (bonding-curve) and on-chain WSOL
+quote-vault via `accountSubscribe` (migrated PumpSwap) — both *reserve
+balances*.  Coverage overlap with the engine is thin: only **10 of the 159
+engine-traded recordings** have `pool_sol` (24 baseline trades, 7 BIG losers).
+
+**Result 1 — `pool_sol` is still a near-perfect price mirror (iter30 confirmed
+empirically).**  Across all 49 recordings, `corr(Δlog pool_sol, Δlog close) >
+0.99` in 48 (the 49th is 0.988).  Per-second invariant `k = pool_sol²/close`
+drifts with CV 0.6–8% (slow LP add/remove + fee accrual), **not** discrete
+breaks.  iter30's CPMM-mirror proof holds on real vault data.
+
+**Result 2 — genuine LP pulls exist but are rare and only fire post-entry.**
+Scanning for real k-jumps (`|Δk/k| > 5%` in one second, the signature of a
+discrete LP add/remove): **25 events across 114,445 bars (0.022%)**, in 15
+recordings.  Of the genuine *pulls* (Δk < −5%), inspecting the lead structure
+(price change in the pull bar vs the following 5–60 s):
+  * ~60% show **price holding in the pull bar** (same-bar Δprice ∈ [−0.05,
+    +0.00]) then crashing **−28% … −97% within 5–15 s** — a real leading tell
+    (e.g. rec1271: two pulls at Δk = −0.21, −0.19, price −97% in 15 s; rec1274:
+    Δk = −0.29 → −94%; rec1265: −0.08/−0.08/−0.14 → −39…−48%).
+  * ~40% are **pump-dump distortions** — price *spikes* in the bar (Δprice up
+    to +40%), inflating `k = pool²/price` artificially; the subsequent "pull"
+    is just the price reverting, not an LP remove (e.g. rec1260: Δk = −0.27 on
+    a +41% same-bar pump, price then +37%).  These are unusable.
+
+**Result 3 — not exploitable as an ENTRY gate (the LP pull is not present at
+entry time).**  Joining causal pool features (pool_ret 15/30/60/120,
+pool_dd_from_300s_peak, k-drop-in-last-60s) to the 24 baseline trades on pool
+recordings: **0 of 7 BIG losers had any k-drop in the trailing 60 s before
+entry** (the pull fires *mid-trade*, after the engine is already in), and the
+pool-slope / pool-drawdown features overlap completely between winners and BIG
+losers (e.g. pool_dd300: Throb **winner** −0.52 vs Goosey **loser** −0.27;
+pool_ret30: TINYTANK winner +0.39 vs loser −0.17).  The dump is not announced
+in the liquidity *level* or *recent slope* at entry — same conclusion as
+iter31's price/volume microstructure.
+
+**Result 4 — not exploitable as an EXIT gate (counterfactual, exact path
+replay on the 24 overlap trades).**
+  * **Pool-drawdown exit** (exit when pool < entry-pool × (1−X)): at X=15%,
+    total return −554% vs baseline −112% — **catastrophic**.  Pool depth
+    declines on *any* price dip (CPMM mirror), so the exit fires on 11/17
+    winners, converting them to −28…−39% losers.  This is the iter26/28
+    winner-drawdown overlap resurfacing through the liquidity channel: pool
+    drawdown is isomorphic to price drawdown, which provably cannot separate
+    recovering winners from dead coins.
+  * **k-jump exit** (exit on a genuine LP pull, Δk ≤ −kthr): only fires on
+    3/24 trades at kthr=0.05 (NET −15%, hurting 2 winners via pump-dump
+    distortion false-positives); at kthr=0.10/0.15 it fires on **0/24** trades
+    — in zero big losers before their kelly_flat/recorded exit.  The genuine
+    LP pull is simply too rare and too late within the trades the engine
+    actually takes.
+
+**Conclusion (definitive, closes the liquidity avenue on real data).**  The
+real-vault `pool_sol` data confirms — empirically, not just theoretically —
+that pool liquidity is a CPMM price mirror that carries **no exploitable
+leading signal** for the trades the engine takes.  The one genuine tell (a
+discrete LP pull) (a) is not present at entry time, (b) is confounded by
+pump-dump k-distortions, and (c) fires too rarely and too late post-entry to
+beat the existing `kelly_flat` Bayesian exit.  Combined with iter26 (engine
+posterior), iter28 (post-entry path), iter30 (CPMM theory), and iter31
+(order-flow microstructure), this is the **fifth orthogonal negative result**:
+the residual left tail is a dead-coin liquidity-drain event whose only reliable
+*leading* tell would be a **pool Created/Withdraw event stream or L2
+order-book depth** — neither of which is derivable from the recorded reserve
+balance, which moves in lockstep with price.
+
+**Production change: NONE.**  Engine byte-identical to HEAD (g50 / iter21
+production).  The `pool_sol` plumbing remains in place and would activate only
+if a *non-price-derived* liquidity feed (LP add/remove event log, or depth-at-
+tick) is connected — reserve-balance telemetry is provably insufficient.
+Analysis-only; no batch re-run warranted (pool recordings do not overlap the
+traded cohort enough to move aggregate metrics).
+
