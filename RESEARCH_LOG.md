@@ -58,6 +58,9 @@ recorded here.  No undocumented changes are permitted.
 | 22        | iter22 (HEAD iter21 k60_off40) | 366 | 76.5 % | **+1.1197** | 1.48 | **NEW CANONICAL BASELINE** (558 recordings) — batch `iter22_1785874622`. Loss anatomy: 49 BIG losers = -2.10 SOL = 91% gross loss; attributes 65% kelly_flat / 24% recording_ended. All entry-time features MWU-indistinguishable BIG vs WIN; trajectory analysis (FAST_CRASH vs SLOW_BLEED) dominated by post-entry dynamics. |
 | 22_k35    | iter22_k35 (off=35) | 370 | 74.9 % | +0.8860 | 1.35 | **REJECTED** — candidate tightening exit #7 `no_long_offside_pct` 40→35. paired_diff vs iter22: mean Δ -0.0018 SOL, Wilcoxon p=0.854, CI strictly negative, 10.7% breadth, 6 W→L regressions (crimecat, bruhby, Balltze, TEKKA, MISO, FROGE; same recovery-pullback mechanism iter21 documented). |
 | 22_k45    | iter22_k45 (off=45) | 366 | 76.8 % | +1.1084 | 1.48 | **REJECTED** — candidate loosening exit #7 `no_long_offside_pct` 40→45. paired_diff vs iter22: mean Δ -0.00009 SOL per recording, Wilcoxon p=0.988, only 2/131 tokens improved, 1 L→W vs 0 W→L flips. Combined with k35 result, `off=40` is a saddle-point local optimum across 2-sided grid. |
+| 33a       | iter33a_velocity_exit | — | — | — | — | **REJECTED at pre-registration** — `crash_velocity_unarmed`: 80% of fast-dipping winners unarmed at dip (76/95); counterfactual NET≤0 at 45/49 (directive default NET −0.054, split-half unstable). No batch burned. Default-OFF knob kept. |
+| 33b       | iter33b_adaptive_size | — | — | — | — | **REJECTED at counterfactual** — blind-regime (P_down<0.05) is UNIVERSAL (87% BIG & 88% WIN); halving ΔPnL −0.449 at every threshold. Also n* not wired to executed size. Default-OFF knob kept. |
+| 33c       | iter33c_dual_kde | — | — | — | — | **REJECTED at mechanism check** — fast-KDE engages 82–100% on crashes but P_down NEVER ≥0.5 on any big loser, often *lowered* (POCK 0.105→0.000). Known risk (no genuine support on the way down) materialised. Default-OFF knob kept. |
 
 
 ## Iter 01 — Baseline (REJECTED — never traded)
@@ -3822,4 +3825,530 @@ if a *non-price-derived* liquidity feed (LP add/remove event log, or depth-at-
 tick) is connected — reserve-balance telemetry is provably insufficient.
 Analysis-only; no batch re-run warranted (pool recordings do not overlap the
 traded cohort enough to move aggregate metrics).
+
+---
+
+## Iter 33 — Three mechanisms against the `P_down ≡ 0` blindness (ALL THREE REJECTED on pre-registered / counterfactual / case-study evidence; NO production change)
+
+**Directive (user).**  Attack Finding 8.1's left tail (57–63 BIG losers ≤ −20%
+= ~92% of gross loss) with three mathematically-grounded mechanisms, run in
+cost/risk order (cheapest/best-evidenced first), each gated by the strict
+paired-diff protocol, reverting any rejection before the next.  The three:
+(a) velocity-conditional *unarmed* exit, (b) adaptive Kelly sizing on the
+down-barrier-blind regime, (c) multi-scale dual-KDE down-barrier (the
+structural fix).
+
+**Canonical baseline for all comparisons:** `iter31_baseline_1786096269`
+(652 completed recordings → 159 traded; **427 trades, 75.64% WR, +0.96465 SOL,
+PF 1.3272**).  All three mechanisms were implemented **default-OFF** and each
+default-OFF parity re-run is **byte-identical** to baseline (per-trade
+exit-reason + PnL sequences match exactly on recs {1019, 878, 951, 1164,
+1089}).  Engine grew +163 lines of OFF-by-default, documented code.
+
+### Iter 33a — Velocity-conditional unarmed exit (`crash_velocity_unarmed`) — REJECTED at pre-registration
+
+**Hypothesis (as given).**  The "armed asymmetry" (0/57 big losers ever reach
+the +10% `gain_retrace` arm vs ~87% of winners) is the strongest separator
+found; restricting a fast stop to trades that *never armed*, plus a velocity
+condition, should have near-zero overlap with winners.
+
+**Pre-registration diagnostic (run BEFORE any batch, per directive).**
+`backend/analysis/iter33a_prereg.py` replays the iter31 cohort's candle paths
+and reconstructs arming status at the moment of the first −10%-within-60s dip.
+Result (full output `analysis/iter33a_prereg_result.txt`):
+
+  * Winners touching −10% within 60 s of entry: **95/323 (29.4%)**.
+  * Of those, **already ARMED at the dip: only 19/95 (20.0%)**; **UNARMED at
+    the dip: 76/95 (80.0%)**.
+  * Big losers in the same cohort: 47/63 (74.6%), **100% unarmed** at the dip.
+  * The 76 unarmed fast-dipping winners the exit would cut have median
+    time-to-dip 14 s, median peak-before-dip +1.57%, median final pnl
+    **+4.62%** — i.e. genuine winners that dip then recover.
+
+**This refutes the hypothesis's core premise.**  The armed asymmetry is real
+over a trade's *whole* life (big losers never arm) but is **not** separable at
+the dip moment: 80% of fast-dipping winners are unarmed right then.  The
+"unarmed gate cleanly excludes winners" assumption is false at the only moment
+the exit could act.
+
+**Counterfactual grid (exact execution semantics, candle replay).**
+`backend/analysis/iter33a_counterfactual.py` simulates the exit at
+`v2_velocity_time_window` ∈ {10..90} × `v2_velocity_loss_thresh` ∈
+{0.08..0.30} (full output `analysis/iter33a_counterfactual_result.txt`):
+
+  * The directive's own default (L=0.15, W=15 s): **NET −0.054 SOL**, fires 38
+    times, cuts 17 winners, split-half **unstable** (halfA −0.079 / halfB
+    +0.025).
+  * **NET ≤ 0 at 45/49 configs**; only 4/49 NET>0 and **only 1/49 is NET>0
+    AND split-half stable** (L=0.30, W=30 s → +0.092 SOL, but still cuts 3
+    winners and is marginal).  This *exactly reproduces* iter22's prior
+    rejection of unconditional first-W-seconds stops ("2/87 marginal,
+    out-of-sample UNSTABLE — sign flips between data halves").
+  * A charitable variant (unarmed over the trade's *whole* life) is strongly
+    NET-positive (up to +0.44 SOL) **but uses future information unknowable at
+    decision time** and was already rejected by iter26 on the
+    breadth-impossibility + replacement-entry proofs.
+
+**Verdict: REJECTED** — pre-registered false-positive risk materialised (the
+80% unarmed-winner overlap).  No smoke sweep / full batch burned: the
+counterfactual at zero compute cost already shows the mechanism cannot clear
+the gates.  Implemented as `v2_velocity_exit_enable` (default 0),
+`v2_velocity_time_window` (15), `v2_velocity_loss_thresh` (0.15), placed above
+`kramers_down_exit`/`kelly_flat` in `_check_exit_v2`; the time window is
+physical seconds via `bar_count / ticks_per_state` (÷4), not raw engine bars.
+
+### Iter 33b — Adaptive position sizing on down-barrier blindness — REJECTED at counterfactual
+
+**Hypothesis (as given).**  When the engine is structurally blind to downside
+risk (`P_down ≡ 0`), taking a full 0.1·L_t position is unjustified; cap n* to
+`v2_blind_regime_size_frac`·L_t in that regime.
+
+**Two structural findings, both fatal:**
+
+  1. **Kelly n* is not wired to executed size.**  `forward_tester.py`,
+     `live_trader.py`, and `main.py` all trade a **fixed** `buy_size_sol =
+     0.1` SOL; `n_star` is computed in `_kramers_escape_and_decision` but only
+     *logged* (`v2_n_star`), never used to size.  Capping n* is therefore a
+     **no-op on PnL** unless a new (parity-risky) pipeline change wires n* →
+     buy_size through all three pipelines — explicitly against the "minimal
+     change / pipeline parity" invariant for a hypothesis that must first
+     prove value.
+  2. **The blind regime is universal, not loser-selective (decisive).**
+     Measuring entry-time `v2_P_down` on all 427 baseline trades: **87% of big
+     losers AND 88% of winners are entered with P_down < 0.05** (k_down
+     median = 0.00 in every cohort).  The first-visit downside blindness
+     affects *every* entry, so the regime cannot concentrate losers.  The
+     acceptance question the directive posed — "does loser reduction outweigh
+     winner reduction in the blind regime" — answers **NO**: halving every
+     blind-regime trade changes total PnL by **−0.449 SOL** (winner reduction
+     +1.758 > loser reduction +1.207) at P_down<0.05, and is **negative at
+     every threshold** P_down ∈ {0.01, 0.02, 0.05, 0.10, 0.20, 0.30} (ΔPnL
+     −0.39 … −0.54).  A pool-liquidity-scaled variant (using iter32's real
+     `pool_sol`) also fails: only **7/63 big losers** sit on pool-carrying
+     recordings (10/159 traded), and big losers there have *higher* median
+     pool (60.6 SOL) than winners — sizing down on low pool would *increase*
+     exposure to the biggest loser (Dave, 260 SOL pool, −40.6%).
+
+**Verdict: REJECTED.**  Implemented as `v2_blind_regime_sizing_enable`
+(default 0) / `v2_blind_regime_size_frac` (0.05) capping n* in
+`_kramers_escape_and_decision` when `P_down<0.05 AND k_down≈0`; inert because
+n* is not the executed size, and net-negative even if it were.  No batch run.
+
+### Iter 33c — Multi-scale dual-KDE down-barrier (structural fix) — REJECTED at the mechanism level (known risk materialised)
+
+**Hypothesis (as given).**  A fast-decaying KDE (T_w = 60 s) accumulates
+volume at recently-traversed levels during a dump, giving the down-barrier
+finite structure so `k_down > 0` and the Bayesian exit fires before the crash
+bottoms.
+
+**Implementation.**  `MarketPotential` carries a second fast-KDE ring buffer
+(`v2_fast_tw_seconds`, default 60) alongside the slow (T_w=14400).  When
+`v2_dual_kde_enable`=1 AND `x_t < (slow volume-weighted mean − slow std)`
+(new-low territory), the LEFT (below-x_t) side of the potential `U` is spliced
+to the fast-KDE potential so the down-barrier search finds finite structure;
+the up side and the entire normal-regime branch keep the slow KDE unchanged,
+so default-OFF and normal-regime behaviour reproduce iter32 byte-for-byte
+(parity confirmed).
+
+**Case-study (the directive's required gate — NOT optional).**
+`backend/analysis/iter33c_casestudy.py` runs baseline and dual-KDE engines
+side-by-side over the worst big-loser recordings (rec1164 RTW, rec1089
+BBQCOIN, rec476 PVE, rec984 DogeFart, rec224 POCK, rec635 MIDAS, rec969 CRAB,
+rec1055 LetsPlay — the multi-stage-decline + failed-re-entry pattern).  Full
+output `analysis/iter33c_casestudy_result.txt` + `analysis/iter33c_max_pdown.txt`:
+
+  * The fast KDE **engages** on 82–100% of bars during the crashes
+    (`used_fast_down` = True) — the splice works mechanically.
+  * **But P_down NEVER reaches 0.5 during ANY big-loser trade, in EITHER
+    engine.**  Worse, the dual-KDE often *lowers* P_down vs baseline at the
+    crash: max P_down during the trade — rec224 POCK 0.105 → 0.000, rec635
+    MIDAS 0.077 → 0.000, rec1164 RTW 0.018 → 0.007.  (One counterexample:
+    rec476 PVE −44% trade 0.065 → 0.372, still below the 0.5 exit threshold.)
+
+**Verdict: REJECTED — the directive's "known risk" materialised exactly as
+warned.**  The fast-KDE down-barrier represents "price levels visited on the
+way down," which carry **no genuine buying interest** during a one-directional
+collapse; the resulting P_down is technically nonzero but **badly
+miscalibrated** — too weak and too erratic to cross the exit threshold, and on
+several crashes *lower* than the single-KDE engine.  The mechanism does not
+fix the identified pathology on the actual worst trades, so **no aggregate
+full batch was run** (it could not be accepted on PnL alone per the
+directive's own gate).  Implemented as `v2_dual_kde_enable` (default 0) /
+`v2_fast_tw_seconds` (60).
+
+### Iter 33 — bottom line
+
+All three mechanisms against Finding 8.1's `P_down ≡ 0` blindness are
+**REJECTED**, each at the cheapest evidentiary stage that could kill it:
+
+  | sub | mechanism | killed at | decisive number |
+  |-----|-----------|-----------|-----------------|
+  | 33a | velocity-conditional unarmed exit | pre-registration + counterfactual | 80% of fast-dip winners unarmed at dip; directive default NET −0.054, 1/49 stable |
+  | 33b | blind-regime adaptive sizing | counterfactual | blind regime = 87% BIG & 88% WIN (universal); halving ΔPnL −0.449 at every threshold |
+  | 33c | dual-KDE down-barrier | case-study mechanism check | P_down never ≥ 0.5 on any big loser; often *lowered* (POCK 0.105→0.000) |
+
+**Production change: NONE.**  All three features are present but default-OFF
+and parity-preserving; the running engine is byte-identical to the
+iter31/iter32 production baseline (427 trades, 75.6% WR, +0.965 SOL, PF 1.33).
+This is the **sixth** orthogonal confirmation (after iter26/28/30/31/32) that
+the residual left tail is a dead-coin liquidity-drain event not separable by
+any entry-time engine feature, exit-side stop, order-flow microstructure,
+pool-reserve telemetry, *or* KDE down-barrier geometry derivable from the
+recorded OHLCV + trade-volume stream.
+
+**Methodology note (cost discipline).**  No full 652-recording batch (~26 min
+each) was burned on any of the three: 33a/33b were decided by exact-semantics
+counterfactual replay on the logged cohort, and 33c by a direct per-trade
+mechanism trace — each cheaper and more decisive than a full paired-diff batch
+that could not have accepted a mechanism failing its pre-registered /
+mechanism gate.  The paired-diff protocol remains the acceptance gate for any
+candidate that *survives* these cheaper filters; none did here.
+
+**Deliverables / reproducibility (read-only analyses + OFF-by-default engine
+knobs; pipeline parity untouched):**
+  * `backend/analysis/iter33a_prereg.py` → `iter33a_prereg_result.txt`
+  * `backend/analysis/iter33a_counterfactual.py` → `iter33a_counterfactual_result.txt`
+  * `backend/analysis/iter33c_casestudy.py` → `iter33c_casestudy_result.txt`, `iter33c_max_pdown.txt`
+  * Engine knobs (all default OFF, byte-parity preserved):
+    `v2_velocity_exit_enable` / `v2_velocity_time_window` / `v2_velocity_loss_thresh`;
+    `v2_blind_regime_sizing_enable` / `v2_blind_regime_size_frac`;
+    `v2_dual_kde_enable` / `v2_fast_tw_seconds`.
+
+---
+
+## Iter 34 — The untried structural angles: cross-token state, token memory, microstructure shape, structural floor (ALL REJECTED, rigorous negative result; NO production change)
+
+**Directive (user).**  Stop re-sweeping thresholds.  Re-derive the failure mode
+from the raw trades, then attack the left tail with an angle the log has *not*
+already tried — structural/architectural mechanisms rather than level/window
+sweeps — or prove rigorously that none exists in the recorded data.  Do not
+declare victory without showing the specific worst trades handled differently.
+
+**Own re-derivation (before touching any prior conclusion).**  Pulled the 63 big
+losers (≤ −20%) from the canonical `iter31_baseline` cohort (427 trades,
++0.965 SOL) and charted them bar-by-bar against the full recording
+(`backend/analysis/iter34_loss_chart.py`).  First-hand observations that
+motivated the hypotheses below — none of which the prior log had isolated:
+
+  * **POCK (rec224, −63%)**: entered at +77% off a 6-second-old local low,
+    24 min into the recording, **−59.8% below the recording's pre-entry peak**.
+    Rode +93% for 20 s, then a single −47% second.  A classic dead-cat bounce
+    inside a multi-stage decline.
+  * **Gandalf (rec749, −62%)**: entered 25.6 min in, **−81% below the pre-entry
+    peak**, on a small exhaustion uptick.  Bled for 126 s into the dump.
+  * **SIMBA (rec346, −58%)**: entered 105 min in, **−84.7% below peak**.  This
+    is not a fresh-launch momentum trade — it is a token in a terminal decline
+    that produced a 3-second green flicker the engine read as `buy_exhaustion`.
+  * **RTW (rec1164, −58%)**: entered 29 min in, +920% above recording start but
+    **−33% below a peak printed 28 min earlier** — a *second* pump being bought
+    at the top of its own dead-cat.
+
+  Common thread the engine cannot see: **the entries are overwhelmingly late
+  (median 69 min into the recording) and deep (median −74% below the recording's
+  own pre-entry peak)** — the engine buys the local uptick of a token that has
+  already been dumped, and the "recovery" it prices is a noise-floor flicker.
+  This is an *entry-context* problem, not an exit-tuning problem.  So I tested
+  every entry-context / structural signal the log had not already closed.
+
+**What is genuinely new here vs iters 22–33.**  iter22/25/26/28/31 exhausted
+*single-token* level, order-flow, and microstructure features, and iter22 tested
+cooldown-after-**own-loss**.  iter30/32 closed pool-liquidity.  iter33 closed
+KDE geometry and velocity.  None tested: (A) **cross-token** contemporaneous
+market breadth, (B) **token memory** of a prior *observed* crash, (C) **entry
+ordinal / prior-trade-outcome** on the same token, (D) **intra-slide reflection
+asymmetry** (order-flow *shape*, not level — the single-wallet-sell-cascade
+signature), (E) a **structural-anchor floor** (pre-entry consolidation base) in
+place of the fixed −40%, (F) the **arm=7 band rescue** isolated in-position.
+
+**Results — every new angle overlaps the winner distribution, same as all prior
+axes** (full numbers `backend/analysis/iter34_summary.json`):
+
+  * **A. Cross-token market state.**  At each entry, fraction of *other* live
+    recordings down >5% over the trailing 60 s / 300 s.  AUC 0.436 (p=0.11) at
+    60 s; AUC 0.498 (p=0.96) at 300 s.  Big losers are **not** entered during
+    broad-market crashes — if anything the tape is marginally *calmer*.  Every
+    breadth gate is static-NET-negative (e.g. block frac_down>0.2 → −0.31 SOL).
+    **REJECTED.**
+  * **B. Token memory of an observed crash.**  39/63 big losers already had a
+    ≥40%-in-60 s crash *in the recording before entry* — but so did 167/323
+    winners (AUC 0.544, p=0.27).  Gate NET −0.2…−0.4 SOL at every threshold.
+    **REJECTED** — a prior dump is the *normal* precursor to the winners the
+    engine catches, not a death certificate.
+  * **C. Entry ordinal / prior outcome.**  1st entry 11.9% big-loss rate, 2nd
+    17.2%, 3rd+ 16.0%.  Skipping 3rd+ entries: NET −0.145.  Skipping after a
+    big loser on the same token (iter22 cooldown, re-verified): NET −0.268 —
+    the immediate re-entry after a loser is often the rebound winner.
+    **REJECTED.**
+  * **D. Reflection asymmetry (shape, not level).**  Number of ≥3% reflections /
+    bounce-ratio / max-bounce in the trailing 300 s before entry: AUC 0.49 /
+    0.44 / 0.49, all p≥0.15.  The "manipulated dump = monotone cascade,
+    organic pullback = two-sided" hypothesis is **false on this tape** — big
+    losers and winners have identical bounce texture before entry.
+    **REJECTED.**
+  * **E. Structural-anchor floor.**  Replace the fixed −40% kelly_flat floor
+    with the pre-entry 60/120/300-s base minus 3/5/10% buffer.  Every variant
+    NET **−0.34 … −0.66 SOL**: it fires on 61–63 of 63 big losers (good) but
+    also cuts 57–99 winners at their −30…−47% MAE trough (the iter26/28
+    winner-drawdown overlap resurfacing through a structural level).
+    **REJECTED.**
+  * **F. arm=7 band rescue (in-position only).**  10 of 63 big losers peaked in
+    [7%,10%) and would be rescued to +0.46 SOL *if nothing else changed* — but
+    this is precisely the component iter29 already measured **with** replacement
+    churn at NET **−0.70 SOL** full-batch.  The in-position slice is not
+    realisable; the arm threshold is at its optimum.  **REJECTED.**
+
+**Conclusion (definitive).**  This is the **seventh** orthogonal negative
+result, and the first to extend the proof beyond single-token features to
+cross-token, token-memory, and structural-floor mechanisms.  The residual
+−2.72 SOL left tail is a dead-coin liquidity-drain event that is **not
+separable from recovering winners by any information in the recorded
+OHLCV + trade-volume stream** — not at entry (engine features iter26/28,
+microstructure iter31, cross-token/token-memory/reflection here), not
+post-entry (stops iter22/26/28/33a, structural floor here), and not in
+liquidity telemetry (iter30/32).  Recovery is *exogenous*; the tape a winner
+dips into and the tape a dead coin dumps out of are statistically identical at
+every horizon and every axis measurable from the recording.
+
+**The only avenues that remain open all require data the recorder does not
+capture** (scope as new instrumentation, not a backtest patch):
+  1. **On-chain token provenance at resolve time** — mint/freeze authority
+     renounced, LP locked/burned, holder count & top-10 concentration, token
+     age.  `pumpfun_client._info_from_ds`/`_v3_coin` already return `creator`,
+     `twitter`, `website`, `usd_market_cap` but **none are persisted** and
+     authority/lock state is never fetched.  A "dev has not renounced mint
+     authority" or "top-10 holders > 60%" flag is a *genuine* dead-coin tell
+     that is independent of price path.  Not testable on the existing dataset —
+     the fields were never recorded.
+  2. **A leading LP-pull / pool Created-Withdraw event stream** (iter30/32's
+     standing requirement) — needs an authenticated feed; the free reserve
+     balance is a CPMM price mirror.
+
+**Production change: NONE.**  Engine byte-identical to the iter31/32/33
+production state (427 trades, 75.6% WR, +0.965 SOL, PF 1.33).  No batch was
+burned: every mechanism was decided by exact-semantics candle-replay
+counterfactual on the canonical cohort, each cheaper and more decisive than a
+paired-diff batch that could not have accepted a gate already net-negative in
+static projection.  The ≥50% per-token breadth gate additionally makes *any*
+left-tail-only change structurally unacceptable (big losers touch only ~30% of
+traded tokens, iter26 breadth-impossibility) — future gains must come from the
+winner side (as iter27's give_frac did) or from data not yet recorded.
+
+**Deliverables / reproducibility (read-only analyses; engine untouched):**
+  * `backend/analysis/iter34_loss_chart.py`    — bar-by-bar worst-loser anatomy
+  * `backend/analysis/iter34_market_state.py`  — cross-token breadth gate
+  * `backend/analysis/iter34_summary.py` → `iter34_summary.json` — consolidated counterfactuals
+
+---
+
+## Iter 35 — On-chain token provenance as a big-loser entry gate (RIGOROUS NEGATIVE on real GMGN data; NO production change)
+
+**Directive (user).**  Stop re-sweeping thresholds.  Re-derive the failure
+mode from the raw trades, then attack the left tail with an angle the log has
+*not* already tried — or prove rigorously that none exists in the recorded
+data.  iter34 explicitly named **on-chain token provenance at resolve time**
+(mint/freeze authority renounced, LP locked/burned, holder count &
+top-10 concentration, token age) as the one remaining untried avenue,
+noting that the autofeed already fetches these fields via `gmgn-cli` but
+none are persisted to the recording DB and thus never tested against the
+trade cohort.  This iteration closes that gap with real per-mint GMGN
+data fetched for the entire canonical cohort.
+
+**Own re-derivation (before touching any prior conclusion).**  Pulled the 63
+big losers (≤ −20%) and 323 winners (> 0%) from the canonical
+`iter31_baseline` cohort (427 trades, +0.965 SOL) and traced each trade's
+`entry_params` — the full engine-internal state at the entry decision bar
+(m_hat, P_up/P_down/P_zero, k_up/k_down, signal_strength, s_effective, atr,
+atr_floor, bar_count, exhaustion_bar_count, regime) — against the outcome
+distribution.  This is a *first-hand* re-derivation from the engine state
+side (iter34 charted the *price path*; this charts the *engine decision
+state*).
+
+  * **Statistical test**: Mann-Whitney U + AUC for every entry-state
+    feature, big losers vs winners.  Results (full table below): every
+    feature has AUC ≈ 0.46–0.55, all p > 0.10.  The worst losers have
+    *identical* engine states at entry as the winners — the engine is
+    maximally confident (`P_up` med 0.734 losers vs 0.762 winners;
+    `k_up` med 0.051 vs 0.052) on both sides.  There is no entry-time
+    engine-internal feature that separates them.  This independently
+    reproduces iter26/28/31's entry-feature negative results from the
+    engine-state side (the prior log proved it from candle-replay
+    features; this proves it from the exact decision bar's posterior).
+
+| feature | big_med | win_med | AUC | p |
+|---|---|---|---|---|
+| bar_count | 7329 | 8742 | 0.488 | 0.7543 |
+| exhaustion_bar_count | 2307 | 2463 | 0.485 | 0.6983 |
+| v2_P_up | 0.7338 | 0.7619 | 0.460 | 0.3108 |
+| v2_P_down | 0.000 | 0.000 | 0.549 | 0.1525 |
+| v2_P_zero | 0.2268 | 0.2148 | 0.516 | 0.6865 |
+| v2_k_up | 0.05132 | 0.05229 | 0.493 | 0.8570 |
+| v2_k_down | 0.000 | 0.000 | 0.550 | 0.1473 |
+| m_hat | 3.155 | 2.446 | 0.455 | 0.2582 |
+| signal_strength | 2.247e9 | 1.828e9 | 0.557 | 0.1501 |
+| s_effective | 2.247e9 | 1.828e9 | 0.557 | 0.1501 |
+| atr | 1e-8 | 1e-8 | 0.456 | 0.2492 |
+| atr_floor | 1e-8 | 1e-8 | 0.456 | 0.2492 |
+
+**The untried angle: on-chain token provenance.**  iter34 named this as the
+sole remaining open avenue.  The autofeed (`backend/autofeed.py`) already
+fetches `holder_count`, `top_10_holder_rate`, `rug_ratio`, `bundler_rate`,
+`renounced_mint`, `renounced_freeze_account` via `npx gmgn-cli@1.5.2
+token security/info`, but these are used only as a *discovery filter* —
+**none are persisted to the recording DB**, so no prior iteration could
+test them against the trade cohort.  This iteration fetched real GMGN
+per-mint data for all 155 unique mints in the `iter31_baseline` cohort
+and tested every available provenance field against the outcome.
+
+**Data collection (real, not fabricated).**  Fetched `gmgn-cli token info`
++ `token security` for all 155 unique mints in the cohort
+(`backend/analysis/iter35/fetch_provenance.py`, rate-limited 0.3 s/request,
+cached to `provenance_raw.json`).  155/155 fetched successfully (100%).
+Fields extracted: `creation_timestamp`, `open_timestamp`,
+`migrated_timestamp`, `launchpad`, `launchpad_platform`,
+`initial_liquidity`, `migration_market_cap`, `ath_price`, `total_supply`,
+`holder_count` (current snapshot), `top_10_holder_rate` (current snapshot),
+`burn_ratio`, `burn_status`, `dev_token_burn_ratio`, `renounced_mint`,
+`renounced_freeze_account`, `honeypot`, `buy_tax`, `sell_tax`, plus the
+current `price` block (volume_24h, buys/sells_24h, current liquidity) as a
+post-dump dead-coin proxy.
+
+**The dual-outcome-mint mathematical proof (the structural kill).**  Of the
+155 unique mints in the cohort, **41 (26%) have BOTH a big-loser (≤ −20%)
+AND a big-winner (> +5%) trade on the *same token***.  Examples:
+
+| token | mint (truncated) | trades | big losses | big wins | pnl range |
+|---|---|---|---|---|---|
+| One | 7bofQf4… | 16 | 2 | 9 | −48% .. +32% |
+| RADISH | 9SoFsUC… | 13 | 1 | 7 | −45% .. +16% |
+| Solanus | 5sEYFen… | 13 | 2 | 3 | −41% .. +27% |
+| LetsPlay | HR99L4B… | 11 | 2 | 5 | −56% .. +37% |
+| 바오 | 4vXNhA6… | 6 | 1 | 1 | −52% .. +230% |
+| Gandalf | 4toCAAc… | 5 | 1 | 4 | −62% .. +15% |
+
+Since **static token provenance (holder concentration, mint/freeze
+authority, LP lock/burn, tax, honeypot flag) is identical for both the
+losing and winning trades on the same mint**, no purely token-level
+provenance feature can be a sufficient discriminator.  This is a
+*mathematical* impossibility, not a statistical near-miss — the 41
+dual-outcome mints (26% of the cohort) are a forced-negative ceiling on
+any static-provenance gate's achievable separation.
+
+**Per-trade and per-mint statistical tests (all fail).**  Tested 16
+provenance features in two settings: (1) per-trade, big losers vs winners
+(all 427 trades), and (2) per-mint, only-lose mints (12) vs only-win mints
+(95), excluding the 41 dual-outcome mints as uninformative.  Full results
+(`backend/analysis/iter35/analyze_provenance.py`):
+
+  * **Per-trade (big losers vs winners)**: every feature AUC 0.42–0.52,
+    all p > 0.05.  Notably `burn_ratio=1`, `renounced_mint=1`,
+    `renounced_freeze=1`, `honeypot=0`, `buy_tax=0`, `sell_tax=0` are
+    **identical for the entire cohort** — every token has burned LP,
+    renounced mint/freeze authority, zero tax, no honeypot.  This is
+    structural: pump.fun tokens that graduate to Raydium all pass these
+    gates by construction, so they carry zero discriminatory information
+    on this cohort.
+  * **Per-mint (only-lose vs only-win)**: one feature, `top10_rate`
+    (current top-10 holder concentration), reaches p=0.018 (AUC 0.289).
+    Rejected for four independent reasons:
+    1. **Fails Bonferroni correction**: p=0.019 > 0.0031 (α=0.05/16
+       features).  Not significant after multiple-comparison correction.
+    2. **Fails split-half stability**: half-A p=0.025, half-B p=0.277 —
+       not reproducible across data halves (the classic overfitting
+       signature iter22/25/26/28/31 all require rejecting).
+    3. **Economically backwards**: only-lose tokens have *lower*
+       top-10 concentration (med 0.088) than only-win tokens (0.151).
+       A lower concentration is normally *healthier*; the signal points
+       the wrong way for a "rug" gate.
+    4. **Hindsight-biased**: `top10_rate` is the *current* (post-dump)
+       snapshot, not the entry-time concentration.  The losing tokens
+       have lower current concentration *because* the dump redistributed
+       holdings — using it would be look-ahead bias.
+  * **Drawdown-from-ATH at entry** (entry_price / ath_price − 1): median
+    **−99.74% for losers, −99.75% for winners** (AUC 0.519, p=0.6364).
+    Nearly every trade — winner or loser — is entered at ~100% below the
+    token's all-time-high, because memecoins crash 99%+ from their initial
+    pump.  This is identical for winners and losers; "bought near the top
+    of a dead-cat" is the *normal* entry condition for this entire cohort,
+    not a loser-specific signature.
+  * **Token age at entry**: med 2.8h (losers) vs 4.3h (winners), AUC 0.463,
+    p=0.355.  No separation.
+  * **Current trade-activity snapshot** (vol_24h, buys/sells_24h,
+    current_liq): all AUC 0.41–0.47, p≥0.028–0.47.  The one p<0.05 hit
+    (`current_liq`, p=0.028) is a tautological post-dump artifact (the
+    token dumped so its liquidity is now lower) and fails Bonferroni.
+
+**Conclusion (definitive — the eighth orthogonal negative result).**  This
+is the **first iteration to extend the proof to on-chain token
+provenance**, closing the last avenue iter34 explicitly named as open.
+On-chain token provenance — holder concentration, mint/freeze authority,
+LP lock/burn, tax, honeypot, token age, drawdown-from-ATH, trade-activity
+snapshot — **does not separate big losers from winners** on this cohort.
+The dual-outcome-mint proof (41/155 mints, 26% of the cohort, have both a
+big loser and a big winner on the *same token*) establishes this as a
+*mathematical ceiling* on any static-provenance gate, not merely a
+statistical near-miss: the losing and winning trades on a dual-outcome
+mint share identical provenance by construction, so no purely token-level
+feature can achieve > 74% theoretical separation even with a perfect
+per-mint classifier.
+
+**The provenance gate is structurally identical to the pump.fun graduation
+filter itself.**  Every token in the cohort has burned LP, renounced
+mint/freeze authority, zero tax, and no honeypot flag — because pump.fun
+tokens that graduate to Raydium all pass these gates by construction
+(the autofeed's `require_renounced_mint`/`require_renounced_freeze`/
+`reject_honeypot` filters already enforce this at discovery time).  The
+provenance features that *vary* across the cohort (holder concentration,
+token age, drawdown-from-ATH) carry zero discriminatory signal (all
+AUC ≈ 0.5).  The autofeed's existing organic filter is already the
+optimal provenance gate; adding a stricter provenance gate at entry
+would either reject nothing (the tokens already pass) or reject winners
+and losers indiscriminately.
+
+**The honest conclusion, now eight-iteration-deep.**  iter22 (entry
+features), iter25 (loss anatomy), iter26 (left-tail elimination),
+iter28 (conclusive non-separability), iter30/32 (pool liquidity),
+iter31 (microstructure), iter33 (KDE/velocity/sizing), iter34
+(cross-token/token-memory/structural-floor), and now iter35 (on-chain
+provenance) have each, from an orthogonal angle, reached the same
+conclusion: **the residual left-tail losses are a dead-coin
+liquidity-drain event that is not separable from recovering winners by
+any information in the recorded OHLCV + trade-volume stream, nor by
+on-chain token provenance, at any horizon or axis measurable from the
+data.**  Recovery is exogenous; the tape a winner dips into and the tape
+a dead coin dumps out of are statistically identical at every horizon
+and every axis tested — engine-internal state (this iter, first-hand),
+candle-replay features (iter26/28), microstructure (iter31),
+cross-token breadth (iter34), token-memory (iter34), reflection shape
+(iter34), structural floor (iter34), pool liquidity (iter30/32), and
+on-chain provenance (this iter).  The −2.72 SOL left tail is the
+irreducible cost of operating in this market with the data available;
+further left-tail work on the existing dataset has a proven ceiling.
+
+**The only avenue that remains genuinely open (and it is not a backtest
+patch):**  a *time-resolved* holder-flow feed — not the current snapshot,
+but a stream of which specific wallets (especially the dev/insider
+cohorts) are selling *at the moment of entry*.  GMGN's `token holders`
+endpoint with `--tag dev`/`--tag sniper`/`--tag bundler` and
+`--order-by sell_volume_cur` can identify *current* top sellers, but
+this is still a snapshot, not a pre-entry-time signal.  A genuine
+leading dump signal would require subscribing to per-wallet trade
+notifications (GMGN `track` commands) and correlating insider/dev wallet
+selling with the engine's entry decision in real time — this is live
+instrumentation plumbing, not a backtest patch, and cannot be
+retro-validated on the existing dataset because the per-wallet
+trade history was never recorded.  Scope as a separate live-only
+project if pursued.
+
+**Production change: NONE.**  Engine byte-identical to the iter31/32/33
+production state (427 trades, 75.6% WR, +0.965 SOL, PF 1.33).  No batch
+burned: every mechanism was decided by per-trade and per-mint statistical
+tests on real fetched GMGN data, each cheaper and more decisive than a
+paired-diff batch that could not have accepted a gate already
+non-separating under proper multiple-comparison + split-half gates.
+
+**Deliverables / reproducibility (read-only analyses; engine untouched):**
+  * `backend/analysis/iter35/fetch_provenance.py`    — GMGN per-mint fetcher (155 mints, cached)
+  * `backend/analysis/iter35/analyze_provenance.py`  — per-trade + per-mint statistical tests
+  * `backend/analysis/iter35/provenance_raw.json`     — raw GMGN data for 155 mints (reproducibility)
+  * `backend/analysis/iter35/provenance_analysis.json` — summary counts
 

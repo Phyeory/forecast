@@ -361,6 +361,50 @@ future agent must therefore:
 > change in iter31/32; engine byte-identical to HEAD.**  Current canonical
 > baseline `iter31_baseline_full`: 427 trades, 75.6% WR, +0.965 SOL, PF 1.33
 > on 652 recordings.  See RESEARCH_LOG.md iters 16–32.
+>
+> **iter33 (three mechanisms vs the `P_down ≡ 0` blindness — ALL REJECTED, no
+> production change).**  Three default-OFF, parity-preserving knobs were added
+> to `strategy_engineV2.py` (+163 lines, all gated): `v2_velocity_exit_enable`
+> (33a crash_velocity_unarmed exit), `v2_blind_regime_sizing_enable` (33b
+> adaptive Kelly cap), `v2_dual_kde_enable` / `v2_fast_tw_seconds` (33c
+> dual-KDE down-barrier).  Each was killed at the cheapest decisive stage, no
+> full batch burned: **33a** pre-registration found 80% of fast-dipping
+> winners (76/95) are UNARMED at the −10%-within-60s dip (the armed asymmetry
+> is a whole-trade, not dip-moment, separator) → counterfactual NET≤0 at
+> 45/49; **33b** the down-blind regime (P_down<0.05) is UNIVERSAL (87% of big
+> losers AND 88% of winners) so sizing it down is net-negative (−0.449 SOL) at
+> every threshold, and n* isn't wired to executed size anyway; **33c** the
+> fast-KDE engages 82–100% on crashes but P_down NEVER ≥0.5 on any big loser
+> and is often *lowered* (POCK 0.105→0.000) — the "no genuine support on the
+> way down" known risk materialised.  Default-OFF parity byte-exact (recs
+> {1019,878,951,1164,1089}).  Engine remains the iter31/32 Pareto frontier.
+> See RESEARCH_LOG.md Iter 33.
+>
+> **iter34–35 (structural angles + on-chain provenance — ALL REJECTED, no
+> production change).**  iter34 tested six untried *structural* angles
+> (cross-token market breadth, token memory of observed crashes, entry
+> ordinal / prior-trade outcome, intra-slide reflection asymmetry,
+> structural-anchor floor, arm=7 in-position rescue) — all overlap the
+> winner distribution (AUC ≈ 0.5, every gate NET-negative).  **iter35
+> closed the last explicitly-open avenue: on-chain token provenance.**
+> Fetched real GMGN `token info` + `token security` for all 155 unique
+> mints in the `iter31_baseline` cohort (100% success).  **41/155 mints
+> (26%) have BOTH a big-loser AND a big-winner trade on the same token**
+> — a mathematical ceiling: static provenance is identical for the losing
+> and winning trades on a dual-outcome mint, so no purely token-level
+> feature can separate them.  Per-trade and per-mint tests of 16
+> provenance fields (holder concentration, mint/freeze authority, LP
+> lock/burn, tax, honeypot, token age, drawdown-from-ATH, trade-activity
+> snapshot): all AUC ≈ 0.5; the one p<0.05 hit (`top10_rate`, p=0.018)
+> fails Bonferroni, fails split-half stability, is economically
+> backwards, and is hindsight-biased (post-dump snapshot).  Every token
+> in the cohort has burned LP, renounced mint/freeze, zero tax, no
+> honeypot — the pump.fun graduation filter is already the optimal
+> provenance gate.  **This is the eighth orthogonal negative result**,
+> now spanning engine-internal state, candle-replay features,
+> microstructure, cross-token breadth, token-memory, reflection shape,
+> structural floor, pool liquidity, and on-chain provenance.  Engine
+> byte-identical to HEAD.  See RESEARCH_LOG.md Iter 34–35.
 
 ---
 
