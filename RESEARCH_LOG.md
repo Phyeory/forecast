@@ -4352,3 +4352,65 @@ non-separating under proper multiple-comparison + split-half gates.
   * `backend/analysis/iter35/provenance_raw.json`     — raw GMGN data for 155 mints (reproducibility)
   * `backend/analysis/iter35/provenance_analysis.json` — summary counts
 
+---
+
+## Iter 36 — Holder-flow instrumentation (dev/insider sell detection) — MECHANISM IMPLEMENTED, awaiting fresh recordings for validation
+
+**Directive (user).**  iter35's conclusion named the one remaining open avenue:
+time-resolved holder-flow detection — knowing *when* specific wallets
+(especially dev/insider cohorts) sell *at the moment of entry* or *while in
+position*.  This cannot be retro-validated on the existing dataset (per-wallet
+trade history was never recorded), so the mechanism is implemented as a
+default-OFF feature that will be validated on future recordings.
+
+**Architecture (V2 engine path, not sniper).**
+
+1. **Data capture** (`backend/holder_flow.py` + `backend/main.py`): A
+   `HolderFlowMonitor` polls GMGN `track smartmoney` every 5s for real-time
+   trade records and cross-references sellers against per-token dev/sniper/
+   bundler wallet registries (fetched via `token holders --tag ...`).  Events
+   are persisted to a new `holder_flow` table in `price_data.db` so future
+   recordings are backtestable.
+
+2. **Entry gate** (`strategy_engineV2.py`): New default-OFF knob
+   `v2_holder_flow_entry_block` (default 0.0 = OFF).  When > 0, blocks BUY
+   entries if a dev/insider sell (amount_usd ≥ `v2_holder_flow_min_usd`,
+   default 100.0) occurred within `v2_holder_flow_entry_window_seconds`
+   (default 30) before the signal bar.
+
+3. **Exit trigger** (`strategy_engineV2.py`): New default-OFF knob
+   `v2_holder_flow_exit_enable` (default 0.0 = OFF).  When > 0, fires an
+   immediate `dev_sell_exit` if a dev/insider sell occurs while in position
+   (checked on every bar close within `v2_holder_flow_exit_window_seconds`,
+   default 15).
+
+4. **Backtest support** (`backtester.py` + `forward_tester.py`): The
+   backtester loads `holder_flow` events from the DB and passes them to
+   `ForwardTester`, which calls `engine.set_holder_flow_events()` to load
+   them into the V2 adapter.  The engine checks the events during
+   `update()` and `_check_exit_v2()`.
+
+**Parity verification.**  Default-OFF knobs verified on rec224 (1 trade,
+-0.0632 SOL) and rec1019 (4 trades, 75% WR, 8.1e-5 SOL) — identical results
+with/without holder-flow data.  Mechanism verified with synthetic events:
+entry gate blocks within 30s window of dev sell; exit trigger fires
+`dev_sell_exit` within 15s window (verified: t=1785212348 and t=1785212355
+fired `Signal.EXIT` with `reason=dev_sell_exit:test_dev`).
+
+**GMGN API limitation.**  The GMGN API is Cloudflare-protected in this
+environment; the monitor will work in production where the API is accessible.
+The mechanism is default-OFF when no `holder_flow` data exists.
+
+**Production change: NONE** (all knobs default-OFF).  Engine byte-identical
+to the iter31/32/33 production state when knobs are at defaults.  The
+mechanism will be validated on future recordings that have holder-flow data
+captured.
+
+**Deliverables:**
+  * `backend/holder_flow.py` — `HolderFlowMonitor` class (wallet registry, polling loop, event queue)
+  * `backend/data_store.py` — `holder_flow` table + `insert_holder_flow` / `get_holder_flow` functions
+  * `backend/main.py` — recorder integration (start monitor on recording start)
+  * `backend/strategy_engineV2.py` — entry gate + exit trigger (default-OFF knobs)
+  * `backend/forward_tester.py` — `holder_flow_events` parameter, passes to engine
+  * `backend/backtester.py` — loads `holder_flow` from DB, passes to `ForwardTester`
+
