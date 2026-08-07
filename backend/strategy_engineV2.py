@@ -2725,6 +2725,60 @@ class StrategyEngineV2Adapter:
         self._n_particles = int(self.cfg["n_particles"])
         self._n_grid = int(self.cfg["n_grid"])
 
+        # ── Holder-flow knobs (iter36: dev/insider sell detection) ────────
+        # `v2_holder_flow_entry_block` (default 0.0 = OFF): when > 0, block
+        #   BUY entries if a dev/insider sell (amount_usd ≥ threshold) occurred
+        #   within `v2_holder_flow_entry_window_seconds` before the signal bar.
+        # `v2_holder_flow_exit_enable` (default 0.0 = OFF): when > 0, fire an
+        #   immediate `dev_sell_exit` if a dev/insider sell occurs while in
+        #   position (checked on every bar close).
+        # `v2_holder_flow_min_usd` (default 100.0): minimum sell amount (USD)
+        #   to consider significant — filters dust.
+        self._v2_holder_flow_entry_block = float(engine_kwargs.pop("v2_holder_flow_entry_block", 0.0))
+        self._v2_holder_flow_exit_enable = float(engine_kwargs.pop("v2_holder_flow_exit_enable", 0.0))
+        self._v2_holder_flow_min_usd     = float(engine_kwargs.pop("v2_holder_flow_min_usd", 100.0))
+        self._v2_holder_flow_entry_window_seconds = int(engine_kwargs.pop("v2_holder_flow_entry_window_seconds", 30))
+        self._v2_holder_flow_exit_window_seconds  = int(engine_kwargs.pop("v2_holder_flow_exit_window_seconds", 15))
+        # Holder-flow events: list of dicts with keys time, wallet, tag, side,
+        # amount_usd, amount_sol, tx_hash.  Passed in by the pipeline layer
+        # (ForwardTester / LiveTrader) that loaded them from the recording DB.
+        self._holder_flow_events: list[dict] = []
+        self._holder_flow_index: dict[int, list[dict]] = {}
+
+    # ── Holder-flow helpers ───────────────────────────────────────────────
+
+    def set_holder_flow_events(self, events: list[dict]):
+        """Load holder-flow events for this recording (called by pipeline)."""
+        self._holder_flow_events = events
+        self._holder_flow_index = {}
+        for event in events:
+            t = int(event.get("time", 0))
+            if t not in self._holder_flow_index:
+                self._holder_flow_index[t] = []
+            self._holder_flow_index[t].append(event)
+
+    def _has_recent_dev_sell(self, time: int, window_seconds: int, min_usd: float) -> bool:
+        """Check if a significant dev/insider sell occurred within the window before the given time."""
+        if not self._holder_flow_index:
+            return False
+        cutoff = time - window_seconds
+        for t in range(cutoff, time + 1):
+            for event in self._holder_flow_index.get(t, []):
+                if event.get("side") == "sell" and event.get("amount_usd", 0) >= min_usd:
+                    return True
+        return False
+
+    def _get_recent_dev_sell(self, time: int, window_seconds: int) -> Optional[dict]:
+        """Get the most recent dev/insider sell event within the window before the given time."""
+        if not self._holder_flow_index:
+            return None
+        cutoff = time - window_seconds
+        for t in range(time, cutoff - 1, -1):
+            for event in self._holder_flow_index.get(t, []):
+                if event.get("side") == "sell":
+                    return event
+        return None
+
     # ── V1 surface ────────────────────────────────────────────────────
     def _passes_engine_version_check(self):
         # Pass through.  No-op standalone — the symbol is there in case
@@ -2931,6 +2985,7 @@ class StrategyEngineV2Adapter:
         _build_full_result: bool = True,
     ) -> dict:
         self.bar_count += 1
+        self._current_time = int(time)  # iter36: store for holder-flow checks
         # iter28: real pool liquidity depth (SOL in bonding curve), 0.0 when the
         # feed does not carry reserves.  Tracks the latest non-zero observation.
         if pool_sol > 0.0:
@@ -3071,8 +3126,15 @@ class StrategyEngineV2Adapter:
         else:
             # Open new positions based on V2 decision.
             if decision.get("direction") == 1 and decision.get("E_star", -1.0) > 0:
+                # ── Holder-flow entry gate (iter36): block entry on recent dev sell ──
+                if self._v2_holder_flow_entry_block > 0.0 and self._has_recent_dev_sell(
+                    getattr(self, "_current_time", 0), self._v2_holder_flow_entry_window_seconds, self._v2_holder_flow_min_usd
+                ):
+                    sell_event = self._get_recent_dev_sell(getattr(self, "_current_time", 0), self._v2_holder_flow_entry_window_seconds)
+                    # Suppress the BUY signal — log for debugging
+                    self.exit_signal_reason = f"holder_flow_block:{sell_event.get('wallet','')[:8] if sell_event else 'unknown'}"
                 # Apply V1-style entry gate (confidence).
-                if self._v2_passes_entry_gate(c, decision):
+                elif self._v2_passes_entry_gate(c, decision):
                     v1_signal = _V1Signal.BUY
                     self._entry_E_star = float(decision.get("E_star", 0.0))
                     self.exit_signal_reason = ""
@@ -3336,6 +3398,26 @@ class StrategyEngineV2Adapter:
                     and self._no_long_mu_neg_frac <= _mu_neg_frac
                     and entry > 0 and c <= entry * (1.0 - self._no_long_offside_pct / 100.0)):
                 self.exit_signal_reason = "kelly_flat"
+                return _V1Signal.EXIT
+            # 8. iter36 holder-flow exit: dev/insider sell while in position.
+            #    A dev/insider sell is an exogenous adverse event that the
+            #    engine's internal state cannot see — the KDE posterior has
+            #    not yet accumulated enough down-crossings to flip P_down,
+            #    but the on-chain evidence is unambiguous.  Default OFF
+            #    (v2_holder_flow_exit_enable = 0.0) — requires holder_flow
+            #    events to be loaded via set_holder_flow_events().
+            if (self._v2_holder_flow_exit_enable > 0.0
+                    and self._has_recent_dev_sell(
+                        getattr(self, "_current_time", 0),
+                        self._v2_holder_flow_exit_window_seconds,
+                        self._v2_holder_flow_min_usd
+                    )):
+                sell_event = self._get_recent_dev_sell(
+                    getattr(self, "_current_time", 0), self._v2_holder_flow_exit_window_seconds
+                )
+                self.exit_signal_reason = (
+                    f"dev_sell_exit:{sell_event.get('wallet','')[:8] if sell_event else 'unknown'}"
+                )
                 return _V1Signal.EXIT
         return None
 
