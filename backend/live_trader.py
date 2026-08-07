@@ -81,6 +81,16 @@ CONFIRM_REBROADCAST_S: float = 1.0 # re-broadcast same signed TX every N s while
 #            zero.  A missed sell on a memecoin can mean riding it to zero, so
 #            the sell loop re-quotes/re-broadcasts back-to-back (escalating
 #            slippage/fee) and the watchdog remains as the final backstop.
+#
+# SINGLE-CLOSE INVARIANT: a position is closed (``confirm_sell``) EXACTLY ONCE,
+# and only AFTER the sell TX is confirmed on-chain.  Broadcast does NOT close
+# the trade — so N failed attempts followed by 1 success yields exactly ONE
+# closed trade, never N phantom closes.
+#
+# AMOUNT ACCURACY: sells ALWAYS read the authoritative on-chain token balance
+# before building the swap.  This eliminates `Custom: 6024` (insufficient token
+# account balance) caused by a stale/overstated cached figure (e.g. the buy's
+# Jupiter outAmount inflated by slippage or a partial fill).
 QUOTE_RETRIES_PER_GROUP = 3          # fresh quotes fetched per sell attempt group
 NONSIMULATION_ABORT_CODES = frozenset({6024, 1, 0x1771})  # swallowed — handled by re-quote
 PRIORITY_FEE_ESCALATION  = [100_000, 100_000, 100_000, 100_000]  # micro-lamports — fixed 0.0001 SOL
@@ -197,6 +207,11 @@ class LiveTrader:
         # Simulation is still run on explicit test buys if desired.
         skip_simulation: bool = True,
         engine_version: int = 1,
+
+        # ── No-motion stop ───────────────────────────────────────────────
+        # If the price has not moved for this many wall-clock seconds while
+        # a position is open, force-close it.  Set to 0 to disable.
+        no_motion_stop_seconds: float = 300.0,
     ):
         if engine_kwargs is None:
             engine_kwargs = {}
@@ -217,6 +232,12 @@ class LiveTrader:
         self.min_market_cap_usd: float = min_market_cap_usd
         self._last_market_cap_usd: float = 0.0
         self.mcap_stop_triggered: bool = False   # set True once triggered
+        self.no_motion_stop_triggered: bool = False  # set True once no-motion exit fires
+
+        # ── No-motion stop tracking ──────────────────────────────────────
+        self.no_motion_stop_seconds: float = no_motion_stop_seconds
+        self._last_motion_ts: float = 0.0       # wall-clock timestamp of last price change
+        self._last_motion_price: float = 0.0    # close price at that moment
 
         self.stats = LiveTraderStats()
         self.current_trade: Optional[LiveTrade] = None
@@ -1220,74 +1241,6 @@ class LiveTrader:
                 self.engine.notify_trade_opened(self._last_price, Direction.UP)
         # Success path: balance is 0 — trade is genuinely closed. Nothing to do.
 
-    async def _background_sell_settle(self, sig: str, closed_trade, sold_amount: int):
-        """
-        Background confirmation + settle for a fire-and-forget sell.
-
-        The hot path already called ``confirm_sell`` (finalising PnL and
-        notifying the engine) optimistically.  This task confirms the TX
-        actually landed:
-
-          • Confirmed → run the standard ``_verify_sell_settled`` partial-fill
-            check (resurrects the position + re-arms the watchdog if any
-            tokens survived).
-          • Failed    → the sell never happened, so resurrect the position and
-            re-arm the watchdog to force a retry.  This mirrors the existing
-            partial-fill recovery path so no position is ever silently
-            abandoned by the fast path.
-        """
-        confirm_result = await self._confirm_tx(sig)
-        if confirm_result["confirmed"]:
-            logger.info(f"[SELL CONFIRMED BG] sig={sig[:16]}… slot={confirm_result.get('slot')}")
-            await self._verify_sell_settled(sig, closed_trade)
-            await self._refresh_sol_balance_async()
-            return
-
-        # ── Fire-and-forget sell never landed — resurrect + retry IMMEDIATELY ─
-        logger.error(
-            f"[SELL BG FAILED] sig={sig[:16]}… did not confirm "
-            f"(error={confirm_result.get('error')}) — resurrecting position and retrying NOW"
-        )
-        on_chain = await self._get_token_balance()
-        residual = on_chain if on_chain > 0 else sold_amount
-        self._token_balance = residual
-        self._cached_token_balance = residual
-
-        if self.current_trade is None and closed_trade is not None:
-            from dataclasses import replace
-            reopened = replace(
-                closed_trade,
-                status="open",
-                exit_time=None,
-                exit_price=None,
-                exit_reason="sell_tx_failed_retry",
-                size_tokens=residual / (10 ** self._token_decimals),
-                pnl_sol=0.0,
-                pnl_pct=0.0,
-                tx_hash_sell="",
-            )
-            self.current_trade = reopened
-            if self.trade_history and self.trade_history[-1] is closed_trade:
-                self.trade_history.pop()
-            self.stats.total_trades -= 1
-            if closed_trade.pnl_sol > 0:
-                self.stats.winning_trades -= 1
-            else:
-                self.stats.losing_trades -= 1
-            self.stats.total_pnl_sol -= closed_trade.pnl_sol
-            self.stats.current_balance -= closed_trade.pnl_sol
-            self.engine.notify_trade_opened(self._last_price, Direction.UP)
-
-        # Arm the watchdog (final backstop) AND immediately fire a fresh sell
-        # pass so a failed exit is retried without waiting for the 45s watchdog.
-        self._last_exit_signal_ts = time.time()
-        await self._broadcast_status(
-            "sell_retry", f"Sell TX failed on-chain ({confirm_result.get('error')}) — retrying", "signal"
-        )
-        if not self._swap_in_flight and self._alive:
-            logger.warning("[SELL RETRY] Fire-and-forget sell failed — launching immediate retry")
-            asyncio.ensure_future(self.execute_sell("sell_tx_failed_retry"))
-
     async def execute_sell(self, reason: str = "signal") -> Optional[str]:
         """
         Full sell cycle with grouped-retry escalation.
@@ -1326,21 +1279,31 @@ class LiveTrader:
                 f"[SELL] Starting sell: mint={mint_str[:8]}… reason={reason} "
                 f"cached_balance={self._token_balance} units"
             )
-            # ── Cached token balance (no RPC round-trip on the hot path) ─────
-            # The background balance cache refreshes every ~4s, so on a normal
-            # exit the cached figure is fresh and we can build the swap
-            # immediately.  We only fall back to a blocking live read when the
-            # cache has never been populated (session just started and the
-            # position was opened before the cache warmed up).  Using a stale
-            # OVERSTATED figure risks a `Custom: 6024` (insufficient token
-            # balance) on the first attempt — which the retry loop recovers
-            # from with a fresh read — so this is safe.
-            if self._cached_balance_ts > 0.0 and self._get_cached_token_balance() > 0:
-                token_balance = self._get_cached_token_balance()
-                fresh_bal = token_balance  # treat cache as the fresh figure
+            # ── Authoritative on-chain token balance (accuracy > speed) ──────
+            # `Custom: 6024` (insufficient token account balance) is the #1
+            # cause of failed sells, and it happens when we try to sell MORE
+            # tokens than the wallet actually holds — typically because the
+            # cached figure came from the buy's Jupiter outAmount (inflated by
+            # slippage / a partial fill).  We therefore ALWAYS read the live
+            # on-chain balance before building the swap.  This is the single
+            # most important step for "correct amount every time".  The read
+            # uses the fast-RPC fanout (~0.2–0.5s), far cheaper than a failed
+            # 6024 round-trip (~1s + a wasted signature).
+            fresh_bal = await self._get_token_balance()
+            if fresh_bal > 0:
+                if fresh_bal != self._token_balance:
+                    logger.info(
+                        f"[SELL] Correcting stale cached balance: "
+                        f"{self._token_balance} → {fresh_bal}"
+                    )
+                token_balance = fresh_bal
+                self._token_balance = fresh_bal
+                self._cached_token_balance = fresh_bal
             else:
-                fresh_bal = await self._get_token_balance()
-                token_balance = fresh_bal if fresh_bal > 0 else self._token_balance
+                # Live read returned 0 — either genuinely empty or a transient
+                # RPC gap.  Fall back to the last-known balance so we still
+                # attempt the sell; the 6024 retry loop will correct it.
+                token_balance = self._token_balance
 
             if token_balance <= 0:
                 logger.warning(f"[SELL FAILED] No token balance to sell for {mint_str[:8]}…")
@@ -1348,7 +1311,7 @@ class LiveTrader:
                 return None
 
             logger.info(
-                f"[SELL] Live balance: {token_balance} units (cached={self._cached_balance_ts > 0.0})"
+                f"[SELL] Authoritative balance: {token_balance} units (on-chain={fresh_bal > 0})"
             )
 
             while True:  # grouped-retry — never give up while wallet still holds tokens
@@ -1396,61 +1359,23 @@ class LiveTrader:
                         await asyncio.sleep(0.05)
                         continue
 
-                    # ── Hot-path broadcast ────────────────────────────────────
-                    # First attempt of the first group is fire-and-forget: the
-                    # TX is broadcast instantly and we return the signature
-                    # without blocking on confirmation.  The background settle
-                    # task finalises the trade (or resurrects it + retries
-                    # immediately if the TX failed).  In-loop retries block on
-                    # confirmation so we can immediately re-quote with a fresh
-                    # balance on failure.
-                    hot_attempt = (attempt_group == 1 and inner == 1)
-                    if hot_attempt:
-                        sig = await self._sign_and_send(swap_tx, wait_for_confirmation=False)
-                        if not sig:
-                            logger.warning(f"[SELL FAILED {label}] broadcast rejected — retrying immediately")
-                            continue
-                        elapsed = time.time() - sell_start
-                        sol_received = int(quote.get("outAmount", 0)) / 1e9
-                        # Optimistically zero the cached balance so a duplicate
-                        # tick can't queue a second sell while confirmation
-                        # runs in the background.
-                        self._token_balance = 0
-                        self._cached_token_balance = 0
-                        self._last_exit_signal_ts = 0.0  # clear watchdog on the happy path
-                        closed_trade = None
-                        if self.current_trade:
-                            closed_trade = self.confirm_sell(sig, sol_received, self._last_price)
-                        asyncio.ensure_future(
-                            self._background_sell_settle(sig, closed_trade, token_balance)
-                        )
-                        await self._broadcast_status(
-                            "sell_confirmed", sig, reason,
-                            sol_received=sol_received, closed_trade=closed_trade,
-                        )
-                        logger.info(
-                            f"[SELL BROADCAST] sig={sig} received~{sol_received:.6f} SOL "
-                            f"elapsed={elapsed:.2f}s (fire-and-forget)"
-                        )
-                        logger.info(f"[SELL] https://solscan.io/tx/{sig}")
-                        return sig
-
-                    # ── Retry path: block on confirmation ─────────────────────
+                    # ── Confirm-first broadcast (single unified path) ────────
+                    # CRITICAL INVARIANT: the trade is closed EXACTLY ONCE, and
+                    # only AFTER the sell TX is confirmed on-chain.  We never
+                    # call confirm_sell() on broadcast — doing so produced one
+                    # phantom "closed trade" per failed attempt.  If the TX
+                    # fails, the position stays open and the loop retries
+                    # immediately with a fresh quote + fresh balance.
                     sig = await self._sign_and_send(swap_tx, wait_for_confirmation=True)
                     if not sig:
                         logger.warning(f"[SELL FAILED {label}] TX not confirmed — retrying immediately with fresh quote")
                         await asyncio.sleep(0.05)
                         continue
 
-                    # ── Success (confirmed retry) ────────────────────────────
+                    # ── Success: TX confirmed on-chain — close ONCE ──────────
                     elapsed = time.time() - sell_start
                     sol_received = int(quote.get("outAmount", 0)) / 1e9
 
-                    # Finalise the trade immediately — the swap is on-chain
-                    # confirmed. Post-confirm balance verification is run in
-                    # the background: if tokens remain, the watchdog will
-                    # schedule another sell pass. This shaves 4–10 s off
-                    # the sell_return leg when the read RPC is rate-limited.
                     self._token_balance = 0
                     self._cached_token_balance = 0
                     self._last_exit_signal_ts = 0.0  # clear watchdog on the happy path
@@ -1458,6 +1383,9 @@ class LiveTrader:
                     if self.current_trade:
                         closed_trade = self.confirm_sell(sig, sol_received, self._last_price)
 
+                    # Post-confirm balance verification in the background: if
+                    # tokens survived (partial fill / program error) the
+                    # watchdog schedules another sell pass.
                     asyncio.ensure_future(
                         self._verify_sell_settled(sig, closed_trade)
                     )
@@ -1779,6 +1707,21 @@ class LiveTrader:
             self._pending_exit_reason = reason
             self._pending_buy = False
 
+        # ── No-motion stop ───────────────────────────────────────────────
+        if self.no_motion_stop_seconds > 0:
+            if self._last_motion_price == 0.0 or c != self._last_motion_price:
+                self._last_motion_price = c
+                self._last_motion_ts = time.time()
+
+            # Only terminate the session when idle — never force-exit a
+            # live position.  main.py sees the flag and shuts down.
+            if (self.current_trade is None
+                    and not self._pending_buy
+                    and not self._pending_exit
+                    and not self._swap_in_flight
+                    and (time.time() - self._last_motion_ts) > self.no_motion_stop_seconds):
+                self.no_motion_stop_triggered = True
+
         return result
 
     # ── Strategy update loop ──────────────────────────────────────────────────
@@ -1875,7 +1818,7 @@ class LiveTrader:
             # engine.notify_trade_opened/closed() will be called at the START
             # of the NEXT candle's _process_completed_candle call.
 
-            if self._pending_buy and self.current_trade is None and not self._swap_in_flight and not self.mcap_stop_triggered:
+            if self._pending_buy and self.current_trade is None and not self._swap_in_flight and not self.mcap_stop_triggered and not self.no_motion_stop_triggered:
                 buy_reason = self._pending_buy_reason
                 trade = LiveTrade(
                     token_mint=self.token_mint,
@@ -1889,6 +1832,7 @@ class LiveTrader:
                 self.current_trade = trade
                 opened_trade = trade
                 trade_action = "buy"
+                self._last_motion_ts = time.time()  # reset no-motion clock at position open
                 # DO NOT call engine.notify_trade_opened() here.
                 # It will be called at sub-state 1 of the NEXT candle in
                 # _process_completed_candle — matching the backtester exactly.
@@ -1978,6 +1922,7 @@ class LiveTrader:
             status="pending",
         )
         self.current_trade = trade
+        self._last_motion_ts = time.time()  # reset no-motion clock at position open
         self.engine.notify_trade_opened(c, Direction.UP)
         sig = await self.execute_buy("manual_test_buy")
         if sig is None:

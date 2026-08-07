@@ -1102,6 +1102,17 @@ async def live_trading_ws(
                 await asyncio.sleep(5)  # grace period for emergency sell TX
                 cancelled.set()
                 break
+
+            # ── No-motion stop check ─────────────────────────────────────
+            # Only fires when idle (no position, no pending signals) —
+            # never interrupts an active position.
+            if live_trader.no_motion_stop_triggered:
+                logger.warning(
+                    f"[LIVE] No-motion stop triggered for {real_mint[:8]}… — "
+                    f"session idle, shutting down"
+                )
+                cancelled.set()
+                break
         return got_trade
 
     async def stream_live():
