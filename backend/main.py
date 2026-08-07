@@ -35,7 +35,7 @@ import data_store
 from backtester import run_backtest, run_backtest_batch
 from sniper.sniper_router import router as sniper_router, set_engine as set_sniper_engine
 from sniper.sniper_engine import SniperEngine, SniperConfig
-from holder_flow import HolderFlowMonitor
+from holder_flow import HolderFlowMonitor, get_shared_monitor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -174,7 +174,9 @@ async def recorder_start(body: dict = Body(...)):
         last_candle_time = None
 
         # ── Holder-flow monitor (records dev/insider wallet sells) ────────
-        holder_monitor = HolderFlowMonitor()
+        # Shared process-wide monitor — one GMGN poller regardless of how many
+        # recordings/sessions are active (iter36 rate-limit fix).
+        holder_monitor = get_shared_monitor()
         await holder_monitor.start()
         holder_monitor.watch_token(real_mint, recording_id=rec_id)
         # Consume events from the queue so it doesn't fill up
@@ -961,7 +963,9 @@ async def live_trading_ws(
     # feeds the events into the strategy engine so the iter36 entry gate /
     # exit trigger fire in real time.  Parity: the engine checks the same
     # event list the backtester would later replay from the DB.
-    holder_monitor = HolderFlowMonitor()
+    # Shared process-wide monitor — one GMGN poller regardless of how many
+    # sessions are active (iter36 rate-limit fix).
+    holder_monitor = get_shared_monitor()
     await holder_monitor.start()
     holder_monitor.watch_token(real_mint, recording_id=rec_id)
     # Track how many events we've already pushed into the engine (append-only)

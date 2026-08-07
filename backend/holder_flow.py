@@ -6,31 +6,44 @@ cross-references sellers against a per-token registry of dev/sniper/bundler
 wallets (fetched via `token holders --tag ...`).
 
 Emits HolderFlowEvent into an asyncio.Queue when a tracked wallet sells a
-watched token.  The sniper engine consumes these events as an entry gate
+watched token.  The strategy engine consumes these events as an entry gate
 (block entry on recent dev sell) and as an exit trigger (dev sell while in
 position).
 
 Also persists events to the recording DB so future backtests can replay them.
+
+Implementation notes (iter36 rate-limit fix):
+  * Uses a *shared* process-wide singleton (`get_shared_monitor()`) so that
+    N concurrent live sessions / recorders share ONE poller instead of each
+    hammering the GMGN API independently.
+  * Calls the GMGN OpenAPI REST endpoint directly over async HTTP
+    (`https://openapi.gmgn.ai`, exist-auth: X-APIKEY + timestamp + client_id)
+    instead of shelling out to the `npx gmgn-cli` subprocess on every poll —
+    subprocess startup was the main driver of the request rate.
+  * Rate-limit aware: on HTTP 429 the poller backs off until the
+    server-provided reset time, and registry refreshes are skipped while
+    banned.  Errors are logged once per ban window, not per poll.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Optional
+
+import aiohttp
 
 import data_store
 
 logger = logging.getLogger(__name__)
 
-# GMGN CLI command templates
-_GMGN_TRACK_CMD = "npx -y gmgn-cli@1.5.2 track smartmoney --chain sol --limit 200 --raw"
-_GMGN_HOLDERS_CMD = (
-    "npx -y gmgn-cli@1.5.2 token holders --chain sol --address {mint} "
-    "--tag {tag} --limit 20 --raw"
-)
+# GMGN OpenAPI host (exist-auth: X-APIKEY header + timestamp/client_id query)
+_GMGN_HOST = "https://openapi.gmgn.ai"
 
 # Wallet tags we care about (dev/insider cohorts)
 _TRACKED_TAGS = ("dev", "sniper", "bundler", "rat_trader")
@@ -43,6 +56,9 @@ _REGISTRY_REFRESH_INTERVAL = 60.0
 
 # Minimum sell amount (USD) to consider significant
 _MIN_SELL_USD = 100.0
+
+# Extra sleep multiplier while recovering from a 429 ban
+_BAN_BACKOFF_MULTIPLIER = 2.0
 
 
 @dataclass
@@ -72,6 +88,23 @@ class _TokenWatchState:
     recent_window: float = 60.0
 
 
+def _parse_reset_unix(message: str) -> Optional[float]:
+    """Extract the unix reset time from a GMGN rate-limit error message."""
+    # e.g. "Rate limit resets at 2026-08-08 00:00:49 GM" — GMGN gives UTC
+    m = re.search(r"resets at (\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2}):(\d{2})", message)
+    if not m:
+        return None
+    try:
+        import datetime
+        dt = datetime.datetime.strptime(
+            f"{m.group(1)} {m.group(2)}:{m.group(3)}:{m.group(4)}",
+            "%Y-%m-%d %H:%M:%S",
+        ).replace(tzinfo=datetime.timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return None
+
+
 class HolderFlowMonitor:
     """
     Monitors dev/insider wallet activity for a set of watched tokens.
@@ -90,33 +123,66 @@ class HolderFlowMonitor:
     def __init__(self):
         self._watched: dict[str, _TokenWatchState] = {}
         self._running = False
-        self._task: Optional[asyncio.Task] = None
         self._poll_task: Optional[asyncio.Task] = None
         self._event_queue: asyncio.Queue[HolderFlowEvent] = asyncio.Queue(maxsize=500)
         # Track last-seen tx_hash to avoid duplicates from polling
         self._seen_tx: set[str] = set()
         self._seen_tx_max = 10_000  # LRU cap
+        # Registry refresh queue (mints needing a wallet-registry fetch)
+        self._registry_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._registry_task: Optional[asyncio.Task] = None
+        # HTTP session + auth
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._api_key: str = os.environ.get("GMGN_API_KEY", "")
+        # Rate-limit state
+        self._banned_until: float = 0.0
+        self._ban_logged: bool = False
+        # Refcount of active users (live sessions + recorders)
+        self._refcount: int = 0
 
     # ── Public API ────────────────────────────────────────────────────────
 
     async def start(self):
-        """Start the background polling loop."""
+        """Start the background polling loop (idempotent, refcounted)."""
+        self._refcount += 1
         if self._running:
             return
+        if not self._api_key:
+            logger.warning("[HolderFlow] GMGN_API_KEY not set — monitor disabled")
+            self._refcount -= 1
+            return
         self._running = True
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=12.0),
+            headers={"User-Agent": "pump-chart/holder-flow"},
+        )
         self._poll_task = asyncio.create_task(self._poll_loop())
+        self._registry_task = asyncio.create_task(self._registry_loop())
         logger.info("[HolderFlow] Monitor started")
 
     async def stop(self):
-        """Stop the background polling loop."""
+        """Stop the background polling loop when the last user disconnects."""
+        self._refcount = max(0, self._refcount - 1)
+        if self._refcount > 0 or not self._running:
+            return
         self._running = False
-        if self._poll_task:
-            self._poll_task.cancel()
-            try:
-                await self._poll_task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._poll_task, self._registry_task):
+            if task:
+                task.cancel()
+        for task in (self._poll_task, self._registry_task):
+            if task:
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
         self._poll_task = None
+        self._registry_task = None
+        if self._session:
+            try:
+                await self._session.close()
+            except Exception:
+                pass
+            self._session = None
         logger.info("[HolderFlow] Monitor stopped")
 
     def watch_token(self, mint: str, recording_id: Optional[int] = None):
@@ -128,12 +194,10 @@ class HolderFlowMonitor:
             return
         self._watched[mint] = _TokenWatchState(mint=mint, recording_id=recording_id)
         logger.info(f"[HolderFlow] Watching {mint[:8]} (recording_id={recording_id})")
-        # Fetch wallet registry in background (only if we're in an async context)
+        # Queue a wallet-registry fetch (processed serially by the registry loop)
         try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._refresh_wallet_registry(mint))
-        except RuntimeError:
-            # No running event loop — registry will be fetched on first poll
+            self._registry_queue.put_nowait(mint)
+        except asyncio.QueueFull:
             pass
 
     def unwatch_token(self, mint: str):
@@ -193,29 +257,77 @@ class HolderFlowMonitor:
         """Queue of all detected events (for consumers that want to process every event)."""
         return self._event_queue
 
-    # ── Internal: polling loop ────────────────────────────────────────────
+    # ── Internal: HTTP plumbing ───────────────────────────────────────────
+
+    def _auth_query(self, extra: dict) -> dict:
+        """Exist-auth query params: timestamp + client_id (no signature needed)."""
+        return {**extra, "timestamp": int(time.time()), "client_id": str(uuid.uuid4())}
+
+    async def _get(self, path: str, extra: dict) -> Optional[dict]:
+        """Authenticated GET against the GMGN OpenAPI.  Returns parsed JSON or None."""
+        if not self._session:
+            return None
+        params = self._auth_query(extra)
+        headers = {"X-APIKEY": self._api_key, "Content-Type": "application/json"}
+        try:
+            async with self._session.get(
+                f"{_GMGN_HOST}{path}", params=params, headers=headers
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json(content_type=None)
+                text = await resp.text()
+                if resp.status == 429:
+                    reset = _parse_reset_unix(text)
+                    self._note_ban(reset)
+                else:
+                    logger.debug(f"[HolderFlow] GMGN {path} HTTP {resp.status}: {text[:200]}")
+                return None
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.debug(f"[HolderFlow] GMGN {path} error: {e}")
+            return None
+
+    def _note_ban(self, reset_unix: Optional[float]):
+        """Record a rate-limit ban and log it once per window."""
+        now = time.time()
+        if reset_unix and reset_unix > now:
+            self._banned_until = max(self._banned_until, reset_unix)
+        else:
+            self._banned_until = max(self._banned_until, now + 10.0)
+        if not self._ban_logged:
+            wait = max(0.0, self._banned_until - now)
+            logger.warning(
+                f"[HolderFlow] GMGN rate-limited — backing off {wait:.0f}s "
+                f"(further ban logs suppressed until reset)"
+            )
+            self._ban_logged = True
+
+    def _ban_active(self) -> bool:
+        return time.time() < self._banned_until
+
+    # ── Internal: polling loops ───────────────────────────────────────────
 
     async def _poll_loop(self):
         """Main polling loop: fetch smartmoney trades and match against watched tokens."""
         while self._running:
             try:
+                if self._ban_active():
+                    self._ban_logged = self._ban_logged and (time.time() < self._banned_until)
+                    await asyncio.sleep(1.0)
+                    continue
+                self._ban_logged = False
                 await self._poll_once()
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning(f"[HolderFlow] Poll error: {e}")
+                logger.debug(f"[HolderFlow] Poll error: {e}")
             await asyncio.sleep(_POLL_INTERVAL)
 
     async def _poll_once(self):
         """Single poll of the smartmoney feed."""
         if not self._watched:
             return
-
-        # Refresh stale wallet registries
-        now = time.time()
-        for mint, state in self._watched.items():
-            if now - state.last_registry_refresh > _REGISTRY_REFRESH_INTERVAL:
-                await self._refresh_wallet_registry(mint)
 
         # Fetch smartmoney trades
         trades = await self._fetch_smartmoney_trades()
@@ -230,18 +342,19 @@ class HolderFlowMonitor:
                 continue
 
             tx_hash = trade.get("transaction_hash", "")
-            if tx_hash in self._seen_tx:
+            if tx_hash and tx_hash in self._seen_tx:
                 continue
-            self._seen_tx.add(tx_hash)
+            if tx_hash:
+                self._seen_tx.add(tx_hash)
             # LRU eviction
             if len(self._seen_tx) > self._seen_tx_max:
                 self._seen_tx = set(list(self._seen_tx)[-self._seen_tx_max // 2:])
 
             maker = trade.get("maker", "")
             side = trade.get("side", "")
-            amount_usd = trade.get("amount_usd", 0.0)
-            amount_sol = trade.get("quote_amount", 0.0)
-            timestamp = trade.get("timestamp", int(time.time()))
+            amount_usd = float(trade.get("amount_usd", 0.0) or 0.0)
+            amount_sol = float(trade.get("quote_amount", 0.0) or 0.0)
+            timestamp = int(trade.get("timestamp", int(time.time())))
 
             # Check if maker is a tracked wallet for this token
             state = self._watched[base_addr]
@@ -249,7 +362,7 @@ class HolderFlowMonitor:
 
             # If not in registry, check maker_info tags from the feed
             if not tag:
-                maker_tags = trade.get("maker_info", {}).get("tags", [])
+                maker_tags = trade.get("maker_info", {}).get("tags", []) or []
                 for t in _TRACKED_TAGS:
                     if t in maker_tags:
                         tag = t
@@ -290,13 +403,13 @@ class HolderFlowMonitor:
                         tx_hash=tx_hash,
                     )
                 except Exception as e:
-                    logger.warning(f"[HolderFlow] DB insert failed: {e}")
+                    logger.debug(f"[HolderFlow] DB insert failed: {e}")
 
             # Emit to queue
             try:
                 self._event_queue.put_nowait(event)
             except asyncio.QueueFull:
-                logger.warning("[HolderFlow] Event queue full, dropping event")
+                pass
 
             if side == "sell" and amount_usd >= _MIN_SELL_USD:
                 logger.info(
@@ -306,55 +419,81 @@ class HolderFlowMonitor:
                 )
 
     async def _fetch_smartmoney_trades(self) -> list[dict]:
-        """Fetch the latest smartmoney trades from GMGN."""
-        try:
-            proc = await asyncio.create_subprocess_shell(
-                _GMGN_TRACK_CMD,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15.0)
-            if proc.returncode != 0:
-                logger.warning(f"[HolderFlow] GMGN CLI error: {stderr.decode()[:200]}")
-                return []
-            import json
-            data = json.loads(stdout.decode())
-            return data.get("list", [])
-        except asyncio.TimeoutError:
-            logger.warning("[HolderFlow] GMGN CLI timeout")
+        """Fetch the latest smartmoney trades from GMGN (exist auth, no signature)."""
+        data = await self._get("/v1/user/smartmoney", {"chain": "sol", "limit": 200})
+        if not data or not isinstance(data, dict):
             return []
-        except Exception as e:
-            logger.warning(f"[HolderFlow] GMGN CLI error: {e}")
-            return []
+        # Response shape: {"code":0, "data":{"list":[...]}, "message":...}
+        payload = data.get("data", data)
+        if isinstance(payload, dict):
+            return payload.get("list", []) or []
+        return []
+
+    async def _registry_loop(self):
+        """Serially fetch per-token wallet registries (rate-limit friendly)."""
+        while self._running:
+            try:
+                mint = await asyncio.wait_for(self._registry_queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                # Periodic re-refresh of stale registries
+                now = time.time()
+                if not self._ban_active():
+                    for m, state in list(self._watched.items()):
+                        if now - state.last_registry_refresh > _REGISTRY_REFRESH_INTERVAL:
+                            await self._refresh_wallet_registry(m)
+                continue
+            except asyncio.CancelledError:
+                break
+            if self._ban_active():
+                # Re-queue after the ban lifts
+                await asyncio.sleep(2.0)
+                try:
+                    self._registry_queue.put_nowait(mint)
+                except asyncio.QueueFull:
+                    pass
+                continue
+            await self._refresh_wallet_registry(mint)
+            # Pace registry fetches — 4 tag requests per token
+            await asyncio.sleep(1.0)
 
     async def _refresh_wallet_registry(self, mint: str):
         """Fetch the dev/sniper/bundler wallet list for a token."""
         state = self._watched.get(mint)
         if not state:
             return
-
         for tag in _TRACKED_TAGS:
-            try:
-                cmd = _GMGN_HOLDERS_CMD.format(mint=mint, tag=tag)
-                proc = await asyncio.create_subprocess_shell(
-                    cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15.0)
-                if proc.returncode != 0:
-                    continue
-                import json
-                data = json.loads(stdout.decode())
-                for holder in data.get("list", []):
-                    wallet = holder.get("address", "")
-                    if wallet:
-                        state.wallet_registry[wallet] = tag
-            except Exception as e:
-                logger.debug(f"[HolderFlow] Registry refresh failed for {mint[:8]} tag={tag}: {e}")
-
+            if self._ban_active():
+                return
+            data = await self._get(
+                "/v1/market/token_top_holders",
+                {"chain": "sol", "address": mint, "tag": tag, "limit": 20},
+            )
+            if not data or not isinstance(data, dict):
+                continue
+            # Response shape: {"code":0, "data":{"list":[...]}, ...}
+            payload = data.get("data", data)
+            holders = payload.get("list", []) if isinstance(payload, dict) else []
+            for holder in holders:
+                wallet = holder.get("address", "")
+                if wallet:
+                    state.wallet_registry[wallet] = tag
+            await asyncio.sleep(0.3)  # gentle pacing between tag fetches
         state.last_registry_refresh = time.time()
         logger.debug(
             f"[HolderFlow] Registry refreshed for {mint[:8]}: "
             f"{len(state.wallet_registry)} wallets"
         )
+
+
+# ── Process-wide shared singleton ─────────────────────────────────────────
+# All live sessions and recorders share ONE monitor so the GMGN API is polled
+# once per interval regardless of how many tokens are being watched.
+_shared_monitor: Optional[HolderFlowMonitor] = None
+
+
+def get_shared_monitor() -> HolderFlowMonitor:
+    """Return the process-wide shared HolderFlowMonitor (created on first use)."""
+    global _shared_monitor
+    if _shared_monitor is None:
+        _shared_monitor = HolderFlowMonitor()
+    return _shared_monitor
