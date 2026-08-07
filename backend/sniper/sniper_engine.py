@@ -24,6 +24,7 @@ from sniper.exit_signal import ExitEvaluator, ExitSignal, OpenPosition
 from sniper.fee_filter import passes_fee_filter
 from sniper.forward_tester import SniperForwardTester
 from pumpfun_client import NewPairsStream, PumpFunWSClient
+from holder_flow import HolderFlowMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ class SniperEngine:
     def __init__(self, config: Optional[SniperConfig] = None):
         self.config = config or SniperConfig()
         self.forward_tester = SniperForwardTester()
+        self.holder_flow = HolderFlowMonitor()
 
         # Per-token state
         self.detectors: dict[str, LaunchDetector] = {}
@@ -97,6 +99,9 @@ class SniperEngine:
         self._running = True
         logger.info(f"[Sniper] Starting in {self.config.mode} mode")
 
+        # Start holder-flow monitor
+        await self.holder_flow.start()
+
         # Start new pairs stream
         self._new_pairs_stream = NewPairsStream()
         self._tasks.append(
@@ -114,6 +119,7 @@ class SniperEngine:
     async def stop(self):
         """Stop the sniper engine."""
         self._running = False
+        await self.holder_flow.stop()
         if self._new_pairs_stream:
             self._new_pairs_stream.stop()
         for client in self._trade_clients.values():
@@ -335,6 +341,7 @@ class SniperEngine:
                         self._cleanup_token(mint)
                         return
                 self.watching.add(mint)
+                self.holder_flow.watch_token(mint)
                 await self._broadcast({
                     "type": "token_watching",
                     "mint": mint,
@@ -355,6 +362,7 @@ class SniperEngine:
         if mint not in self.watching:
             if detector.dip_depth >= 0.35:
                 self.watching.add(mint)
+                self.holder_flow.watch_token(mint)
                 await self._broadcast({
                     "type": "token_watching",
                     "mint": mint,
@@ -399,6 +407,18 @@ class SniperEngine:
 
         # Re-fetch se in case it was cleaned up between gate checks
         se = self.strategy_engines.get(mint)
+
+        # ── Holder-flow entry gate: block entry on recent dev/insider sell ──
+        if self.holder_flow.has_recent_dev_sell(mint, window_seconds=30, min_usd=100.0):
+            logger.info(
+                f"[Sniper] {mint[:8]} entry BLOCKED — recent dev/insider sell detected"
+            )
+            await self._broadcast({
+                "type": "entry_blocked_dev_sell",
+                "mint": mint,
+                "reason": "recent_dev_sell",
+            })
+            return
 
         entry = evaluate_entry(
             mint=mint,
@@ -479,6 +499,25 @@ class SniperEngine:
 
         current_price = trade.get("price", 0)
         current_mc = trade.get("market_cap_sol", 0)
+
+        # ── Holder-flow exit trigger: dev/insider sell while in position ──
+        if self.holder_flow.has_recent_dev_sell(mint, window_seconds=15, min_usd=100.0):
+            sell_event = self.holder_flow.get_recent_sell(mint, window_seconds=15)
+            exit_signal = ExitSignal(
+                triggered=True,
+                trigger_name="dev_sell_exit",
+                timestamp=time.time(),
+                current_mc=current_mc,
+                exit_price_sol=current_price,
+                urgency="immediate",
+            )
+            logger.info(
+                f"[Sniper] DEV SELL EXIT {mint[:8]} "
+                f"wallet={sell_event.wallet[:8] if sell_event else '?'} "
+                f"amount=${sell_event.amount_usd:.2f if sell_event else 0}"
+            )
+            await self._execute_exit(mint, exit_signal)
+            return
 
         exit_signal = evaluator.evaluate_exit(
             position=position,
@@ -582,6 +621,7 @@ class SniperEngine:
         self.aggregators.pop(mint, None)
         self.strategy_engines.pop(mint, None)
         self._last_se_candle_time.pop(mint, None)
+        self.holder_flow.unwatch_token(mint)
         client = self._trade_clients.pop(mint, None)
         if client:
             client.stop()

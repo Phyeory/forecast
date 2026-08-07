@@ -35,6 +35,7 @@ import data_store
 from backtester import run_backtest, run_backtest_batch
 from sniper.sniper_router import router as sniper_router, set_engine as set_sniper_engine
 from sniper.sniper_engine import SniperEngine, SniperConfig
+from holder_flow import HolderFlowMonitor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -172,6 +173,29 @@ async def recorder_start(body: dict = Body(...)):
         aggregator = CandleAggregator(timeframe)
         last_candle_time = None
 
+        # ── Holder-flow monitor (records dev/insider wallet sells) ────────
+        holder_monitor = HolderFlowMonitor()
+        await holder_monitor.start()
+        holder_monitor.watch_token(real_mint, recording_id=rec_id)
+        # Consume events from the queue so it doesn't fill up
+        async def _consume_holder_events():
+            while not cancelled.is_set():
+                try:
+                    event = await asyncio.wait_for(
+                        holder_monitor.event_queue.get(), timeout=1.0
+                    )
+                    # Event is already persisted to DB by the monitor itself
+                    logger.debug(
+                        f"[Recorder] Holder-flow event: {event.mint[:8]} "
+                        f"{event.side} ${event.amount_usd:.2f} "
+                        f"tag={event.tag or 'unknown'}"
+                    )
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    break
+        holder_consumer_task = asyncio.create_task(_consume_holder_events())
+
         # Seed with historical candles (also throttled)
         try:
             async with _resolve_sem:
@@ -222,6 +246,9 @@ async def recorder_start(body: dict = Body(...)):
                 last_candle_time = ct
         finally:
             ws_client.stop()
+            holder_monitor.unwatch_token(real_mint)
+            await holder_monitor.stop()
+            holder_consumer_task.cancel()
             data_store.stop_recording(rec_id)
             logger.info(f"[Recorder] Stopped recording {rec_id}")
 

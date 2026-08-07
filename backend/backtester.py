@@ -47,6 +47,7 @@ from forward_tester import ForwardTester
 from data_store import (
     get_recording,
     get_recording_candles,
+    get_holder_flow,
     create_backtest,
     list_recordings,
 )
@@ -183,6 +184,9 @@ def run_backtest(
     if not candles:
         raise ValueError(f"Recording {recording_id} has no candles")
 
+    # Load holder-flow events for this recording (dev/insider wallet trades)
+    holder_flow_events = get_holder_flow(recording_id)
+
     if engine_params is None:
         engine_params = {}
 
@@ -197,6 +201,7 @@ def run_backtest(
         slippage_pct=slippage_pct,
         engine_kwargs=engine_params,
         engine_version=engine_version,
+        holder_flow_events=holder_flow_events,
     )
 
     # One chart result per stored candle

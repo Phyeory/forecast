@@ -60,6 +60,22 @@ def init_price_db():
         );
 
         CREATE INDEX IF NOT EXISTS idx_candles_rec_time ON candles(recording_id, time);
+
+        CREATE TABLE IF NOT EXISTS holder_flow (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            recording_id INTEGER NOT NULL,
+            time         INTEGER NOT NULL,
+            wallet       TEXT NOT NULL,
+            tag          TEXT DEFAULT '',
+            side         TEXT NOT NULL,
+            amount_usd   REAL DEFAULT 0,
+            amount_sol   REAL DEFAULT 0,
+            tx_hash      TEXT DEFAULT '',
+            FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_holder_flow_rec_time ON holder_flow(recording_id, time);
+        CREATE INDEX IF NOT EXISTS idx_holder_flow_wallet ON holder_flow(wallet);
     """)
     # Migrate existing databases that were created before buy/sell volume columns
     for col in ("buy_volume", "sell_volume", "pool_sol"):
@@ -67,6 +83,23 @@ def init_price_db():
             conn.execute(f"ALTER TABLE candles ADD COLUMN {col} REAL DEFAULT 0")
         except Exception:
             pass  # column already exists
+    # Migrate existing databases that were created before the holder_flow table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS holder_flow (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            recording_id INTEGER NOT NULL,
+            time         INTEGER NOT NULL,
+            wallet       TEXT NOT NULL,
+            tag          TEXT DEFAULT '',
+            side         TEXT NOT NULL,
+            amount_usd   REAL DEFAULT 0,
+            amount_sol   REAL DEFAULT 0,
+            tx_hash      TEXT DEFAULT '',
+            FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_holder_flow_rec_time ON holder_flow(recording_id, time)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_holder_flow_wallet ON holder_flow(wallet)")
     conn.commit()
     conn.close()
 
@@ -142,6 +175,49 @@ def insert_candles_batch(recording_id: int, candles: list[dict]):
     )
     conn.commit()
     conn.close()
+
+
+def insert_holder_flow(
+    recording_id: int,
+    t: int,
+    wallet: str,
+    tag: str = "",
+    side: str = "sell",
+    amount_usd: float = 0.0,
+    amount_sol: float = 0.0,
+    tx_hash: str = "",
+):
+    """Insert a single holder-flow event (dev/insider wallet trade)."""
+    conn = _get_price_conn()
+    conn.execute(
+        "INSERT INTO holder_flow (recording_id, time, wallet, tag, side, amount_usd, amount_sol, tx_hash)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (recording_id, t, wallet, tag, side, amount_usd, amount_sol, tx_hash),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_holder_flow(recording_id: int, start_time: Optional[int] = None, end_time: Optional[int] = None) -> list[dict]:
+    """Fetch holder-flow events for a recording, optionally filtered by time range."""
+    conn = _get_price_conn()
+    query = "SELECT * FROM holder_flow WHERE recording_id = ?"
+    params: list = [recording_id]
+    if start_time is not None:
+        query += " AND time >= ?"
+        params.append(start_time)
+    if end_time is not None:
+        query += " AND time <= ?"
+        params.append(end_time)
+    query += " ORDER BY time ASC"
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_holder_flow_for_window(recording_id: int, center_time: int, window_seconds: int) -> list[dict]:
+    """Fetch holder-flow events within ±window_seconds of a center time."""
+    return get_holder_flow(recording_id, center_time - window_seconds, center_time + window_seconds)
 
 
 def list_recordings() -> list[dict]:

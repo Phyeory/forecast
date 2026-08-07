@@ -143,6 +143,7 @@ class ForwardTester:
         slippage_pct: float = 10.0,
         engine_kwargs: Optional[dict] = None,
         engine_version: int = 1,
+        holder_flow_events: Optional[list[dict]] = None,
     ):
         if engine_kwargs is None:
             engine_kwargs = {}
@@ -153,6 +154,17 @@ class ForwardTester:
         self.priority_fee = 0.0001   # fixed: 0.0001 SOL per transaction
         self.bribe_fee = 0.0          # fixed: no bribe fee
         self.slippage_pct = slippage_pct
+
+        # Holder-flow events for this recording (dev/insider wallet trades)
+        # Used as an entry gate and exit trigger during backtests.
+        self._holder_flow_events: list[dict] = holder_flow_events or []
+        # Index for O(1) lookup of events near a given timestamp
+        self._holder_flow_index: dict[int, list[dict]] = {}
+        for event in self._holder_flow_events:
+            t = event.get("time", 0)
+            if t not in self._holder_flow_index:
+                self._holder_flow_index[t] = []
+            self._holder_flow_index[t].append(event)
 
         self.stats = ForwardTestStats(
             starting_balance=starting_balance,
@@ -200,6 +212,30 @@ class ForwardTester:
         """
         slip = self.slippage_pct / 100.0
         return raw_price * size_tokens * slip
+
+    # ── Holder-flow helpers ───────────────────────────────────────────────
+
+    def _has_recent_dev_sell(self, time: int, window_seconds: int = 30, min_usd: float = 100.0) -> bool:
+        """Check if a significant dev/insider sell occurred within the window before the given time."""
+        if not self._holder_flow_index:
+            return False
+        cutoff = time - window_seconds
+        for t in range(cutoff, time + 1):
+            for event in self._holder_flow_index.get(t, []):
+                if event.get("side") == "sell" and event.get("amount_usd", 0) >= min_usd:
+                    return True
+        return False
+
+    def _get_recent_dev_sell(self, time: int, window_seconds: int = 30) -> Optional[dict]:
+        """Get the most recent dev/insider sell event within the window before the given time."""
+        if not self._holder_flow_index:
+            return None
+        cutoff = time - window_seconds
+        for t in range(time, cutoff - 1, -1):
+            for event in self._holder_flow_index.get(t, []):
+                if event.get("side") == "sell":
+                    return event
+        return None
 
     # ── Timed-delay fill parameters ────────────────────────────────────────
     _REFERENCE_FEE: float = 0.0001   # SOL — fixed per-transaction fee
@@ -686,11 +722,24 @@ class ForwardTester:
         # reflect the signal candle's engine state.  They are stashed and
         # assigned to the trade when it fills on candle N+1.
         if signal == Signal.BUY.value and self.current_trade is None and not self._pending_buy:
-            self._pending_buy = True
-            self._pending_buy_reason = f"buy_{regime}"
-            self._pending_exit = False
-            # Snapshot engine state on the signal candle (close price as ref)
-            self._stashed_entry_params = self._capture_entry_params(c)
+            # ── Holder-flow entry gate: block entry on recent dev/insider sell ──
+            if self._has_recent_dev_sell(time, window_seconds=30, min_usd=100.0):
+                sell_event = self._get_recent_dev_sell(time, window_seconds=30)
+                # Log but don't queue the buy
+                self.signals_log.append({
+                    "time": time,
+                    "signal": "buy_blocked_dev_sell",
+                    "regime": regime,
+                    "price": c,
+                    "wallet": sell_event.get("wallet", "") if sell_event else "",
+                    "amount_usd": sell_event.get("amount_usd", 0) if sell_event else 0,
+                })
+            else:
+                self._pending_buy = True
+                self._pending_buy_reason = f"buy_{regime}"
+                self._pending_exit = False
+                # Snapshot engine state on the signal candle (close price as ref)
+                self._stashed_entry_params = self._capture_entry_params(c)
 
         elif signal == Signal.EXIT.value and self.current_trade is not None:
             reason = result.get("exit_reason")
@@ -710,6 +759,24 @@ class ForwardTester:
             self._pending_buy = False
             # Snapshot engine state on the signal candle (close price as ref)
             self._stashed_exit_params = self._capture_exit_params(c)
+
+        # ── Holder-flow exit trigger: dev/insider sell while in position ──
+        # This fires independently of the engine's exit signal — a dev sell
+        # is an immediate exit trigger even if the engine hasn't signalled yet.
+        if self.current_trade is not None and not self._pending_exit:
+            if self._has_recent_dev_sell(time, window_seconds=15, min_usd=100.0):
+                sell_event = self._get_recent_dev_sell(time, window_seconds=15)
+                self._pending_exit = True
+                self._pending_exit_reason = "dev_sell_exit"
+                self._stashed_exit_params = self._capture_exit_params(c)
+                self.signals_log.append({
+                    "time": time,
+                    "signal": "dev_sell_exit",
+                    "regime": regime,
+                    "price": c,
+                    "wallet": sell_event.get("wallet", "") if sell_event else "",
+                    "amount_usd": sell_event.get("amount_usd", 0) if sell_event else 0,
+                })
 
         # ── Fast path: skip expensive output construction ─────────────────
         if not _build_full_result:
