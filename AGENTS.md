@@ -104,11 +104,12 @@ A dedicated automated sniping pipeline mounted via `/api/sniper/*`. Executes a 5
 A `HolderFlowMonitor` that polls GMGN's `track smartmoney` endpoint for real-time dev/insider wallet trades and cross-references sellers against per-token dev/sniper/bundler wallet registries (fetched via `token holders --tag ...`).
 
 - **Data capture**: Events are persisted to a `holder_flow` table in `price_data.db` so future recordings are backtestable.
-- **Entry gate** (`strategy_engineV2.py`): Blocks entry if a dev/insider sell occurred in the last 30 seconds.
-- **Exit trigger** (`strategy_engineV2.py` + `forward_tester.py`): Fires an immediate exit if a dev/insider sell occurs while in position.
+- **Entry gate** (`strategy_engineV2.py`): Blocks entry if a dev/insider sell occurred in the last 30 seconds. **Default ON** (`v2_holder_flow_entry_block=1.0`).
+- **Exit trigger** (`strategy_engineV2.py` + `forward_tester.py`): Fires an immediate exit if a dev/insider sell occurs while in position. **Default ON** (`v2_holder_flow_exit_enable=1.0`).
 - **Backtest support** (`backtester.py`): Loads `holder_flow` events from the DB and passes them to `ForwardTester` for replay.
+- **Live support** (`main.py`): Each live session runs a `HolderFlowMonitor` that pushes events into the engine in real time and persists them to the auto-recording.
 
-The mechanism is default-OFF when no `holder_flow` data exists (parity verified on existing recordings).
+The mechanism is parity-safe when no `holder_flow` data exists (the gates never fire on an empty table, so legacy recordings are byte-identical).
 
 ### 6. Quantitative Benchmarking & Analysis (`backend/analysis/`)
 - **`run_iteration.py`**: Batch entry point that executes backtests across recordings, gathers results, and saves aggregate metrics.

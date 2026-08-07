@@ -4360,8 +4360,8 @@ non-separating under proper multiple-comparison + split-half gates.
 time-resolved holder-flow detection — knowing *when* specific wallets
 (especially dev/insider cohorts) sell *at the moment of entry* or *while in
 position*.  This cannot be retro-validated on the existing dataset (per-wallet
-trade history was never recorded), so the mechanism is implemented as a
-default-OFF feature that will be validated on future recordings.
+trade history was never recorded), so the mechanism is implemented and enabled
+in production, and will be validated on future recordings.
 
 **Architecture (V2 engine path, not sniper).**
 
@@ -4372,14 +4372,14 @@ default-OFF feature that will be validated on future recordings.
    are persisted to a new `holder_flow` table in `price_data.db` so future
    recordings are backtestable.
 
-2. **Entry gate** (`strategy_engineV2.py`): New default-OFF knob
-   `v2_holder_flow_entry_block` (default 0.0 = OFF).  When > 0, blocks BUY
+2. **Entry gate** (`strategy_engineV2.py`): knob
+   `v2_holder_flow_entry_block` (**default 1.0 = ON**).  When > 0, blocks BUY
    entries if a dev/insider sell (amount_usd ≥ `v2_holder_flow_min_usd`,
    default 100.0) occurred within `v2_holder_flow_entry_window_seconds`
    (default 30) before the signal bar.
 
-3. **Exit trigger** (`strategy_engineV2.py`): New default-OFF knob
-   `v2_holder_flow_exit_enable` (default 0.0 = OFF).  When > 0, fires an
+3. **Exit trigger** (`strategy_engineV2.py`): knob
+   `v2_holder_flow_exit_enable` (**default 1.0 = ON**).  When > 0, fires an
    immediate `dev_sell_exit` if a dev/insider sell occurs while in position
    (checked on every bar close within `v2_holder_flow_exit_window_seconds`,
    default 15).
@@ -4390,21 +4390,30 @@ default-OFF feature that will be validated on future recordings.
    them into the V2 adapter.  The engine checks the events during
    `update()` and `_check_exit_v2()`.
 
-**Parity verification.**  Default-OFF knobs verified on rec224 (1 trade,
--0.0632 SOL) and rec1019 (4 trades, 75% WR, 8.1e-5 SOL) — identical results
-with/without holder-flow data.  Mechanism verified with synthetic events:
-entry gate blocks within 30s window of dev sell; exit trigger fires
-`dev_sell_exit` within 15s window (verified: t=1785212348 and t=1785212355
-fired `Signal.EXIT` with `reason=dev_sell_exit:test_dev`).
+5. **Live support** (`main.py`): each live session runs its own
+   `HolderFlowMonitor` bound to the auto-recording's `rec_id`; new events
+   are pushed into the engine incrementally via
+   `engine.append_holder_flow_events()` on every candle and persisted to
+   the DB, so live sessions are themselves backtestable.
+
+**Parity verification.**  With knobs ON at defaults but an empty
+`holder_flow` table, rec224 (1 trade, -0.063173 SOL) and rec1019 (4 trades,
+75% WR, 8.12e-5 SOL) are byte-identical to the iter31 baseline — the gates
+never fire without events.  Mechanism verified with synthetic events:
+entry gate ON: dev sell 2s pre-entry → 0 trades (loss avoided); exit
+trigger ON: dev sell 5s post-entry → loss cut -0.0632 → -0.0214.
 
 **GMGN API limitation.**  The GMGN API is Cloudflare-protected in this
 environment; the monitor will work in production where the API is accessible.
 The mechanism is default-OFF when no `holder_flow` data exists.
 
-**Production change: NONE** (all knobs default-OFF).  Engine byte-identical
-to the iter31/32/33 production state when knobs are at defaults.  The
-mechanism will be validated on future recordings that have holder-flow data
-captured.
+**Production change: holder-flow entry gate + exit trigger are ON by
+default.**  The mechanism is inert on recordings without `holder_flow`
+data (empty table ⇒ gates never fire ⇒ byte-identical results), so the
+existing iter31/32/33 baseline behaviour is preserved on the legacy
+dataset; the gate becomes active on new recordings as soon as the GMGN
+feed provides data.  Effectiveness will be evaluated by paired-diff on
+the fresh holder-flow-carrying cohort once enough recordings accumulate.
 
 **Deliverables:**
   * `backend/holder_flow.py` — `HolderFlowMonitor` class (wallet registry, polling loop, event queue)
