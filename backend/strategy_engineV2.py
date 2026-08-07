@@ -2726,16 +2726,20 @@ class StrategyEngineV2Adapter:
         self._n_grid = int(self.cfg["n_grid"])
 
         # ── Holder-flow knobs (iter36: dev/insider sell detection) ────────
-        # `v2_holder_flow_entry_block` (default 0.0 = OFF): when > 0, block
+        # `v2_holder_flow_entry_block` (default 1.0 = ON): when > 0, block
         #   BUY entries if a dev/insider sell (amount_usd ≥ threshold) occurred
         #   within `v2_holder_flow_entry_window_seconds` before the signal bar.
-        # `v2_holder_flow_exit_enable` (default 0.0 = OFF): when > 0, fire an
+        # `v2_holder_flow_exit_enable` (default 1.0 = ON): when > 0, fire an
         #   immediate `dev_sell_exit` if a dev/insider sell occurs while in
         #   position (checked on every bar close).
         # `v2_holder_flow_min_usd` (default 100.0): minimum sell amount (USD)
         #   to consider significant — filters dust.
-        self._v2_holder_flow_entry_block = float(engine_kwargs.pop("v2_holder_flow_entry_block", 0.0))
-        self._v2_holder_flow_exit_enable = float(engine_kwargs.pop("v2_holder_flow_exit_enable", 0.0))
+        # NOTE: when no holder_flow events are loaded (legacy recordings or the
+        # GMGN feed unreachable), `_has_recent_dev_sell` always returns False,
+        # so these defaults are parity-safe: behaviour is byte-identical to the
+        # pre-iter36 engine on any recording with an empty holder_flow table.
+        self._v2_holder_flow_entry_block = float(engine_kwargs.pop("v2_holder_flow_entry_block", 1.0))
+        self._v2_holder_flow_exit_enable = float(engine_kwargs.pop("v2_holder_flow_exit_enable", 1.0))
         self._v2_holder_flow_min_usd     = float(engine_kwargs.pop("v2_holder_flow_min_usd", 100.0))
         self._v2_holder_flow_entry_window_seconds = int(engine_kwargs.pop("v2_holder_flow_entry_window_seconds", 30))
         self._v2_holder_flow_exit_window_seconds  = int(engine_kwargs.pop("v2_holder_flow_exit_window_seconds", 15))
@@ -2752,6 +2756,15 @@ class StrategyEngineV2Adapter:
         self._holder_flow_events = events
         self._holder_flow_index = {}
         for event in events:
+            t = int(event.get("time", 0))
+            if t not in self._holder_flow_index:
+                self._holder_flow_index[t] = []
+            self._holder_flow_index[t].append(event)
+
+    def append_holder_flow_events(self, events: list[dict]):
+        """Incrementally append new events (live path) without rebuilding index."""
+        for event in events:
+            self._holder_flow_events.append(event)
             t = int(event.get("time", 0))
             if t not in self._holder_flow_index:
                 self._holder_flow_index[t] = []

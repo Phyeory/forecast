@@ -955,6 +955,18 @@ async def live_trading_ws(
     )
     logger.info(f"[LIVE] Auto-recording candles → recording {rec_id}")
 
+    # ── Holder-flow monitor (live dev/insider sell detection) ────────────
+    # Watches the token and persists events to the auto-recording's
+    # holder_flow table (so the live session is itself backtestable), and
+    # feeds the events into the strategy engine so the iter36 entry gate /
+    # exit trigger fire in real time.  Parity: the engine checks the same
+    # event list the backtester would later replay from the DB.
+    holder_monitor = HolderFlowMonitor()
+    await holder_monitor.start()
+    holder_monitor.watch_token(real_mint, recording_id=rec_id)
+    # Track how many events we've already pushed into the engine (append-only)
+    _hf_pushed = {"n": 0}
+
     async def send(obj: dict) -> bool:
         try:
             await websocket.send_json(obj)
@@ -1032,6 +1044,19 @@ async def live_trading_ws(
             if last_sent_price is not None and current_price == last_sent_price and not is_new:
                 continue
             last_sent_price = current_price
+
+            # ── Push any new holder-flow events into the engine (iter36) ──
+            # The engine's holder-flow index is append-only; we push only the
+            # events we haven't forwarded yet so each event is seen once.
+            _hf_events = holder_monitor.get_events_as_dicts(real_mint)
+            if len(_hf_events) > _hf_pushed["n"]:
+                _new = _hf_events[_hf_pushed["n"]:]
+                _hf_pushed["n"] = len(_hf_events)
+                try:
+                    live_trader.engine.append_holder_flow_events(_new)
+                except AttributeError:
+                    # V1 engine has no holder-flow surface — safe to ignore
+                    pass
 
             strategy_result = live_trader.update(
                 time_val=candle_dict["time"],
@@ -1143,7 +1168,14 @@ async def live_trading_ws(
     finally:
         cancelled.set()
         ws_client.stop()
-        
+
+        # Stop the holder-flow monitor for this session
+        try:
+            holder_monitor.unwatch_token(real_mint)
+            await holder_monitor.stop()
+        except Exception:
+            pass
+
         # ── Emergency position cleanup before disconnect ──────────────────────
         # If a position is open when the WebSocket terminates, execute an
         # emergency sell to avoid leaving positions unattended.
