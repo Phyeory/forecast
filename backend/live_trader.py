@@ -72,12 +72,16 @@ CONFIRM_POLL_MS:    float = 0.3    # poll cadence while waiting for confirmation
 CONFIRM_REBROADCAST_S: float = 1.0 # re-broadcast same signed TX every N s while confirming
 
 # ── RETRY / ESCALATION POLICY ────────────────────────────────────────────────
-# "Give up after 5 tries" was the root cause of unsold positions riding to zero.
-# We never give up within a logical swap call anymore — we keep cycling
-# (fresh quote → fresh TX → broadcast → confirm) until either the swap lands or
-# the caller aborts.  Sells are especially aggressive because a missed sell on a
-# memecoin can mean riding it to zero.
-QUOTE_RETRIES_PER_GROUP = 3          # fresh quotes fetched per attempt group
+# ASYMMETRIC FAILURE POLICY (per requirements):
+#   • BUY  — single attempt, NO retry.  If the broadcast is rejected or the TX
+#            never confirms, the trade is logged as failed and the algorithm is
+#            returned to FLAT (current_trade=None, engine notified closed) so
+#            it can re-enter on the next signal.
+#   • SELL — retry IMMEDIATELY and WITHOUT LIMIT until the on-chain balance is
+#            zero.  A missed sell on a memecoin can mean riding it to zero, so
+#            the sell loop re-quotes/re-broadcasts back-to-back (escalating
+#            slippage/fee) and the watchdog remains as the final backstop.
+QUOTE_RETRIES_PER_GROUP = 3          # fresh quotes fetched per sell attempt group
 NONSIMULATION_ABORT_CODES = frozenset({6024, 1, 0x1771})  # swallowed — handled by re-quote
 PRIORITY_FEE_ESCALATION  = [100_000, 100_000, 100_000, 100_000]  # micro-lamports — fixed 0.0001 SOL
 MAX_PRIORITY_FEE         = 100_000  # micro-lamports — 0.0001 SOL, never exceeded
@@ -86,6 +90,14 @@ MAX_PRIORITY_FEE         = 100_000  # micro-lamports — 0.0001 SOL, never excee
 # signal within this many seconds, force another sell pass.
 WATCHDOG_INTERVAL_S: float = 6.0
 WATCHDOG_TIMEOUT_S:  float = 45.0
+
+# ── Hot-path cache tuning ─────────────────────────────────────────────────────
+# How often the background tasks refresh the cached balances / blockhash.
+# These run OFF the critical path: the swap reads the cache instantly instead
+# of blocking on an RPC round-trip before it can even build the transaction.
+BALANCE_CACHE_TTL_S:   float = 4.0   # SOL + token balance refresh cadence
+BLOCKHASH_REFRESH_S:   float = 0.9   # blockhash refresh cadence (~1 slot)
+BLOCKHASH_MAX_AGE_S:   float = 25.0  # blockhash is valid ~150 slots (~60s); use well under that
 
 
 def _derive_ata(owner: "Pubkey", mint: "Pubkey", token_program: "Pubkey") -> "Pubkey":
@@ -255,6 +267,20 @@ class LiveTrader:
         self._last_exit_signal_ts: float = 0.0
         self._watchdog_task: Optional[asyncio.Task] = None
 
+        # ── Hot-path caches (balance + blockhash) ──────────────────────────
+        # The pre-optimization hot path blocked on an RPC read BEFORE building
+        # the swap TX (~0.3–1.5s each).  We keep a warm cache of both balances
+        # and a fresh blockhash so a signal can go straight to Jupiter with
+        # zero pre-RPC on the critical path.  Background tasks refresh the
+        # cache continuously; the swap path only touches the cache.
+        self._cached_sol_balance: float = 0.0
+        self._cached_token_balance: int = 0
+        self._cached_balance_ts: float = 0.0
+        self._cached_blockhash: Optional[str] = None
+        self._cached_blockhash_ts: float = 0.0
+        self._balance_cache_task: Optional[asyncio.Task] = None
+        self._blockhash_task: Optional[asyncio.Task] = None
+
         # ── Hot-path RPC affinity ──────────────────────────────────────────
         # Free public RPCs vary wildly in latency. Track the last RPC that
         # successfully served a balance/confirm read and try it FIRST next
@@ -263,21 +289,38 @@ class LiveTrader:
         self._fast_rpc_idx: int = 0
 
     def start_watchdog(self):
-        """Spawn `_monitor_trade` exactly once per session (called by main.py)."""
+        """Spawn `_monitor_trade` exactly once per session (called by main.py).
+
+        Also spins up the two hot-path cache tasks (balance + blockhash).
+        These keep the swap path free of any pre-RPC round-trips so a signal
+        can go from "detected" to "broadcast" in a single Jupiter round-trip.
+        """
         if self._watchdog_task is None or self._watchdog_task.done():
             self._watchdog_task = asyncio.ensure_future(self._monitor_trade())
             logger.info("[WATCHDOG] Task started")
+        self._start_caches()
+
+    def _start_caches(self):
+        """Lazily start the balance + blockhash background refresh tasks."""
+        if self._balance_cache_task is None or self._balance_cache_task.done():
+            self._balance_cache_task = asyncio.ensure_future(self._balance_cache_loop())
+            logger.info("[CACHE] Balance cache task started")
+        if self._blockhash_task is None or self._blockhash_task.done():
+            self._blockhash_task = asyncio.ensure_future(self._blockhash_loop())
+            logger.info("[CACHE] Blockhash task started")
 
     async def close(self):
-        """Stop the watchdog and close the HTTP session."""
+        """Stop the watchdog, cache tasks and close the HTTP session."""
         self._alive = False
-        if self._watchdog_task is not None and not self._watchdog_task.done():
-            self._watchdog_task.cancel()
-            try:
-                await self._watchdog_task
-            except (asyncio.CancelledError, Exception):
-                pass
-            self._watchdog_task = None
+        for task_attr in ("_watchdog_task", "_balance_cache_task", "_blockhash_task"):
+            task = getattr(self, task_attr, None)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                setattr(self, task_attr, None)
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
@@ -297,6 +340,88 @@ class LiveTrader:
                 headers={"Content-Type": "application/json"},
             )
         return self._session
+
+    # ── Hot-path cache background loops ───────────────────────────────────────
+
+    async def _balance_cache_loop(self):
+        """
+        Background loop that keeps SOL + token balances warm.
+
+        The swap hot path reads ``_cached_sol_balance`` / ``_cached_token_balance``
+        instead of awaiting an RPC read before it can build the transaction.
+        This shaves ~0.3–1.5s off every entry/exit.  The first iteration runs
+        immediately so the cache is populated before the first signal can fire.
+        """
+        while self._alive:
+            try:
+                sol, tok = await asyncio.gather(
+                    self._get_sol_balance(),
+                    self._get_token_balance(),
+                )
+                self._cached_sol_balance = sol
+                if tok > 0:
+                    self._cached_token_balance = tok
+                    self._token_balance = tok
+                self._cached_balance_ts = time.time()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"[CACHE] balance refresh error: {e}")
+            await asyncio.sleep(BALANCE_CACHE_TTL_S)
+
+    async def _blockhash_loop(self):
+        """
+        Background loop that keeps a fresh blockhash warm.
+
+        The Jupiter quote response carries a blockhash, but by the time the
+        quote → swap-build → sign sequence finishes the hash can be a few
+        seconds old.  A fresher hash means more slots for the TX to land,
+        which directly improves first-attempt landing rate.  When we rebuild
+        the TX locally with this hash we remove blockhash freshness from the
+        quote path entirely.
+        """
+        while self._alive:
+            try:
+                bh = await self._fetch_latest_blockhash()
+                if bh:
+                    self._cached_blockhash = bh
+                    self._cached_blockhash_ts = time.time()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"[CACHE] blockhash refresh error: {e}")
+            await asyncio.sleep(BLOCKHASH_REFRESH_S)
+
+    async def _fetch_latest_blockhash(self) -> Optional[str]:
+        """Fetch a fresh (processed) blockhash from the fastest known RPC."""
+        payload = {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "getLatestBlockhash",
+            "params": [{"commitment": "processed"}],
+        }
+
+        def _extract(data: dict) -> Optional[str]:
+            try:
+                bh = data.get("result", {}).get("value", {}).get("blockhash")
+                return bh if isinstance(bh, str) else None
+            except Exception:
+                return None
+
+        return await self._rpc_fanout_first_wins(payload, timeout_s=1.2, result_fn=_extract)
+
+    def _get_cached_sol_balance(self) -> float:
+        return self._cached_sol_balance
+
+    def _get_cached_token_balance(self) -> int:
+        return self._cached_token_balance
+
+    def _get_fresh_blockhash(self) -> Optional[str]:
+        """Return the cached blockhash if it's still comfortably within validity."""
+        if self._cached_blockhash is None:
+            return None
+        if (time.time() - self._cached_blockhash_ts) > BLOCKHASH_MAX_AGE_S:
+            return None
+        return self._cached_blockhash
 
     async def _rpc_fanout_first_wins(self, payload: dict, timeout_s: float,
                                        result_fn) -> Optional[object]:
@@ -702,27 +827,64 @@ class LiveTrader:
 
         return sig
 
+    def _rebuild_tx_with_blockhash(self, tx: "VersionedTransaction", blockhash: str) -> "VersionedTransaction":
+        """
+        Rebuild a versioned transaction with a fresh recent-blockhash.
+
+        Jupiter's quote → swap round-trip takes ~0.5–1s, during which the
+        blockhash embedded in the returned TX ages.  Swapping in a blockhash
+        that is <1s old maximises the number of slots the TX has to land,
+        which materially improves first-attempt landing rate on congested
+        free RPCs.
+
+        `solders.message.MessageV0.recent_blockhash` is read-only, so we
+        reconstruct the message field-by-field with the new hash.  All other
+        fields (header, account keys, instructions, address lookup tables) are
+        copied verbatim — only the blockhash changes, so the instruction set
+        and account references are untouched.  On any failure we fall back to
+        the original TX (behaviour identical to the pre-optimization code).
+        """
+        try:
+            msg = tx.message
+            new_msg = MessageV0(
+                header=msg.header,
+                account_keys=list(msg.account_keys),
+                recent_blockhash=Hash.from_string(blockhash),
+                instructions=list(msg.instructions),
+                address_table_lookups=list(msg.address_table_lookups),
+            )
+            return VersionedTransaction(new_msg, [self.keypair])
+        except Exception as e:
+            logger.debug(f"[BLOCKHASH] rebuild failed ({e}) — using Jupiter blockhash")
+            return tx
+
     async def _sign_and_send(self, swap_tx_b64: str, wait_for_confirmation: bool = False) -> Optional[str]:
         """
         Sign the base64-encoded versioned transaction and broadcast it
         to ALL RPCs simultaneously.
 
-        Hot path:
+        Hot path (wait_for_confirmation=False):
+          - Rebuild TX with a fresh cached blockhash (maximises landing window)
           - skip_simulation=True  → no simulate call (saves ~300 ms)
           - Multi-RPC fanout for maximum landing probability
-          - If wait_for_confirmation is True, await confirmation before returning.
-            Otherwise, dispatch confirmation as a fire-and-forget background task.
+          - Returns the signature the INSTANT the TX is on the wire.
+            Confirmation + rebroadcast run as a background task.
         """
         try:
             raw_tx = base64.b64decode(swap_tx_b64)
             tx = VersionedTransaction.from_bytes(raw_tx)
+
+            # ── Rebuild with the freshest cached blockhash if available ────
+            fresh_bh = self._get_fresh_blockhash()
+            if fresh_bh:
+                tx = self._rebuild_tx_with_blockhash(tx, fresh_bh)
 
             # Sign with our keypair
             signed_tx = VersionedTransaction(tx.message, [self.keypair])
             signed_bytes = bytes(signed_tx)
             signed_b64 = base64.b64encode(signed_bytes).decode()
 
-            logger.info(f"[SIGN] Transaction signed ({len(signed_bytes)} bytes)")
+            logger.info(f"[SIGN] Transaction signed ({len(signed_bytes)} bytes, fresh_bh={bool(fresh_bh)})")
 
             # ── Optional simulation (disabled on hot path) ─────────────────
             if not self.skip_simulation:
@@ -833,133 +995,121 @@ class LiveTrader:
 
     async def execute_buy(self, reason: str = "signal") -> Optional[str]:
         """
-        Full buy cycle with grouped-retry escalation.
+        Single-attempt, fire-and-forget buy.
 
-        Strategy:
-          - Outer loop: unlimited "attempt groups" (previously the code bailed
-            after 5 total tries — the leading cause of missed entries).
-          - Inner loop: QUOTE_RETRIES_PER_GROUP fresh quotes, each sent with an
-            escalating priority fee taken from PRIORITY_FEE_ESCALATION.
-          - Mid-retry balance verification: between groups, re-check whether
-            tokens ALREADY arrived on-chain (a previous TX may have confirmed
-            silently while we were polling another).
-          - `_swap_in_flight` is held for the entire duration so the 1s tick
-            can't queue a duplicate buy.
+        Policy (per requirements):
+          - Build and broadcast the swap ONCE, as fast as possible (cached SOL
+            balance + cached blockhash keep the hot path free of pre-RPC reads).
+          - The TX is broadcast immediately and the signature is returned
+            without waiting for on-chain confirmation.
+          - NO RETRY on failure.  If the broadcast is rejected — or the
+            background confirmation task later finds the TX never landed — the
+            trade is logged as failed and the engine/position state is returned
+            to FLAT (``current_trade=None``, ``engine.notify_trade_closed()``)
+            so the algorithm sees "position closed" and may re-enter on the
+            next signal.
+
+        Reliability comes from the fast-RPC fanout + fresh blockhash (high
+        first-attempt landing rate) rather than from hammering retries.
         """
         if self._swap_in_flight:
             logger.warning("[BUY] Swap already in flight — skipping")
             return None
         self._swap_in_flight = True
         buy_start = time.time()
-        attempt_group = 0
         try:
             amount_lam = int(self.buy_size_sol * 1e9)
             mint_str = str(self.token_mint)
 
-            sol_bal = await self._get_sol_balance()
+            # ── Cached SOL balance (no RPC round-trip on the hot path) ──────
+            # The background balance cache keeps this figure fresh (~4s).  If
+            # the cache has never been populated (session just started) we do
+            # one blocking read; otherwise the swap proceeds immediately.
+            sol_bal = self._get_cached_sol_balance()
+            if self._cached_balance_ts == 0.0:
+                sol_bal = await self._get_sol_balance()
+                self._cached_sol_balance = sol_bal
+                self._cached_balance_ts = time.time()
             logger.info(
                 f"[BUY] Starting buy: mint={mint_str[:8]}… size={self.buy_size_sol} SOL "
-                f"balance={sol_bal:.4f} SOL reason={reason}"
+                f"balance={sol_bal:.4f} SOL (cached) reason={reason}"
             )
             if sol_bal * 1e9 < amount_lam + 50_000:  # buy size + gas buffer
                 logger.error(f"[BUY FAILED] Insufficient balance: {sol_bal:.4f} SOL but need ~{self.buy_size_sol} SOL")
-                await self._broadcast_status(
-                    "buy_failed", f"Insufficient SOL ({sol_bal:.4f} available)", reason
-                )
+                await self._fail_buy_flat(f"Insufficient SOL ({sol_bal:.4f} available)", reason)
                 return None
 
-            while True:  # grouped-retry — never give up mid-call
-                attempt_group += 1
-                fee = PRIORITY_FEE_ESCALATION[
-                    min(attempt_group - 1, len(PRIORITY_FEE_ESCALATION) - 1)
-                ]
-                logger.info(
-                    f"[BUY] Attempt group {attempt_group} "
-                    f"(fee={fee} micro-lamports)"
-                )
+            # ── Single quote → swap → broadcast (NO retry) ───────────────────
+            fee = PRIORITY_FEE_ESCALATION[0]
 
-                for inner in range(1, QUOTE_RETRIES_PER_GROUP + 1):
-                    label = f"G{attempt_group}/Q{inner}"
+            quote = await self._get_quote(WSOL_MINT, self.token_mint, amount_lam)
+            if not quote:
+                logger.error("[BUY FAILED] Jupiter quote failed")
+                await self._fail_buy_flat("Jupiter quote failed", reason)
+                return None
 
-                    quote = await self._get_quote(WSOL_MINT, self.token_mint, amount_lam)
-                    if not quote:
-                        logger.error(f"[BUY FAILED {label}] Jupiter quote failed")
-                        await asyncio.sleep(0.4)
-                        continue
+            swap_tx = await self._get_swap_tx(quote, priority_fee_override=fee)
+            if not swap_tx:
+                logger.error("[BUY FAILED] Swap TX build failed")
+                await self._fail_buy_flat("Swap TX build failed", reason)
+                return None
 
-                    swap_tx = await self._get_swap_tx(quote, priority_fee_override=fee)
-                    if not swap_tx:
-                        logger.error(f"[BUY FAILED {label}] Swap TX build failed")
-                        await asyncio.sleep(0.4)
-                        continue
+            # ── Fire-and-forget broadcast ─────────────────────────────────────
+            sig = await self._sign_and_send(swap_tx, wait_for_confirmation=False)
+            if not sig:
+                logger.error("[BUY FAILED] Broadcast rejected by all RPCs — not retrying")
+                await self._fail_buy_flat("Broadcast rejected by all RPCs", reason)
+                return None
 
-                    sig = await self._sign_and_send(swap_tx, wait_for_confirmation=True)
-                    if not sig:
-                        logger.warning(f"[BUY FAILED {label}] TX not confirmed — will retry with fresh quote")
-                        await asyncio.sleep(0.3)
-                        continue
-
-                    # ── Success path ─────────────────────────────────────────
-                    elapsed = time.time() - buy_start
-                    out_amount = int(quote.get("outAmount", 0))
-                    quote_tokens = out_amount / (10 ** self._token_decimals)
-
-                    # Authoritative on-chain balance — but DON'T block the
-                    # buy return path on it.  Jupiter's confirmed outAmount
-                    # is what actually landed; the prior 3× poll (0.4 s
-                    # apart × 3) added ~5–12 s per buy when the chosen RPC
-                    # was rate-limited.  Run a single async verification
-                    # in the background; if it disagrees, we log only.
-                    tokens = quote_tokens
-                    asyncio.ensure_future(self._verify_buy_settled(sig, out_amount))
-
-                    ct = self.current_trade
-                    if ct:
-                        ct.tx_hash_buy = sig
-                        ct.size_tokens = tokens
-                        ct.status = "open"
-                    self._token_balance = out_amount
-                    # Refresh SOL balance without blocking (used for stats).
-                    asyncio.ensure_future(self._refresh_sol_balance_async())
-                    self._last_exit_signal_ts = 0.0  # reset watchdog
-
-                    await self._broadcast_status("buy_confirmed", sig, reason, tokens=tokens)
-                    logger.info(
-                        f"[BUY OK] sig={sig} tokens={tokens:.4f} elapsed={elapsed:.1f}s "
-                        f"group={attempt_group}"
-                    )
-                    logger.info(f"[BUY OK] https://solscan.io/tx/{sig}")
-                    return sig
-
-                # ── Between groups: maybe tokens already arrived ──────────────
-                bal = await self._get_token_balance()
-                if bal > 0:
-                    logger.info(
-                        f"[BUY VERIFIED] Tokens detected on-chain mid-retry "
-                        f"({bal} raw units) — treating buy as successful."
-                    )
-                    tokens = bal / (10 ** self._token_decimals)
-                    ct = self.current_trade
-                    if ct:
-                        ct.size_tokens = tokens
-                        ct.status = "open"
-                    self._token_balance = bal
-                    self.stats.starting_balance = await self._get_sol_balance()
-                    self._last_exit_signal_ts = 0.0
-                    await self._broadcast_status("buy_confirmed", "", reason, tokens=tokens)
-                    return "verified_on_chain"
-
-                # Escalating back-off between groups (0.5 s → 1 s → 2 s, capped)
-                backoff = min(0.5 * (2 ** (attempt_group - 1)), 2.0)
-                logger.info(f"[BUY] Group {attempt_group} exhausted; sleeping {backoff:.1f}s before retry")
-                await asyncio.sleep(backoff)
+            # ── Optimistic success (confirmation runs in background) ─────────
+            elapsed = time.time() - buy_start
+            out_amount = int(quote.get("outAmount", 0))
+            tokens = out_amount / (10 ** self._token_decimals)
+            ct = self.current_trade
+            if ct:
+                ct.tx_hash_buy = sig
+                ct.size_tokens = tokens
+                ct.status = "open"
+            self._token_balance = out_amount
+            self._cached_token_balance = out_amount
+            self._last_exit_signal_ts = 0.0  # reset watchdog
+            # Background task confirms the TX; if it never lands it rolls the
+            # position back to FLAT (no retry).
+            asyncio.ensure_future(self._background_buy_settle(sig, out_amount))
+            await self._broadcast_status("buy_confirmed", sig, reason, tokens=tokens)
+            logger.info(
+                f"[BUY BROADCAST] sig={sig} tokens={tokens:.4f} "
+                f"elapsed={elapsed:.2f}s (fire-and-forget)"
+            )
+            logger.info(f"[BUY] https://solscan.io/tx/{sig}")
+            return sig
 
         except Exception as e:
             logger.error(f"[BUY ERROR] Unexpected error: {e}", exc_info=True)
-            await self._broadcast_status("buy_failed", f"Unexpected: {e}", reason)
+            await self._fail_buy_flat(f"Unexpected: {e}", reason)
             return None
         finally:
             self._swap_in_flight = False
+
+    async def _fail_buy_flat(self, detail: str, reason: str):
+        """
+        Return the algorithm to a FLAT / position-closed state after a failed
+        buy (no retry).  Clears the open trade and notifies the engine that no
+        position is held so it can generate a fresh entry on the next signal.
+        """
+        self._token_balance = 0
+        self._cached_token_balance = 0
+        if self.current_trade is not None:
+            failed = self.current_trade
+            failed.status = "failed"
+            failed.exit_reason = f"buy_failed: {detail}"
+            failed.exit_time = time.time()
+            self.trade_history.append(failed)
+            self.current_trade = None
+        self._pending_buy = False
+        self._pending_buy_reason = ""
+        self.engine.notify_trade_closed()
+        await self._broadcast_status("buy_failed", detail, reason)
 
     async def _verify_buy_settled(self, sig: str, expected_amount: int):
         """Background post-buy balance check. Non-blocking — only corrects
@@ -974,6 +1124,7 @@ class LiveTrader:
                 f"outAmount {expected_amount} — adopting on-chain figure."
             )
             self._token_balance = settled
+            self._cached_token_balance = settled
             ct = self.current_trade
             if ct and ct.status == "open":
                 ct.size_tokens = settled / (10 ** self._token_decimals)
@@ -983,6 +1134,35 @@ class LiveTrader:
             logger.debug(
                 f"[BUY VERIFY] Token balance query lagged (sig={sig[:8]}…); "
                 f"trusting Jupiter outAmount."
+            )
+
+    async def _background_buy_settle(self, sig: str, expected_amount: int):
+        """
+        Background confirmation + settle for a fire-and-forget buy.
+
+        The hot path returned the signature the instant the TX was broadcast;
+        this task runs the confirmation poll (with rebroadcast) and then
+        verifies the token balance actually landed.  If the TX fails on-chain
+        (rejected, dropped, or simulation error) the position is unwound via
+        ``_fail_buy_flat`` (no retry) so a later signal can re-enter cleanly.
+        """
+        confirm_result = await self._confirm_tx(sig)
+        if confirm_result["confirmed"]:
+            logger.info(f"[BUY CONFIRMED BG] sig={sig[:16]}… slot={confirm_result.get('slot')}")
+            await self._verify_buy_settled(sig, expected_amount)
+            await self._refresh_sol_balance_async()
+            return
+
+        # ── Fire-and-forget buy never landed → fail flat, NO retry ──────────
+        logger.error(
+            f"[BUY BG FAILED] sig={sig[:16]}… did not confirm "
+            f"(error={confirm_result.get('error')}) — returning to FLAT (no retry)"
+        )
+        # Only roll back if this sig is still the live position's buy hash.
+        ct = self.current_trade
+        if ct is not None and ct.tx_hash_buy == sig:
+            await self._fail_buy_flat(
+                f"Buy TX failed on-chain: {confirm_result.get('error')}", "signal"
             )
 
     async def _refresh_sol_balance_async(self):
@@ -1040,6 +1220,74 @@ class LiveTrader:
                 self.engine.notify_trade_opened(self._last_price, Direction.UP)
         # Success path: balance is 0 — trade is genuinely closed. Nothing to do.
 
+    async def _background_sell_settle(self, sig: str, closed_trade, sold_amount: int):
+        """
+        Background confirmation + settle for a fire-and-forget sell.
+
+        The hot path already called ``confirm_sell`` (finalising PnL and
+        notifying the engine) optimistically.  This task confirms the TX
+        actually landed:
+
+          • Confirmed → run the standard ``_verify_sell_settled`` partial-fill
+            check (resurrects the position + re-arms the watchdog if any
+            tokens survived).
+          • Failed    → the sell never happened, so resurrect the position and
+            re-arm the watchdog to force a retry.  This mirrors the existing
+            partial-fill recovery path so no position is ever silently
+            abandoned by the fast path.
+        """
+        confirm_result = await self._confirm_tx(sig)
+        if confirm_result["confirmed"]:
+            logger.info(f"[SELL CONFIRMED BG] sig={sig[:16]}… slot={confirm_result.get('slot')}")
+            await self._verify_sell_settled(sig, closed_trade)
+            await self._refresh_sol_balance_async()
+            return
+
+        # ── Fire-and-forget sell never landed — resurrect + retry IMMEDIATELY ─
+        logger.error(
+            f"[SELL BG FAILED] sig={sig[:16]}… did not confirm "
+            f"(error={confirm_result.get('error')}) — resurrecting position and retrying NOW"
+        )
+        on_chain = await self._get_token_balance()
+        residual = on_chain if on_chain > 0 else sold_amount
+        self._token_balance = residual
+        self._cached_token_balance = residual
+
+        if self.current_trade is None and closed_trade is not None:
+            from dataclasses import replace
+            reopened = replace(
+                closed_trade,
+                status="open",
+                exit_time=None,
+                exit_price=None,
+                exit_reason="sell_tx_failed_retry",
+                size_tokens=residual / (10 ** self._token_decimals),
+                pnl_sol=0.0,
+                pnl_pct=0.0,
+                tx_hash_sell="",
+            )
+            self.current_trade = reopened
+            if self.trade_history and self.trade_history[-1] is closed_trade:
+                self.trade_history.pop()
+            self.stats.total_trades -= 1
+            if closed_trade.pnl_sol > 0:
+                self.stats.winning_trades -= 1
+            else:
+                self.stats.losing_trades -= 1
+            self.stats.total_pnl_sol -= closed_trade.pnl_sol
+            self.stats.current_balance -= closed_trade.pnl_sol
+            self.engine.notify_trade_opened(self._last_price, Direction.UP)
+
+        # Arm the watchdog (final backstop) AND immediately fire a fresh sell
+        # pass so a failed exit is retried without waiting for the 45s watchdog.
+        self._last_exit_signal_ts = time.time()
+        await self._broadcast_status(
+            "sell_retry", f"Sell TX failed on-chain ({confirm_result.get('error')}) — retrying", "signal"
+        )
+        if not self._swap_in_flight and self._alive:
+            logger.warning("[SELL RETRY] Fire-and-forget sell failed — launching immediate retry")
+            asyncio.ensure_future(self.execute_sell("sell_tx_failed_retry"))
+
     async def execute_sell(self, reason: str = "signal") -> Optional[str]:
         """
         Full sell cycle with grouped-retry escalation.
@@ -1078,13 +1326,21 @@ class LiveTrader:
                 f"[SELL] Starting sell: mint={mint_str[:8]}… reason={reason} "
                 f"cached_balance={self._token_balance} units"
             )
-            # Parallel fetch of fresh token balance — doesn't block on the
-            # hot path because we fall through to the cached figure if the
-            # RPC lags. We DO still want a fresh figure on the first attempt
-            # because the buy's outAmount may not have settled by the time
-            # we sell (manual sells happen ~10 s after a buy).
-            fresh_bal = await self._get_token_balance()
-            token_balance = fresh_bal if fresh_bal > 0 else self._token_balance
+            # ── Cached token balance (no RPC round-trip on the hot path) ─────
+            # The background balance cache refreshes every ~4s, so on a normal
+            # exit the cached figure is fresh and we can build the swap
+            # immediately.  We only fall back to a blocking live read when the
+            # cache has never been populated (session just started and the
+            # position was opened before the cache warmed up).  Using a stale
+            # OVERSTATED figure risks a `Custom: 6024` (insufficient token
+            # balance) on the first attempt — which the retry loop recovers
+            # from with a fresh read — so this is safe.
+            if self._cached_balance_ts > 0.0 and self._get_cached_token_balance() > 0:
+                token_balance = self._get_cached_token_balance()
+                fresh_bal = token_balance  # treat cache as the fresh figure
+            else:
+                fresh_bal = await self._get_token_balance()
+                token_balance = fresh_bal if fresh_bal > 0 else self._token_balance
 
             if token_balance <= 0:
                 logger.warning(f"[SELL FAILED] No token balance to sell for {mint_str[:8]}…")
@@ -1092,7 +1348,7 @@ class LiveTrader:
                 return None
 
             logger.info(
-                f"[SELL] Live balance: {token_balance} units (fresh={fresh_bal > 0})"
+                f"[SELL] Live balance: {token_balance} units (cached={self._cached_balance_ts > 0.0})"
             )
 
             while True:  # grouped-retry — never give up while wallet still holds tokens
@@ -1130,23 +1386,63 @@ class LiveTrader:
 
                     quote = await self._get_quote(self.token_mint, WSOL_MINT, token_balance)
                     if not quote:
-                        logger.error(f"[SELL FAILED {label}] Jupiter quote failed")
-                        await asyncio.sleep(0.4)
+                        logger.error(f"[SELL FAILED {label}] Jupiter quote failed — retrying immediately")
+                        await asyncio.sleep(0.05)
                         continue
 
                     swap_tx = await self._get_swap_tx(quote, priority_fee_override=fee)
                     if not swap_tx:
-                        logger.error(f"[SELL FAILED {label}] Swap TX build failed")
-                        await asyncio.sleep(0.4)
+                        logger.error(f"[SELL FAILED {label}] Swap TX build failed — retrying immediately")
+                        await asyncio.sleep(0.05)
                         continue
 
+                    # ── Hot-path broadcast ────────────────────────────────────
+                    # First attempt of the first group is fire-and-forget: the
+                    # TX is broadcast instantly and we return the signature
+                    # without blocking on confirmation.  The background settle
+                    # task finalises the trade (or resurrects it + retries
+                    # immediately if the TX failed).  In-loop retries block on
+                    # confirmation so we can immediately re-quote with a fresh
+                    # balance on failure.
+                    hot_attempt = (attempt_group == 1 and inner == 1)
+                    if hot_attempt:
+                        sig = await self._sign_and_send(swap_tx, wait_for_confirmation=False)
+                        if not sig:
+                            logger.warning(f"[SELL FAILED {label}] broadcast rejected — retrying immediately")
+                            continue
+                        elapsed = time.time() - sell_start
+                        sol_received = int(quote.get("outAmount", 0)) / 1e9
+                        # Optimistically zero the cached balance so a duplicate
+                        # tick can't queue a second sell while confirmation
+                        # runs in the background.
+                        self._token_balance = 0
+                        self._cached_token_balance = 0
+                        self._last_exit_signal_ts = 0.0  # clear watchdog on the happy path
+                        closed_trade = None
+                        if self.current_trade:
+                            closed_trade = self.confirm_sell(sig, sol_received, self._last_price)
+                        asyncio.ensure_future(
+                            self._background_sell_settle(sig, closed_trade, token_balance)
+                        )
+                        await self._broadcast_status(
+                            "sell_confirmed", sig, reason,
+                            sol_received=sol_received, closed_trade=closed_trade,
+                        )
+                        logger.info(
+                            f"[SELL BROADCAST] sig={sig} received~{sol_received:.6f} SOL "
+                            f"elapsed={elapsed:.2f}s (fire-and-forget)"
+                        )
+                        logger.info(f"[SELL] https://solscan.io/tx/{sig}")
+                        return sig
+
+                    # ── Retry path: block on confirmation ─────────────────────
                     sig = await self._sign_and_send(swap_tx, wait_for_confirmation=True)
                     if not sig:
-                        logger.warning(f"[SELL FAILED {label}] TX not confirmed — retrying with fresh quote")
-                        await asyncio.sleep(0.3)
+                        logger.warning(f"[SELL FAILED {label}] TX not confirmed — retrying immediately with fresh quote")
+                        await asyncio.sleep(0.05)
                         continue
 
-                    # ── Success ──────────────────────────────────────────────
+                    # ── Success (confirmed retry) ────────────────────────────
                     elapsed = time.time() - sell_start
                     sol_received = int(quote.get("outAmount", 0)) / 1e9
 
@@ -1156,6 +1452,7 @@ class LiveTrader:
                     # schedule another sell pass. This shaves 4–10 s off
                     # the sell_return leg when the read RPC is rate-limited.
                     self._token_balance = 0
+                    self._cached_token_balance = 0
                     self._last_exit_signal_ts = 0.0  # clear watchdog on the happy path
                     closed_trade = None
                     if self.current_trade:
@@ -1210,12 +1507,13 @@ class LiveTrader:
                         )
                         self.slippage_bps = new_slip
 
-                backoff = min(0.5 * (2 ** (attempt_group - 1)), 2.0)
+                # Retry immediately — only a tiny yield so we don't spin the
+                # event loop while still re-quoting right away.
                 logger.info(
-                    f"[SELL] Group {attempt_group} exhausted; retry in {backoff:.1f}s "
+                    f"[SELL] Group {attempt_group} exhausted; retrying immediately "
                     f"(still holding {bal} raw tokens)"
                 )
-                await asyncio.sleep(backoff)
+                await asyncio.sleep(0.05)
 
         except Exception as e:
             logger.error(f"[SELL ERROR] Unexpected error: {e}", exc_info=True)
