@@ -100,7 +100,17 @@ graph TD
 ### 4. Sniper Module (`backend/sniper/`)
 A dedicated automated sniping pipeline mounted via `/api/sniper/*`. Executes a 5-stage sequential analysis: `launch_detector → pressure_analyzer → chart_validator → entry_signal → exit_signal`.
 
-### 5. Quantitative Benchmarking & Analysis (`backend/analysis/`)
+### 5. Holder-Flow Instrumentation (`backend/holder_flow.py`)
+A `HolderFlowMonitor` that polls GMGN's `track smartmoney` endpoint for real-time dev/insider wallet trades and cross-references sellers against per-token dev/sniper/bundler wallet registries (fetched via `token holders --tag ...`).
+
+- **Data capture**: Events are persisted to a `holder_flow` table in `price_data.db` so future recordings are backtestable.
+- **Entry gate** (`sniper_engine.py`): Blocks entry if a dev/insider sell occurred in the last 30 seconds.
+- **Exit trigger** (`sniper_engine.py` + `forward_tester.py`): Fires an immediate exit if a dev/insider sell occurs while in position.
+- **Backtest support** (`backtester.py`): Loads `holder_flow` events from the DB and passes them to `ForwardTester` for replay.
+
+The mechanism is default-OFF when no `holder_flow` data exists (parity verified on existing recordings).
+
+### 6. Quantitative Benchmarking & Analysis (`backend/analysis/`)
 - **`run_iteration.py`**: Batch entry point that executes backtests across recordings, gathers results, and saves aggregate metrics.
 - **`aggregate_results.py`**: Summarizes per-trade JSON outputs into metrics (win rate, total PnL, profit factor, expectancy, exit reason breakdowns).
 - **`paired_diff.py`**: Strict statistical hypothesis testing tool comparing candidate vs. baseline batches via Wilcoxon signed-rank tests, 10,000-sample bootstrap 95% CIs, McNemar tests, and per-token improvement percentages.
