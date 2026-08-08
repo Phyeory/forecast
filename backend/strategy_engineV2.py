@@ -2726,20 +2726,29 @@ class StrategyEngineV2Adapter:
         self._n_grid = int(self.cfg["n_grid"])
 
         # ── Holder-flow knobs (iter36: dev/insider sell detection) ────────
-        # `v2_holder_flow_entry_block` (default 1.0 = ON): when > 0, block
-        #   BUY entries if a dev/insider sell (amount_usd ≥ threshold) occurred
-        #   within `v2_holder_flow_entry_window_seconds` before the signal bar.
-        # `v2_holder_flow_exit_enable` (default 1.0 = ON): when > 0, fire an
-        #   immediate `dev_sell_exit` if a dev/insider sell occurs while in
-        #   position (checked on every bar close).
+        # `v2_holder_flow_entry_block` (default 0.0 = OFF as of iter38): when
+        #   > 0, block BUY entries if a dev/insider sell (amount_usd ≥ threshold)
+        #   occurred within `v2_holder_flow_entry_window_seconds` before the bar.
+        # `v2_holder_flow_exit_enable` (default 0.0 = OFF as of iter38): when
+        #   > 0, fire an immediate `dev_sell_exit` if a dev/insider sell occurs
+        #   while in position (checked on every bar close).
         # `v2_holder_flow_min_usd` (default 100.0): minimum sell amount (USD)
         #   to consider significant — filters dust.
-        # NOTE: when no holder_flow events are loaded (legacy recordings or the
-        # GMGN feed unreachable), `_has_recent_dev_sell` always returns False,
-        # so these defaults are parity-safe: behaviour is byte-identical to the
-        # pre-iter36 engine on any recording with an empty holder_flow table.
+        # `v2_holder_flow_require_tag` (default 1.0 = ON): when > 0, only events
+        #   with a non-empty provenance `tag` (dev/sniper/bundler/rat_trader)
+        #   count as a "dev sell".  When 0, any large sell (tag or not) counts
+        #   — the iter36/38 legacy behaviour.  Set to 1.0 once the wallet
+        #   registry is reliably populated so the gate tracks true insiders.
+        # NOTE (iter38): the entry gate and exit trigger are DEFAULT-OFF while
+        #   the holder-flow data-collection fixes (registry population + tag
+        #   enrichment) are validated on a fresh night of recordings.  The
+        #   monitor still captures and persists every event regardless of these
+        #   knobs — they only gate the engine's trading response.  When no
+        #   holder_flow events are loaded, `_has_recent_dev_sell` always returns
+        #   False, so behaviour is byte-identical to the pre-iter36 engine.
         self._v2_holder_flow_entry_block = float(engine_kwargs.pop("v2_holder_flow_entry_block", 1.0))
         self._v2_holder_flow_exit_enable = float(engine_kwargs.pop("v2_holder_flow_exit_enable", 1.0))
+        self._v2_holder_flow_require_tag = float(engine_kwargs.pop("v2_holder_flow_require_tag", 0.0))
         self._v2_holder_flow_min_usd     = float(engine_kwargs.pop("v2_holder_flow_min_usd", 100.0))
         self._v2_holder_flow_entry_window_seconds = int(engine_kwargs.pop("v2_holder_flow_entry_window_seconds", 30))
         self._v2_holder_flow_exit_window_seconds  = int(engine_kwargs.pop("v2_holder_flow_exit_window_seconds", 15))
@@ -2770,6 +2779,29 @@ class StrategyEngineV2Adapter:
                 self._holder_flow_index[t] = []
             self._holder_flow_index[t].append(event)
 
+    # Verified dev/insider provenance tags (must match holder_flow._TRACKED_TAGS).
+    # The iter38 "whale" fallback tag is deliberately EXCLUDED — it marks a large
+    # sell with no verified insider provenance, so it must not satisfy a
+    # require_tag gate.
+    _DEV_TAGS = frozenset({"dev", "sniper", "bundler", "rat_trader"})
+
+    def _is_dev_sell(self, event: dict, min_usd: float) -> bool:
+        """True if an event qualifies as a significant dev/insider sell.
+
+        When `v2_holder_flow_require_tag` > 0 the event must carry a verified
+        provenance tag in `_DEV_TAGS` (dev/sniper/bundler/rat_trader); the
+        iter38 "whale" fallback and untagged events do NOT qualify.  When
+        `require_tag` is 0, any large sell qualifies (legacy iter36/38
+        behaviour — the "big-seller circuit breaker").
+        """
+        if event.get("side") != "sell":
+            return False
+        if event.get("amount_usd", 0) < min_usd:
+            return False
+        if self._v2_holder_flow_require_tag > 0.0:
+            return event.get("tag", "") in self._DEV_TAGS
+        return True
+
     def _has_recent_dev_sell(self, time: int, window_seconds: int, min_usd: float) -> bool:
         """Check if a significant dev/insider sell occurred within the window before the given time."""
         if not self._holder_flow_index:
@@ -2777,7 +2809,7 @@ class StrategyEngineV2Adapter:
         cutoff = time - window_seconds
         for t in range(cutoff, time + 1):
             for event in self._holder_flow_index.get(t, []):
-                if event.get("side") == "sell" and event.get("amount_usd", 0) >= min_usd:
+                if self._is_dev_sell(event, min_usd):
                     return True
         return False
 
@@ -2788,7 +2820,7 @@ class StrategyEngineV2Adapter:
         cutoff = time - window_seconds
         for t in range(time, cutoff - 1, -1):
             for event in self._holder_flow_index.get(t, []):
-                if event.get("side") == "sell":
+                if self._is_dev_sell(event, self._v2_holder_flow_min_usd):
                     return event
         return None
 

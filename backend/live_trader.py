@@ -71,6 +71,23 @@ CONFIRM_TIMEOUT_S:  float = 12.0   # per-attempt confirm window (short — we re
 CONFIRM_POLL_MS:    float = 0.3    # poll cadence while waiting for confirmation
 CONFIRM_REBROADCAST_S: float = 1.0 # re-broadcast same signed TX every N s while confirming
 
+# ── BUY FINALITY INVARIANT ────────────────────────────────────────────────────
+# A buy may ONLY be declared "failed" once the transaction is *cryptographically
+# dead* — i.e. its blockhash has expired (~150 slots ≈ 60 s) — AND a direct
+# on-chain wallet-balance probe confirms zero tokens arrived.  The 12 s
+# per-attempt confirm window above is NOT a failure boundary for buys: a TX
+# that shows no status at t=12 s can still land at t=20–60 s (RPC forwarding
+# queues keep it alive until the blockhash expires).  Declaring failure at
+# t=12 s previously produced unmonitored on-chain positions that the algorithm
+# believed were closed.
+#
+# While the outcome is unknown the trade stays in status="pending", which
+# blocks new entries everywhere (update(), force_buy(), watchdog, no-motion).
+BUY_CONFIRM_TIMEOUT_S:   float = 75.0  # absolute cap: blockhash (~60 s) + grace
+BUY_SETTLE_GRACE_S:      float = 8.0   # post-expiry grace for processed-commitment lag
+BUY_BALANCE_PROBE_EVERY_S: float = 1.5 # wallet-balance probe cadence while settling
+BUY_SETTLE_POLL_S:       float = 0.4   # settle-loop iteration cadence (fast)
+
 # ── RETRY / ESCALATION POLICY ────────────────────────────────────────────────
 # ASYMMETRIC FAILURE POLICY (per requirements):
 #   • BUY  — single attempt, NO retry.  If the broadcast is rejected or the TX
@@ -100,6 +117,13 @@ MAX_PRIORITY_FEE         = 100_000  # micro-lamports — 0.0001 SOL, never excee
 # signal within this many seconds, force another sell pass.
 WATCHDOG_INTERVAL_S: float = 6.0
 WATCHDOG_TIMEOUT_S:  float = 45.0
+
+# Market-cap floor stop: maximum time (seconds) the session will wait for the
+# emergency sell to confirm on-chain before terminating anyway.  Generous on
+# purpose — a panicked market needs the slippage/priority-fee escalation
+# ladder in execute_sell to run its course.  The background watchdog
+# (_monitor_trade) keeps trying to settle even after this fires.
+MCAP_STOP_SELL_TIMEOUT_SECONDS: float = 300.0
 
 # ── Hot-path cache tuning ─────────────────────────────────────────────────────
 # How often the background tasks refresh the cached balances / blockhash.
@@ -298,6 +322,7 @@ class LiveTrader:
         self._cached_token_balance: int = 0
         self._cached_balance_ts: float = 0.0
         self._cached_blockhash: Optional[str] = None
+        self._cached_blockhash_lvh: Optional[int] = None
         self._cached_blockhash_ts: float = 0.0
         self._balance_cache_task: Optional[asyncio.Task] = None
         self._blockhash_task: Optional[asyncio.Task] = None
@@ -308,6 +333,30 @@ class LiveTrader:
         # time — empirically cuts "first-wins" wait time in half. Falls back
         # to the full fanout if that RPC ever fails or stalls.
         self._fast_rpc_idx: int = 0
+
+        # ── Buy-finality state ─────────────────────────────────────────────
+        # While a buy TX is broadcast-but-unconfirmed the trade stays
+        # "pending" and ALL entry paths are blocked (see _is_buy_pending).
+        # If the wallet ever holds tokens that no tracked trade accounts for
+        # (e.g. a buy landed after we gave up on it — should no longer be
+        # possible, but belt-and-braces), the watchdog adopts the bag into a
+        # monitored trade instead of leaving it invisible.
+        self._adopted_bag: bool = False
+
+    def _is_buy_pending(self) -> bool:
+        """True while a buy TX's on-chain fate is still unknown.
+
+        A pending buy must block every entry path (signal buys, manual buys,
+        watchdog) — entering a second position while the first may still land
+        is exactly the unmonitored-position bug this invariant fixes.
+        """
+        ct = self.current_trade
+        return (
+            ct is not None
+            and ct.status == "pending"
+            and not ct.tx_hash_sell
+            and ct.exit_time is None
+        )
 
     def start_watchdog(self):
         """Spawn `_monitor_trade` exactly once per session (called by main.py).
@@ -403,9 +452,11 @@ class LiveTrader:
         """
         while self._alive:
             try:
-                bh = await self._fetch_latest_blockhash()
-                if bh:
+                res = await self._fetch_latest_blockhash()
+                if res:
+                    bh, lvh = res
                     self._cached_blockhash = bh
+                    self._cached_blockhash_lvh = lvh
                     self._cached_blockhash_ts = time.time()
             except asyncio.CancelledError:
                 break
@@ -413,22 +464,50 @@ class LiveTrader:
                 logger.debug(f"[CACHE] blockhash refresh error: {e}")
             await asyncio.sleep(BLOCKHASH_REFRESH_S)
 
-    async def _fetch_latest_blockhash(self) -> Optional[str]:
-        """Fetch a fresh (processed) blockhash from the fastest known RPC."""
+    async def _fetch_latest_blockhash(self) -> Optional[tuple]:
+        """Fetch a fresh (processed) blockhash from the fastest known RPC.
+
+        Returns ``(blockhash, last_valid_block_height)`` — the height is the
+        cryptographic expiry of the hash (~150 slots out).  A transaction is
+        guaranteed-dead once the chain passes that height, which is the ONLY
+        moment a buy may be declared failed.
+        """
         payload = {
             "jsonrpc": "2.0", "id": 1,
             "method": "getLatestBlockhash",
             "params": [{"commitment": "processed"}],
         }
 
-        def _extract(data: dict) -> Optional[str]:
+        def _extract(data: dict) -> Optional[tuple]:
             try:
-                bh = data.get("result", {}).get("value", {}).get("blockhash")
-                return bh if isinstance(bh, str) else None
+                value = data.get("result", {}).get("value", {})
+                bh = value.get("blockhash")
+                lvh = value.get("lastValidBlockHeight")
+                if isinstance(bh, str) and isinstance(lvh, int):
+                    return (bh, lvh)
+                return (bh, None) if isinstance(bh, str) else None
             except Exception:
                 return None
 
         return await self._rpc_fanout_first_wins(payload, timeout_s=1.2, result_fn=_extract)
+
+    async def _get_block_height(self) -> Optional[int]:
+        """Current chain block height (processed commitment)."""
+        payload = {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "getBlockHeight",
+            "params": [{"commitment": "processed"}],
+        }
+
+        def _extract(data: dict) -> Optional[int]:
+            try:
+                val = data.get("result")
+                return int(val) if val is not None else None
+            except Exception:
+                return None
+
+        result = await self._rpc_fanout_first_wins(payload, timeout_s=1.2, result_fn=_extract)
+        return result if isinstance(result, int) else None
 
     def _get_cached_sol_balance(self) -> float:
         return self._cached_sol_balance
@@ -436,13 +515,13 @@ class LiveTrader:
     def _get_cached_token_balance(self) -> int:
         return self._cached_token_balance
 
-    def _get_fresh_blockhash(self) -> Optional[str]:
-        """Return the cached blockhash if it's still comfortably within validity."""
+    def _get_fresh_blockhash(self) -> Optional[tuple]:
+        """Return ``(blockhash, last_valid_block_height)`` if still fresh."""
         if self._cached_blockhash is None:
             return None
         if (time.time() - self._cached_blockhash_ts) > BLOCKHASH_MAX_AGE_S:
             return None
-        return self._cached_blockhash
+        return (self._cached_blockhash, getattr(self, "_cached_blockhash_lvh", None))
 
     async def _rpc_fanout_first_wins(self, payload: dict, timeout_s: float,
                                        result_fn) -> Optional[object]:
@@ -695,6 +774,13 @@ class LiveTrader:
         safe (TX is idempotent by signature) and dramatically increases the
         chance that a slow forwarder actually lands it before expiry.
 
+        Rebroadcast is HARD-CAPPED at the first CONFIRM_TIMEOUT_S window even
+        when the caller passes a longer ``timeout_s`` (the buy-settle path
+        polls for the full blockhash-validity window).  Rebroadcasting past
+        that window would keep the TX alive in RPC forwarding queues and
+        undermine the "blockhash expired ⇒ TX is dead" guarantee the buy
+        path relies on.
+
         Returns:
             {"confirmed": bool, "error": str | None, "slot": int | None}
         """
@@ -705,7 +791,12 @@ class LiveTrader:
 
         while time.time() - start < timeout_s:
             # ── Aggressive rebroadcast of the same signed TX while confirming ──
-            if signed_b64 and (time.time() - last_broadcast) >= CONFIRM_REBROADCAST_S:
+            # Capped at the first CONFIRM_TIMEOUT_S window (see docstring).
+            if (
+                signed_b64
+                and (time.time() - last_broadcast) >= CONFIRM_REBROADCAST_S
+                and (time.time() - start) < CONFIRM_TIMEOUT_S
+            ):
                 last_broadcast = time.time()
                 asyncio.ensure_future(self._broadcast_multi(signed_b64))
 
@@ -751,6 +842,29 @@ class LiveTrader:
 
         logger.warning(f"[CONFIRM TIMEOUT] sig={sig[:16]}… not confirmed within {timeout_s}s")
         return {"confirmed": False, "error": "timeout", "slot": None}
+
+    async def _get_signature_status(self, sig: str) -> Optional[dict]:
+        """Single non-blocking signature-status probe across the RPC fanout.
+
+        Returns the raw status dict (``{"err", "confirmationStatus", "slot"}``)
+        from the first RPC that has one, or ``None`` if no RPC knows the sig
+        yet.  Unlike ``_confirm_tx`` this performs ONE round of probes with no
+        internal wait loop, so the buy-settle loop can interleave status probes
+        with balance probes and blockheight checks at a fast cadence.
+        """
+        payload = {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "getSignatureStatuses",
+            "params": [[sig], {"searchTransactionHistory": False}],
+        }
+
+        def _extract(data: dict) -> Optional[dict]:
+            statuses = data.get("result", {}).get("value", [None])
+            st = statuses[0] if statuses else None
+            return st if isinstance(st, dict) else None
+
+        result = await self._rpc_fanout_first_wins(payload, timeout_s=1.2, result_fn=_extract)
+        return result if isinstance(result, dict) else None
 
     async def _fetch_tx_logs(self, sig: str):
         """Fetch and log the full transaction logs for a given signature."""
@@ -879,7 +993,7 @@ class LiveTrader:
             logger.debug(f"[BLOCKHASH] rebuild failed ({e}) — using Jupiter blockhash")
             return tx
 
-    async def _sign_and_send(self, swap_tx_b64: str, wait_for_confirmation: bool = False) -> Optional[str]:
+    async def _sign_and_send(self, swap_tx_b64: str, wait_for_confirmation: bool = False) -> Optional[dict]:
         """
         Sign the base64-encoded versioned transaction and broadcast it
         to ALL RPCs simultaneously.
@@ -888,17 +1002,26 @@ class LiveTrader:
           - Rebuild TX with a fresh cached blockhash (maximises landing window)
           - skip_simulation=True  → no simulate call (saves ~300 ms)
           - Multi-RPC fanout for maximum landing probability
-          - Returns the signature the INSTANT the TX is on the wire.
+          - Returns the INSTANT the TX is on the wire.
             Confirmation + rebroadcast run as a background task.
+
+        Returns ``{"sig": str, "last_valid_block_height": int | None}`` on
+        success, ``None`` if every RPC rejected the broadcast.  The height is
+        the cryptographic expiry of the TX's blockhash — the only moment a
+        buy may be declared failed.
         """
         try:
             raw_tx = base64.b64decode(swap_tx_b64)
             tx = VersionedTransaction.from_bytes(raw_tx)
 
             # ── Rebuild with the freshest cached blockhash if available ────
-            fresh_bh = self._get_fresh_blockhash()
-            if fresh_bh:
-                tx = self._rebuild_tx_with_blockhash(tx, fresh_bh)
+            last_valid_height: Optional[int] = None
+            fresh = self._get_fresh_blockhash()
+            if fresh:
+                fresh_bh, fresh_lvh = fresh
+                if fresh_bh:
+                    tx = self._rebuild_tx_with_blockhash(tx, fresh_bh)
+                last_valid_height = fresh_lvh
 
             # Sign with our keypair
             signed_tx = VersionedTransaction(tx.message, [self.keypair])
@@ -933,9 +1056,13 @@ class LiveTrader:
                     return None
             else:
                 # ── Fire-and-forget confirmation (also rebroadcasts) ─────────
+                # NOTE: rebroadcast is capped at the first CONFIRM_TIMEOUT_S
+                # window inside _confirm_tx — we must NOT keep the TX alive in
+                # RPC forwarding queues past the point where the settle task
+                # is deciding whether the buy is dead.
                 asyncio.ensure_future(self._background_confirm(sig, signed_b64))
 
-            return sig
+            return {"sig": sig, "last_valid_block_height": last_valid_height}
 
         except Exception as e:
             logger.error(f"[SIGN_AND_SEND ERROR] {e}", exc_info=True)
@@ -974,7 +1101,7 @@ class LiveTrader:
         result = await self._rpc_fanout_first_wins(payload, timeout_s=1.2, result_fn=_extract)
         return result if isinstance(result, float) else 0.0
 
-    async def _get_token_balance(self) -> int:
+    async def _get_token_balance(self, commitment: str = "processed") -> int:
         """
         Authoritative on-chain token balance (raw smallest units).
 
@@ -983,6 +1110,12 @@ class LiveTrader:
         remaining RPCs (each capped at 1.2 s). First non-zero account
         amount wins. Auto-detects Token vs Token-2022 program ownership
         from the parsed account info.
+
+        ``commitment`` defaults to ``processed`` (fastest, used on the swap hot
+        path).  Post-trade VERIFICATION reads (post-buy reconcile, post-sell
+        settle, group-boundary empty-check) should pass ``confirmed`` — a
+        processed read can lag a just-confirmed swap and report a stale
+        pre-trade balance, which caused phantom "SELL PARTIAL" resurrections.
         """
         payload = {
             "jsonrpc": "2.0", "id": 1,
@@ -990,7 +1123,7 @@ class LiveTrader:
             "params": [
                 self.wallet_pubkey,
                 {"mint": self.token_mint},
-                {"encoding": "jsonParsed"},
+                {"encoding": "jsonParsed", "commitment": commitment},
             ],
         }
 
@@ -1076,31 +1209,43 @@ class LiveTrader:
                 return None
 
             # ── Fire-and-forget broadcast ─────────────────────────────────────
-            sig = await self._sign_and_send(swap_tx, wait_for_confirmation=False)
-            if not sig:
+            send_res = await self._sign_and_send(swap_tx, wait_for_confirmation=False)
+            if not send_res:
                 logger.error("[BUY FAILED] Broadcast rejected by all RPCs — not retrying")
                 await self._fail_buy_flat("Broadcast rejected by all RPCs", reason)
                 return None
+            sig = send_res["sig"]
+            last_valid_height = send_res.get("last_valid_block_height")
 
-            # ── Optimistic success (confirmation runs in background) ─────────
+            # ── PENDING until on-chain confirmation ───────────────────────────
+            # DO NOT mark the trade open here — the TX may still fail or never
+            # land.  The trade stays "pending" (blocking new entries) until
+            # _background_buy_settle either confirms it on-chain (→ open) or
+            # proves it dead (→ failed).  We DO seed a PROVISIONAL balance from
+            # the Jupiter outAmount so a sell signal that fires before the
+            # 4s background balance refresh can still build a swap — the sell
+            # path re-reads the authoritative on-chain balance and corrects it.
             elapsed = time.time() - buy_start
             out_amount = int(quote.get("outAmount", 0))
             tokens = out_amount / (10 ** self._token_decimals)
             ct = self.current_trade
             if ct:
                 ct.tx_hash_buy = sig
-                ct.size_tokens = tokens
-                ct.status = "open"
-            self._token_balance = out_amount
-            self._cached_token_balance = out_amount
+                ct.size_tokens = tokens   # provisional — corrected on confirm
+                ct.status = "pending"
+            self._token_balance = out_amount          # provisional seed
+            self._cached_token_balance = out_amount   # keep cache warm pre-refresh
             self._last_exit_signal_ts = 0.0  # reset watchdog
-            # Background task confirms the TX; if it never lands it rolls the
-            # position back to FLAT (no retry).
-            asyncio.ensure_future(self._background_buy_settle(sig, out_amount))
-            await self._broadcast_status("buy_confirmed", sig, reason, tokens=tokens)
+            # Background task confirms the TX across the FULL blockhash-validity
+            # window; only after the hash is cryptographically dead AND the
+            # wallet provably holds no tokens is the buy declared failed.
+            asyncio.ensure_future(
+                self._background_buy_settle(sig, out_amount, last_valid_height)
+            )
+            await self._broadcast_status("buy_pending", sig, reason, tokens=tokens)
             logger.info(
                 f"[BUY BROADCAST] sig={sig} tokens={tokens:.4f} "
-                f"elapsed={elapsed:.2f}s (fire-and-forget)"
+                f"elapsed={elapsed:.2f}s (pending on-chain confirmation)"
             )
             logger.info(f"[BUY] https://solscan.io/tx/{sig}")
             return sig
@@ -1117,73 +1262,207 @@ class LiveTrader:
         Return the algorithm to a FLAT / position-closed state after a failed
         buy (no retry).  Clears the open trade and notifies the engine that no
         position is held so it can generate a fresh entry on the next signal.
+
+        CRITICAL SAFETY: before failing, do a final on-chain balance probe.
+        If tokens ARE present the buy actually landed — adopt them into the
+        open trade instead of declaring failure (an unmonitored bag is the
+        exact bug this fixes).
         """
-        self._token_balance = 0
-        self._cached_token_balance = 0
         if self.current_trade is not None:
             failed = self.current_trade
+            # Defensive final probe: never fail a buy whose tokens are
+            # actually sitting in the wallet (belt-and-braces — the settle
+            # loop already probed, but RPC lag is real).
+            try:
+                on_chain = await self._get_token_balance()
+            except Exception:
+                on_chain = 0
+            if on_chain > 0:
+                logger.warning(
+                    f"[BUY FAIL ABORTED] Wallet holds {on_chain} tokens despite "
+                    f"'{detail}' — treating buy as CONFIRMED instead of failed."
+                )
+                self._token_balance = on_chain
+                self._cached_token_balance = on_chain
+                failed.status = "open"
+                failed.size_tokens = on_chain / (10 ** self._token_decimals)
+                await self._broadcast_status(
+                    "buy_confirmed", failed.tx_hash_buy or "", reason,
+                    tokens=failed.size_tokens,
+                )
+                return
             failed.status = "failed"
             failed.exit_reason = f"buy_failed: {detail}"
             failed.exit_time = time.time()
             self.trade_history.append(failed)
             self.current_trade = None
+        self._token_balance = 0
+        self._cached_token_balance = 0
         self._pending_buy = False
         self._pending_buy_reason = ""
         self.engine.notify_trade_closed()
         await self._broadcast_status("buy_failed", detail, reason)
 
     async def _verify_buy_settled(self, sig: str, expected_amount: int):
-        """Background post-buy balance check. Non-blocking — only corrects
-        ``_token_balance`` if the on-chain figure differs from the Jupiter
-        outAmount. A small settle delay lets the RPC's processed commitment
-        catch up so we don't fan a false alarm."""
-        await asyncio.sleep(0.4)
-        settled = await self._get_token_balance()
-        if settled > 0 and settled != expected_amount:
-            logger.info(
-                f"[BUY VERIFY] On-chain balance {settled} differs from Jupiter "
-                f"outAmount {expected_amount} — adopting on-chain figure."
-            )
-            self._token_balance = settled
-            self._cached_token_balance = settled
-            ct = self.current_trade
-            if ct and ct.status == "open":
-                ct.size_tokens = settled / (10 ** self._token_decimals)
-        elif settled == 0:
-            # The swap confirmed via Solana's getSignatureStatuses; this
-            # is just bandwidth-limited processed-commitment read lag.
-            logger.debug(
-                f"[BUY VERIFY] Token balance query lagged (sig={sig[:8]}…); "
-                f"trusting Jupiter outAmount."
-            )
+        """Background post-buy balance reconcile.  The buy is CONFIRMED on-chain,
+        so the tokens MUST exist — a ``0`` read is just processed-commitment /
+        ATA-propagation lag, never a real empty wallet.  Poll briefly until we
+        get a definitive non-zero read and adopt it, so ``_token_balance`` /
+        ``_cached_token_balance`` reflect reality before any sell can fire.
+        Never leaves the cache stale by silently returning on a lagged 0."""
+        for attempt in range(8):  # ~0.4s initial + up to 7 × 0.5s retries
+            await asyncio.sleep(0.4 if attempt == 0 else 0.5)
+            try:
+                settled = await self._get_token_balance()
+            except Exception:
+                settled = 0
+            if settled > 0:
+                if settled != expected_amount:
+                    logger.info(
+                        f"[BUY VERIFY] On-chain balance {settled} differs from Jupiter "
+                        f"outAmount {expected_amount} — adopting on-chain figure."
+                    )
+                self._token_balance = settled
+                self._cached_token_balance = settled
+                ct = self.current_trade
+                if ct and ct.tx_hash_buy == sig:
+                    ct.size_tokens = settled / (10 ** self._token_decimals)
+                return
+            # settled == 0 → read lag; keep polling
+        # All probes lagged.  Keep the provisional Jupiter outAmount (seeded in
+        # execute_buy) rather than zeroing — the sell path re-reads on-chain and
+        # corrects, and zeroing here is what caused "No token balance to sell".
+        logger.warning(
+            f"[BUY VERIFY] Balance still reading 0 after retries (sig={sig[:8]}…) — "
+            f"keeping provisional {expected_amount}; sell will re-read on-chain."
+        )
 
-    async def _background_buy_settle(self, sig: str, expected_amount: int):
+    async def _background_buy_settle(
+        self,
+        sig: str,
+        expected_amount: int,
+        last_valid_height: Optional[int] = None,
+    ):
         """
         Background confirmation + settle for a fire-and-forget buy.
 
-        The hot path returned the signature the instant the TX was broadcast;
-        this task runs the confirmation poll (with rebroadcast) and then
-        verifies the token balance actually landed.  If the TX fails on-chain
-        (rejected, dropped, or simulation error) the position is unwound via
-        ``_fail_buy_flat`` (no retry) so a later signal can re-enter cleanly.
+        THE BUY-FINALITY INVARIANT lives here.  A buy is resolved in exactly
+        one of two ways:
+
+          CONFIRMED — the TX reached confirmed/finalized status, OR the wallet
+                      provably holds the tokens (balance probe).  The trade is
+                      promoted to ``open`` and monitored normally.
+
+          FAILED    — ONLY once the TX is *cryptographically dead* (its
+                      blockhash's ``lastValidBlockHeight`` has been passed by
+                      the chain, ~150 slots ≈ 60 s) AND the wallet provably
+                      holds zero tokens.  Until BOTH hold, the trade stays
+                      ``pending`` and no new entry is possible.
+
+        This removes the old 12 s timeout failure boundary, which declared a
+        buy "failed" while the TX was still landable — producing unmonitored
+        on-chain positions the algorithm believed were closed.
         """
-        confirm_result = await self._confirm_tx(sig)
-        if confirm_result["confirmed"]:
-            logger.info(f"[BUY CONFIRMED BG] sig={sig[:16]}… slot={confirm_result.get('slot')}")
-            await self._verify_buy_settled(sig, expected_amount)
+        start = time.time()
+        deadline = start + BUY_CONFIRM_TIMEOUT_S
+        last_probe = 0.0
+        last_height_check = 0.0
+
+        async def _confirm_open(balance: int, via: str):
+            """Promote the pending trade to open and reconcile the balance."""
+            self._token_balance = balance
+            self._cached_token_balance = balance
+            ct = self.current_trade
+            if ct is not None and ct.tx_hash_buy == sig:
+                ct.status = "open"
+                ct.size_tokens = balance / (10 ** self._token_decimals)
             await self._refresh_sol_balance_async()
+            await self._broadcast_status(
+                "buy_confirmed", sig, "signal",
+                tokens=(self.current_trade.size_tokens if self.current_trade else 0),
+            )
+            logger.info(f"[BUY CONFIRMED BG] sig={sig[:16]}… via={via} balance={balance}")
+
+        # Single tight poll loop — one status probe per iteration (NOT a nested
+        # 12 s _confirm_tx per outer loop, which made deadness/balance checks
+        # run only once per 12 s and duplicated the _background_confirm waiter).
+        while time.time() < deadline:
+            # ── 1. Single signature-status probe ─────────────────────────────
+            status = await self._get_signature_status(sig)
+            if status is not None:
+                if status.get("err"):
+                    # Definitive on-chain rejection — TX can never land.  Probe
+                    # balance once (a prior rebroadcast may have landed) then fail.
+                    logger.warning(f"[BUY BG] sig={sig[:16]}… on-chain error: {status['err']}")
+                    break
+                if status.get("confirmationStatus") in ("confirmed", "finalized"):
+                    # Confirmed — reconcile the real balance and open.
+                    await self._verify_buy_settled(sig, expected_amount)
+                    bal = self._token_balance or expected_amount
+                    await _confirm_open(bal, "signature_status")
+                    return
+
+            # ── 2. Wallet-balance probe (catches landed-but-unseen TXs) ───────
+            if time.time() - last_probe >= BUY_BALANCE_PROBE_EVERY_S:
+                last_probe = time.time()
+                try:
+                    on_chain = await self._get_token_balance()
+                except Exception:
+                    on_chain = 0
+                if on_chain > 0:
+                    await _confirm_open(on_chain, "balance_probe")
+                    return
+
+            # ── 3. Cryptographic deadness check (blockhash expiry) ────────────
+            if last_valid_height is not None and (time.time() - last_height_check) >= 2.0:
+                last_height_check = time.time()
+                height = await self._get_block_height()
+                if height is not None and height > last_valid_height:
+                    # TX can NEVER land now.  Grace window for processed-commitment
+                    # lag, then the balance probe decides confirmed-vs-failed.
+                    logger.info(
+                        f"[BUY BG] sig={sig[:16]}… blockhash expired "
+                        f"(height {height} > last_valid {last_valid_height}) — final settle grace"
+                    )
+                    await asyncio.sleep(BUY_SETTLE_GRACE_S)
+                    try:
+                        final_bal = await self._get_token_balance()
+                    except Exception:
+                        final_bal = 0
+                    if final_bal > 0:
+                        await _confirm_open(final_bal, "post_expiry_balance")
+                        return
+                    logger.error(
+                        f"[BUY BG FAILED] sig={sig[:16]}… blockhash expired and "
+                        f"wallet empty — buy is cryptographically dead"
+                    )
+                    ct = self.current_trade
+                    if ct is not None and ct.tx_hash_buy == sig:
+                        await self._fail_buy_flat(
+                            "Buy TX expired without landing (blockhash dead)", "signal"
+                        )
+                    return
+
+            await asyncio.sleep(BUY_SETTLE_POLL_S)
+
+        # ── Absolute deadline hit (or definitive on-chain error) ──────────────
+        # Final balance probe is the tie-breaker: tokens present ⇒ confirmed.
+        try:
+            final_bal = await self._get_token_balance()
+        except Exception:
+            final_bal = 0
+        ct = self.current_trade
+        if final_bal > 0:
+            await _confirm_open(final_bal, "deadline_balance")
             return
 
-        # ── Fire-and-forget buy never landed → fail flat, NO retry ──────────
         logger.error(
-            f"[BUY BG FAILED] sig={sig[:16]}… did not confirm "
-            f"(error={confirm_result.get('error')}) — returning to FLAT (no retry)"
+            f"[BUY BG FAILED] sig={sig[:16]}… never confirmed within "
+            f"{BUY_CONFIRM_TIMEOUT_S:.0f}s and wallet empty — returning to FLAT (no retry)"
         )
-        # Only roll back if this sig is still the live position's buy hash.
-        ct = self.current_trade
         if ct is not None and ct.tx_hash_buy == sig:
             await self._fail_buy_flat(
-                f"Buy TX failed on-chain: {confirm_result.get('error')}", "signal"
+                "Buy TX failed on-chain (never landed, wallet empty)", "signal"
             )
 
     async def _refresh_sol_balance_async(self):
@@ -1201,9 +1480,33 @@ class LiveTrader:
 
         ``closed_trade`` is the LiveTrade returned by confirm_sell; if it's
         not None we may need to "un-close" it and re-arm the watchdog.
+
+        CRITICAL: this read MUST use ``confirmed`` commitment and retry.  A
+        ``processed`` read taken moments after the sell confirmed can lag and
+        report the stale PRE-SELL balance — which produced phantom "SELL
+        PARTIAL" resurrections that re-sold an already-empty wallet (6024
+        loop).  We only resurrect on a STABLE non-zero confirmed balance.
         """
-        await asyncio.sleep(0.6)  # let processed commitment catch up
-        post_balance = await self._get_token_balance()
+        post_balance = 0
+        for attempt in range(5):
+            await asyncio.sleep(0.8 if attempt == 0 else 0.7)
+            try:
+                post_balance = await self._get_token_balance(commitment="confirmed")
+            except Exception:
+                post_balance = 0
+            if post_balance == 0:
+                return  # genuinely empty — trade is closed, nothing to do
+            # Non-zero: confirm it's stable (not a lagging pre-sell snapshot)
+            # by reading once more before deciding to resurrect.
+            await asyncio.sleep(0.5)
+            try:
+                confirm_read = await self._get_token_balance(commitment="confirmed")
+            except Exception:
+                confirm_read = 0
+            if confirm_read == 0:
+                return  # first read was lag — wallet is actually empty
+            post_balance = confirm_read
+            break  # stable non-zero across two confirmed reads → genuine partial
         if post_balance > 0:
             logger.warning(
                 f"[SELL PARTIAL] {post_balance} tokens still on-chain after "
@@ -1275,6 +1578,15 @@ class LiveTrader:
             # past the watchdog timeout without a clear "we tried" mark.
             self._last_exit_signal_ts = time.time()
 
+            # ── If a buy is still pending, wait for it to settle first ────────
+            # Selling into a pending buy races the landing TX.  Wait (bounded)
+            # for the settle loop to resolve it; then read the real balance.
+            if self._is_buy_pending():
+                logger.info("[SELL] Buy still pending — waiting for it to settle before selling")
+                wait_deadline = time.time() + 30.0
+                while self._is_buy_pending() and time.time() < wait_deadline:
+                    await asyncio.sleep(0.25)
+
             logger.info(
                 f"[SELL] Starting sell: mint={mint_str[:8]}… reason={reason} "
                 f"cached_balance={self._token_balance} units"
@@ -1289,7 +1601,22 @@ class LiveTrader:
             # most important step for "correct amount every time".  The read
             # uses the fast-RPC fanout (~0.2–0.5s), far cheaper than a failed
             # 6024 round-trip (~1s + a wasted signature).
-            fresh_bal = await self._get_token_balance()
+            #
+            # A 0 read is usually transient (processed-commitment / ATA
+            # propagation lag right after a buy) — NEVER bail on it.  Retry the
+            # read briefly, then fall back to the last-known cached figure and
+            # let the grouped-retry loop + watchdog keep selling until the
+            # wallet is actually empty.
+            fresh_bal = 0
+            for probe in range(4):
+                try:
+                    fresh_bal = await self._get_token_balance()
+                except Exception:
+                    fresh_bal = 0
+                if fresh_bal > 0:
+                    break
+                if probe < 3:
+                    await asyncio.sleep(0.5)
             if fresh_bal > 0:
                 if fresh_bal != self._token_balance:
                     logger.info(
@@ -1300,14 +1627,25 @@ class LiveTrader:
                 self._token_balance = fresh_bal
                 self._cached_token_balance = fresh_bal
             else:
-                # Live read returned 0 — either genuinely empty or a transient
-                # RPC gap.  Fall back to the last-known balance so we still
-                # attempt the sell; the 6024 retry loop will correct it.
+                # Live read stayed 0 — transient RPC/ATA lag or genuinely empty.
+                # Fall back to the last-known cached balance so we still attempt
+                # the sell; the 6024 retry loop + watchdog correct it.
                 token_balance = self._token_balance
 
             if token_balance <= 0:
-                logger.warning(f"[SELL FAILED] No token balance to sell for {mint_str[:8]}…")
-                await self._broadcast_status("sell_failed", "No token balance", reason)
+                # No on-chain balance AND no cached balance.  Do NOT give up —
+                # re-arm the watchdog so it keeps probing until tokens appear
+                # (delayed buy landing) or the session is torn down.  This
+                # removes the old "No token balance" dead-end that orphaned
+                # positions.
+                logger.warning(
+                    f"[SELL] No token balance readable yet for {mint_str[:8]}… — "
+                    f"arming watchdog to retry until tokens appear"
+                )
+                self._last_exit_signal_ts = time.time()
+                await self._broadcast_status(
+                    "sell_pending", "Waiting for token balance to appear", reason
+                )
                 return None
 
             logger.info(
@@ -1366,7 +1704,8 @@ class LiveTrader:
                     # phantom "closed trade" per failed attempt.  If the TX
                     # fails, the position stays open and the loop retries
                     # immediately with a fresh quote + fresh balance.
-                    sig = await self._sign_and_send(swap_tx, wait_for_confirmation=True)
+                    send_res = await self._sign_and_send(swap_tx, wait_for_confirmation=True)
+                    sig = send_res["sig"] if send_res else None
                     if not sig:
                         logger.warning(f"[SELL FAILED {label}] TX not confirmed — retrying immediately with fresh quote")
                         await asyncio.sleep(0.05)
@@ -1402,7 +1741,18 @@ class LiveTrader:
                     return sig
 
                 # ── Group exhausted ──────────────────────────────────────────
-                bal = await self._get_token_balance()
+                # Use confirmed commitment + retry: a lagging processed read
+                # here can report the stale pre-sell balance (or vice-versa).
+                bal = 0
+                for _chk in range(3):
+                    try:
+                        bal = await self._get_token_balance(commitment="confirmed")
+                    except Exception:
+                        bal = 0
+                    if bal > 0:
+                        break
+                    if _chk < 2:
+                        await asyncio.sleep(0.5)
                 if bal == 0:
                     # Wallet empty — the sell DID go through on-chain (otherwise
                     # we'd still hold tokens). Estimate SOL received from the
@@ -1497,7 +1847,50 @@ class LiveTrader:
             try:
                 await asyncio.sleep(WATCHDOG_INTERVAL_S)
 
+                # ── Orphaned-bag adoption (backstop) ──────────────────────────
+                # If the wallet holds tokens but NO trade is tracked and no buy
+                # is pending, a position exists on-chain that the algorithm
+                # cannot see.  Adopt it into a monitored trade so it can be
+                # sold — never leave an invisible bag.  (With the buy-finality
+                # invariant this should be unreachable, but belt-and-braces.)
+                if (self.current_trade is None
+                        and not self._swap_in_flight
+                        and not self._is_buy_pending()
+                        and not self._adopted_bag):
+                    try:
+                        orphan = await self._get_token_balance(commitment="confirmed")
+                    except Exception:
+                        orphan = 0
+                    if orphan > 0:
+                        logger.warning(
+                            f"[WATCHDOG] ⚠  Wallet holds {orphan} tokens with no "
+                            f"tracked trade — adopting orphaned bag into a monitored "
+                            f"position so it can be sold."
+                        )
+                        self._adopted_bag = True
+                        self._token_balance = orphan
+                        self._cached_token_balance = orphan
+                        price = self._last_price or 0.0
+                        adopted = LiveTrade(
+                            token_mint=self.token_mint,
+                            entry_time=int(time.time()),
+                            entry_price=price,
+                            size_sol=0.0,
+                            size_tokens=orphan / (10 ** self._token_decimals),
+                            entry_reason="watchdog_adopted_orphan",
+                            status="open",
+                        )
+                        self.current_trade = adopted
+                        self.engine.notify_trade_opened(price, Direction.UP)
+                        self._last_exit_signal_ts = time.time()  # arm sell path
+                        asyncio.ensure_future(self.execute_sell("watchdog_adopted_orphan"))
+                        continue
+
                 if self.current_trade is None or self._swap_in_flight:
+                    continue
+
+                # A pending buy is mid-flight — never interfere with it.
+                if self._is_buy_pending():
                     continue
 
                 if self._last_exit_signal_ts <= 0:
@@ -1507,7 +1900,10 @@ class LiveTrader:
                 if time_since_exit < WATCHDOG_TIMEOUT_S:
                     continue  # normal sell retry may still be running
 
-                on_chain = await self._get_token_balance()
+                try:
+                    on_chain = await self._get_token_balance(commitment="confirmed")
+                except Exception:
+                    on_chain = 0
                 if on_chain > 0:
                     logger.warning(
                         f"[WATCHDOG] ⚠  {time_since_exit:.0f}s elapsed since sell "
@@ -1546,15 +1942,22 @@ class LiveTrader:
         """
         Called every tick with the latest USD market cap.
 
-        Returns True if the mcap floor was breached and the session should
-        be stopped by the caller (main.py cancels the WebSocket loop).
-
-        Behaviour:
-          - If mcap ≥ floor  → nothing happens.
+        Returns True only after the mcap floor breach has been FULLY handled:
+          - If mcap ≥ floor  → nothing happens (returns False).
           - If mcap < floor and NO open position → block new entries by
-            setting mcap_stop_triggered; broadcast warning.
-          - If mcap < floor and position IS open → emergency sell first,
-            then set mcap_stop_triggered; broadcast stop event.
+            setting mcap_stop_triggered; broadcast warning; returns True
+            immediately (nothing to sell).
+          - If mcap < floor and position IS open → await the emergency sell
+            to completion (execute_sell loops until the wallet is empty or
+            the sale is confirmed on-chain), THEN set mcap_stop_triggered
+            and return True.  The caller (main.py) can therefore cancel the
+            session immediately on True without racing an in-flight swap.
+
+        A generous timeout backstop (module-level
+        MCAP_STOP_SELL_TIMEOUT_SECONDS) prevents a pathologically stuck RPC
+        from hanging the session forever; on timeout we return True anyway
+        so the session can shut down and the background watchdog
+        (_monitor_trade) keeps trying to settle.
         """
         if market_cap_usd <= 0:
             return False  # No data yet — don't act on 0
@@ -1574,11 +1977,64 @@ class LiveTrader:
         )
         self.mcap_stop_triggered = True
 
-        if self.current_trade is not None and not self._swap_in_flight:
-            logger.warning("[MCAP STOP] Position open — triggering emergency sell")
-            self.current_trade.status = "closing"
-            self.current_trade.exit_reason = "mcap_floor_stop"
-            asyncio.ensure_future(self.execute_sell("mcap_floor_stop"))
+        if self.current_trade is not None:
+            if self._swap_in_flight:
+                # A swap (buy or sell) is already in flight.  Poll until it
+                # clears, then run the emergency sell if a position remains.
+                # This avoids execute_sell's "swap already in flight" early
+                # return, which would otherwise skip the emergency sell
+                # entirely and terminate the session with tokens still held.
+                logger.warning(
+                    "[MCAP STOP] Swap already in flight — waiting for it to "
+                    "clear before emergency sell"
+                )
+                wait_start = time.time()
+                while self._swap_in_flight:
+                    if time.time() - wait_start > MCAP_STOP_SELL_TIMEOUT_SECONDS:
+                        logger.error(
+                            f"[MCAP STOP] In-flight swap did not clear within "
+                            f"{MCAP_STOP_SELL_TIMEOUT_SECONDS:.0f}s — "
+                            f"terminating session; watchdog will continue "
+                            f"attempting to settle"
+                        )
+                        break
+                    await asyncio.sleep(0.1)
+
+            if self.current_trade is not None and not self._swap_in_flight:
+                logger.warning(
+                    "[MCAP STOP] Position open — awaiting emergency sell "
+                    "confirmation before session termination"
+                )
+                self.current_trade.status = "closing"
+                self.current_trade.exit_reason = "mcap_floor_stop"
+                try:
+                    # Await the sell to completion.  execute_sell only returns
+                    # once the swap is confirmed on-chain (sig), the wallet is
+                    # verified empty ("verified_empty"), or an unrecoverable
+                    # error occurred (None).  It never returns while a retry
+                    # is still pending.
+                    sig = await asyncio.wait_for(
+                        self.execute_sell("mcap_floor_stop"),
+                        timeout=MCAP_STOP_SELL_TIMEOUT_SECONDS,
+                    )
+                    if sig:
+                        logger.info(
+                            f"[MCAP STOP] Emergency sell settled (sig={sig}) — "
+                            f"safe to terminate session"
+                        )
+                    else:
+                        logger.error(
+                            "[MCAP STOP] Emergency sell returned without a "
+                            "signature — terminating session anyway; watchdog "
+                            "will continue attempting to settle"
+                        )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        f"[MCAP STOP] Emergency sell exceeded "
+                        f"{MCAP_STOP_SELL_TIMEOUT_SECONDS:.0f}s timeout — "
+                        f"terminating session; watchdog will continue attempting "
+                        f"to settle"
+                    )
 
         await self._broadcast_status(
             "mcap_stop",
@@ -1616,7 +2072,12 @@ class LiveTrader:
         """
         # ── Step 1: apply pending signal to engine BEFORE first engine.update() ──
         # This mirrors: ForwardTester._open_long / _close_long at candle open.
-        if self._pending_buy and self.current_trade is not None:
+        # Only notify the engine once the buy is CONFIRMED open — while the TX
+        # is still pending (broadcast but not on-chain) the engine must NOT
+        # believe a position is held, or it would evolve state for a trade that
+        # may never exist.
+        if (self._pending_buy and self.current_trade is not None
+                and self.current_trade.status == "open"):
             # Notify engine that a trade is now open at the open of this candle.
             # (The actual LiveTrade object was created and swap fired last candle.)
             self.engine.notify_trade_opened(o, Direction.UP)
@@ -1818,7 +2279,9 @@ class LiveTrader:
             # engine.notify_trade_opened/closed() will be called at the START
             # of the NEXT candle's _process_completed_candle call.
 
-            if self._pending_buy and self.current_trade is None and not self._swap_in_flight and not self.mcap_stop_triggered and not self.no_motion_stop_triggered:
+            if (self._pending_buy and self.current_trade is None
+                    and not self._swap_in_flight and not self._is_buy_pending()
+                    and not self.mcap_stop_triggered and not self.no_motion_stop_triggered):
                 buy_reason = self._pending_buy_reason
                 trade = LiveTrade(
                     token_mint=self.token_mint,
@@ -1907,8 +2370,8 @@ class LiveTrader:
 
     async def force_buy(self) -> Optional[str]:
         """Manually trigger a test buy from the dashboard."""
-        if self.current_trade is not None:
-            logger.warning("[MANUAL BUY] Already in a trade — ignoring")
+        if self.current_trade is not None or self._is_buy_pending():
+            logger.warning("[MANUAL BUY] Already in a trade (or buy pending) — ignoring")
             return None
         c = self._last_price or 1.0
         logger.info(f"[MANUAL BUY] Initiating manual buy at price={c}")
@@ -1923,13 +2386,15 @@ class LiveTrader:
         )
         self.current_trade = trade
         self._last_motion_ts = time.time()  # reset no-motion clock at position open
-        self.engine.notify_trade_opened(c, Direction.UP)
+        # Do NOT notify the engine yet — the trade is only "pending" until the
+        # buy confirms on-chain.  The engine is notified on confirmed-open via
+        # the normal pending-signal path (or on settle).
         sig = await self.execute_buy("manual_test_buy")
         if sig is None:
-            # Buy failed — clean up so future trades aren't blocked
+            # Buy failed — clean up so future trades aren't blocked.
+            # Engine was never notified of an open, so no notify_trade_closed.
             logger.warning("[MANUAL BUY] Buy failed — resetting trade state")
             self.current_trade = None
-            self.engine.notify_trade_closed()
         return sig
 
     async def force_sell(self) -> Optional[str]:
@@ -1956,9 +2421,16 @@ class LiveTrader:
         trade.tx_hash_sell = tx_hash
         trade.exit_price = actual_price
         trade.exit_time = time.time()
-        trade.pnl_sol = sol_received - trade.size_sol
-        if trade.entry_price > 0:
-            trade.pnl_pct = (trade.pnl_sol / trade.size_sol) * 100
+        # Adopted-orphan / zero-cost-basis trades carry size_sol=0.0 — guard
+        # the division and treat the entire proceeds as the PnL (there is no
+        # known entry cost to subtract).
+        if trade.size_sol > 0:
+            trade.pnl_sol = sol_received - trade.size_sol
+            if trade.entry_price > 0:
+                trade.pnl_pct = (trade.pnl_sol / trade.size_sol) * 100
+        else:
+            trade.pnl_sol = sol_received
+            trade.pnl_pct = 0.0
         trade.status = "closed"
 
         self.stats.total_trades += 1

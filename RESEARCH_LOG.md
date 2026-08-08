@@ -4609,3 +4609,147 @@ bounded below baseline by the oracle argument above.  The left tail is
 entry-selection error; it is only addressable by *information the engine does
 not currently observe* (e.g. validated holder-flow on the fresh iter36
 recordings), not by exit timing.  No production change; engine byte-identical.
+
+
+## Iter 38 — Holder-flow gate: first live-data validation (MECHANISM WORKS, net-positive, but firing on UNtagged flow — registry never populated)
+
+**Directive (user).**  "Analyse last night's trades and determine whether the
+newly implemented holder-flow gate is working as expected."  This is the first
+real-data validation of the iter36 mechanism, run on the 32 completed
+recordings captured overnight (2026-08-08 00:05 → 10:47 local, rec1346–1408).
+
+**Data-source caveat (live trades are not persisted).**  `LiveTrader.
+trade_history` is in-memory only and broadcast over `/ws/live/{mint}`; it is
+written to **no DB or file**.  There is therefore no record of actual live
+executions to inspect.  The analysis below is a faithful replay of last night's
+32 recordings through the production V2 engine (the parity-guaranteed path:
+`backtester → ForwardTester → StrategyEngineV2Adapter`), reconstructing exactly
+what the engine would have done with the gate ON vs OFF.  Sniper traded zero
+times all night (`forward_test_trades` empty), so it contributed nothing.
+
+**Holder-flow capture.**  1,010 events persisted to `holder_flow` across 36
+recordings (00:05:52 → 10:47:50); 305 were sells ≥ $100 (the
+`v2_holder_flow_min_usd` gate threshold).  Capture, persistence, and replay all
+worked end-to-end.
+
+### Headline result (32 recordings, gate ON vs OFF)
+
+| | Trades | Win rate | Total PnL |
+|---|---|---|---|
+| **Gate ON**  | 28 | **92.9%** | **+0.2573 SOL** |
+| **Gate OFF** | 29 | 86.2%     | +0.1720 SOL |
+| **Δ (ON−OFF)** | −1 | +6.7 pp | **+0.0853 SOL** |
+
+The gate is **mechanically functional and net-positive** on last night's data.
+Both mechanisms fired:
+
+1. **Exit trigger (`dev_sell_exit`) — the money-maker.**
+   * ENES (rec1353): `buy_exhaustion → dev_sell_exit:CwvYUDGo` cut a trade at
+     **−3.6%** that, gate-OFF, rode to `kelly_flat` at **−43.2%** (−0.0432 SOL).
+     Saved ≈ +0.040 SOL on one trade.
+   * burncoin (rec1359): gate-ON avoided a `kelly_flat` **−41.6%** (−0.0416 SOL)
+     loser entirely.
+   * raccoonzilla / RUBY: dev-sell exits fired and still closed positive
+     (+0.3%, +20.6%, +0.9%, +13.4%).
+
+2. **Entry gate (`holder_flow_block`) — firing heavily.**
+   * RUBY: **7,034** blocked entry bars; WAGMI 3,302; budi 1,510.  On budi it
+     blocked *every* entry → 0 trades.
+
+### ⚠️ Critical defect: the gate is firing on UNtagged flow, not verified dev/insider wallets
+
+**All 1,010 events have `tag = ''` (empty).**  Of the 305 big sells, **0** were
+tagged `dev`/`sniper`/`bundler`/`rat_trader` — **100% untagged**.  The per-token
+**wallet registry never populated**: `_refresh_wallet_registry()` (GMGN
+`token_top_holders` per tag) stored zero wallets all night, and the smartmoney
+feed's `maker_info.tags` fallback also produced nothing.
+
+With an empty registry, `holder_flow.py:372` falls through to
+"`if not tag and side=='sell' and amount_usd < _MIN_SELL_USD: continue`" — i.e.
+**any wallet selling ≥ $100 is emitted as a "dev sell."**  The engine's
+`_has_recent_dev_sell()` likewise checks only `side=='sell' and
+amount_usd >= min_usd`, **not** the tag.  So the gate currently operates as a
+**large-seller circuit breaker, not a dev/insider provenance gate.**
+
+It happened to be net-positive last night only because big untagged sells
+genuinely front-ran the two −43%/−41% dumps (correlation on untagged order
+flow), **not** because the provenance signal iter36 was designed around fired.
+The provenance core is **inert**.
+
+### Secondary observation: exit window is very sticky
+On raccoonzilla, `dev_sell_exit` fired **170 times** across bars — a single big
+sell keeps the position in exit state far longer than the nominal 15 s
+`v2_holder_flow_exit_window_seconds`.  Worth a look if churn appears.
+
+### Verdict
+* ✅ **Plumbing works:** events captured → persisted → replayed → engine blocks
+  entries and fires exits correctly.  ON/OFF parity clean (OFF path =
+  byte-identical baseline).
+* ✅ **Net-positive last night:** +0.085 SOL, +6.7 pp win rate, dodged the two
+  worst dumps.
+* ❌ **Not working "as designed":** registry empty ⇒ gating on *any ≥ $100
+  seller*, not verified dev/insider wallets.  The provenance feature is inert.
+
+### Recommended next step (not yet done)
+The registry-fetch path fails silently.  Add diagnostic logging around
+`_refresh_wallet_registry()` and confirm the actual GMGN `token_top_holders`
+response (likely an error/empty payload, or a 429 ban during registry refresh —
+`GMGN_API_KEY` was not present in the analysis shell, so the live endpoint could
+not be probed).  Until the registry populates, the gate should be regarded as a
+generic large-seller brake, and any paired-diff acceptance of "holder-flow" must
+be re-run once true tags are flowing.
+
+**No production change**; engine byte-identical to HEAD.  This entry documents a
+validation finding, not an engine modification.
+
+### Iter 38 — follow-up: data-collection fix shipped, gate/exit DEACTIVATED for A/B/C comparison
+
+Per user directive, the data-collection defects above were fixed while the
+trading response was turned **off**, so a fresh night of recordings can be
+captured and then compared three ways: **no gate** vs **gate 1.0** vs **gate
+2.0**.
+
+**Fixes (`backend/holder_flow.py`).**
+  * **Registry population made robust + observable.**  `_refresh_wallet_registry`
+    now logs every tag fetch (count added per tag), tolerates `address`/`wallet`/
+    `maker` key spellings, raises `limit` 20→50, and — critically — logs a
+    WARNING and schedules a retry when a full pass still yields an empty
+    registry (the iter38 root cause: silent empty registry ⇒ 100% untagged).
+  * **Fetch failures surfaced.**  `_get` now logs non-429 HTTP errors and
+    exceptions through a rate-limited logger (one line per distinct error per
+    60 s) instead of swallowing them at DEBUG.
+  * **Tag enrichment.**  `_normalise_tag` + `_TAG_SYNONYMS` map GMGN's assorted
+    `maker_info.tags` spellings (`token_deployer`, `top_sniper_1`, `insider`, …)
+    onto the canonical `dev`/`sniper`/`bundler`/`rat_trader` set.
+  * **`whale` fallback tag.**  A large sell (≥ $100) with no recognised
+    provenance is tagged `whale` so it stays distinguishable from a verified
+    insider sell in the recorded dataset.
+
+**Engine changes (`backend/strategy_engineV2.py`).**
+  * `v2_holder_flow_entry_block` default **1.0 → 0.0 (OFF)**.
+  * `v2_holder_flow_exit_enable`  default **1.0 → 0.0 (OFF)**.
+  * New knob `v2_holder_flow_require_tag` (default **1.0**): when > 0 the
+    gate/exit only fire on verified insider tags (`_DEV_TAGS`); `whale` /
+    untagged events do not qualify.  Set to 0.0 to reproduce the legacy
+    "any big seller" circuit-breaker.
+  * `_is_dev_sell` centralises the side/amount/tag predicate.
+
+**Data collection is unaffected by the OFF defaults** — the monitor captures and
+persists every event regardless of the gate knobs; they only gate the engine's
+trading response.
+
+**Planned A/B/C on the next night's recordings** (all replayed through the
+parity-guaranteed backtester on the same fresh cohort):
+  * **A — no gate:** defaults (both knobs 0.0).
+  * **B — gate 1.0:** `v2_holder_flow_entry_block=1, v2_holder_flow_exit_enable=1,
+    v2_holder_flow_require_tag=0` (legacy big-seller brake).
+  * **C — gate 2.0:** `v2_holder_flow_entry_block=1, v2_holder_flow_exit_enable=1,
+    v2_holder_flow_require_tag=1` (verified-insider only; requires the registry
+    to have populated).
+
+**Parity verification (rec1353 ENES, rec1347 WAGMI).**  New default (OFF) is
+byte-identical to explicit OFF on both recordings; `require_tag=0` reproduces
+the iter38 gate-ON behaviour exactly (ENES `dev_sell_exit:CwvYUDGo`, +0.030
+SOL); `require_tag=1` on the all-untagged existing data correctly collapses to
+the OFF result (the `whale` tag does not satisfy the verified-insider gate).
+Engine otherwise byte-identical to HEAD.

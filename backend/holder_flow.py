@@ -48,6 +48,80 @@ _GMGN_HOST = "https://openapi.gmgn.ai"
 # Wallet tags we care about (dev/insider cohorts)
 _TRACKED_TAGS = ("dev", "sniper", "bundler", "rat_trader")
 
+# iter38: map GMGN's assorted maker-tag spellings onto our tracked set, and
+# recognise additional insider-ish labels.  Anything not matched stays "".
+_TAG_SYNONYMS = {
+    "dev": "dev",
+    "token_deployer": "dev",
+    "deployer": "dev",
+    "creator": "dev",
+    "sniper": "sniper",
+    "bundler": "bundler",
+    "bundle": "bundler",
+    "rat_trader": "rat_trader",
+    "rat": "rat_trader",
+    "insider": "rat_trader",
+    "smart_money": "rat_trader",
+    "smartmoney": "rat_trader",
+}
+
+# Tag assigned to a LARGE sell (>= _MIN_SELL_USD) whose wallet is NOT in the
+# tracked registry and carries no recognised maker tag.  This keeps the
+# "big-seller circuit breaker" signal (which was net-positive in iter38) but
+# makes it explicitly distinguishable from a verified dev/insider sell, so the
+# engine's `v2_holder_flow_require_tag` gate can tell them apart.
+LARGE_SELLER_TAG = "whale"
+
+
+def _normalise_tag(maker_tags_lower: set[str]) -> str:
+    """Map a lowercased set of GMGN maker tags onto our canonical tracked tag.
+
+    Returns the first tracked tag found, else "".
+    """
+    for raw in maker_tags_lower:
+        canon = _TAG_SYNONYMS.get(raw)
+        if canon:
+            return canon
+    # Substring fallback (e.g. "top_sniper_1" -> sniper)
+    for raw in maker_tags_lower:
+        for syn, canon in _TAG_SYNONYMS.items():
+            if syn in raw:
+                return canon
+    return ""
+
+
+def _extract_holder_list(data) -> Optional[list]:
+    """Tolerantly extract a list of holder dicts from a GMGN response.
+
+    Returns the list (possibly empty) on success, or None when `data` is not a
+    recognisable shape (so the caller can log the actual payload).  Handles:
+      * bare list   → [holder, ...]
+      * {"list":[...]}
+      * {"data":{"list":[...]}}
+      * {"data":[...]}
+      * {"holders":[...]} / {"top_holders":[...]}
+    """
+    if data is None:
+        return None
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        payload = data.get("data", data)
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            for key in ("list", "holders", "top_holders"):
+                lst = payload.get(key)
+                if isinstance(lst, list):
+                    return lst
+        # Some endpoints nest one level deeper.
+        if isinstance(data.get("data"), dict):
+            for key in ("list", "holders", "top_holders"):
+                lst = data["data"].get(key)
+                if isinstance(lst, list):
+                    return lst
+    return None
+
 # Poll interval for the smartmoney feed (seconds)
 _POLL_INTERVAL = 5.0
 
@@ -139,6 +213,8 @@ class HolderFlowMonitor:
         self._ban_logged: bool = False
         # Refcount of active users (live sessions + recorders)
         self._refcount: int = 0
+        # iter38: rate-limited error log timestamps (key -> last emit time)
+        self._err_log_ts: dict[str, float] = {}
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -264,7 +340,12 @@ class HolderFlowMonitor:
         return {**extra, "timestamp": int(time.time()), "client_id": str(uuid.uuid4())}
 
     async def _get(self, path: str, extra: dict) -> Optional[dict]:
-        """Authenticated GET against the GMGN OpenAPI.  Returns parsed JSON or None."""
+        """Authenticated GET against the GMGN OpenAPI.  Returns parsed JSON or None.
+
+        iter38: failures are now logged at INFO/WARNING (rate-limited) instead of
+        DEBUG so the root cause of an empty wallet registry is observable in the
+        server log.  Returns None on any non-200.
+        """
         if not self._session:
             return None
         params = self._auth_query(extra)
@@ -280,13 +361,30 @@ class HolderFlowMonitor:
                     reset = _parse_reset_unix(text)
                     self._note_ban(reset)
                 else:
-                    logger.debug(f"[HolderFlow] GMGN {path} HTTP {resp.status}: {text[:200]}")
+                    # Surface non-429 failures — these are why the registry was
+                    # silently empty in iter36/38 (e.g. 404 wrong endpoint, 401
+                    # bad auth, Cloudflare challenge).
+                    self._log_rl(
+                        f"http_{resp.status}",
+                        f"[HolderFlow] GMGN {path} HTTP {resp.status}: {text[:200]}",
+                    )
                 return None
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.debug(f"[HolderFlow] GMGN {path} error: {e}")
+            self._log_rl(f"err_{type(e).__name__}", f"[HolderFlow] GMGN {path} error: {e}")
             return None
+
+    def _log_rl(self, key: str, msg: str):
+        """Rate-limited logger: emit each distinct `key` at most once per 60s so
+        a persistent failure is visible without spamming the log every poll."""
+        now = time.time()
+        last = self._err_log_ts.get(key, 0.0)
+        if now - last >= 60.0:
+            logger.warning(msg)
+            self._err_log_ts[key] = now
+        else:
+            logger.debug(msg)
 
     def _note_ban(self, reset_unix: Optional[float]):
         """Record a rate-limit ban and log it once per window."""
@@ -360,17 +458,31 @@ class HolderFlowMonitor:
             state = self._watched[base_addr]
             tag = state.wallet_registry.get(maker, "")
 
-            # If not in registry, check maker_info tags from the feed
+            # If not in registry, check maker_info tags from the feed.
+            # iter38: accept several tag spellings GMGN uses (e.g. "dev",
+            # "token_deployer", "sniper", "bundler", "rat_trader", "insider")
+            # and normalise them onto our tracked set so provenance is captured
+            # even when the registry is still populating.
             if not tag:
-                maker_tags = trade.get("maker_info", {}).get("tags", []) or []
-                for t in _TRACKED_TAGS:
-                    if t in maker_tags:
-                        tag = t
-                        break
+                maker_info = trade.get("maker_info", {}) or {}
+                maker_tags = maker_info.get("tags", []) or []
+                if isinstance(maker_tags, str):
+                    maker_tags = [maker_tags]
+                norm = {str(t).lower() for t in maker_tags}
+                tag = _normalise_tag(norm)
 
-            # Only emit if it's a tracked tag or a significant sell
+            # Only emit if it's a tracked/known tag or a significant sell.
+            # Untagged dust sells are dropped; everything else is persisted so
+            # the recorded dataset retains the full order-flow picture.
             if not tag and side == "sell" and amount_usd < _MIN_SELL_USD:
                 continue
+
+            # iter38: a large sell with no recognised provenance is tagged
+            # "whale" so it stays distinguishable from a verified dev/insider
+            # sell in the recorded dataset (and so the engine's require_tag
+            # gate can treat them differently).
+            if not tag and side == "sell" and amount_usd >= _MIN_SELL_USD:
+                tag = LARGE_SELLER_TAG
 
             event = HolderFlowEvent(
                 mint=base_addr,
@@ -457,32 +569,70 @@ class HolderFlowMonitor:
             await asyncio.sleep(1.0)
 
     async def _refresh_wallet_registry(self, mint: str):
-        """Fetch the dev/sniper/bundler wallet list for a token."""
+        """Fetch the dev/sniper/bundler wallet list for a token.
+
+        iter38: made robust + observable.  Previously a non-200 / empty payload
+        silently left the registry empty (the root cause of the all-untagged
+        iter38 finding).  Now each tag fetch is logged, the response shape is
+        validated, and a token that still has an empty registry after a full
+        pass is re-queued for a retry (with backoff) instead of being marked
+        "refreshed" and forgotten.
+        """
         state = self._watched.get(mint)
         if not state:
             return
+        fetched_any = False
         for tag in _TRACKED_TAGS:
             if self._ban_active():
                 return
             data = await self._get(
                 "/v1/market/token_top_holders",
-                {"chain": "sol", "address": mint, "tag": tag, "limit": 20},
+                {"chain": "sol", "address": mint, "tag": tag, "limit": 50},
             )
-            if not data or not isinstance(data, dict):
+            holders = _extract_holder_list(data)
+            if holders is None:
+                # Log the actual response shape so the failure mode is visible.
+                shape = type(data).__name__
+                if isinstance(data, dict):
+                    keys = list(data.keys())[:5]
+                    shape += f" keys={keys}"
+                elif data is not None:
+                    shape += f" val={str(data)[:120]}"
+                logger.info(
+                    f"[HolderFlow] Registry fetch tag={tag} {mint[:8]}: "
+                    f"no holders ({shape})"
+                )
                 continue
-            # Response shape: {"code":0, "data":{"list":[...]}, ...}
-            payload = data.get("data", data)
-            holders = payload.get("list", []) if isinstance(payload, dict) else []
+            added = 0
             for holder in holders:
-                wallet = holder.get("address", "")
+                # Tolerate both "address" and "wallet"/"maker" key spellings.
+                wallet = (holder.get("address")
+                          or holder.get("wallet")
+                          or holder.get("maker") or "")
                 if wallet:
                     state.wallet_registry[wallet] = tag
+                    added += 1
+            fetched_any = fetched_any or added > 0
+            logger.info(
+                f"[HolderFlow] Registry tag={tag} {mint[:8]}: +{added} wallets "
+                f"(total {len(state.wallet_registry)})"
+            )
             await asyncio.sleep(0.3)  # gentle pacing between tag fetches
         state.last_registry_refresh = time.time()
-        logger.debug(
-            f"[HolderFlow] Registry refreshed for {mint[:8]}: "
-            f"{len(state.wallet_registry)} wallets"
-        )
+        n = len(state.wallet_registry)
+        if n == 0:
+            # Empty registry — schedule a retry rather than accepting it.  The
+            # periodic re-refresh in _registry_loop will pick this up again on
+            # the next cycle; log at WARNING so it's visible.
+            state.registry_retry_count = getattr(state, "registry_retry_count", 0) + 1
+            logger.warning(
+                f"[HolderFlow] Registry EMPTY for {mint[:8]} after full pass "
+                f"(attempt {state.registry_retry_count}) — will retry; "
+                f"dev/insider sells will be UNtagged until registry populates"
+            )
+        else:
+            state.registry_retry_count = 0
+            logger.info(f"[HolderFlow] Registry ready for {mint[:8]}: {n} wallets")
 
 
 # ── Process-wide shared singleton ─────────────────────────────────────────

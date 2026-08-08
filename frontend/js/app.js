@@ -2068,6 +2068,64 @@ document.getElementById("bt-run-all-btn").addEventListener("click", async () => 
   }
 });
 
+document.getElementById("bt-run-last-night-btn").addEventListener("click", async () => {
+  // "Last night" window: 10:00 PM local time of the previous calendar day
+  // through 12:00 PM (noon) local time of the current day. The backend
+  // applies the same window against each recording's started_at timestamp;
+  // we pre-compute it here only to preview which recordings will run.
+  const now = new Date();
+  const todayNoon = new Date(now); todayNoon.setHours(12, 0, 0, 0);
+  const yesterday10pm = new Date(now); yesterday10pm.setDate(now.getDate() - 1); yesterday10pm.setHours(22, 0, 0, 0);
+  const lo = yesterday10pm.getTime() / 1000;
+  const hi = todayNoon.getTime() / 1000;
+
+  const recordings = await apiFetch("/api/recordings");
+  const lastNight = recordings.filter(r => r.status === "completed" && r.started_at >= lo && r.started_at <= hi);
+  if (!lastNight.length) return alert("No completed recordings started last night (10 PM prev day – 12 PM today).");
+
+  const prog = document.getElementById("bt-progress");
+  const progLabel = document.getElementById("bt-progress-label");
+  const lastNightBtn = document.getElementById("bt-run-last-night-btn");
+  const runAllBtn = document.getElementById("bt-run-all-btn");
+  const runBtn = document.getElementById("bt-run-btn");
+  prog.classList.remove("hidden");
+  lastNightBtn.disabled = true;
+  runAllBtn.disabled = true;
+  runBtn.disabled = true;
+  progLabel.textContent = `Running last night's ${lastNight.length} recordings in parallel…`;
+
+  try {
+    const testerConfig = {
+      buy_size_sol: parseFloat(document.getElementById("tester-buy-size").value) || 0.1,
+      slippage_pct: parseFloat(document.getElementById("tester-slippage").value) || 1.0,
+      priority_fee: parseFloat(document.getElementById("tester-priority-fee").value) || 0.0001,
+      bribe_fee: parseFloat(document.getElementById("tester-bribe-fee").value) || 0.00001
+    };
+
+    const result = await apiFetch("/api/backtest/batch", {
+      method: "POST",
+      body: JSON.stringify({
+        engine_params: getEngineParams(),
+        engine_version: engineVersion,
+        recording_ids: lastNight.map(r => r.id),
+        last_night: true,
+        ...testerConfig
+      }),
+    });
+    const msg = `Done: ${result.succeeded}/${result.total} backtests succeeded.`;
+    if (result.failed > 0) alert(msg);
+    loadBacktestsList();
+  } catch (e) {
+    alert(`Last-night batch backtest failed: ${e.message || e}`);
+  } finally {
+    prog.classList.add("hidden");
+    lastNightBtn.disabled = false;
+    runAllBtn.disabled = false;
+    runBtn.disabled = false;
+    progLabel.textContent = "Running…";
+  }
+});
+
 document.getElementById("bt-params-btn").addEventListener("click", () => {
   renderSettings();
   settingsModal.classList.remove("hidden");
@@ -2568,6 +2626,12 @@ function startLiveTrader(mint, _delayOverride = null) {
               addTraderEvent(ctx, "sell", `Received ${msg.sol_received.toFixed(6)} SOL`);
             }
           }
+        } else if (msg.event === "buy_pending") {
+          const sig = msg.detail || "";
+          const shortSig = sig.length > 10 ? sig.slice(0, 10) + "…" : sig;
+          addTraderEvent(ctx, "buy", `BUY BROADCAST ⏳ confirming on-chain… ${shortSig}`);
+        } else if (msg.event === "sell_pending") {
+          addTraderEvent(ctx, "sell", `⏳ ${msg.detail} — watchdog will retry`);
         } else if (msg.event === "buy_failed" || msg.event === "sell_failed") {
           addTraderEvent(ctx, "error", `❌ ${msg.event.replace("_", " ").toUpperCase()}: ${msg.detail}`);
         } else if (msg.event === "tx_simulation_failed") {

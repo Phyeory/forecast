@@ -95,6 +95,7 @@ def run_backtest_batch(
     batch_id: Optional[str] = None,
     engine_version: int = 1,
     recording_ids: Optional[list[int]] = None,
+    last_night: bool = False,
 ) -> list[dict]:
     """
     Run backtests on ALL completed recordings.
@@ -102,12 +103,25 @@ def run_backtest_batch(
     Uses simple sequential execution (faster for typical recording counts
     due to process spawn overhead being larger than computation time).
     Falls back to parallel processes for very large batches (>20).
+
+    If ``last_night`` is True, only recordings whose ``started_at`` falls
+    within the "last night" window — 10:00 PM local time of the previous
+    calendar day through 12:00 PM (noon) local time of the current day —
+    are included.
     """
     # Fee is always fixed at 0.0001 SOL priority + 0.0 bribe = 0.0001 SOL/tx.
     priority_fee = 0.0001
     bribe_fee    = 0.0
     recordings = list_recordings()
     completed = [r for r in recordings if r.get("status") == "completed"]
+
+    if last_night:
+        now = datetime.datetime.now()
+        today_noon = now.replace(hour=12, minute=0, second=0, microsecond=0)
+        yesterday_10pm = (now - datetime.timedelta(days=1)).replace(hour=22, minute=0, second=0, microsecond=0)
+        lo = yesterday_10pm.timestamp()
+        hi = today_noon.timestamp()
+        completed = [r for r in completed if lo <= (r.get("started_at") or 0) <= hi]
 
     if recording_ids is not None:
         sel = set(recording_ids)

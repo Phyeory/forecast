@@ -383,10 +383,21 @@ async def run_backtest_endpoint(body: dict = Body(...)):
 
 @app.post("/api/backtest/batch")
 async def run_backtest_batch_endpoint(body: dict = Body(default={})):
-    """Run backtests on ALL completed recordings in parallel."""
+    """Run backtests on ALL completed recordings in parallel.
+
+    Optional filters in the request body:
+      - ``recording_ids``: explicit list of recording IDs to run.
+      - ``last_night``: if true, restrict to recordings started between
+        10:00 PM local time of the previous day and 12:00 PM (noon) local
+        time of the current day.
+    """
     engine_params = body.get("engine_params", {})
     engine_version = int(body.get("engine_version", 1))
     batch_id = str(int(time.time() * 1000))
+    recording_ids = body.get("recording_ids")
+    if recording_ids is not None:
+        recording_ids = [int(r) for r in recording_ids]
+    last_night = bool(body.get("last_night", False))
     try:
         results = await asyncio.to_thread(
             run_backtest_batch,
@@ -398,6 +409,8 @@ async def run_backtest_batch_endpoint(body: dict = Body(default={})):
             starting_balance=body.get("starting_balance", 1.0),
             batch_id=batch_id,
             engine_version=engine_version,
+            recording_ids=recording_ids,
+            last_night=last_night,
         )
         succeeded = [r for r in results if "error" not in r]
         failed = [r for r in results if "error" in r]
@@ -1093,13 +1106,17 @@ async def live_trading_ws(
                 break
 
             # ── Market-cap safety floor check ─────────────────────────────
+            # update_market_cap() blocks until any emergency sell has fully
+            # settled on-chain (or the MCAP_STOP_SELL_TIMEOUT_SECONDS
+            # backstop fires), so by the time it returns True the wallet is
+            # empty and it is safe to terminate immediately — no grace
+            # sleep needed.
             mcap_usd = trade.get("market_cap_usd", 0)
             if mcap_usd and await live_trader.update_market_cap(float(mcap_usd)):
                 logger.warning(
                     f"[LIVE] Market cap floor triggered for {real_mint[:8]}… — "
-                    f"stopping session in 5s (waiting for emergency sell)"
+                    f"emergency sell settled, stopping session"
                 )
-                await asyncio.sleep(5)  # grace period for emergency sell TX
                 cancelled.set()
                 break
 
