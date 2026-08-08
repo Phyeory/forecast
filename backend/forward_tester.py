@@ -640,6 +640,7 @@ class ForwardTester:
         buy_volume: float = 0.0,
         sell_volume: float = 0.0,
         pool_sol: float = 0.0,
+        market_cap_usd: float = 0.0,
         _build_full_result: bool = True,
     ) -> dict:
         """
@@ -685,6 +686,7 @@ class ForwardTester:
                                     buy_volume=buy_volume,
                                     sell_volume=sell_volume,
                                     pool_sol=pool_sol,
+                                    market_cap_usd=market_cap_usd,
                                     _build_full_result=_build_full_result)
         signal = result.get("signal", "none")
         regime = result.get("regime", "idle")

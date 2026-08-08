@@ -579,6 +579,11 @@ class StrategyEngine:
         langevin_drift_window: int = 28,
         langevin_drift_pct: float = 8.0,
         langevin_drift_stay: int = 94,
+        # ── Market-cap bound trade block ────────────────────────────────────
+        # Block all BUY entries when the USD market cap is below mcap_low_usd
+        # or above mcap_high_usd.  Both default to 0 = deactivated.
+        mcap_low_usd: float = 0.0,
+        mcap_high_usd: float = 0.0,
     ):
         self.ema_fast_p = ema_fast
         self.ema_slow_p = ema_slow
@@ -668,6 +673,10 @@ class StrategyEngine:
         self.max_entry_bar_count = max_entry_bar_count
         self.forbidden_bc_lo = forbidden_bc_lo
         self.forbidden_bc_hi = forbidden_bc_hi
+        self.mcap_low_usd = mcap_low_usd
+        self.mcap_high_usd = mcap_high_usd
+        # Latest USD market cap (updated each bar via update() kwarg)
+        self._market_cap_usd: float = 0.0
         # LANGEVIN drift discriminator (price-level escape detector)
         self.langevin_drift_window = langevin_drift_window
         self.langevin_drift_pct = langevin_drift_pct
@@ -1191,6 +1200,17 @@ class StrategyEngine:
 
     def _passes_entry_gate(self, c: float, direction: Direction) -> bool:
         """FIX-A + FIX-B + macro-trend gate applied here in addition to existing checks."""
+
+        # ── Market-cap bound trade block: block all BUY entries when the
+        # latest USD market cap is below mcap_low_usd or above mcap_high_usd.
+        # Both default to 0 = deactivated.
+        if direction == Direction.UP:
+            mcap = self._market_cap_usd
+            if mcap > 0.0:
+                if self.mcap_low_usd > 0.0 and mcap < self.mcap_low_usd:
+                    return False
+                if self.mcap_high_usd > 0.0 and mcap > self.mcap_high_usd:
+                    return False
 
         # ── Late-recording entry gate: avoid trading tokens whose recording is
         # already mature (high bar_count).  Late-record trades have a higher
@@ -2151,9 +2171,12 @@ class StrategyEngine:
         buy_volume: float = 0.0,
         sell_volume: float = 0.0,
         pool_sol: float = 0.0,
+        market_cap_usd: float = 0.0,
         _build_full_result: bool = True,
     ) -> dict:
         self.bar_count += 1
+        if market_cap_usd > 0.0:
+            self._market_cap_usd = market_cap_usd
         self._update_indicators(o, h, l, c, volume)
 
         self._update_profile(c, volume, time,

@@ -56,6 +56,7 @@ def init_price_db():
             buy_volume   REAL DEFAULT 0,
             sell_volume  REAL DEFAULT 0,
             pool_sol     REAL DEFAULT 0,
+            market_cap_usd REAL DEFAULT 0,
             FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
         );
 
@@ -78,7 +79,7 @@ def init_price_db():
         CREATE INDEX IF NOT EXISTS idx_holder_flow_wallet ON holder_flow(wallet);
     """)
     # Migrate existing databases that were created before buy/sell volume columns
-    for col in ("buy_volume", "sell_volume", "pool_sol"):
+    for col in ("buy_volume", "sell_volume", "pool_sol", "market_cap_usd"):
         try:
             conn.execute(f"ALTER TABLE candles ADD COLUMN {col} REAL DEFAULT 0")
         except Exception:
@@ -134,6 +135,7 @@ def insert_candle(
     buy_vol: float = 0.0,
     sell_vol: float = 0.0,
     pool_sol: float = 0.0,
+    market_cap_usd: float = 0.0,
 ):
     """
     Upsert a single candle row.  We DELETE any existing row for the same
@@ -147,9 +149,9 @@ def insert_candle(
         (recording_id, t),
     )
     conn.execute(
-        "INSERT INTO candles (recording_id, time, open, high, low, close, volume, buy_volume, sell_volume, pool_sol)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (recording_id, t, o, h, l, c, vol, buy_vol, sell_vol, pool_sol),
+        "INSERT INTO candles (recording_id, time, open, high, low, close, volume, buy_volume, sell_volume, pool_sol, market_cap_usd)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (recording_id, t, o, h, l, c, vol, buy_vol, sell_vol, pool_sol, market_cap_usd),
     )
     conn.commit()
     conn.close()
@@ -159,8 +161,8 @@ def insert_candles_batch(recording_id: int, candles: list[dict]):
     conn = _get_price_conn()
     conn.executemany(
         "INSERT OR REPLACE INTO candles"
-        " (recording_id, time, open, high, low, close, volume, buy_volume, sell_volume, pool_sol)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " (recording_id, time, open, high, low, close, volume, buy_volume, sell_volume, pool_sol, market_cap_usd)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 recording_id,
@@ -169,6 +171,7 @@ def insert_candles_batch(recording_id: int, candles: list[dict]):
                 c.get("buy_volume", 0.0),
                 c.get("sell_volume", 0.0),
                 c.get("pool_sol", 0.0),
+                c.get("market_cap_usd", 0.0),
             )
             for c in candles
         ],
@@ -251,7 +254,8 @@ def get_recording_candles(recording_id: int) -> list[dict]:
         SELECT time, open, high, low, close, volume,
                COALESCE(buy_volume, 0.0)  AS buy_volume,
                COALESCE(sell_volume, 0.0) AS sell_volume,
-               COALESCE(pool_sol, 0.0)    AS pool_sol
+               COALESCE(pool_sol, 0.0)    AS pool_sol,
+               COALESCE(market_cap_usd, 0.0) AS market_cap_usd
         FROM   candles
         WHERE  id IN (
             SELECT MAX(id)

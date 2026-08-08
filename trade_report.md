@@ -47,19 +47,51 @@ Big losers carry **92%** of all losing PnL (-2.722 of -2.948 SOL).
 
 ![class mcap heatmap](backend/report_figs/class_mcap_heatmap.png)
 
-## 4. Performance by entry-mcap bucket
+## 4. Performance by entry-mcap bucket ($5k granularity)
 
-| mcap (USD) | n | W | L | big-L | loss% | big-L% | net PnL |
-|---|---|---|---|---|---|---|---|
-| 0-7k | 16 | 11 | 5 | 2 | 31% | 12% | +0.024 |
-| 7-10k | 43 | 31 | 12 | 5 | 28% | 12% | -0.015 |
-| 10-14k | 45 | 31 | 14 | 10 | 31% | 22% | -0.070 |
-| 14-21k | 59 | 40 | 19 | 13 | 32% | 22% | +0.278 |
-| 21-35k | 70 | 52 | 18 | 12 | 26% | 17% | -0.057 |
-| 35-70k | 87 | 69 | 18 | 10 | 21% | 11% | +0.343 |
-| 70-140k | 73 | 66 | 7 | 4 | 10% | 5% | +0.605 |
-| 140-350k | 31 | 22 | 9 | 5 | 29% | 16% | -0.085 |
-| 350k+ | 3 | 1 | 2 | 2 | 67% | 67% | -0.059 |
+| mcap (USD) | n | W | L | big-W | big-L | loss% | big-L% | net PnL |
+|---|---|---|---|---|---|---|---|---|
+| 0-5k | 0 | 0 | 0 | 0 | 0 | 0% | 0% | +0.000 |
+| 5-10k | 53 | 36 | 17 | 3 | 7 | 32% | 13% | -0.029 |
+| 10-15k | 60 | 44 | 16 | 8 | 11 | 27% | 18% | +0.395 |
+| 15-20k | 45 | 29 | 16 | 3 | 12 | 36% | 27% | -0.268 |
+| 20-25k | 28 | 24 | 4 | 5 | 3 | 14% | 11% | +0.230 |
+| 25-30k | 24 | 14 | 10 | 1 | 6 | 42% | 25% | -0.174 |
+| 30-35k | 23 | 18 | 5 | 2 | 3 | 22% | 13% | +0.007 |
+| 35-40k | 22 | 16 | 6 | 1 | 3 | 27% | 14% | +0.007 |
+| 40-45k | 13 | 13 | 0 | 1 | 0 | 0% | 0% | +0.184 |
+| 45-50k | 8 | 6 | 2 | 0 | 2 | 25% | 25% | -0.033 |
+| 50-55k | 14 | 8 | 6 | 0 | 2 | 43% | 14% | -0.029 |
+| 55-60k | 15 | 14 | 1 | 2 | 1 | 7% | 7% | +0.161 |
+| 60-65k | 8 | 5 | 3 | 1 | 2 | 38% | 25% | +0.025 |
+| 65-70k | 7 | 7 | 0 | 0 | 0 | 0% | 0% | +0.027 |
+| 70-75k | 9 | 9 | 0 | 0 | 0 | 0% | 0% | +0.077 |
+| 75-80k | 8 | 6 | 2 | 0 | 1 | 25% | 12% | +0.029 |
+| 80-85k | 10 | 8 | 2 | 1 | 1 | 20% | 10% | +0.020 |
+| 85-90k | 8 | 8 | 0 | 2 | 0 | 0% | 0% | +0.090 |
+| 90-95k | 7 | 7 | 0 | 1 | 0 | 0% | 0% | +0.131 |
+| 95-100k | 3 | 2 | 1 | 0 | 1 | 33% | 33% | -0.023 |
+| 100-105k | 7 | 6 | 1 | 1 | 1 | 14% | 14% | +0.014 |
+| 105-110k | 2 | 2 | 0 | 0 | 0 | 0% | 0% | +0.010 |
+| 110-115k | 5 | 5 | 0 | 1 | 0 | 0% | 0% | +0.060 |
+| 115-120k | 3 | 3 | 0 | 0 | 0 | 0% | 0% | +0.012 |
+| 120-125k | 6 | 6 | 0 | 0 | 0 | 0% | 0% | +0.043 |
+| 125-130k | 2 | 2 | 0 | 1 | 0 | 0% | 0% | +0.097 |
+| 130-135k | 1 | 0 | 1 | 0 | 0 | 100% | 0% | -0.000 |
+| 135-140k | 2 | 2 | 0 | 1 | 0 | 0% | 0% | +0.046 |
+| 140-145k | 1 | 1 | 0 | 0 | 0 | 0% | 0% | +0.008 |
+| 145-150k | 2 | 1 | 1 | 0 | 0 | 50% | 0% | -0.000 |
+| 150-155k | 0 | 0 | 0 | 0 | 0 | 0% | 0% | +0.000 |
+| 155-160k | 2 | 2 | 0 | 0 | 0 | 0% | 0% | +0.010 |
+| 160-165k | 1 | 1 | 0 | 0 | 0 | 0% | 0% | +0.007 |
+| 165-170k | 1 | 0 | 1 | 0 | 1 | 100% | 100% | -0.045 |
+| 170-175k | 2 | 2 | 0 | 0 | 0 | 0% | 0% | +0.011 |
+| 175-180k | 4 | 4 | 0 | 0 | 0 | 0% | 0% | +0.029 |
+| 180-185k | 0 | 0 | 0 | 0 | 0 | 0% | 0% | +0.000 |
+| 185-190k | 0 | 0 | 0 | 0 | 0 | 0% | 0% | +0.000 |
+| 190-195k | 3 | 2 | 1 | 0 | 0 | 33% | 0% | +0.008 |
+| 195-200k | 0 | 0 | 0 | 0 | 0 | 0% | 0% | +0.000 |
+| 200k+ | 18 | 10 | 8 | 0 | 6 | 44% | 33% | -0.171 |
 
 ![lossrate by mcap](backend/report_figs/lossrate_by_mcap.png)
 
@@ -190,6 +222,37 @@ paired bootstrap on per-recording PnL deltas.
 | $14k-inf | 323 | 77.4 | +1.025 | +0.060 | 1.48 | 28 | 46 |
 | $35k-$200k | 176 | 84.1 | +0.975 | +0.010 | 2.49 | 13 | 15 |
 
+### Floor x Ceiling combination sweep ($5k grid)
+
+Every (floor F, ceiling C) pair with F < C, keeping trades where
+F <= mcap < C.  Floor grid: $0–$100k in $5k steps; ceiling grid: $10k–$200k
+in $5k steps plus `inf`.  The heatmap shows net PnL for every combination;
+the baseline (no gate) is the F=$0, C=inf cell (blue circle).
+
+![floor ceiling heatmap](backend/report_figs/floor_ceiling_heatmap.png)
+
+**Top 15 (floor, ceiling) combinations by net PnL:**
+
+| rank | floor | ceiling | kept | WR% | PnL (SOL) | dPnL | PF |
+|---|---|---|---|---|---|---|---|
+| 1 | $10k | $195k | 356 | 77.8 | +1.164 | +0.199 | 1.49 |
+| 2 | $10k | $200k | 356 | 77.8 | +1.164 | +0.199 | 1.49 |
+| 3 | $10k | $165k | 346 | 77.7 | +1.161 | +0.196 | 1.50 |
+| 4 | $10k | $180k | 353 | 77.9 | +1.156 | +0.191 | 1.49 |
+| 5 | $10k | $185k | 353 | 77.9 | +1.156 | +0.191 | 1.49 |
+| 6 | $10k | $190k | 353 | 77.9 | +1.156 | +0.191 | 1.49 |
+| 7 | $10k | $160k | 345 | 77.7 | +1.154 | +0.190 | 1.50 |
+| 8 | $10k | $145k | 341 | 77.7 | +1.144 | +0.180 | 1.49 |
+| 9 | $10k | $150k | 343 | 77.6 | +1.144 | +0.179 | 1.49 |
+| 10 | $10k | $155k | 343 | 77.6 | +1.144 | +0.179 | 1.49 |
+| 11 | $10k | $140k | 340 | 77.6 | +1.137 | +0.172 | 1.49 |
+| 12 | $0 | $195k | 409 | 76.5 | +1.135 | +0.171 | 1.42 |
+| 13 | $0 | $200k | 409 | 76.5 | +1.135 | +0.171 | 1.42 |
+| 14 | $5k | $195k | 409 | 76.5 | +1.135 | +0.171 | 1.42 |
+| 15 | $5k | $200k | 409 | 76.5 | +1.135 | +0.171 | 1.42 |
+
+**77 of 650** (floor, ceiling) combinations beat the baseline (+0.965 SOL).  Best: floor $10k / ceiling $195k = +1.164 SOL (+0.199 vs baseline, 356 trades, 77.8% WR).  However — as the significance tables below show — none of these survive the paired Wilcoxon/bootstrap gate once the search is controlled.
+
 ### Statistical significance — paired bootstrap on per-recording PnL delta
 
 Unit of pairing is the recording (n_boot=10000). A gate is a real
@@ -305,7 +368,7 @@ thresholds, and 2-feature combos. Per-recording paired Wilcoxon (1-sided) +
 
 Instead of a contiguous band, allow any **union of mcap buckets** — a set of
 "trading zones". Searched all 127 non-empty bucket unions over the 7 buckets
-(0-7k, 7-14k, 14-21k, 21-35k, 35-70k, 70-140k, 140k+). Because this is a large multiple-comparison search,
+(0-20k, 20-40k, 40-60k, 60-80k, 80-100k, 100-120k, 120-140k, 140-160k, 160-180k, 180k+). Because this is a large multiple-comparison search,
 significance uses a **max-statistic permutation null** (n=20000):
 the observed best-zone PnL is compared against the best zone achievable under
 randomly permuted bucket PnL. p near 1.0 = no better than chance.
@@ -316,50 +379,53 @@ randomly permuted bucket PnL. p near 1.0 = no better than chance.
 
 | bucket (USD) | n | PnL (SOL) | WR% |
 |---|---|---|---|
-| 0-7k | 16 | +0.024 | 69% |
-| 7-14k | 88 | -0.084 | 70% |
-| 14-21k | 59 | +0.278 | 68% |
-| 21-35k | 70 | -0.057 | 74% |
-| 35-70k | 87 | +0.343 | 79% |
-| 70-140k | 73 | +0.605 | 90% |
-| 140k+ | 34 | -0.143 | 68% |
+| 0-20k | 158 | +0.098 | 69% |
+| 20-40k | 97 | +0.069 | 74% |
+| 40-60k | 50 | +0.284 | 82% |
+| 60-80k | 32 | +0.158 | 84% |
+| 80-100k | 28 | +0.217 | 89% |
+| 100-120k | 17 | +0.095 | 94% |
+| 120-140k | 11 | +0.187 | 91% |
+| 140-160k | 5 | +0.018 | 80% |
+| 160-180k | 8 | +0.001 | 88% |
+| 180k+ | 21 | -0.162 | 57% |
 
 **Top 10 zone masks** by PnL (`+` = bucket kept):
 
 | rank | kept buckets | n | PnL (SOL) | dPnL | WR% | permutation p |
 |---|---|---|---|---|---|---|
-| 1 | 0-7k+14-21k+35-70k+70-140k | 235 | +1.250 | +0.285 | 79.1% | 1.000 |
-| 2 | 14-21k+35-70k+70-140k | 219 | +1.226 | +0.261 | 79.9% | 1.000 |
-| 3 | 0-7k+14-21k+21-35k+35-70k+70-140k | 305 | +1.193 | +0.228 | 78.0% | 1.000 |
-| 4 | 14-21k+21-35k+35-70k+70-140k | 289 | +1.168 | +0.204 | 78.5% | 1.000 |
-| 5 | 0-7k+7-14k+14-21k+35-70k+70-140k | 323 | +1.165 | +0.201 | 76.8% | 1.000 |
-| 6 | 7-14k+14-21k+35-70k+70-140k | 307 | +1.141 | +0.177 | 77.2% | 1.000 |
-| 7 | 0-7k+7-14k+14-21k+21-35k+35-70k+70-140k | 393 | +1.108 | +0.143 | 76.3% | 1.000 |
-| 8 | 0-7k+14-21k+35-70k+70-140k+140k+ | 269 | +1.107 | +0.142 | 77.7% | 1.000 |
-| 9 | 7-14k+14-21k+21-35k+35-70k+70-140k | 377 | +1.084 | +0.119 | 76.7% | 1.000 |
-| 10 | 14-21k+35-70k+70-140k+140k+ | 253 | +1.082 | +0.118 | 78.3% | 1.000 |
+| 1 | 0-20k+20-40k+40-60k+60-80k+80-100k+100-120k+120-140k+140-160k+160-180k | 406 | +1.127 | +0.162 | 76.6% | 0.986 |
+| 2 | 0-20k+20-40k+40-60k+60-80k+80-100k+100-120k+120-140k+140-160k | 398 | +1.126 | +0.161 | 76.4% | 1.000 |
+| 3 | 0-20k+20-40k+40-60k+60-80k+80-100k+100-120k+120-140k+160-180k | 401 | +1.109 | +0.145 | 76.6% | 1.000 |
+| 4 | 0-20k+20-40k+40-60k+60-80k+80-100k+100-120k+120-140k | 393 | +1.108 | +0.143 | 76.3% | 1.000 |
+| 5 | 0-20k+40-60k+60-80k+80-100k+100-120k+120-140k+140-160k+160-180k | 309 | +1.058 | +0.093 | 77.3% | 1.000 |
+| 6 | 0-20k+40-60k+60-80k+80-100k+100-120k+120-140k+140-160k | 301 | +1.056 | +0.092 | 77.1% | 1.000 |
+| 7 | 0-20k+40-60k+60-80k+80-100k+100-120k+120-140k+160-180k | 304 | +1.040 | +0.075 | 77.3% | 1.000 |
+| 8 | 0-20k+40-60k+60-80k+80-100k+100-120k+120-140k | 296 | +1.039 | +0.074 | 77.0% | 1.000 |
+| 9 | 0-20k+20-40k+40-60k+60-80k+80-100k+120-140k+140-160k+160-180k | 389 | +1.032 | +0.068 | 75.8% | 1.000 |
+| 10 | 0-20k+20-40k+40-60k+60-80k+80-100k+120-140k+140-160k | 381 | +1.031 | +0.066 | 75.6% | 1.000 |
 
-Best contiguous band for reference: buckets 14-21k+21-35k+35-70k+70-140k PnL +1.168 (max-stat permutation p=1.000).
+Best contiguous band for reference: buckets 40-60k+60-80k+80-100k+100-120k PnL +0.754 (max-stat permutation p=1.000).
 
-**Hypothesis tests on the best zone mask** (0-7k+14-21k+35-70k+70-140k, PnL +1.250):
+**Hypothesis tests on the best zone mask** (0-20k+20-40k+40-60k+60-80k+80-100k+100-120k+120-140k+140-160k+160-180k, PnL +1.127):
 
 | test | statistic | p-value | interpretation |
 |---|---|---|---|
-| Per-recording Wilcoxon signed-rank (1-sided) | n_changed=117 | 0.5782 | not significant (>= 0.05) |
-| Paired bootstrap 95% CI of dPnL/rec | mean Δ | [-0.00197, +0.00552] | straddles 0 → not significant |
+| Per-recording Wilcoxon signed-rank (1-sided) | n_changed=14 | 0.0991 | not significant (>= 0.05) |
+| Paired bootstrap 95% CI of dPnL/rec | mean Δ | [-0.00016, +0.00235] | straddles 0 → not significant |
 | Naive permutation (best single bucket, uncorrected) | best PnL | 0.0000 | best zone no better than best single bucket by chance |
-| **Max-stat permutation (127-comparison corrected)** | best PnL | **1.0000** | **not significant — gain is search-selection artifact** |
+| **Max-stat permutation (127-comparison corrected)** | best PnL | **0.9864** | **not significant — gain is search-selection artifact** |
 
-**Verdict:** the best zone mask reaches +1.250 SOL (Δ+0.285) and even beats the naive single-bucket null (p=0.000), but once the 127-combination search is controlled by the max-statistic permutation null, **p = 1.000** — far from significant. The apparent gain is a multiple-comparison artifact. Discontiguous zones do **not** beat contiguous bands.
+**Verdict:** the best zone mask reaches +1.127 SOL (Δ+0.162) and even beats the naive single-bucket null (p=0.000), but once the 127-combination search is controlled by the max-statistic permutation null, **p = 0.986** — far from significant. The apparent gain is a multiple-comparison artifact. Discontiguous zones do **not** beat contiguous bands.
 
 ## 9. Key takeaways
 
 1. **Big winners and big losers enter at nearly identical mcap** (median $22,808 vs $23,669). At low mcap the engine cannot separate a pump from a dump at entry time.
-2. **Best mcap band by net PnL**: $70-140k (+0.605 SOL); worst: $140-350k (-0.085 SOL).
+2. **Best mcap band by net PnL**: $10-15k (+0.395 SOL); worst: $15-20k (-0.268 SOL).
 3. **Big losers die via `kelly_flat`**: 44/63 (70%) — the engine rides them down with no Bayesian exit firing.
 4. **Strongest entry-metric discriminator**: `entry mcap (USD)` (AUC W>L = 0.572, p MW = 0.0271). Most metrics sit near 0.5 — little entry-time separability.
 5. **Mcap gate is small and not significant**: best band $14k-$200k gives +1.196 SOL (+0.231 vs baseline), WR 78.7% — but no floor gate has a bootstrap CI strictly > 0 (none significant). Counterfactual is an upper bound that ignores replacement-entry dynamics.
-6. **Discontiguous zones overfit**: best zone mask = +1.250 SOL (Δ+0.285) but permutation p=1.000 (max-stat null). No better than contiguous bands once multiple comparisons are controlled.
+6. **Discontiguous zones overfit**: best zone mask = +1.127 SOL (Δ+0.162) but permutation p=0.986 (max-stat null). No better than contiguous bands once multiple comparisons are controlled.
 7. **Gate does not replicate across baselines**: 0/30 (baseline, gate) pairs significant. The mcap gate fails to reproduce on every old engine baseline tested (iter22b…iter36) — it is not a robust effect.
 
 ---

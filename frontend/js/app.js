@@ -2089,19 +2089,16 @@ document.getElementById("bt-run-all-btn").addEventListener("click", async () => 
 });
 
 document.getElementById("bt-run-last-night-btn").addEventListener("click", async () => {
-  // "Last night" window: 10:00 PM local time of the previous calendar day
-  // through 12:00 PM (noon) local time of the current day. The backend
-  // applies the same window against each recording's started_at timestamp;
-  // we pre-compute it here only to preview which recordings will run.
-  const now = new Date();
-  const todayNoon = new Date(now); todayNoon.setHours(12, 0, 0, 0);
-  const yesterday10pm = new Date(now); yesterday10pm.setDate(now.getDate() - 1); yesterday10pm.setHours(22, 0, 0, 0);
-  const lo = yesterday10pm.getTime() / 1000;
-  const hi = todayNoon.getTime() / 1000;
+  // "Last night" = a rolling 12-hour window ending at the moment the button
+  // is clicked. The backend applies the same window against each recording's
+  // started_at timestamp; we pre-compute it here only to preview which
+  // recordings will run.
+  const hi = Math.floor(Date.now() / 1000);
+  const lo = hi - 12 * 60 * 60;
 
   const recordings = await apiFetch("/api/recordings");
   const lastNight = recordings.filter(r => r.status === "completed" && r.started_at >= lo && r.started_at <= hi);
-  if (!lastNight.length) return alert("No completed recordings started last night (10 PM prev day – 12 PM today).");
+  if (!lastNight.length) return alert("No completed recordings started in the last 12 hours.");
 
   const prog = document.getElementById("bt-progress");
   const progLabel = document.getElementById("bt-progress-label");

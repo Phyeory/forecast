@@ -37,6 +37,16 @@ from scipy import stats as sps
 # fixed rate. Recordings span 2026-07-27..2026-08-07; user-confirmed SOL = $70.
 DEFAULT_SOL_USD = 70.0
 
+
+def _mcap_5k_buckets(max_bucket=200e3, final_label="200k+"):
+    """Uniform $5k market-cap buckets from $0 to max_bucket, then a final
+    catch-all bucket.  Returns (edges, labels)."""
+    edges = list(range(0, int(max_bucket // 5e3) + 1))
+    edges = [e * 5e3 for e in edges] + [np.inf]
+    labels = [f"{int(edges[i]//1000)}-{int(edges[i+1]//1000)}k"
+              for i in range(len(edges) - 2)] + [final_label]
+    return edges, labels
+
 # ----------------------------------------------------------------------------
 # loading
 # ----------------------------------------------------------------------------
@@ -249,9 +259,7 @@ def fig_mcap_vs_pnl(rows, outdir):
 
 
 def fig_lossrate_by_mcap(rows, outdir):
-    edges = [0, 7e3, 10.5e3, 14e3, 21e3, 35e3, 70e3, 140e3, 350e3, np.inf]
-    labels = ["0-7k", "7-10k", "10-14k", "14-21k", "21-35k",
-              "35-70k", "70-140k", "140-350k", "350k+"]
+    edges, labels = _mcap_5k_buckets(max_bucket=200e3, final_label="200k+")
     big_rate, any_rate, net, n_trades = [], [], [], []
     for lo, hi in zip(edges[:-1], edges[1:]):
         sub = [r for r in rows if lo <= r["mcap"] < hi]
@@ -262,31 +270,24 @@ def fig_lossrate_by_mcap(rows, outdir):
         any_rate.append(100 * n_loss / len(sub) if sub else 0)
         net.append(sum(r["pnl_sol"] for r in sub))
     x = np.arange(len(labels))
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 8), sharex=True,
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(18, 8), sharex=True,
                                    gridspec_kw=dict(height_ratios=[1, 1]))
     ax1.bar(x - 0.2, any_rate, width=0.4, color="#e08080", label="any loss rate")
     ax1.bar(x + 0.2, big_rate, width=0.4, color="#a01414", label="big loss (>20%) rate")
-    for i, v in enumerate(any_rate):
-        ax1.text(i - 0.2, v + 0.5, f"{v:.0f}", ha="center", fontsize=8)
-    for i, v in enumerate(big_rate):
-        ax1.text(i + 0.2, v + 0.5, f"{v:.0f}", ha="center", fontsize=8)
     ax1.set_ylabel("% of entries in bucket")
-    ax1.set_title("Loss rate by entry-mcap bucket")
+    ax1.set_title("Loss rate by entry-mcap bucket ($5k granularity)")
     ax1.legend(fontsize=9)
     ax1.grid(axis="y", alpha=0.25)
 
     colors = ["#1a7a1a" if v >= 0 else "#a01414" for v in net]
     ax2.bar(x, net, color=colors, alpha=0.8)
-    for i, v in enumerate(net):
-        ax2.text(i, v + (0.02 if v >= 0 else -0.02), f"{v:+.2f}",
-                 ha="center", va="bottom" if v >= 0 else "top", fontsize=8)
     ax2.axhline(0, color="black", lw=0.8)
     ax2.set_ylabel("Net PnL (SOL)")
     ax2.set_xlabel("Entry market cap bucket (USD)")
-    ax2.set_title("Net PnL by entry-mcap bucket")
+    ax2.set_title("Net PnL by entry-mcap bucket ($5k granularity)")
     ax2.grid(axis="y", alpha=0.25)
     ax2.set_xticks(x)
-    ax2.set_xticklabels(labels)
+    ax2.set_xticklabels(labels, fontsize=7, rotation=45, ha="right")
     # annotate n
     for i, n in enumerate(n_trades):
         ax2.text(i, ax2.get_ylim()[0], f"n={n}", ha="center", va="bottom", fontsize=7, color="gray")
@@ -418,23 +419,23 @@ def fig_hold_time(rows, outdir):
 
 
 def fig_class_mcap_heatmap(rows, outdir):
-    edges = [0, 7e3, 14e3, 21e3, 35e3, 70e3, 140e3, np.inf]
-    labels = ["0-7k", "7-14k", "14-21k", "21-35k", "35-70k", "70-140k", "140k+"]
+    edges, labels = _mcap_5k_buckets(max_bucket=200e3, final_label="200k+")
     M = np.zeros((4, len(labels)))
     for i, cls in enumerate(CLASSES):
         sub = [r for r in rows if r["_cls"] == cls]
         for j, (lo, hi) in enumerate(zip(edges[:-1], edges[1:])):
             M[i, j] = 100 * sum(1 for r in sub if lo <= r["mcap"] < hi) / len(sub) if sub else 0
-    fig, ax = plt.subplots(figsize=(11, 3.6))
+    fig, ax = plt.subplots(figsize=(18, 3.6))
     im = ax.imshow(M, aspect="auto", cmap="YlOrRd")
     ax.set_xticks(range(len(labels)))
-    ax.set_xticklabels(labels)
+    ax.set_xticklabels(labels, fontsize=6, rotation=45, ha="right")
     ax.set_yticks(range(4))
     ax.set_yticklabels([CLASS_LABEL[c].split(" (")[0] for c in CLASSES])
     for i in range(4):
         for j in range(len(labels)):
-            ax.text(j, i, f"{M[i,j]:.0f}%", ha="center", va="center",
-                    fontsize=8, color="black")
+            v = M[i, j]
+            ax.text(j, i, f"{v:.0f}" if v > 0 else "", ha="center", va="center",
+                    fontsize=5.5, color="black")
     ax.set_xlabel("Entry market cap bucket (USD)")
     ax.set_title("Where each class enters (% of class per mcap bucket)")
     fig.colorbar(im, ax=ax, label="% of class")
@@ -534,9 +535,38 @@ def compute_gate_sim(rows, n_boot=10000, n_zone_perm=20000,
             bands.append((lo, hi, _perf([r for r in rows if lo <= r["mcap"] < hi])))
     bands.sort(key=lambda x: -x[2]["pnl"])
 
+    # ---- floor x ceiling 2D combination sweep ($5k grid) ----
+    # For every (floor F, ceiling C) with F < C, keep trades with F <= mcap < C.
+    # Returns a matrix of net PnL + a sorted list of the best combos.
+    fc_floors = [i * 5e3 for i in range(0, 21)]          # $0 .. $100k in $5k steps
+    fc_ceils  = [i * 5e3 for i in range(2, 41)] + [np.inf]  # $10k .. $200k + inf
+    mc_arr = np.array([r["mcap"] for r in rows])
+    pn_arr = np.array([r["pnl_sol"] for r in rows])
+    ot_arr = np.array([r["outcome"] for r in rows])
+    fc_matrix = np.full((len(fc_floors), len(fc_ceils)), np.nan)
+    fc_list = []
+    for fi, F in enumerate(fc_floors):
+        for ci, C in enumerate(fc_ceils):
+            if C <= F:
+                continue
+            m = (mc_arr >= F) & (mc_arr < C)
+            n = int(m.sum())
+            if n == 0:
+                continue
+            pnl = float(pn_arr[m].sum())
+            wr = 100 * float((ot_arr[m] == "W").mean())
+            fc_matrix[fi, ci] = pnl
+            fc_list.append(dict(floor=F, ceil=C, n=n, wr=wr, pnl=pnl,
+                                dpnl=pnl - base["pnl"], pf=_perf([r for r in rows if F <= r["mcap"] < C])["pf"]))
+    fc_list.sort(key=lambda x: -x["pnl"])
+
     # ---- discontiguous zone-mask search over bucket unions ----
-    zedges = [0, 7e3, 14e3, 21e3, 35e3, 70e3, 140e3, np.inf]
-    zlabels = ["0-7k", "7-14k", "14-21k", "21-35k", "35-70k", "70-140k", "140k+"]
+    # $20k grid (10 buckets, 1023 subsets) — fine enough to detect zone
+    # structure while keeping exhaustive enumeration tractable.  The main
+    # report tables and figures use $5k buckets (see _mcap_5k_buckets).
+    zedges = [0, 20e3, 40e3, 60e3, 80e3, 100e3, 120e3, 140e3, 160e3, 180e3, np.inf]
+    zlabels = ["0-20k", "20-40k", "40-60k", "60-80k", "80-100k",
+               "100-120k", "120-140k", "140-160k", "160-180k", "180k+"]
     mc = np.array([r["mcap"] for r in rows])
     pn = np.array([r["pnl_sol"] for r in rows])
     ot = np.array([r["outcome"] for r in rows])
@@ -723,6 +753,8 @@ def compute_gate_sim(rows, n_boot=10000, n_zone_perm=20000,
                 bands=bands, thr=thr, n_boot=n_boot,
                 contig_tests=contig_tests, robust_rows=robust_rows, scan=scan,
                 bonf_alpha=bonf_alpha,
+                fc=dict(matrix=fc_matrix, floors=fc_floors, ceils=fc_ceils,
+                        list=fc_list),
                 zone=dict(edges=zedges, labels=zlabels, bpnl=bpnl, bn=bn, bwr=bwr,
                           top=zone_top, perm_p_best=zone_top[0]["perm_p"],
                           n_zone_perm=n_zone_perm,
@@ -795,6 +827,39 @@ def fig_gate_sim(gs, outdir):
                  "(NAIVE: blocked trade = no trade; upper bound only)")
     fig.tight_layout()
     fig.savefig(os.path.join(outdir, "mcap_gate_sim.png"), dpi=140, bbox_inches="tight")
+    plt.close(fig)
+
+
+def fig_floor_ceiling_heatmap(gs, outdir):
+    """2D heatmap of net PnL for every (floor, ceiling) combination."""
+    fc = gs["fc"]
+    M = fc["matrix"]
+    floors = fc["floors"]
+    ceils = fc["ceils"]
+    # mask NaN (empty combos) for display
+    Mdisp = np.ma.masked_invalid(M)
+    fig, ax = plt.subplots(figsize=(14, 9))
+    vmax = max(abs(np.nanmin(M)), abs(np.nanmax(M)))
+    im = ax.imshow(Mdisp, aspect="auto", cmap="RdYlGn", vmin=-vmax, vmax=vmax,
+                   interpolation="nearest")
+    ceil_labels = [("$" + str(int(c / 1000)) + "k") if np.isfinite(c) else "inf"
+                   for c in ceils]
+    floor_labels = ["$" + str(int(f / 1000)) + "k" for f in floors]
+    ax.set_xticks(range(len(ceils)))
+    ax.set_xticklabels(ceil_labels, fontsize=7, rotation=45, ha="right")
+    ax.set_yticks(range(len(floors)))
+    ax.set_yticklabels(floor_labels, fontsize=7)
+    ax.set_xlabel("Ceiling (block mcap > C)")
+    ax.set_ylabel("Floor (block mcap < F)")
+    ax.set_title("Floor x Ceiling gate — net PnL (SOL).  Green = beats baseline "
+                 f"({gs['base']['pnl']:+.3f}), red = worse.")
+    # mark the baseline (floor=0, ceil=inf) cell
+    ax.scatter(len(ceils) - 1, 0, s=120, marker="o", edgecolors="blue",
+               facecolors="none", linewidths=2, label="baseline (no gate)")
+    ax.legend(fontsize=8, loc="upper left")
+    fig.colorbar(im, ax=ax, label="Net PnL (SOL)")
+    fig.tight_layout()
+    fig.savefig(os.path.join(outdir, "floor_ceiling_heatmap.png"), dpi=140)
     plt.close(fig)
 
 
@@ -989,22 +1054,21 @@ def build_report(rows, batch, nfiles, nrecs, tests, out_md, figdir_rel, sol_usd,
     a("")
 
     # ---- mcap buckets ----
-    a("## 4. Performance by entry-mcap bucket")
+    a("## 4. Performance by entry-mcap bucket ($5k granularity)")
     a("")
-    edges = [0, 7e3, 10.5e3, 14e3, 21e3, 35e3, 70e3, 140e3, 350e3, np.inf]
-    labels = ["0-7k", "7-10k", "10-14k", "14-21k", "21-35k",
-              "35-70k", "70-140k", "140-350k", "350k+"]
-    a("| mcap (USD) | n | W | L | big-L | loss% | big-L% | net PnL |")
-    a("|---|---|---|---|---|---|---|---|")
+    edges, labels = _mcap_5k_buckets(max_bucket=200e3, final_label="200k+")
+    a("| mcap (USD) | n | W | L | big-W | big-L | loss% | big-L% | net PnL |")
+    a("|---|---|---|---|---|---|---|---|---|")
     for lbl, lo, hi in zip(labels, edges[:-1], edges[1:]):
         sub = [r for r in rows if lo <= r["mcap"] < hi]
         w = sum(1 for r in sub if r["outcome"] == "W")
         l = sum(1 for r in sub if r["outcome"] == "L")
+        bw = sum(1 for r in sub if r["_cls"] == "big_win")
         bl = sum(1 for r in sub if r["_cls"] == "big_loss")
         lp = 100 * l / len(sub) if sub else 0
         blp = 100 * bl / len(sub) if sub else 0
         net = sum(r["pnl_sol"] for r in sub)
-        a(f"| {lbl} | {len(sub)} | {w} | {l} | {bl} | {lp:.0f}% | {blp:.0f}% | {net:+.3f} |")
+        a(f"| {lbl} | {len(sub)} | {w} | {l} | {bw} | {bl} | {lp:.0f}% | {blp:.0f}% | {net:+.3f} |")
     a("")
     a("![lossrate by mcap](%s/lossrate_by_mcap.png)" % figdir_rel)
     a("")
@@ -1102,6 +1166,38 @@ def build_report(rows, batch, nfiles, nrecs, tests, out_md, figdir_rel, sol_usd,
         hi_lbl = _fmt_usd(hi) if np.isfinite(hi) else "inf"
         a(f"| {_fmt_usd(lo)}-{hi_lbl} | {p['n']} | {p['wr']:.1f} | {p['pnl']:+.3f} | "
           f"{dp:+.3f} | {p['pf']:.2f} | {p['bigw']} | {p['bigl']} |")
+    a("")
+
+    # ---- floor x ceiling 2D sweep ----
+    a("### Floor x Ceiling combination sweep ($5k grid)")
+    a("")
+    a("Every (floor F, ceiling C) pair with F < C, keeping trades where")
+    a("F <= mcap < C.  Floor grid: $0–$100k in $5k steps; ceiling grid: $10k–$200k")
+    a("in $5k steps plus `inf`.  The heatmap shows net PnL for every combination;")
+    a("the baseline (no gate) is the F=$0, C=inf cell (blue circle).")
+    a("")
+    a("![floor ceiling heatmap](%s/floor_ceiling_heatmap.png)" % figdir_rel)
+    a("")
+    a("**Top 15 (floor, ceiling) combinations by net PnL:**")
+    a("")
+    a("| rank | floor | ceiling | kept | WR% | PnL (SOL) | dPnL | PF |")
+    a("|---|---|---|---|---|---|---|---|")
+    for rank, fc in enumerate(gs["fc"]["list"][:15]):
+        cl = _fmt_usd(fc["ceil"]) if np.isfinite(fc["ceil"]) else "inf"
+        a(f"| {rank+1} | {_fmt_usd(fc['floor'])} | {cl} | {fc['n']} | "
+          f"{fc['wr']:.1f} | {fc['pnl']:+.3f} | {fc['dpnl']:+.3f} | {fc['pf']:.2f} |")
+    a("")
+    # how many combos beat baseline?
+    n_beat = sum(1 for fc in gs["fc"]["list"] if fc["pnl"] > base["pnl"])
+    n_total = len(gs["fc"]["list"])
+    best_fc = gs["fc"]["list"][0]
+    a(f"**{n_beat} of {n_total}** (floor, ceiling) combinations beat the baseline "
+      f"({base['pnl']:+.3f} SOL).  Best: floor {_fmt_usd(best_fc['floor'])} / "
+      f"ceiling {_fmt_usd(best_fc['ceil']) if np.isfinite(best_fc['ceil']) else 'inf'} "
+      f"= {best_fc['pnl']:+.3f} SOL ({best_fc['dpnl']:+.3f} vs baseline, "
+      f"{best_fc['n']} trades, {best_fc['wr']:.1f}% WR).  However — as the "
+      "significance tables below show — none of these survive the paired "
+      "Wilcoxon/bootstrap gate once the search is controlled.")
     a("")
     a("### Statistical significance — paired bootstrap on per-recording PnL delta")
     a("")
@@ -1334,6 +1430,7 @@ def main():
     gs = compute_gate_sim(rows, n_boot=args.n_boot,
                           results_dir=args.results_dir, sol_usd=args.sol_usd)
     fig_gate_sim(gs, args.figdir)
+    fig_floor_ceiling_heatmap(gs, args.figdir)
     fig_zone_sim(gs, args.figdir)
 
     print("computing metric tests...")

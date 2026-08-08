@@ -105,9 +105,8 @@ def run_backtest_batch(
     Falls back to parallel processes for very large batches (>20).
 
     If ``last_night`` is True, only recordings whose ``started_at`` falls
-    within the "last night" window — 10:00 PM local time of the previous
-    calendar day through 12:00 PM (noon) local time of the current day —
-    are included.
+    within the last 12 hours before the moment the batch is run are
+    included.
     """
     # Fee is always fixed at 0.0001 SOL priority + 0.0 bribe = 0.0001 SOL/tx.
     priority_fee = 0.0001
@@ -116,11 +115,8 @@ def run_backtest_batch(
     completed = [r for r in recordings if r.get("status") == "completed"]
 
     if last_night:
-        now = datetime.datetime.now()
-        today_noon = now.replace(hour=12, minute=0, second=0, microsecond=0)
-        yesterday_10pm = (now - datetime.timedelta(days=1)).replace(hour=22, minute=0, second=0, microsecond=0)
-        lo = yesterday_10pm.timestamp()
-        hi = today_noon.timestamp()
+        hi = datetime.datetime.now().timestamp()
+        lo = (datetime.datetime.now() - datetime.timedelta(hours=12)).timestamp()
         completed = [r for r in completed if lo <= (r.get("started_at") or 0) <= hi]
 
     if recording_ids is not None:
@@ -235,6 +231,7 @@ def run_backtest(
         buy_vol  = candle.get("buy_volume", 0.0)
         sell_vol = candle.get("sell_volume", 0.0)
         pool_sol = candle.get("pool_sol", 0.0)
+        mcap_usd = candle.get("market_cap_usd", 0.0)
 
         # Bull bar: high comes before low; bear bar: low before high
         bullish = c >= o
@@ -277,6 +274,7 @@ def run_backtest(
         result = ft_update(time=t, o=o, h=h, l=l, c=c, volume=vol,
                            buy_volume=buy_vol, sell_volume=sell_vol,
                            pool_sol=pool_sol,
+                           market_cap_usd=mcap_usd,
                            _build_full_result=False)
         fwd = result.get("forward_test")
         if fwd and trade_action_for_candle is None and fwd.get("trade_action"):

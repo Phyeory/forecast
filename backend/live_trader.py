@@ -2237,7 +2237,8 @@ class LiveTrader:
     def _process_completed_candle(self, t: int, o: float, h: float,
                                    l: float, c: float, vol: float,
                                    buy_vol: float = 0.0,
-                                   sell_vol: float = 0.0) -> dict:
+                                   sell_vol: float = 0.0,
+                                   market_cap_usd: float = 0.0) -> dict:
         """
         Mirror ForwardTester.update() exactly — called once per completed candle.
 
@@ -2321,7 +2322,8 @@ class LiveTrader:
 
         # State 4: close tick — buy/sell split lands here
         result = self.engine.update(t, o, h, l, c, vol,
-                                    buy_volume=buy_vol, sell_volume=sell_vol)
+                                    buy_volume=buy_vol, sell_volume=sell_vol,
+                                    market_cap_usd=market_cap_usd)
         sig = result.get("signal", "none")
         if sig not in (Signal.NONE.value, "none") and final_signal is None:
             final_signal = sig
@@ -2428,6 +2430,7 @@ class LiveTrader:
         buy_volume: float = 0.0,
         sell_volume: float = 0.0,
         is_new: bool = False,
+        market_cap_usd: float = 0.0,
     ) -> dict:
         """
         Process one live tick through the candle-buffering + pending-signal pipeline.
@@ -2460,6 +2463,7 @@ class LiveTrader:
                 prev["t"], prev["o"], prev["h"], prev["l"], prev["c"], prev["vol"],
                 buy_vol=prev.get("buy_vol", 0.0),
                 sell_vol=prev.get("sell_vol", 0.0),
+                market_cap_usd=prev.get("market_cap_usd", 0.0),
             )
             self._last_engine_result = result
 
@@ -2521,6 +2525,7 @@ class LiveTrader:
         self._current_accumulating = {
             "t": time_val, "o": o, "h": h, "l": l, "c": c, "vol": volume,
             "buy_vol": buy_volume, "sell_vol": sell_volume,
+            "market_cap_usd": market_cap_usd,
         }
 
         # ── Build output ──────────────────────────────────────────────────────

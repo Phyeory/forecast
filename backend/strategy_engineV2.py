@@ -2752,6 +2752,12 @@ class StrategyEngineV2Adapter:
         self._v2_holder_flow_min_usd     = float(engine_kwargs.pop("v2_holder_flow_min_usd", 100.0))
         self._v2_holder_flow_entry_window_seconds = int(engine_kwargs.pop("v2_holder_flow_entry_window_seconds", 30))
         self._v2_holder_flow_exit_window_seconds  = int(engine_kwargs.pop("v2_holder_flow_exit_window_seconds", 15))
+        # ── Market-cap bound trade block ────────────────────────────────────
+        # Block all BUY entries when the USD market cap is below mcap_low_usd
+        # or above mcap_high_usd.  Both default to 0 = deactivated.
+        self._mcap_low_usd  = float(engine_kwargs.pop("mcap_low_usd", 0.0))
+        self._mcap_high_usd = float(engine_kwargs.pop("mcap_high_usd", 0.0))
+        self._market_cap_usd: float = 0.0
         # Holder-flow events: list of dicts with keys time, wallet, tag, side,
         # amount_usd, amount_sol, tx_hash.  Passed in by the pipeline layer
         # (ForwardTester / LiveTrader) that loaded them from the recording DB.
@@ -3027,6 +3033,7 @@ class StrategyEngineV2Adapter:
         buy_volume: float = 0.0,
         sell_volume: float = 0.0,
         pool_sol: float = 0.0,
+        market_cap_usd: float = 0.0,
         _build_full_result: bool = True,
     ) -> dict:
         self.bar_count += 1
@@ -3035,6 +3042,8 @@ class StrategyEngineV2Adapter:
         # feed does not carry reserves.  Tracks the latest non-zero observation.
         if pool_sol > 0.0:
             self._pool_sol = pool_sol
+        if market_cap_usd > 0.0:
+            self._market_cap_usd = market_cap_usd
 
         # Snapshot the previous close BEFORE `_maintain_v1_indicators`
         # overwrites it with the current bar's close — otherwise the V2
@@ -3171,8 +3180,21 @@ class StrategyEngineV2Adapter:
         else:
             # Open new positions based on V2 decision.
             if decision.get("direction") == 1 and decision.get("E_star", -1.0) > 0:
+                # ── Market-cap bound trade block ───────────────────────────────
+                # Block all BUY entries when the USD market cap is below
+                # mcap_low_usd or above mcap_high_usd.  Both default to 0
+                # = deactivated.
+                _mcap = self._market_cap_usd
+                _mcap_blocked = False
+                if _mcap > 0.0:
+                    if self._mcap_low_usd > 0.0 and _mcap < self._mcap_low_usd:
+                        _mcap_blocked = True
+                    if self._mcap_high_usd > 0.0 and _mcap > self._mcap_high_usd:
+                        _mcap_blocked = True
+                if _mcap_blocked:
+                    self.exit_signal_reason = "mcap_bound_block"
                 # ── Holder-flow entry gate (iter36): block entry on recent dev sell ──
-                if self._v2_holder_flow_entry_block > 0.0 and self._has_recent_dev_sell(
+                elif self._v2_holder_flow_entry_block > 0.0 and self._has_recent_dev_sell(
                     getattr(self, "_current_time", 0), self._v2_holder_flow_entry_window_seconds, self._v2_holder_flow_min_usd
                 ):
                     sell_event = self._get_recent_dev_sell(getattr(self, "_current_time", 0), self._v2_holder_flow_entry_window_seconds)
