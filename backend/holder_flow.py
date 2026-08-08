@@ -154,6 +154,9 @@ class _TokenWatchState:
     # wallet → tag mapping (dev/sniper/bundler wallets for this token)
     wallet_registry: dict[str, str] = field(default_factory=dict)
     last_registry_refresh: float = 0.0
+    # Round-robin cursor: which tag in _TRACKED_TAGS to fetch next (iter38
+    # rate-limit fix — one tag per _refresh_wallet_registry call).
+    _tag_cursor: int = 0
     # Recent events for quick lookup (mint → list of events)
     recent_events: list[HolderFlowEvent] = field(default_factory=list)
     # Max age for "recent" events (seconds)
@@ -490,7 +493,7 @@ class HolderFlowMonitor:
 
             if side == "sell" and amount_usd >= _MIN_SELL_USD:
                 logger.info(
-                    f"[HolderFlow] DEV SELL {base_addr[:8]} "
+                    f"[HolderFlow] SELL {base_addr[:8]} "
                     f"wallet={maker[:8]} tag={tag or 'unknown'} "
                     f"amount=${amount_usd:.2f}"
                 )
@@ -507,17 +510,31 @@ class HolderFlowMonitor:
         return []
 
     async def _registry_loop(self):
-        """Serially fetch per-token wallet registries (rate-limit friendly)."""
+        """Serially fetch per-token wallet registries (rate-limit friendly).
+
+        iter38 rate-limit fix: with one-tag-per-call, the loop paces fetches
+        at ≥ 3s apart to avoid 429s.  The periodic re-refresh iterates stale
+        tokens but makes at most ONE fetch per cycle (the next token gets its
+        turn on the next cycle), so with N watched tokens each token gets a
+        tag fetch every ~N×3s.
+        """
         while self._running:
             try:
                 mint = await asyncio.wait_for(self._registry_queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
-                # Periodic re-refresh of stale registries
+                # Periodic re-refresh: one fetch for the single stalest token.
                 now = time.time()
                 if not self._ban_active():
+                    stalest = None
+                    stalest_age = -1.0
                     for m, state in list(self._watched.items()):
-                        if now - state.last_registry_refresh > _REGISTRY_REFRESH_INTERVAL:
-                            await self._refresh_wallet_registry(m)
+                        age = now - state.last_registry_refresh
+                        if age > _REGISTRY_REFRESH_INTERVAL and age > stalest_age:
+                            stalest = m
+                            stalest_age = age
+                    if stalest:
+                        await self._refresh_wallet_registry(stalest)
+                        await asyncio.sleep(3.0)
                 continue
             except asyncio.CancelledError:
                 break
@@ -530,74 +547,78 @@ class HolderFlowMonitor:
                     pass
                 continue
             await self._refresh_wallet_registry(mint)
-            # Pace registry fetches — 4 tag requests per token
-            await asyncio.sleep(1.0)
+            # Pace registry fetches — one tag per call, ≥3s between calls.
+            await asyncio.sleep(3.0)
 
     async def _refresh_wallet_registry(self, mint: str):
-        """Fetch the dev/sniper/bundler wallet list for a token.
+        """Fetch ONE tracked-wallet tag for a token (round-robin per call).
 
-        iter38: made robust + observable.  Previously a non-200 / empty payload
-        silently left the registry empty (the root cause of the all-untagged
-        iter38 finding).  Now each tag fetch is logged, the response shape is
-        validated, and a token that still has an empty registry after a full
-        pass is re-queued for a retry (with backoff) instead of being marked
-        "refreshed" and forgotten.
+        iter38 rate-limit fix: GMGN allows roughly one request per 30s before
+        429-ing.  The old code fetched all 4 tags (dev/sniper/bundler/
+        rat_trader) back-to-back with 0.3s pacing — dev succeeded, then
+        sniper got 429'd and `last_registry_refresh` was set anyway, marking
+        the token "done" with only 25% tag coverage.  Now each call fetches
+        exactly ONE tag, rotating through `_TRACKED_TAGS` via a per-token
+        cursor (`_tag_cursor`).  A 429 only delays one tag; the cursor stays
+        put so the next cycle retries the same tag instead of skipping it.
         """
         state = self._watched.get(mint)
         if not state:
             return
-        fetched_any = False
-        for tag in _TRACKED_TAGS:
-            if self._ban_active():
-                return
-            data = await self._get(
-                "/v1/market/token_top_holders",
-                {"chain": "sol", "address": mint, "tag": tag, "limit": 50},
-            )
-            holders = _extract_holder_list(data)
-            if holders is None:
-                # Log the actual response shape so the failure mode is visible.
-                shape = type(data).__name__
-                if isinstance(data, dict):
-                    keys = list(data.keys())[:5]
-                    shape += f" keys={keys}"
-                elif data is not None:
-                    shape += f" val={str(data)[:120]}"
-                logger.info(
-                    f"[HolderFlow] Registry fetch tag={tag} {mint[:8]}: "
-                    f"no holders ({shape})"
-                )
-                continue
-            added = 0
-            for holder in holders:
-                # Tolerate both "address" and "wallet"/"maker" key spellings.
-                wallet = (holder.get("address")
-                          or holder.get("wallet")
-                          or holder.get("maker") or "")
-                if wallet:
-                    state.wallet_registry[wallet] = tag
-                    added += 1
-            fetched_any = fetched_any or added > 0
+        if self._ban_active():
+            return
+
+        tag = _TRACKED_TAGS[state._tag_cursor]
+        data = await self._get(
+            "/v1/market/token_top_holders",
+            {"chain": "sol", "address": mint, "tag": tag, "limit": 50},
+        )
+        holders = _extract_holder_list(data)
+        if holders is None:
+            shape = type(data).__name__
+            if isinstance(data, dict):
+                keys = list(data.keys())[:5]
+                shape += f" keys={keys}"
+            elif data is not None:
+                shape += f" val={str(data)[:120]}"
             logger.info(
-                f"[HolderFlow] Registry tag={tag} {mint[:8]}: +{added} wallets "
-                f"(total {len(state.wallet_registry)})"
+                f"[HolderFlow] Registry fetch tag={tag} {mint[:8]}: "
+                f"no holders ({shape})"
             )
-            await asyncio.sleep(0.3)  # gentle pacing between tag fetches
-        state.last_registry_refresh = time.time()
+            # Don't advance the cursor — retry the same tag next cycle.
+            return
+
+        added = 0
+        for holder in holders:
+            wallet = (holder.get("address")
+                       or holder.get("wallet")
+                       or holder.get("maker") or "")
+            if wallet:
+                state.wallet_registry[wallet] = tag
+                added += 1
+        logger.info(
+            f"[HolderFlow] Registry tag={tag} {mint[:8]}: +{added} wallets "
+            f"(total {len(state.wallet_registry)})"
+        )
+        # Advance to the next tag for next cycle (wraps around).
+        state._tag_cursor = (state._tag_cursor + 1) % len(_TRACKED_TAGS)
+        # Mark as refreshed only when all tags have been fetched at least once.
+        tags_fetched = sum(1 for t in _TRACKED_TAGS
+                           if any(w_tag == t for w_tag in state.wallet_registry.values()))
+        if tags_fetched >= len(_TRACKED_TAGS) or state._tag_cursor == 0:
+            state.last_registry_refresh = time.time()
         n = len(state.wallet_registry)
-        if n == 0:
-            # Empty registry — schedule a retry rather than accepting it.  The
-            # periodic re-refresh in _registry_loop will pick this up again on
-            # the next cycle; log at WARNING so it's visible.
+        if n == 0 and state._tag_cursor == 0:
+            # Full rotation with zero wallets — log and let the cursor loop
+            # again (the periodic re-refresh in _registry_loop will retry).
             state.registry_retry_count = getattr(state, "registry_retry_count", 0) + 1
             logger.warning(
-                f"[HolderFlow] Registry EMPTY for {mint[:8]} after full pass "
+                f"[HolderFlow] Registry EMPTY for {mint[:8]} after full rotation "
                 f"(attempt {state.registry_retry_count}) — will retry; "
                 f"dev/insider sells will be UNtagged until registry populates"
             )
-        else:
+        elif n > 0:
             state.registry_retry_count = 0
-            logger.info(f"[HolderFlow] Registry ready for {mint[:8]}: {n} wallets")
 
 
 # ── Process-wide shared singleton ─────────────────────────────────────────
