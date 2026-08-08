@@ -4634,11 +4634,25 @@ worked end-to-end.
 
 ### Headline result (32 recordings, gate ON vs OFF)
 
+> ⚠️ **Correction (2026-08-08, post-user-backtest).**  The numbers below came
+> from a **manual `ForwardTester` replay that skipped the backtester's
+> `recording_ended` force-close** on the final candle (`backtester.py:283-288`).
+> That force-close is a parity invariant (AGENTS.md §4) — omitting it drops
+> unclosed losing trades and inflates both win rate and PnL.  The user's real
+> `run_backtest` on the same recordings (batch `1786188906634`) produced the
+> **correct** gate-1.0 result: **30 trades, 86.7% WR, +0.1736 SOL** (vs the
+> inflated 28 / 92.9% / +0.2573 below).  The two missing `recording_ended`
+> losers (BINGUS −0.0232, Family −0.0605) account for the entire discrepancy.
+> The gate's direction (net-positive, dev_sell_exit fires) is unchanged; the
+> *magnitude* in the table is overstated.  The corrected, authoritative
+> numbers from the real backtester are recorded in the "Iter 38 — corrected
+> backtester result" subsection at the end of this entry.
+
 | | Trades | Win rate | Total PnL |
 |---|---|---|---|
-| **Gate ON**  | 28 | **92.9%** | **+0.2573 SOL** |
-| **Gate OFF** | 29 | 86.2%     | +0.1720 SOL |
-| **Δ (ON−OFF)** | −1 | +6.7 pp | **+0.0853 SOL** |
+| **Gate ON (manual replay, INFLATED — see correction)**  | 28 | 92.9% | +0.2573 SOL |
+| **Gate OFF (manual replay)** | 29 | 86.2% | +0.1720 SOL |
+| **Δ (ON−OFF)** | −1 | +6.7 pp | +0.0853 SOL |
 
 The gate is **mechanically functional and net-positive** on last night's data.
 Both mechanisms fired:
@@ -4752,4 +4766,43 @@ byte-identical to explicit OFF on both recordings; `require_tag=0` reproduces
 the iter38 gate-ON behaviour exactly (ENES `dev_sell_exit:CwvYUDGo`, +0.030
 SOL); `require_tag=1` on the all-untagged existing data correctly collapses to
 the OFF result (the `whale` tag does not satisfy the verified-insider gate).
+
+### Iter 38 — production state after user review (gate 1.0 ON, registry parser hardened)
+
+After reviewing the follow-up, the user directed:
+1. **Turn the gate ON as gate 1.0** (any big seller, not verified-insider-only)
+   so it fires on the existing untagged data while the registry fix is validated.
+   `v2_holder_flow_entry_block=1.0`, `v2_holder_flow_exit_enable=1.0`,
+   `v2_holder_flow_require_tag=0.0` are now the **production defaults**.
+2. The registry still wasn't populating (live log showed
+   `Registry fetch tag=dev ...: no/invalid response` repeatedly).  Root cause:
+   the parser only accepted the `{"data":{"list":[...]}}` envelope; GMGN (or a
+   proxy) can return a bare list, a different wrapper key, or a non-dict body.
+
+**Registry parser hardened (`backend/holder_flow.py`).**  Added
+`_extract_holder_list(data)` which tolerates all plausible GMGN response shapes
+— bare list, `{"list":[...]}`, `{"data":{"list":[...]}}`, `{"data":[...]}`,
+`{"holders":[...]}` / `{"top_holders":[...]}` — and logs the actual response
+shape when none match, so the failure mode is observable instead of silent.
+
+### Iter 38 — corrected backtester result (authoritative)
+
+The user ran the real `run_backtest` (batch `1786188906634`) on 12 of last
+night's recordings with gate 1.0 ON (production defaults).  This is the
+authoritative result — it includes the `recording_ended` force-close that the
+earlier manual replay skipped:
+
+| | Trades | Win rate | Total PnL |
+|---|---|---|---|
+| **Gate 1.0 ON (real backtester, 12 recs)** | 30 | **86.7%** | **+0.1736 SOL** |
+
+**5 `dev_sell_exit` trades fired** across ENES (1), RUBY (2), raccoonzilla (2)
+— the gate is mechanically active.  Two `recording_ended` force-close losers
+(BINGUS −0.0232, Family −0.0605) are correctly included, which is why this
+differs from the inflated manual-replay numbers in the headline table above.
+
+**No further production change**; engine defaults are gate 1.0 ON.  Next step:
+collect a fresh night of recordings with the hardened registry parser and
+re-evaluate whether true `dev`/`sniper` tags flow (enabling the gate 2.0
+comparison).
 Engine otherwise byte-identical to HEAD.
