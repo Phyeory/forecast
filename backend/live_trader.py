@@ -33,6 +33,7 @@ from solders.hash import Hash
 
 from strategy_engine import Signal, Direction, Regime
 from engine_factory import create_engine
+from live_session_logger import SessionJournal
 
 # SPL Token / ATA program ids (used for deterministic ATA derivation and
 # Token-2022 detection without pulling in the heavyweight `spl-token` package).
@@ -41,6 +42,20 @@ TOKEN_2022_PROGRAM_ID = Pubkey.from_string("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCX
 ATA_PROGRAM_ID        = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
 
 logger = logging.getLogger("live-trader")
+
+
+class _SessionTagFilter(logging.Filter):
+    """Stamp every live-trader LogRecord with the emitting LiveTrader's
+    SessionJournal so each session's FileHandler only writes its own lines
+    (see live_session_logger.SessionJournal)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not hasattr(record, "_sid"):
+            record._sid = LiveTrader.current_journal
+        return True
+
+
+logger.addFilter(_SessionTagFilter())
 
 # ── Jupiter & Solana constants ────────────────────────────────────────────────
 # NOTE: Using the newer Swap API v1 (lite-api.jup.ag) instead of the V6 API
@@ -217,6 +232,12 @@ class LiveTrader:
       6. Result logged and state updated
     """
 
+    # Class-level pointer to the currently-active session journal.  The
+    # dashboard runs one live-trader session at a time per mint; the
+    # _SessionTagFilter on the "live-trader" logger stamps each record with
+    # this journal so every session's console.log only contains its own lines.
+    current_journal: Optional[SessionJournal] = None
+
     def __init__(
         self,
         token_mint: str,
@@ -244,6 +265,29 @@ class LiveTrader:
         self.token_mint = token_mint
         self.keypair = keypair
         self.wallet_pubkey = str(keypair.pubkey())
+
+        # ── Per-session persistent logging ─────────────────────────────────
+        # Physical files under backend/data/live_logs/<session>/:
+        #   console.log  — every console log line emitted by this session
+        #   trades.jsonl — structured ledger of every trade transaction
+        #   (entry/exit timestamps, broadcast/confirm/fail, sizes, tx hashes)
+        self.journal = SessionJournal(
+            token_mint,
+            self.wallet_pubkey,
+            meta={
+                "buy_size_sol": buy_size_sol,
+                "slippage_bps": slippage_bps,
+                "engine_version": engine_version,
+                "engine_kwargs": engine_kwargs,
+                "min_market_cap_usd": min_market_cap_usd,
+                "skip_simulation": skip_simulation,
+            },
+        )
+        LiveTrader.current_journal = self.journal
+        logger.info(
+            f"[SESSION] Logging to {self.journal.dir} "
+            f"(console.log + trades.jsonl)"
+        )
         self.buy_size_sol = buy_size_sol
         self.slippage_bps = slippage_bps
         self.priority_fee_lamports = 100_000  # fixed: 0.0001 SOL per transaction
@@ -343,6 +387,25 @@ class LiveTrader:
         # monitored trade instead of leaving it invisible.
         self._adopted_bag: bool = False
 
+    # ── Structured session ledger helpers ─────────────────────────────────────
+
+    def set_session_meta(self, **meta):
+        """Record extra session metadata (e.g. recording_id) into the ledger."""
+        if meta:
+            self.journal.event("session_meta", meta)
+
+    def _journal_event(self, kind: str, trade: Optional["LiveTrade"] = None, **data):
+        """Append a structured trade-transaction record to trades.jsonl.
+
+        Always includes the SOL/tx-hash detail passed in plus a full snapshot
+        of the affected trade (entry/exit timestamps, sizes, PnL, status)."""
+        payload = dict(data)
+        if trade is not None:
+            payload["trade"] = trade.to_dict()
+        elif self.current_trade is not None:
+            payload["trade"] = self.current_trade.to_dict()
+        self.journal.event(kind, payload)
+
     def _is_buy_pending(self) -> bool:
         """True while a buy TX's on-chain fate is still unknown.
 
@@ -394,6 +457,17 @@ class LiveTrader:
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
+        # Flush + close this session's physical log files (console.log /
+        # trades.jsonl) with a final summary record.
+        summary = {
+            "stats": self.stats.to_dict(),
+            "open_trade": self.current_trade.to_dict() if self.current_trade else None,
+            "trade_count": len(self.trade_history),
+            "log_dir": str(self.journal.dir),
+        }
+        self.journal.close(summary)
+        if LiveTrader.current_journal is self.journal:
+            LiveTrader.current_journal = None
 
     # ── Session lifecycle ─────────────────────────────────────────────────────
 
@@ -613,6 +687,10 @@ class LiveTrader:
             )
             self.current_trade.status = "closing"
             self.current_trade.exit_reason = "connection_closed"
+            self._journal_event(
+                "emergency_cleanup_sell", trade=self.current_trade,
+                reason="connection_closed",
+            )
             try:
                 sig = await asyncio.wait_for(
                     self.execute_sell("connection_closed"),
@@ -1188,8 +1266,16 @@ class LiveTrader:
                 f"[BUY] Starting buy: mint={mint_str[:8]}… size={self.buy_size_sol} SOL "
                 f"balance={sol_bal:.4f} SOL (cached) reason={reason}"
             )
+            self._journal_event(
+                "buy_attempt", reason=reason, size_sol=self.buy_size_sol,
+                amount_lamports=amount_lam, sol_balance=sol_bal,
+            )
             if sol_bal * 1e9 < amount_lam + 50_000:  # buy size + gas buffer
                 logger.error(f"[BUY FAILED] Insufficient balance: {sol_bal:.4f} SOL but need ~{self.buy_size_sol} SOL")
+                self._journal_event(
+                    "buy_rejected", reason=reason, error="insufficient_sol",
+                    sol_balance=sol_bal, required_sol=self.buy_size_sol,
+                )
                 await self._fail_buy_flat(f"Insufficient SOL ({sol_bal:.4f} available)", reason)
                 return None
 
@@ -1199,12 +1285,17 @@ class LiveTrader:
             quote = await self._get_quote(WSOL_MINT, self.token_mint, amount_lam)
             if not quote:
                 logger.error("[BUY FAILED] Jupiter quote failed")
+                self._journal_event("buy_rejected", reason=reason, error="jupiter_quote_failed")
                 await self._fail_buy_flat("Jupiter quote failed", reason)
                 return None
 
             swap_tx = await self._get_swap_tx(quote, priority_fee_override=fee)
             if not swap_tx:
                 logger.error("[BUY FAILED] Swap TX build failed")
+                self._journal_event(
+                    "buy_rejected", reason=reason, error="swap_tx_build_failed",
+                    quote_out_amount=quote.get("outAmount"),
+                )
                 await self._fail_buy_flat("Swap TX build failed", reason)
                 return None
 
@@ -1212,6 +1303,10 @@ class LiveTrader:
             send_res = await self._sign_and_send(swap_tx, wait_for_confirmation=False)
             if not send_res:
                 logger.error("[BUY FAILED] Broadcast rejected by all RPCs — not retrying")
+                self._journal_event(
+                    "buy_rejected", reason=reason, error="broadcast_rejected_all_rpcs",
+                    quote_out_amount=quote.get("outAmount"),
+                )
                 await self._fail_buy_flat("Broadcast rejected by all RPCs", reason)
                 return None
             sig = send_res["sig"]
@@ -1248,10 +1343,19 @@ class LiveTrader:
                 f"elapsed={elapsed:.2f}s (pending on-chain confirmation)"
             )
             logger.info(f"[BUY] https://solscan.io/tx/{sig}")
+            self._journal_event(
+                "buy_broadcast", reason=reason, status="pending",
+                tx_hash=sig, solscan=f"https://solscan.io/tx/{sig}",
+                size_sol=self.buy_size_sol, tokens_expected=tokens,
+                out_amount_raw=out_amount, priority_fee_microlamports=fee,
+                last_valid_block_height=last_valid_height,
+                elapsed_s=round(elapsed, 3),
+            )
             return sig
 
         except Exception as e:
             logger.error(f"[BUY ERROR] Unexpected error: {e}", exc_info=True)
+            self._journal_event("buy_error", reason=reason, error=str(e))
             await self._fail_buy_flat(f"Unexpected: {e}", reason)
             return None
         finally:
@@ -1286,6 +1390,11 @@ class LiveTrader:
                 self._cached_token_balance = on_chain
                 failed.status = "open"
                 failed.size_tokens = on_chain / (10 ** self._token_decimals)
+                self._journal_event(
+                    "buy_confirmed", trade=failed, reason=reason,
+                    via="fail_aborted_balance_probe", original_error=detail,
+                    on_chain_balance=on_chain, tokens=failed.size_tokens,
+                )
                 await self._broadcast_status(
                     "buy_confirmed", failed.tx_hash_buy or "", reason,
                     tokens=failed.size_tokens,
@@ -1295,6 +1404,11 @@ class LiveTrader:
             failed.exit_reason = f"buy_failed: {detail}"
             failed.exit_time = time.time()
             self.trade_history.append(failed)
+            self._journal_event(
+                "buy_failed", trade=failed, reason=reason, error=detail,
+                tx_hash=failed.tx_hash_buy or None,
+                sol_spent=failed.size_sol, tokens=failed.size_tokens,
+            )
             self.current_trade = None
         self._token_balance = 0
         self._cached_token_balance = 0
@@ -1382,6 +1496,13 @@ class LiveTrader:
                 tokens=(self.current_trade.size_tokens if self.current_trade else 0),
             )
             logger.info(f"[BUY CONFIRMED BG] sig={sig[:16]}… via={via} balance={balance}")
+            self._journal_event(
+                "buy_confirmed", trade=self.current_trade, via=via,
+                tx_hash=sig, on_chain_balance=balance,
+                tokens=(balance / (10 ** self._token_decimals)),
+                elapsed_s=round(time.time() - start, 3),
+                solscan=f"https://solscan.io/tx/{sig}",
+            )
 
         # Single tight poll loop — one status probe per iteration (NOT a nested
         # 12 s _confirm_tx per outer loop, which made deadness/balance checks
@@ -1394,6 +1515,11 @@ class LiveTrader:
                     # Definitive on-chain rejection — TX can never land.  Probe
                     # balance once (a prior rebroadcast may have landed) then fail.
                     logger.warning(f"[BUY BG] sig={sig[:16]}… on-chain error: {status['err']}")
+                    self._journal_event(
+                        "buy_onchain_error", tx_hash=sig,
+                        error=str(status["err"]),
+                        elapsed_s=round(time.time() - start, 3),
+                    )
                     break
                 if status.get("confirmationStatus") in ("confirmed", "finalized"):
                     # Confirmed — reconcile the real balance and open.
@@ -1436,6 +1562,10 @@ class LiveTrader:
                         f"[BUY BG FAILED] sig={sig[:16]}… blockhash expired and "
                         f"wallet empty — buy is cryptographically dead"
                     )
+                    self._journal_event(
+                        "buy_dead", tx_hash=sig, cause="blockhash_expired_wallet_empty",
+                        elapsed_s=round(time.time() - start, 3),
+                    )
                     ct = self.current_trade
                     if ct is not None and ct.tx_hash_buy == sig:
                         await self._fail_buy_flat(
@@ -1459,6 +1589,10 @@ class LiveTrader:
         logger.error(
             f"[BUY BG FAILED] sig={sig[:16]}… never confirmed within "
             f"{BUY_CONFIRM_TIMEOUT_S:.0f}s and wallet empty — returning to FLAT (no retry)"
+        )
+        self._journal_event(
+            "buy_dead", tx_hash=sig, cause="confirm_deadline_wallet_empty",
+            elapsed_s=round(time.time() - start, 3),
         )
         if ct is not None and ct.tx_hash_buy == sig:
             await self._fail_buy_flat(
@@ -1512,6 +1646,11 @@ class LiveTrader:
                 f"[SELL PARTIAL] {post_balance} tokens still on-chain after "
                 f"confirmed sell sig={sig[:8]}… — re-arming watchdog to retry."
             )
+            self._journal_event(
+                "sell_partial", tx_hash=sig,
+                remaining_token_balance=post_balance,
+                closed_trade=(closed_trade.to_dict() if closed_trade else None),
+            )
             self._token_balance = post_balance
             # If confirm_sell already nulled current_trade, resurrect it so
             # the watchdog's "position open" check passes.
@@ -1542,6 +1681,11 @@ class LiveTrader:
                 self.stats.current_balance -= closed_trade.pnl_sol
                 self._last_exit_signal_ts = time.time()  # arm watchdog
                 self.engine.notify_trade_opened(self._last_price, Direction.UP)
+                self._journal_event(
+                    "trade_resurrected", trade=self.current_trade,
+                    tx_hash_sell_reverted=sig,
+                    reason="partial_fill_resurrection",
+                )
         # Success path: balance is 0 — trade is genuinely closed. Nothing to do.
 
     async def execute_sell(self, reason: str = "signal") -> Optional[str]:
@@ -1590,6 +1734,10 @@ class LiveTrader:
             logger.info(
                 f"[SELL] Starting sell: mint={mint_str[:8]}… reason={reason} "
                 f"cached_balance={self._token_balance} units"
+            )
+            self._journal_event(
+                "sell_attempt", reason=reason,
+                cached_token_balance=self._token_balance,
             )
             # ── Authoritative on-chain token balance (accuracy > speed) ──────
             # `Custom: 6024` (insufficient token account balance) is the #1
@@ -1643,6 +1791,10 @@ class LiveTrader:
                     f"arming watchdog to retry until tokens appear"
                 )
                 self._last_exit_signal_ts = time.time()
+                self._journal_event(
+                    "sell_pending", reason=reason,
+                    detail="no_token_balance_readable_watchdog_armed",
+                )
                 await self._broadcast_status(
                     "sell_pending", "Waiting for token balance to appear", reason
                 )
@@ -1660,6 +1812,11 @@ class LiveTrader:
                 logger.info(
                     f"[SELL] Attempt group {attempt_group} "
                     f"(fee={fee} micro-lamports, slippage={self.slippage_bps} bps)"
+                )
+                self._journal_event(
+                    "sell_attempt_group", reason=reason, group=attempt_group,
+                    priority_fee_microlamports=fee, slippage_bps=self.slippage_bps,
+                    token_balance=token_balance,
                 )
 
                 for inner in range(1, QUOTE_RETRIES_PER_GROUP + 1):
@@ -1738,6 +1895,14 @@ class LiveTrader:
                         f"group={attempt_group} elapsed={elapsed:.1f}s"
                     )
                     logger.info(f"[SELL OK] https://solscan.io/tx/{sig}")
+                    self._journal_event(
+                        "sell_confirmed", trade=closed_trade, reason=reason,
+                        tx_hash=sig, solscan=f"https://solscan.io/tx/{sig}",
+                        sol_received=sol_received, attempt_group=attempt_group,
+                        elapsed_s=round(elapsed, 3),
+                        pnl_sol=(closed_trade.pnl_sol if closed_trade else None),
+                        pnl_pct=(closed_trade.pnl_pct if closed_trade else None),
+                    )
                     return sig
 
                 # ── Group exhausted ──────────────────────────────────────────
@@ -1768,8 +1933,17 @@ class LiveTrader:
                     )
                     self._token_balance = 0
                     self._last_exit_signal_ts = 0.0
+                    closed_trade = None
                     if self.current_trade:
-                        self.confirm_sell("", est_sol_received, self._last_price)
+                        closed_trade = self.confirm_sell("", est_sol_received, self._last_price)
+                    self._journal_event(
+                        "sell_confirmed", trade=closed_trade, reason=reason,
+                        tx_hash=None, via="verified_empty_wallet",
+                        sol_received=est_sol_received, estimated=True,
+                        attempt_group=attempt_group,
+                        pnl_sol=(closed_trade.pnl_sol if closed_trade else None),
+                        pnl_pct=(closed_trade.pnl_pct if closed_trade else None),
+                    )
                     return "verified_empty"
                 token_balance = bal
 
@@ -1795,6 +1969,7 @@ class LiveTrader:
 
         except Exception as e:
             logger.error(f"[SELL ERROR] Unexpected error: {e}", exc_info=True)
+            self._journal_event("sell_error", reason=reason, error=str(e))
             await self._broadcast_status("sell_failed", f"Unexpected: {e}", reason)
             return None
         finally:
@@ -1883,6 +2058,11 @@ class LiveTrader:
                         self.current_trade = adopted
                         self.engine.notify_trade_opened(price, Direction.UP)
                         self._last_exit_signal_ts = time.time()  # arm sell path
+                        self._journal_event(
+                            "bag_adopted", trade=adopted,
+                            on_chain_balance=orphan, price=price,
+                            reason="orphaned_bag_watchdog_adoption",
+                        )
                         asyncio.ensure_future(self.execute_sell("watchdog_adopted_orphan"))
                         continue
 
@@ -2386,6 +2566,7 @@ class LiveTrader:
         )
         self.current_trade = trade
         self._last_motion_ts = time.time()  # reset no-motion clock at position open
+        self._journal_event("manual_buy_triggered", trade=trade, price=c)
         # Do NOT notify the engine yet — the trade is only "pending" until the
         # buy confirms on-chain.  The engine is notified on confirmed-open via
         # the normal pending-signal path (or on settle).
@@ -2394,6 +2575,7 @@ class LiveTrader:
             # Buy failed — clean up so future trades aren't blocked.
             # Engine was never notified of an open, so no notify_trade_closed.
             logger.warning("[MANUAL BUY] Buy failed — resetting trade state")
+            self._journal_event("manual_buy_failed", trade=trade)
             self.current_trade = None
         return sig
 
@@ -2405,10 +2587,12 @@ class LiveTrader:
         logger.info("[MANUAL SELL] Initiating manual sell")
         self.current_trade.status = "closing"
         self.current_trade.exit_reason = "manual_test_sell"
+        self._journal_event("manual_sell_triggered", trade=self.current_trade)
         sig = await self.execute_sell("manual_test_sell")
         if sig is None and self.current_trade is not None:
             # Sell failed — revert status so position isn't stuck
             logger.warning("[MANUAL SELL] Sell failed — reverting trade status to open")
+            self._journal_event("manual_sell_failed", trade=self.current_trade)
             self.current_trade.status = "open"
         return sig
 
@@ -2456,10 +2640,23 @@ class LiveTrader:
         self.current_trade = None
         self.engine.notify_trade_closed()
         logger.info(f"Trade closed: PnL={trade.pnl_sol:+.6f} SOL ({trade.pnl_pct:+.2f}%)")
+        self._journal_event(
+            "trade_closed", trade=trade,
+            tx_hash_buy=trade.tx_hash_buy or None,
+            tx_hash_sell=trade.tx_hash_sell or None,
+            sol_received=sol_received, exit_price=actual_price,
+            pnl_sol=trade.pnl_sol, pnl_pct=trade.pnl_pct,
+            hold_time_s=(trade.exit_time - trade.entry_time) if trade.exit_time else None,
+            stats=self.stats.to_dict(),
+        )
         return trade
 
     def confirm_failed(self, action: str, error: str):
         logger.error(f"Swap FAILED ({action}): {error}")
+        self._journal_event(
+            "swap_failed", action=action, error=error,
+            trade=(self.current_trade.to_dict() if self.current_trade else None),
+        )
         if action == "buy" and self.current_trade is not None:
             self.current_trade = None
             self.engine.notify_trade_closed()

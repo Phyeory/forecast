@@ -969,6 +969,12 @@ async def live_trading_ws(
         real_mint, timeframe, token_name, token_symbol
     )
     logger.info(f"[LIVE] Auto-recording candles → recording {rec_id}")
+    # Link the session's persistent trade ledger to this recording so every
+    # live trade can be cross-referenced against its backtestable candle data.
+    live_trader.set_session_meta(
+        recording_id=rec_id, token_name=token_name,
+        token_symbol=token_symbol, timeframe=timeframe,
+    )
 
     # ── Holder-flow monitor (live dev/insider sell detection) ────────────
     # Watches the token and persists events to the auto-recording's
