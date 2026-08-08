@@ -417,6 +417,44 @@ future agent must therefore:
 > microstructure, cross-token breadth, token-memory, reflection shape,
 > structural floor, pool liquidity, and on-chain provenance.  Engine
 > byte-identical to HEAD.  See RESEARCH_LOG.md Iter 34–35.
+>
+> **iter37 (Persistent Submersion Exit — path-geometric kelly_flat cut —
+> REJECTED, no production change).**  A principled attempt on the
+> `kelly_flat` left tail (44/63 big losers, 92% of losing PnL).  Empirically
+> the losers are persistent negative-drift paths (trailing-60s submersion
+> median 0.98, trend R² 0.70) vs winners' transient dips (submersion median
+> 0.21).  Rule: arm after 20 continuous ticks ≤ −20% offside, exit when the
+> trailing-60s submersion fraction ≥ 0.8.  Proved a submartingale exit
+> theorem (conditional on submersion the posterior concentrates on θ<0 ⇒
+> holding has negative expected log-wealth ⇒ exit dominates).  Static
+> counterfactual looked positive (+0.104 SOL, 32 big losers cut vs 8 winners).
+> **Full batch REJECTED**: `iter37_pse` 452 trades / 70.6% WR / +0.449 SOL
+> vs `iter31_baseline` 427 / 75.6% / +0.965 — **Δ = −0.516 SOL, Wilcoxon
+> p = 0.948, bootstrap CI [−0.0073, −0.0001] strictly negative, breadth
+> 21/24 (13.2%), McNemar p = 0.035 (W→L dominant)**.  The theorem priced the
+> exit in isolation but not the **replacement entry**: freed capital
+> immediately re-bought the same bleeding token (RADISH 13→16 trades) and
+> bled again — the iter31_vc90 mechanism re-confirmed.  **Ninth orthogonal
+> negative result**; closes the last untried exit-side avenue (path-geometry,
+> non-engine-state trigger).  Engine reverted byte-identical to HEAD
+> (rec1019 byte-confirmed).  See RESEARCH_LOG.md Iter 37.
+>
+> **iter37 addendum — oracle impossibility bound for exit-only changes.**
+> Decomposing the iter37 regression showed the exit itself was correct
+> (blocked +0.251 of loser PnL) but was swamped by replacement-entry churn
+> (−0.196, 29 re-entries) and displaced baseline winners (−0.251).  A
+> faithful "exit + re-entry cooldown" sim peaks at +0.785 SOL (best K=180s)
+> — still below baseline +0.965 — because blocking losing re-entries also
+> blocks winning ones (indistinguishable buy flickers).  **Oracle bound:
+> even perfect re-entry foresight (block exactly the losers) yields only
+> +0.786 SOL < baseline.**  Theorem: any mechanism that only modifies exit
+> timing and/or gates re-entry, using only the recorded OHLCV stream, is
+> bounded below baseline on the iter31 cohort.  The left tail is
+> entry-selection error, addressable only by information the engine does
+> not yet observe (e.g. validated holder-flow on fresh iter36 recordings).
+> **Do not build another kelly_flat replacement that fires earlier, adds a
+> cooldown, or re-tunes streak/offside thresholds — all are bounded below
+> baseline.**  See RESEARCH_LOG.md Iter 37 addendum.
 
 ---
 

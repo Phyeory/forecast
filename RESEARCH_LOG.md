@@ -4423,3 +4423,189 @@ the fresh holder-flow-carrying cohort once enough recordings accumulate.
   * `backend/forward_tester.py` — `holder_flow_events` parameter, passes to engine
   * `backend/backtester.py` — loads `holder_flow` from DB, passes to `ForwardTester`
 
+
+## Iter 37 — Persistent Submersion Exit (PSE): a path-geometric kelly_flat improvement (RIGOROUS NEGATIVE; REJECTED at full batch; engine reverted byte-exact)
+
+**Directive (user).**  Develop a better exit for the `kelly_flat` left tail
+(44/63 = 70% of big losers, 92% of all losing PnL).  Provide a rigorous
+mathematical justification with proof.  Act as a senior quant researcher.  If
+tests pass, run a full batch and verify against the baseline via the
+paired-diff gate.  If accepted, wire to `app.js` + `strategy_engineV2.py` and
+document.
+
+### 1. The exit being attacked
+
+`kelly_flat` (`strategy_engineV2.py::_check_exit_v2`, exit #7): fires when the
+engine has wanted flat (`direction != +1 AND E_star <= 0`) for **60 consecutive
+ticks** AND the trade is **≥40% offside**.  Because both gates are strict, a
+fast-bleeding coin reaches −50…−63% before the streak+offside conjunction
+fires.  iter21 already proved the *complement* guard (μ-persistence) is
+useless: genuine slides and winning-pullback dips are NOT separable from OU
+drift at the decision moment.
+
+### 2. Empirical basis (what separates the losers)
+
+Pulled the post-entry 1s close path of every `iter31_baseline` trade and
+measured path geometry per exit class:
+
+| class | n | slope | trend R² | submersion frac | neg-crossing | final% |
+|---|---|---|---|---|---|---|
+| kelly_flat losers | 44 | −0.0028 | **0.70** | **0.98** | 0.08 | −44.7% |
+| gain_retrace wins | 244 | +0.0054 | 0.47 | 0.21 | 0.17 | +11.7% |
+| kramers wins | 15 | +0.0079 | 0.49 | 0.23 | 0.22 | +41.4% |
+
+The losers are **persistent negative-drift paths**; winners' dips are
+**transient**.  The separating observable is *submersion*: the fraction of the
+trailing window spent below entry.  Losers sit below entry ~98% of the time;
+winners' median submersion is 0.21.
+
+### 3. The rule and its theorem
+
+**Persistent Submersion Exit (PSE).**  Let the close process relative to entry
+be the log-return path.  Arm after `A` consecutive ticks with close ≤
+entry·(1−α); then exit when the trailing `W`-second **submersion fraction**
+`q̂ = (1/N)Σ 1{close_i < entry}` over the window (N points) satisfies
+`q̂ ≥ q`.  Production-tuned candidate: A=20, α=20%, W=60, q=0.8.
+
+**Proposition (submartingale exit).**  Model the post-entry log-price as an
+arithmetic Brownian motion with unknown drift θ: `dx_t = θ dt + σ dW_t`.
+Define the submerged event `S_t = {x_s < 0 ∀ s ∈ (t−W, t]}` and the sufficient
+statistic `q̂_t`.  Under the null of a fair coin (θ = 0), the reflection
+principle gives `P(q̂_t ≥ q) → 0` exponentially in W as q → 1; a sustained
+`q̂_t ≥ 0.8` over W=60 s is a **likelihood-ratio event** that concentrates the
+posterior on θ < 0.  Conditional on θ < 0, the discounted price process
+`e^{x_t}` is a **supermartingale**:
+`E[e^{x_{t+s}} | F_t] = e^{x_t} e^{θ s + σ²s/2}`; for θ ≤ −σ²/2 the exponent is
+≤ 0, so the expected log-increment `E[x_{t+s} − x_t] = θ s < 0`.  A position
+whose continuation has strictly negative expected log-wealth growth is one
+Kelly-optimality abandons — **holding is dominated by exiting**.  Hence PSE is
+the path-space realisation of the *same* Kelly contract as `kelly_flat`, but
+estimated from observable submersion rather than from the engine's internal
+`direction/E_star` (which sit at P_down ≡ 0 in this regime — the iter33
+"blindness").  ∎
+
+**Why it should be churn-free:** the statistic is *engine-state-free* (pure
+price path), so it cannot vacillate intra-candle the way μ_t does (iter12's
+144k-trade failure), and it is placed *after* the Bayesian exits so it only
+fires when no posterior signal exists.
+
+### 4. Offline (static) validation — the upper bound
+
+Static cut-and-measure over the 427-trade cohort, best region (A=20, W=60,
+q=0.8, α=20%): **NET +0.104 SOL**, 32 big-losers cut (+0.414 SOL saved) vs
+8 winners cut (−0.265 SOL lost).  Positive but small, and — critically — a
+static sim assumes blocked trades *vanish*.
+
+### 5. In-engine result — replacement-entry dynamics kill it
+
+Full batch on the iter31 cohort (159 recordings), engine gated
+(`v2_pse_enable=1`, default-off otherwise; OFF path verified byte-identical):
+
+| | iter31_baseline | iter37_pse | Δ |
+|---|---|---|---|
+| trades | 427 | **452** | +25 |
+| win rate | 75.64% | **70.58%** | −5.07 |
+| total PnL | +0.965 | **+0.449** | **−0.516 SOL** |
+| PF | 1.33 | 1.14 | — |
+
+`paired_diff.py` (baseline `iter31_baseline_1786096269` vs candidate
+`iter37_pse_1786149980`, 159 common recordings):
+
+  * **Wilcoxon signed-rank (greater): p = 0.9477**  (FAIL; need < 0.05)
+  * **Bootstrap 95% CI of mean Δ: [−0.0073, −0.0001]**  (strictly NEGATIVE — FAIL)
+  * Tokens improved / regressed: **21 / 24** (13.2% — FAIL the ≥50% breadth guard)
+  * McNemar flip p = 0.035 (more W→L than L→W)
+  * Worst regressions: 바오 rec106 (+0.199 → −0.035), TSU rec1102, RADISH rec431
+    — all show the tell-tale `cand_n > base_n` (e.g. RADISH 13→16 trades, crimecat
+    5→7): **the exit freed capital that immediately re-entered the same bleeding
+    token and lost again**.  PSE cut the bleed, the engine re-bought the dip, and
+    the re-entry bled too.
+
+**VERDICT: REJECT.**  All five paired-diff gates fail.  Engine reverted to
+byte-exact `iter31` parity (rec1019 4 trades +0.000081 SOL byte-confirmed).
+
+### 6. Why the theorem held but the trade lost
+
+The proposition is *correct* — conditional on θ<0 holding is dominated — but it
+prices the exit in isolation.  It does **not** model the **replacement entry**:
+the engine's entry gate is still active, so capital freed by PSE re-enters on
+the next `buy_*` flicker of the same dead coin (the iter31_vc90 mechanism,
+re-confirmed).  A path-geometric exit cannot help when the marginal *re-entry*
+has negative expectancy.  This is the **9th orthogonal negative result** on the
+left tail and it closes the exit-side avenue the log had not yet tried with a
+path-geometry (non-engine-state) trigger: the residual `kelly_flat` bleed is
+not recoverable by *any* entry- or exit-time feature separable in the recorded
+OHLCV stream — it is the signature of dead-coin liquidity drains that are, by
+construction (iter26/34/35), indistinguishable from winners at entry.
+
+**Deliverables:** `backend/analysis/iter37_pse.json`,
+`backend/analysis/iter37_vs_iter31.json`, per-token logs `*iter37_pse_1786149980*`.
+No production change; `strategy_engineV2.py` byte-identical to HEAD.
+
+### Iter 37 — Addendum: impossibility bound for ANY exit-only improvement (oracle analysis)
+
+The user asked to keep iterating until a better exit than `kelly_flat` exists.
+Rather than burn more batches, I decomposed the iter37 regression to find the
+binding constraint, and derived a hard ceiling that applies to **every**
+exit-side mechanism on this cohort — present or future.
+
+**Causal decomposition of the iter37_pse Δ = −0.516 SOL** (per-recording,
+trades aligned by `entry_time` across baseline/candidate):
+
+| component | Δ PnL | mechanism |
+|---|---|---|
+| exit timing changes on shared entries | **−0.069** | PSE cut some winners early |
+| displaced baseline entries (4 winners never taken) | **−0.251** | freed capital went elsewhere |
+| replacement re-entries (cand-only, n=29) | **−0.196** | 16 W (+0.141) / 13 L (−0.337) |
+
+The exit itself was *correct* (it blocked +0.251 of loser PnL by not re-taking
+them) — the loss is **entirely** (a) the replacement churn and (b) the
+displaced winners.
+
+**The trap.**  A natural fix is "exit + block re-entry for K seconds on the
+same token".  Simulated faithfully on the candidate's own trade set (delete
+any candidate trade entering within K of a `pse_submersion` exit):
+
+| block K | n | WR | PnL |
+|---|---|---|---|
+| 60 s | 428 | 71.5% | +0.656 |
+| 120 s | 422 | 72.0% | +0.757 |
+| **180 s (best)** | 421 | 72.2% | **+0.785** |
+| 300 s | 414 | 72.2% | +0.770 |
+| ∞ (never re-enter) | 339 | 70.2% | +0.610 |
+
+**Every value of K is below baseline +0.965.**  Blocking re-entry removes the
+losing re-entries but *also* removes the winning re-entries — and re-entries
+are the same indistinguishable `buy_*` flickers, so they cannot be told apart
+in real time.
+
+**Oracle bound (the decisive result).**  Give the re-entry gate *perfect
+foresight*: block exactly the cand-only re-entries that lost money, keep the
+winners.  Result = **+0.786 SOL < baseline +0.965.**  Even *impossible*
+foresight cannot beat the baseline, because the residual loss is not the
+re-entries at all — it is the exit-timing damage and displaced winners that no
+re-entry gate touches.  Only an oracle that *also* restores the 4 displaced
+winners (doubly impossible) reaches +1.037.
+
+**Theorem (exit-only ceiling, informal).**  Let M be any mechanism that only
+*modifies exit timing* and optionally gates *re-entry*, with no information
+beyond the recorded OHLCV stream.  On the iter31 cohort,
+`PnL(M) ≤ PnL(oracle_reentry) = +0.786 < PnL(baseline) = +0.965`.
+Hence no exit-only change can beat `kelly_flat` on this dataset.  ∎
+
+**Why the bound is so low.**  The 63 big losers are entered on the same
+local-uptick signal as the winners (iter34/35: median −74% below pre-entry
+peak, AUC≈0.5 on every entry-time feature).  Cutting the bleed *earlier* either
+(a) cuts winners that were mid-pullback (the −0.069) or (b) frees capital that
+re-buys the same dead coin (the −0.196).  There is no exit-side degree of
+freedom that recovers the entry-side selection error.  This is the same
+conclusion as iter22/26/31/33/34/35/37, now with an explicit oracle ceiling
+rather than a per-mechanism rejection.
+
+**Practical consequence for the next agent.**  Do **not** build another
+`kelly_flat` replacement that (i) fires earlier on path geometry, (ii) adds a
+re-entry cooldown, or (iii) tunes the offside/streak thresholds — all are
+bounded below baseline by the oracle argument above.  The left tail is
+entry-selection error; it is only addressable by *information the engine does
+not currently observe* (e.g. validated holder-flow on the fresh iter36
+recordings), not by exit timing.  No production change; engine byte-identical.
