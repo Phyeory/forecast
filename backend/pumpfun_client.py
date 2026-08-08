@@ -39,7 +39,11 @@ def _get_rpc_lock() -> asyncio.Lock:
 PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
 PUMP_API_V3   = "https://frontend-api-v3.pump.fun"
 DEXSCREENER   = "https://api.dexscreener.com"
-SOLANA_RPC_HTTP = "https://api.mainnet-beta.solana.com"
+# HTTP RPC moved to publicnode (mainnet-beta is too rate-limited for the
+# 2-call _load_pool sequence that fires on every PumpSwapRPCClient connect).
+SOLANA_RPC_HTTP = "https://solana-rpc.publicnode.com"
+# WS stays on mainnet-beta — websocket accountSubscribe doesn't count toward
+# the same per-IP HTTP rate budget, and mainnet-beta's WS is the most reliable.
 SOLANA_RPC_WS   = "wss://api.mainnet-beta.solana.com"
 WSOL_MINT = "So11111111111111111111111111111111111111112"
 

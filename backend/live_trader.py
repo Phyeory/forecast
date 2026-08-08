@@ -72,10 +72,17 @@ WSOL_MINT         = "So11111111111111111111111111111111111111112"
 # If ANY one forwards it to a slot leader, the TX lands on-chain.
 # All are free, no API key required.  Order matters: first = primary
 # (used for reads like balance queries and confirmation polling).
+#
+# IMPORTANT: api.mainnet-beta.solana.com is the MOST rate-limited free RPC
+# (public, no API key, aggressive per-IP caps).  Using it as the primary read
+# endpoint causes 429 storms that also starve pumpfun_client.py's gated reads
+# (getAccountInfo/getMultipleAccounts on every PumpSwapRPCClient connect).
+# publicnode has much higher per-IP limits; ankr is a reliable secondary.
+# mainnet-beta is kept LAST for broadcast redundancy but NOT for reads.
 SOLANA_RPCS = [
-    "https://api.mainnet-beta.solana.com",
     "https://solana-rpc.publicnode.com",
     "https://rpc.ankr.com/solana",
+    "https://api.mainnet-beta.solana.com",
 ]
 SOLANA_RPC_PRIMARY = SOLANA_RPCS[0]
 
@@ -83,8 +90,8 @@ SOLANA_RPC_PRIMARY = SOLANA_RPCS[0]
 # Hot path: confirmation polled at ~standby-tick cadence; rebroadcast fires
 # every 1.0s so a slow slot leader gets retried within the 12s window.
 CONFIRM_TIMEOUT_S:  float = 12.0   # per-attempt confirm window (short — we retry w/ fresh blockhash)
-CONFIRM_POLL_MS:    float = 0.3    # poll cadence while waiting for confirmation
-CONFIRM_REBROADCAST_S: float = 1.0 # re-broadcast same signed TX every N s while confirming
+CONFIRM_POLL_MS:    float = 0.5    # poll cadence while waiting for confirmation
+CONFIRM_REBROADCAST_S: float = 1.5 # re-broadcast same signed TX every N s while confirming
 
 # ── BUY FINALITY INVARIANT ────────────────────────────────────────────────────
 # A buy may ONLY be declared "failed" once the transaction is *cryptographically
@@ -144,8 +151,11 @@ MCAP_STOP_SELL_TIMEOUT_SECONDS: float = 300.0
 # How often the background tasks refresh the cached balances / blockhash.
 # These run OFF the critical path: the swap reads the cache instantly instead
 # of blocking on an RPC round-trip before it can even build the transaction.
-BALANCE_CACHE_TTL_S:   float = 4.0   # SOL + token balance refresh cadence
-BLOCKHASH_REFRESH_S:   float = 0.9   # blockhash refresh cadence (~1 slot)
+# Slowed down from 0.9s→2.0s and 4.0s→8.0s to reduce RPC pressure (the
+# previous cadences generated ~1.6 req/s of background traffic per session,
+# which caused 429 storms on mainnet-beta when combined with pumpfun_client).
+BALANCE_CACHE_TTL_S:   float = 8.0   # SOL + token balance refresh cadence
+BLOCKHASH_REFRESH_S:   float = 2.0   # blockhash refresh cadence (~2 slots)
 BLOCKHASH_MAX_AGE_S:   float = 25.0  # blockhash is valid ~150 slots (~60s); use well under that
 
 

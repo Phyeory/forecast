@@ -39,6 +39,7 @@ from typing import Optional
 import aiohttp
 
 import data_store
+import rate_limiter as rl
 
 logger = logging.getLogger(__name__)
 
@@ -131,9 +132,6 @@ _REGISTRY_REFRESH_INTERVAL = 60.0
 # Minimum sell amount (USD) to consider significant
 _MIN_SELL_USD = 100.0
 
-# Extra sleep multiplier while recovering from a 429 ban
-_BAN_BACKOFF_MULTIPLIER = 2.0
-
 
 @dataclass
 class HolderFlowEvent:
@@ -160,23 +158,6 @@ class _TokenWatchState:
     recent_events: list[HolderFlowEvent] = field(default_factory=list)
     # Max age for "recent" events (seconds)
     recent_window: float = 60.0
-
-
-def _parse_reset_unix(message: str) -> Optional[float]:
-    """Extract the unix reset time from a GMGN rate-limit error message."""
-    # e.g. "Rate limit resets at 2026-08-08 00:00:49 GM" — GMGN gives UTC
-    m = re.search(r"resets at (\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2}):(\d{2})", message)
-    if not m:
-        return None
-    try:
-        import datetime
-        dt = datetime.datetime.strptime(
-            f"{m.group(1)} {m.group(2)}:{m.group(3)}:{m.group(4)}",
-            "%Y-%m-%d %H:%M:%S",
-        ).replace(tzinfo=datetime.timezone.utc)
-        return dt.timestamp()
-    except Exception:
-        return None
 
 
 class HolderFlowMonitor:
@@ -208,9 +189,6 @@ class HolderFlowMonitor:
         # HTTP session + auth
         self._session: Optional[aiohttp.ClientSession] = None
         self._api_key: str = os.environ.get("GMGN_API_KEY", "")
-        # Rate-limit state
-        self._banned_until: float = 0.0
-        self._ban_logged: bool = False
         # Refcount of active users (live sessions + recorders)
         self._refcount: int = 0
         # iter38: rate-limited error log timestamps (key -> last emit time)
@@ -358,8 +336,12 @@ class HolderFlowMonitor:
                     return await resp.json(content_type=None)
                 text = await resp.text()
                 if resp.status == 429:
-                    reset = _parse_reset_unix(text)
-                    self._note_ban(reset)
+                    reset = rl.parse_gmgn_reset_time(text)
+                    if reset is None:
+                        rem = rl.parse_gmgn_remaining_seconds(text)
+                        if rem is not None:
+                            reset = time.time() + rem
+                    rl.note_gmgn_429(reset, source="holder_flow")
                 else:
                     # Surface non-429 failures — these are why the registry was
                     # silently empty in iter36/38 (e.g. 404 wrong endpoint, 401
@@ -386,23 +368,8 @@ class HolderFlowMonitor:
         else:
             logger.debug(msg)
 
-    def _note_ban(self, reset_unix: Optional[float]):
-        """Record a rate-limit ban and log it once per window."""
-        now = time.time()
-        if reset_unix and reset_unix > now:
-            self._banned_until = max(self._banned_until, reset_unix)
-        else:
-            self._banned_until = max(self._banned_until, now + 10.0)
-        if not self._ban_logged:
-            wait = max(0.0, self._banned_until - now)
-            logger.warning(
-                f"[HolderFlow] GMGN rate-limited — backing off {wait:.0f}s "
-                f"(further ban logs suppressed until reset)"
-            )
-            self._ban_logged = True
-
     def _ban_active(self) -> bool:
-        return time.time() < self._banned_until
+        return rl.gmgn_banned()
 
     # ── Internal: polling loops ───────────────────────────────────────────
 
@@ -411,10 +378,8 @@ class HolderFlowMonitor:
         while self._running:
             try:
                 if self._ban_active():
-                    self._ban_logged = self._ban_logged and (time.time() < self._banned_until)
                     await asyncio.sleep(1.0)
                     continue
-                self._ban_logged = False
                 await self._poll_once()
             except asyncio.CancelledError:
                 break

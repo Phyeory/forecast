@@ -44,6 +44,8 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional, Callable, Awaitable, Iterable
 
+import rate_limiter as rl
+
 logger = logging.getLogger("autofeed")
 
 
@@ -372,6 +374,15 @@ class AutoFeed:
             if proc.returncode != 0:
                 self.last_error = f"CLI exit {proc.returncode}: {stderr[:300]}"
                 logger.error(f"[AutoFeed] CLI exit {proc.returncode} — stderr[:400]={stderr[:400]}")
+                # Detect GMGN rate-limit bans in CLI stderr so we stop
+                # re-triggering bans while holder_flow is also being limited.
+                if "429" in stderr or "RATE_LIMIT" in stderr or "rate limit" in stderr.lower():
+                    reset = rl.parse_gmgn_reset_time(stderr)
+                    if reset is None:
+                        rem = rl.parse_gmgn_remaining_seconds(stderr)
+                        if rem is not None:
+                            reset = time.time() + rem
+                    rl.note_gmgn_429(reset, source="autofeed_cli")
                 return None
             if not stdout:
                 self.last_error = "Empty CLI stdout"
@@ -394,6 +405,13 @@ class AutoFeed:
 
     async def _fetch_candidates(self) -> list[dict]:
         """Fetch raw token list from gmgn.ai. Returns raw rank rows on any failure."""
+        # Skip the CLI invocation entirely while GMGN is rate-limited —
+        # calling `npx gmgn-cli` during a ban just extends it.
+        if rl.gmgn_banned():
+            rem = rl.gmgn_ban_remaining()
+            logger.info(f"[AutoFeed] Skipping poll — GMGN rate-limited ({rem:.0f}s remaining)")
+            self.last_error = f"GMGN rate-limited ({rem:.0f}s remaining)"
+            return []
         data = await self._run_cli(self._build_cli_args())
         if not data:
             return []
