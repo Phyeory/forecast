@@ -231,6 +231,7 @@ async def recorder_start(body: dict = Body(...)):
                     synthetic=is_synthetic,
                     is_buy=is_buy_rec,
                     pool_sol=trade.get("pool_sol", 0.0),
+                    market_cap_usd=trade.get("market_cap_usd", 0.0),
                 )
                 # Persist every tick (real or synthetic) so the candle row in
                 # the DB always reflects the current accumulated OHLCV state.
@@ -244,6 +245,7 @@ async def recorder_start(body: dict = Body(...)):
                     candle_dict.get("buy_volume", 0.0),
                     candle_dict.get("sell_volume", 0.0),
                     candle_dict.get("pool_sol", 0.0),
+                    candle_dict.get("market_cap_usd", 0.0),
                 )
                 last_candle_time = ct
         finally:
@@ -336,6 +338,73 @@ async def get_recording_endpoint(recording_id: int):
 async def get_recording_candles_endpoint(recording_id: int):
     candles = data_store.get_recording_candles(recording_id)
     return JSONResponse(candles)
+
+
+@app.post("/api/recordings/finish_stale")
+@app.delete("/api/recordings/finish_stale")
+async def finish_stale_recordings(stale_seconds: int = 60):
+    """Find recordings still marked as `recording` but with no recent candle updates
+    and mark them as completed. Useful when a recorder task crashed or the
+    process was restarted and left DB rows in a recording state.
+
+    `stale_seconds` defaults to 60s; recordings whose last candle time is
+    older than `now - stale_seconds` will be stopped.
+    """
+    now = time.time()
+    fixed = []
+    checked = 0
+    recs = data_store.list_recordings()
+    for r in recs:
+        checked += 1
+        if r.get("status") != "recording":
+            continue
+        rid = r.get("id")
+        # Do not auto-finish recordings that have an active recorder task
+        if rid in _active_recorders:
+            continue
+        try:
+            candles = data_store.get_recording_candles(rid)
+            if not candles:
+                # No candles at all — treat as stale
+                data_store.stop_recording(rid)
+                fixed.append(rid)
+                continue
+            last_time = candles[-1]["time"]
+            if last_time < (now - stale_seconds):
+                data_store.stop_recording(rid)
+                fixed.append(rid)
+        except Exception:
+            continue
+
+    return JSONResponse({"fixed": fixed, "checked": checked, "stale_seconds": stale_seconds})
+
+
+async def _stale_scanner_loop(interval_seconds: int = 60, stale_seconds: int = 60):
+    """Background loop: periodically run the stale-finish pass."""
+    while True:
+        try:
+            await finish_stale_recordings(stale_seconds=stale_seconds)
+        except Exception:
+            logger.exception("stale scanner error")
+        await asyncio.sleep(interval_seconds)
+
+
+@app.on_event("startup")
+async def start_stale_scanner():
+    # Run once at startup to catch any stale DB rows from previous crashes
+    try:
+        await finish_stale_recordings(stale_seconds=60)
+    except Exception:
+        logger.exception("initial stale finish failed")
+    # Start background task to run periodically
+    app.state._stale_scanner_task = asyncio.create_task(_stale_scanner_loop())
+
+
+@app.on_event("shutdown")
+async def stop_stale_scanner():
+    t = getattr(app.state, "_stale_scanner_task", None)
+    if t:
+        t.cancel()
 
 
 @app.delete("/api/recordings/{recording_id}")
@@ -612,6 +681,7 @@ async def chart_ws(
                 trade["price"], trade["sol_amount"], trade["timestamp"],
                 synthetic=is_synthetic,
                 is_buy=is_buy_trade,
+                market_cap_usd=trade.get("market_cap_usd", 0.0),
             )
 
             # Skip if price hasn't changed (dedup rapid-fire identical ticks)
@@ -631,6 +701,7 @@ async def chart_ws(
                 volume=candle_dict.get("volume", 0),
                 buy_volume=candle_dict.get("buy_volume", 0.0),
                 sell_volume=candle_dict.get("sell_volume", 0.0),
+                market_cap_usd=candle_dict.get("market_cap_usd", 0.0),
             )
 
             # Only show real trades in the trade feed sidebar (not synthetic price polls)
@@ -1048,6 +1119,7 @@ async def live_trading_ws(
                 synthetic=is_synthetic,
                 is_buy=is_buy_live,
                 pool_sol=trade.get("pool_sol", 0.0),
+                market_cap_usd=trade.get("market_cap_usd", 0.0),
             )
             candle_dict = candle.to_dict()
             current_price = candle_dict["close"]
@@ -1062,6 +1134,7 @@ async def live_trading_ws(
                 candle_dict.get("buy_volume", 0.0),
                 candle_dict.get("sell_volume", 0.0),
                 candle_dict.get("pool_sol", 0.0),
+                candle_dict.get("market_cap_usd", 0.0),
             )
 
             if last_sent_price is not None and current_price == last_sent_price and not is_new:
@@ -1089,6 +1162,7 @@ async def live_trading_ws(
                 buy_volume=candle_dict.get("buy_volume", 0.0),
                 sell_volume=candle_dict.get("sell_volume", 0.0),
                 is_new=is_new,
+                market_cap_usd=candle_dict.get("market_cap_usd", 0.0),
             )
 
             trade_payload = None if is_synthetic else {

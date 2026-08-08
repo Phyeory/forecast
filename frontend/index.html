@@ -198,7 +198,10 @@
         <div id="viewer-select-area">
           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
             <h2 class="section-title" style="margin-bottom:0;">📂 Saved Recordings</h2>
-            <button id="viewer-cleanup-btn" class="btn btn-danger" onclick="cleanupRecordings()">🧹 Clean up</button>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <button id="viewer-cleanup-btn" class="btn btn-danger" onclick="cleanupRecordings()">🧹 Clean up</button>
+              <button id="viewer-fix-stale-btn" class="btn btn-secondary" onclick="finishStaleRecordings()">🛠 Fix Stale</button>
+            </div>
           </div>
           <div id="viewer-recordings-list" class="recordings-grid">
             <div class="empty-state">No recordings available. Record some price data first.</div>

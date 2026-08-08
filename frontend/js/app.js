@@ -1665,6 +1665,26 @@ async function cleanupRecordings() {
   }
 }
 
+async function finishStaleRecordings() {
+  if (!confirm("Mark stale recordings as completed? This will finish recordings with no recent candles.")) return;
+  const btn = document.getElementById("viewer-fix-stale-btn");
+  if (btn) { btn.disabled = true; btn.textContent = 'Working…'; }
+  try {
+    const res = await apiFetch('/api/recordings/finish_stale', { method: 'POST' });
+    if (res && res.fixed) {
+      alert(`Fixed ${res.fixed.length} stale recording(s).`);
+    } else {
+      alert('No stale recordings found.');
+    }
+  } catch (e) {
+    alert('Error fixing stale recordings');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🛠 Fix Stale'; }
+    loadRecordingsList("recordings-list");
+    loadRecordingsList("viewer-recordings-list", true);
+  }
+}
+
 /* ── Recorder ────────────────────────────────────────────────────────── */
 
 let recPollTimer = null;
