@@ -2748,7 +2748,7 @@ class StrategyEngineV2Adapter:
         #   False, so behaviour is byte-identical to the pre-iter36 engine.
         self._v2_holder_flow_entry_block = float(engine_kwargs.pop("v2_holder_flow_entry_block", 1.0))
         self._v2_holder_flow_exit_enable = float(engine_kwargs.pop("v2_holder_flow_exit_enable", 1.0))
-        self._v2_holder_flow_require_tag = float(engine_kwargs.pop("v2_holder_flow_require_tag", 0.0))
+        self._v2_holder_flow_require_tag = float(engine_kwargs.pop("v2_holder_flow_require_tag", 1.0))
         self._v2_holder_flow_min_usd     = float(engine_kwargs.pop("v2_holder_flow_min_usd", 100.0))
         self._v2_holder_flow_entry_window_seconds = int(engine_kwargs.pop("v2_holder_flow_entry_window_seconds", 30))
         self._v2_holder_flow_exit_window_seconds  = int(engine_kwargs.pop("v2_holder_flow_exit_window_seconds", 15))

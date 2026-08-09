@@ -1058,8 +1058,43 @@ async def live_trading_ws(
     holder_monitor = get_shared_monitor()
     await holder_monitor.start()
     holder_monitor.watch_token(real_mint, recording_id=rec_id)
+    # Pre-load any holder_flow events already persisted for this recording
+    # (e.g. from a prior session on the same token, or events the monitor
+    # captured before the live WS connected).  This matches the backtester
+    # which calls set_holder_flow_events() with the full event list before
+    # the candle loop starts.
+    _existing_hf = data_store.get_holder_flow(rec_id)
+    if _existing_hf:
+        try:
+            live_trader.engine.set_holder_flow_events(_existing_hf)
+        except AttributeError:
+            pass  # V1 engine has no holder-flow surface
     # Track how many events we've already pushed into the engine (append-only)
-    _hf_pushed = {"n": 0}
+    _hf_pushed = {"n": len(_existing_hf)}
+    _hf_stop = asyncio.Event()
+
+    async def _holder_flow_pump():
+        """Background task that pushes new holder-flow events into the engine
+        every 1s, decoupled from trade ticks.  Without this, events discovered
+        by the GMGN poller sit in the monitor's buffer until the next trade
+        arrives — which may be 10s+ on illiquid tokens, making dev_sell_exit
+        fire far later than the backtester (which sees events at their exact
+        on-chain timestamp)."""
+        while not _hf_stop.is_set():
+            try:
+                _hf_events = holder_monitor.get_events_as_dicts(real_mint)
+                if len(_hf_events) > _hf_pushed["n"]:
+                    _new = _hf_events[_hf_pushed["n"]:]
+                    _hf_pushed["n"] = len(_hf_events)
+                    try:
+                        live_trader.engine.append_holder_flow_events(_new)
+                    except AttributeError:
+                        pass  # V1 engine has no holder-flow surface
+            except Exception:
+                pass
+            await asyncio.sleep(1.0)
+
+    _hf_pump_task = asyncio.ensure_future(_holder_flow_pump())
 
     async def send(obj: dict) -> bool:
         try:
@@ -1091,6 +1126,7 @@ async def live_trading_ws(
                 o=candle["open"], h=candle["high"],
                 l=candle["low"], c=candle["close"],
                 volume=candle.get("volume", 0),
+                pool_sol=candle.get("pool_sol", 0.0),
             )
             strategy_results.append(result)
 
@@ -1141,19 +1177,6 @@ async def live_trading_ws(
                 continue
             last_sent_price = current_price
 
-            # ── Push any new holder-flow events into the engine (iter36) ──
-            # The engine's holder-flow index is append-only; we push only the
-            # events we haven't forwarded yet so each event is seen once.
-            _hf_events = holder_monitor.get_events_as_dicts(real_mint)
-            if len(_hf_events) > _hf_pushed["n"]:
-                _new = _hf_events[_hf_pushed["n"]:]
-                _hf_pushed["n"] = len(_hf_events)
-                try:
-                    live_trader.engine.append_holder_flow_events(_new)
-                except AttributeError:
-                    # V1 engine has no holder-flow surface — safe to ignore
-                    pass
-
             strategy_result = live_trader.update(
                 time_val=candle_dict["time"],
                 o=candle_dict["open"], h=candle_dict["high"],
@@ -1163,6 +1186,7 @@ async def live_trading_ws(
                 sell_volume=candle_dict.get("sell_volume", 0.0),
                 is_new=is_new,
                 market_cap_usd=candle_dict.get("market_cap_usd", 0.0),
+                pool_sol=candle_dict.get("pool_sol", 0.0),
             )
 
             trade_payload = None if is_synthetic else {
@@ -1280,6 +1304,14 @@ async def live_trading_ws(
     finally:
         cancelled.set()
         ws_client.stop()
+
+        # Stop the holder-flow background pump
+        _hf_stop.set()
+        _hf_pump_task.cancel()
+        try:
+            await _hf_pump_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
         # Stop the holder-flow monitor for this session
         try:

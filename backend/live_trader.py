@@ -346,13 +346,12 @@ class LiveTrader:
 
         # Pending signal model — mirrors ForwardTester._pending_buy/exit.
         # A signal detected during candle N's 4-state expansion is NOT
-        # acted on immediately.  Instead, engine.notify_trade_opened/closed()
-        # is called at sub-state 1 (the open) of candle N+1's expansion,
-        # BEFORE engine.update() runs on that open tick.  This is exactly
-        # what ForwardTester.update() does (Step 1 before Step 2).
-        # For the LIVE TRADER, the actual swap fires immediately (no N+1
-        # bar wait) — only the engine's in_position state is deferred to
-        # match the indicator evolution of the backtester.
+        # acted on until the next candle boundary (is_new=True).  At that
+        # point the live swap fires AND engine.notify_trade_opened/closed()
+        # is called synchronously — matching the backtester where
+        # _open_long/_close_long + notify happen at Step 1 of candle N+1.
+        # If a buy fails on-chain, _fail_buy_flat() rolls back with
+        # notify_trade_closed() so the engine sees "flat" again.
         self._pending_buy: bool = False
         self._pending_buy_reason: str = ""
         self._pending_exit: bool = False
@@ -2238,46 +2237,39 @@ class LiveTrader:
                                    l: float, c: float, vol: float,
                                    buy_vol: float = 0.0,
                                    sell_vol: float = 0.0,
-                                   market_cap_usd: float = 0.0) -> dict:
+                                   market_cap_usd: float = 0.0,
+                                   pool_sol: float = 0.0) -> dict:
         """
         Mirror ForwardTester.update() exactly — called once per completed candle.
 
-        Step 1 (before any engine.update() call): apply any pending signal from
-                the PREVIOUS candle by calling engine.notify_trade_opened/closed().
-                This is what ForwardTester does when executing a pending signal
-                at the *open* of the current candle before running the engine.
+        Step 1 (before any engine.update() call): clear pending signal flags.
+                The engine was already notified (notify_trade_opened/closed)
+                at the moment the signal was detected in update(), matching
+                the backtester's synchronous _open_long/_close_long → notify
+                pattern.  If a buy fails, _fail_buy_flat() rolls back with
+                notify_trade_closed().
 
         Step 2: expand this candle into 4 intra-candle sub-states and call
                 engine.update() on each — identical to the backtester loop.
+                Uses _build_full_result=False for all 4 states, matching the
+                backtester's fast path.
 
         Step 3: detect any new signal from the 4-state expansion and store it
                 as a pending signal for the NEXT candle (same as ForwardTester
                 setting _pending_buy / _pending_exit).
 
-        The LIVE SWAP fires immediately in step 1 (the actual asyncio task was
-        already scheduled by update() when the signal was detected last candle).
-        Only the engine's in_position state is deferred — this is what aligns
-        the indicator evolution with the backtester.
-
         Returns the engine result from the final sub-state (state 4).
         """
-        # ── Step 1: apply pending signal to engine BEFORE first engine.update() ──
-        # This mirrors: ForwardTester._open_long / _close_long at candle open.
-        # Only notify the engine once the buy is CONFIRMED open — while the TX
-        # is still pending (broadcast but not on-chain) the engine must NOT
-        # believe a position is held, or it would evolve state for a trade that
-        # may never exist.
-        if (self._pending_buy and self.current_trade is not None
-                and self.current_trade.status == "open"):
-            # Notify engine that a trade is now open at the open of this candle.
-            # (The actual LiveTrade object was created and swap fired last candle.)
-            self.engine.notify_trade_opened(o, Direction.UP)
+        # ── Step 1: clear pending signal flags BEFORE first engine.update() ──
+        # The engine was already notified (notify_trade_opened/closed) at the
+        # moment the signal was detected in update(), matching the backtester's
+        # synchronous _open_long/_close_long → notify pattern.  Here we only
+        # need to clear the pending flags so they don't fire again.
+        if self._pending_buy:
             self._pending_buy = False
             self._pending_buy_reason = ""
 
-        elif self._pending_exit and self.current_trade is None:
-            # Trade was closed — notify engine.
-            self.engine.notify_trade_closed()
+        if self._pending_exit:
             self._pending_exit = False
             self._pending_exit_reason = ""
 
@@ -2298,7 +2290,7 @@ class LiveTrader:
         final_regime = None
 
         # State 1: open tick
-        result = self.engine.update(t, o, o, o, o, 0.0)
+        result = self.engine.update(t, o, o, o, o, 0.0, _build_full_result=False)
         sig = result.get("signal", "none")
         if sig not in (Signal.NONE.value, "none"):
             final_signal = sig
@@ -2307,14 +2299,14 @@ class LiveTrader:
         # State 2: first extreme
         h2 = max(o, mid_first)
         l2 = min(o, mid_first)
-        result = self.engine.update(t, o, h2, l2, mid_first, 0.0)
+        result = self.engine.update(t, o, h2, l2, mid_first, 0.0, _build_full_result=False)
         sig = result.get("signal", "none")
         if sig not in (Signal.NONE.value, "none") and final_signal is None:
             final_signal = sig
             final_regime = result.get("regime")
 
         # State 3: both extremes
-        result = self.engine.update(t, o, h, l, mid_second, 0.0)
+        result = self.engine.update(t, o, h, l, mid_second, 0.0, _build_full_result=False)
         sig = result.get("signal", "none")
         if sig not in (Signal.NONE.value, "none") and final_signal is None:
             final_signal = sig
@@ -2323,7 +2315,9 @@ class LiveTrader:
         # State 4: close tick — buy/sell split lands here
         result = self.engine.update(t, o, h, l, c, vol,
                                     buy_volume=buy_vol, sell_volume=sell_vol,
-                                    market_cap_usd=market_cap_usd)
+                                    pool_sol=pool_sol,
+                                    market_cap_usd=market_cap_usd,
+                                    _build_full_result=False)
         sig = result.get("signal", "none")
         if sig not in (Signal.NONE.value, "none") and final_signal is None:
             final_signal = sig
@@ -2347,15 +2341,17 @@ class LiveTrader:
             self._pending_exit = False
 
         elif detected_signal == Signal.EXIT.value and self.current_trade is not None:
-            reason = "exit_signal"
-            if detected_regime == Regime.REVERSAL.value:
-                reason = "reversal_exit"
-            elif detected_regime == Regime.EXHAUSTION.value:
-                reason = "exhaustion_exit"
-            elif detected_regime == Regime.CONTINUATION.value:
-                reason = "continuation_exit"
-            elif detected_regime == Regime.TREND.value:
-                reason = "trend_exit"
+            reason = result.get("exit_reason")
+            if not reason:
+                reason = "exit_signal"
+                if detected_regime == Regime.REVERSAL.value:
+                    reason = "reversal_exit"
+                elif detected_regime == Regime.EXHAUSTION.value:
+                    reason = "exhaustion_exit"
+                elif detected_regime == Regime.CONTINUATION.value:
+                    reason = "continuation_exit"
+                elif detected_regime == Regime.TREND.value:
+                    reason = "trend_exit"
             self._pending_exit = True
             self._pending_exit_reason = reason
             self._pending_buy = False
@@ -2384,6 +2380,7 @@ class LiveTrader:
         time_val: int,
         o: float, h: float, l: float, c: float,
         volume: float = 0.0,
+        pool_sol: float = 0.0,
     ) -> dict:
         """
         Warm up the engine with a historical candle using the same 4-state
@@ -2391,7 +2388,8 @@ class LiveTrader:
         Returns the strategy result dict for the candle.
         """
         self._last_price = c
-        result = self._process_completed_candle(time_val, o, h, l, c, volume)
+        result = self._process_completed_candle(time_val, o, h, l, c, volume,
+                                                 pool_sol=pool_sol)
         self._last_engine_result = result
         
         # Clear pending signals during historical warmup to prevent stale
@@ -2431,20 +2429,22 @@ class LiveTrader:
         sell_volume: float = 0.0,
         is_new: bool = False,
         market_cap_usd: float = 0.0,
+        pool_sol: float = 0.0,
     ) -> dict:
         """
         Process one live tick through the candle-buffering + pending-signal pipeline.
 
         Indicator evolution is IDENTICAL to the backtester:
           - Completed candles are expanded into 4 sub-states.
-          - engine.notify_trade_opened/closed() is applied at the START of the
-            next candle's expansion (sub-state 1), not immediately on signal
-            detection — matching ForwardTester.update() Step 1 exactly.
+          - engine.notify_trade_opened/closed() is called IMMEDIATELY when a
+            signal is detected (matching the backtester's synchronous
+            _open_long/_close_long → notify at Step 1 of the next candle).
+            If a buy fails on-chain, _fail_buy_flat() rolls back with
+            notify_trade_closed().
 
         Live swaps fire IMMEDIATELY (no N+1 bar wait):
           - When a BUY/EXIT signal is detected, the asyncio swap task is fired
-            at once.  Only the engine's in_position flag is deferred to keep
-            indicator math in sync with the backtester.
+            at once and the engine is notified synchronously.
         """
         self._last_price = c
         trade_action = None
@@ -2464,6 +2464,7 @@ class LiveTrader:
                 buy_vol=prev.get("buy_vol", 0.0),
                 sell_vol=prev.get("sell_vol", 0.0),
                 market_cap_usd=prev.get("market_cap_usd", 0.0),
+                pool_sol=prev.get("pool_sol", 0.0),
             )
             self._last_engine_result = result
 
@@ -2490,9 +2491,12 @@ class LiveTrader:
                 opened_trade = trade
                 trade_action = "buy"
                 self._last_motion_ts = time.time()  # reset no-motion clock at position open
-                # DO NOT call engine.notify_trade_opened() here.
-                # It will be called at sub-state 1 of the NEXT candle in
-                # _process_completed_candle — matching the backtester exactly.
+                # Notify the engine IMMEDIATELY that a position is open — this
+                # matches the backtester where _open_long() calls
+                # notify_trade_opened() synchronously at Step 1 of the candle.
+                # If the buy later fails, _fail_buy_flat() rolls back with
+                # notify_trade_closed().
+                self.engine.notify_trade_opened(prev["c"], Direction.UP)
 
                 asyncio.ensure_future(self.execute_buy(buy_reason))
 
@@ -2509,8 +2513,10 @@ class LiveTrader:
                 self.current_trade.status = "closing"
                 self.current_trade.exit_reason = exit_reason
                 trade_action = "exit"
-                # DO NOT call engine.notify_trade_closed() here.
-                # It will be called at sub-state 1 of the NEXT candle.
+                # Notify the engine IMMEDIATELY that the position is closed —
+                # this matches the backtester where _close_long() calls
+                # notify_trade_closed() synchronously at Step 1 of the candle.
+                self.engine.notify_trade_closed()
 
                 asyncio.ensure_future(self.execute_sell(exit_reason))
 
@@ -2526,6 +2532,7 @@ class LiveTrader:
             "t": time_val, "o": o, "h": h, "l": l, "c": c, "vol": volume,
             "buy_vol": buy_volume, "sell_vol": sell_volume,
             "market_cap_usd": market_cap_usd,
+            "pool_sol": pool_sol,
         }
 
         # ── Build output ──────────────────────────────────────────────────────

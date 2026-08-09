@@ -144,6 +144,7 @@ class ForwardTester:
         engine_kwargs: Optional[dict] = None,
         engine_version: int = 1,
         holder_flow_events: Optional[list[dict]] = None,
+        holder_flow_latency_seconds: float = 0.0,
     ):
         if engine_kwargs is None:
             engine_kwargs = {}
@@ -159,7 +160,19 @@ class ForwardTester:
         # Passed into the engine so the V2 adapter can check them as an
         # entry gate / exit trigger (iter36).  The pipeline layer (backtester
         # or live trader) is responsible for loading them from the DB.
+        #
+        # holder_flow_latency_seconds: simulates the GMGN poll delay so the
+        # backtester doesn't see events before the live engine could have.
+        # Each event's time is shifted forward by this many seconds before
+        # indexing, matching the live delivery latency.
         if holder_flow_events:
+            if holder_flow_latency_seconds > 0:
+                shifted = []
+                for ev in holder_flow_events:
+                    ev = dict(ev)
+                    ev["time"] = int(ev.get("time", 0)) + int(holder_flow_latency_seconds)
+                    shifted.append(ev)
+                holder_flow_events = shifted
             self.engine.set_holder_flow_events(holder_flow_events)
 
         self.stats = ForwardTestStats(

@@ -109,7 +109,7 @@ A `HolderFlowMonitor` that polls GMGN's `track smartmoney` endpoint for real-tim
 - **Exit trigger** (`strategy_engineV2.py` + `forward_tester.py`): Fires an immediate exit if a dev/insider sell occurs while in position. **Default ON** (`v2_holder_flow_exit_enable=1.0`).
 - **`v2_holder_flow_require_tag`** (default **0.0 = gate 1.0**): when > 0 the gate/exit only fire on *verified* insider tags (`_DEV_TAGS`); the `whale` fallback and untagged events do NOT qualify. Set to 0.0 to reproduce the iter36/38 legacy "any big seller" circuit-breaker. This is the knob that distinguishes **gate 2.0** (require_tag=1) from **gate 1.0** (require_tag=0) in the planned A/B/C comparison.
 - **Backtest support** (`backtester.py`): Loads `holder_flow` events from the DB and passes them to `ForwardTester` for replay.
-- **Live support** (`main.py`): Each live session runs a `HolderFlowMonitor` that pushes events into the engine in real time and persists them to the auto-recording.
+- **Live support** (`main.py`): Each live session runs a `HolderFlowMonitor` that pushes events into the engine in real time and persists them to the auto-recording. Events are pre-loaded from the DB at session start via `set_holder_flow_events()` (matching the backtester), then a 1s background pump task (`_holder_flow_pump`) pushes newly discovered events via `append_holder_flow_events()`, decoupled from trade ticks (iter39 parity fix — previously events were only pushed on trade ticks, causing 10s+ delivery delay on illiquid tokens).
 - **Rate-limit architecture**: A process-wide shared singleton (`get_shared_monitor()`) with refcounted start/stop — one 5 s poller regardless of session count.  Calls the GMGN OpenAPI directly over async HTTP (`https://openapi.gmgn.ai`, exist-auth: `X-APIKEY` + `timestamp` + `client_id`), NOT via the `npx gmgn-cli` subprocess.  On HTTP 429 it parses the server-provided reset time, backs off until then, and suppresses repeated ban logs. Non-429 errors are surfaced via a rate-limited logger (one line per distinct error per 60 s) so registry/fetch failures are observable.
 
 The mechanism is parity-safe when no `holder_flow` data exists (the gates never fire on an empty table, so legacy recordings are byte-identical). With the iter38 defaults (gate 1.0 ON, `require_tag=0`), the gate fires on any ≥ $100 sell; once the wallet registry populates with real tags, switching `require_tag=1` upgrades to gate 2.0 (verified-insider only).
@@ -457,6 +457,29 @@ future agent must therefore:
 > **Do not build another kelly_flat replacement that fires earlier, adds a
 > cooldown, or re-tunes streak/offside thresholds — all are bounded below
 > baseline.**  See RESEARCH_LOG.md Iter 37 addendum.
+>
+> **iter39 (live-vs-backtest pipeline parity fix — 5 root causes, 8 fixes,
+> no engine change).**  The user observed the live trader behaving differently
+> to the backtester on the same recordings.  Diagnosis identified 5 root
+> causes: (1) holder_flow event delivery latency — the live engine's
+> `append_holder_flow_events()` was called inside `_process_stream` AFTER a
+> `continue` skip that blocked delivery when price hadn't moved, so events
+> could sit undiscovered for 10s+ on illiquid tokens while the backtester
+> had them all upfront at their exact on-chain timestamp; (2) LiveTrader
+> discarded V2 exit reasons (`kramers_down_exit`, `kelly_flat`,
+> `dev_sell_exit`) in favour of regime-based labels (`trend_exit`); (3)
+> `notify_trade_opened/closed` deferred to next candle (1-2.5s
+> confirmation delay), causing `_check_exit_v2` to be skipped during the
+> confirmation window; (4) `pool_sol` not passed in live; (5)
+> `_build_full_result` mismatch.  **Fixes:** `live_trader.py` — immediate
+> notify at signal time with rollback on failure, exit reason parity,
+> `pool_sol` passthrough, `_build_full_result=False`; `main.py` — pre-load
+> holder_flow from DB at session start, 1s background pump task for
+> event delivery decoupled from trade ticks, `pool_sol` passed to
+> `live_trader.update()`; `forward_tester.py` —
+> `holder_flow_latency_seconds` parameter for future backtest latency
+> simulation.  Engine strategy logic byte-identical to HEAD.  See
+> RESEARCH_LOG.md Iter 39.
 
 ---
 
