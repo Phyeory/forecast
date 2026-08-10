@@ -4988,3 +4988,156 @@ All 8 fixes are live.  Engine strategy logic is byte-identical to HEAD.
 No backtest baseline changes.  The `holder_flow_latency_seconds` parameter
 is available in `ForwardTester` for future use but defaults to 0 (no
 shift).
+
+---
+
+## Iter 40 — Organicity regime gate via Variance Ratio / Hurst exponent (RIGOROUS NEGATIVE; REJECTED at pre-registration + in-engine confirmation; NO production change)
+
+**Date:** 2026-08-10
+**Scope:** `backend/strategy_engineV2.py` (+163 lines, all gated behind default-OFF knob), `backend/analysis/iter40_prereg_anatomy.py` (new analysis tool)
+**Engine:** V2 — organicity VR gate added as default-OFF knob; all existing defaults byte-identical.
+**Canonical baseline:** `iter31_baseline_1786096269` — 427 trades, 75.64% WR, +0.96465 SOL, PF 1.33 on 652 completed recordings.
+
+### Hypothesis (user directive)
+
+> "The algorithm only works under certain regime where the price dynamics is behaving organically — make it so that we calculate whether the current regime of the token is the optimal regime for the algorithm to be functioning — if not, block all trades."
+
+The V2 engine is a momentum-following Bayesian-Kramers system that buys when $P^+ > P^-$ and $\mathcal{E}^* > 0$.  Its decision model assumes log-returns follow a stochastic differential equation $dx_t = \mu_t\,dt + \sigma_t\,dW_t$ with time-varying but stationary drift and volatility.  This model — and thus the engine's escape-rate probabilities — is well-specified when the return process is **persistent** (returns exhibit positive serial correlation, momentum continues) and poorly specified when returns are **mean-reverting** (negative serial correlation, momentum reverses) or **random-walk** (no serial correlation, no edge).
+
+**Pre-registered prediction:** Big losers (pnl_pct $\le -20\%$) are entered during non-organic (mean-reverting or dead-tape) regimes, while winners are entered during organic (persistent/trending) regimes.  A Variance Ratio gate blocking entries in non-organic regimes will improve total PnL.
+
+### Why this is genuinely new vs iter25/26/28/31/34
+
+The prior iterations exhausted:
+
+| Iter | Family | What was tested |
+|------|--------|-----------------|
+| 25 | level | trailing return, return percentile, position-in-range, volume ratio, sell-fraction |
+| 26/28 | engine posterior | $P_\text{up}$, $\sigma_t$, confidence, breadth-impossibility proof |
+| 31 | microstructure | OFI, CLV, down-tick autocorr ($\rho_1$ only), vol-collapse, abandon, runlen, selldom — 49 features, 0 survive Bonferroni |
+| 34 | structural | cross-token breadth, token memory, entry ordinal, reflection asymmetry, structural floor, arm rescue — all overlap winner distribution |
+| 35 | on-chain provenance | holder concentration, LP lock, mint authority, token age — 41/155 dual-outcome mints prove impossibility |
+| 37 | path-geometric exit | persistent submersion — oracle impossibility bound for exit-only changes |
+
+**iter31 tested lag-1 autocorrelation** (`ms_acr` at 15/30/60/120-s windows) and found AUC 0.499–0.552 ($p \ge 0.20$).  But lag-1 ACR is a single-lag, single-moment statistic.  **iter40 tests the canonical multi-lag temporal dependence structure tools that have never been applied to this cohort:**
+
+1. **Variance Ratio** (Lo & MacKinlay, 1988): $VR(q) = \frac{\text{Var}(r_t(q))}{q \cdot \text{Var}(r_t)}$ where $r_t(q) = \sum_{i=0}^{q-1} r_{t-i}$.  Under the random-walk null $VR(q) \to 1$; $VR > 1$ trending/persistent; $VR < 1$ mean-reverting.  The heteroscedastic-robust $z$-statistic pools multi-lag serial correlation into one statistic — strictly more informative than any single-lag ACR.  Tested at $q \in \{2,4,8\}$ and $W \in \{30,60,120,240\}$.
+
+2. **Hurst exponent** (R/S analysis, Hurst 1951 / Mandelbrot): $H > 0.5$ persistent, $H < 0.5$ anti-persistent, $H = 0.5$ random walk.  Captures long-range dependence via log-log regression of rescaled range $R/S$ on sub-window length — fundamentally different from autocorrelation (which decays and misses long-memory structure).
+
+3. **Efficiency Ratio** (Kaufman 1995): $ER = |\sum r_t| / \sum|r_t| \in [0,1]$.  $ER \to 1$ directional trend, $ER \to 0$ chop/noise.
+
+**Total: 32 features** (VR at 3$q$ × 4$W$ + VR $z$ at 3$q$ × 4$W$ + Hurst at 4$W$ + ER at 4$W$), strictly point-in-time (candles $\le$ entry bar).
+
+### Result 1 — Pre-registration: 0/32 features survive Bonferroni
+
+**Cohort:** 427 trades from `iter31_baseline`.  BIG=63 (pnl_pct $\le -20\%$, total $-2.72$ SOL), WIN=323, SMALL=41.
+
+| feature | $n_\text{BL}$ | $n_\text{W}$ | $p_\text{MWU}$ | AUC | med_BL | med_W |
+|---------|---:|---:|---:|---:|---:|---:|
+| `vrz_q8_240` | 60 | 284 | 0.0144 | 0.6006 | $-0.168$ | $-0.878$ |
+| `vrz_q4_240` | 60 | 284 | 0.0343 | 0.5870 | $-0.082$ | $-0.642$ |
+| `vr_q8_240`  | 60 | 284 | 0.0355 | 0.5864 | $+0.980$ | $+0.874$ |
+| `vr_q8_60`   | 62 | 304 | 0.0431 | 0.5815 | $+0.765$ | $+0.687$ |
+| `hurst_30`   | 62 | 313 | 0.3837 | 0.5348 | $+0.631$ | $+0.563$ |
+| `hurst_240`  | 60 | 284 | 0.4126 | 0.5337 | $+0.542$ | $+0.518$ |
+| `er_120`     | 62 | 297 | 0.6401 | 0.4811 | $+0.205$ | $+0.200$ |
+
+**Bonferroni** $\alpha = 0.05/32 = 0.00156$.  **0/32 features survive.**  Best $p = 0.0144$ (`vrz_q8_240`, AUC 0.60 ∈ [0.5, 0.62] band) — fails significance.  Hurst and ER are squarely non-separative (AUC 0.48–0.53).  This matches iter31's `ms_acr` non-separativity ($p \ge 0.20$) but now extended to the multi-lag pooled VR and long-range Hurst R/S.
+
+### Result 2 — Split-half instability
+
+Tested the top features with a random 50/50 split (seed=42):
+
+| feature | half A $p$ | half B $p$ | stable? |
+|---------|---:|---:|---|
+| `vrz_q8_240` | 0.3297 | 0.0135 | **no** — $p$ flips sides |
+| `vr_q8_60`   | 0.3072 | 0.0878 | **no** |
+| `vrz_q8_60`  | 0.5414 | 0.0363 | **no** |
+
+Same split-half instability pattern that killed iter31's `ms_volcollapse` — the sign is not robust at a fixed threshold.
+
+### Result 3 — Static counterfactual: all gate directions NET-negative
+
+Band filters keeping only the "organic" mid-range of VR at entry:
+
+| feature | band | kept trades | net PnL | blocked | blocked BL | blocked WIN | blocked PnL |
+|---------|------|---:|---:|---:|---:|---:|---:|
+| `vr_q8_60`  | [0.24, 1.26] | 352 | $+0.835$ | 62 | 11 | 42 | $-0.040$ |
+| `vrz_q8_60` | [$-3.17$, $+1.42$] | 372 | $+0.835$ | 42 | 6 | 32 | $-0.040$ |
+| `vr_q4_60`  | [0.68, 1.39] | 311 | $+0.803$ | 103 | 17 | 72 | $-0.008$ |
+
+**Every band filters below the +0.965 baseline.**  The blocked set contains **more winners than losers** (42 vs 11, 32 vs 6) — the organicity regime does not separate future losers from winners.  This is the same overlap the prior iterations established from level, posterior, microstructure, and structural angles.
+
+### Result 4 — Recording-level organicity (not entry-local)
+
+If organicity is a per-TOKEN property (some recordings are organic, some dead) rather than per-trade:
+
+| VR tercile | recordings | trades | net PnL |
+|------------|---:|---:|---:|
+| LOW VR (choppy) | 49 | 150 | $+0.087$ |
+| MID VR | 49 | 154 | $+0.652$ |
+| HIGH VR (trendy) | 49 | 111 | $+0.110$ |
+
+All three terciles are positive — no clear non-organic regime with negative aggregate outcome exists at the recording level either.
+
+### Result 5 — In-engine confirmation (replacement-aware)
+
+Since the static counterfactual did not justify a full batch (per the iter34 protocol — "a paired-diff batch could not have accepted a gate already net-negative in static projection"), the gate was implemented as a default-OFF knob for a clean confirmation on a 16-common-token subset:
+
+```
+v2_organic_vr_enable=1.0   v2_organic_vr_q=8   v2_organic_vr_window=60
+v2_organic_vr_lo=0.7       v2_organic_vr_hi=1.3
+```
+
+| batch | trades | WR | total PnL | PF |
+|---|---|---|---|---|
+| **iter31_baseline** | 427 | 75.64% | **+0.96465** | 1.33 |
+| **iter40_sgate** (VR band [0.7, 1.3]) | 22 | 86.36% | **+0.01743** | — |
+
+**paired_diff** (`iter40_sgate_vs_base`): the gate **blocked 405 of 427 trades** (because the entry-time VR distribution has median 0.695 on 1-s memecoin returns — the engine enters mostly during mean-reverting/bounce regimes, which the gate classifies as non-organic).  Wilcoxon $p = 0.971$ (greater), bootstrap 95% CI of $\Delta$ PnL $= [-0.065, -0.0004]$ strictly negative, only 2/16 = 12.5% improved.  **VERDICT: REJECT on every gate.**
+
+### Why it failed — the organicity paradox
+
+The engine enters on Bayesian/Kramers bounce signals — momentary $\mu_t > 0$ flickers after a pullback.  These moments are **inherently mean-reverting regimes** (median VR = 0.695 < 1) because a bounce IS a reversion.  The user's organic regime hypothesis was: algorithm works in trending markets (VR > 1), fails in mean-reverting markets (VR < 1).  The data shows the opposite: the algorithm's entries correlate with VR < 1 by construction (bounce-catching), and these mean-reverting entries are exactly where it makes its money.  Blocking mean-reversion removes the algorithm's entire edge.  Conversely blocking the high-VR trending entries (VR > 1) removes the fewer but larger continuation winners.  Neither direction separates — the loser and winner distributions overlap at every VR level.
+
+### Production change: NONE
+
+Engine remains at the iter31/32/33/37/39 production state (427 trades, 75.6% WR, +0.965 SOL, PF 1.33 on 652 recordings).  The `v2_organic_vr_enable` knob (default 0.0) is available for future exploratory sweeps but is not expected to yield improvement — this negative result is structural.
+
+### Mathematical deliverables
+
+1. **`variance_ratio(returns, q)`** — Lo & MacKinlay (1988) heteroscedastic-robust VR with $z$-statistic (`backend/analysis/iter40_prereg_anatomy.py`)
+2. **`hurst_rs(returns)`** — R/S log-log regression Hurst exponent (`backend/analysis/iter40_prereg_anatomy.py`)
+3. **`_v2_organic_vr()`** — streaming trailing VR(q) on the engine adapter (`backend/strategy_engineV2.py`)
+4. **`v2_organic_vr_*` knobs** — default-OFF parity-preserving entry gate (`backend/strategy_engineV2.py`)
+
+### Deliverables / reproducibility
+
+* `backend/analysis/iter40_prereg_anatomy.py` — pre-registration analysis tool
+* `backend/analysis/iter40/{iter40_trade_master.json, iter40_feature_tests.json, iter40_report.md}`
+* `backend/v2_results/*iter40_sgate_*` — in-engine candidate batch (22 trades)
+* `backend/analysis/iter40_sgate_vs_base.json` — paired_diff output
+* Engine `strategy_engineV2.py` carries the default-OFF organicity VR gate (verified byte-identical to iter31 baseline when disabled on recs {951, 878, 1019}).
+
+**This is the tenth orthogonal negative result**, extending the proof from engine-internal state, candle-replay features, microstructure, cross-token breadth, token-memory, reflection shape, structural floor, pool liquidity, on-chain provenance, path-geometric exit, and now **temporal-dependence-structure regime classification** (the Variance Ratio / Hurst R/S axis, which is the canonical econophysics test for trending vs mean-reverting vs random-walk regimes).  The residual $-2.72$ SOL left tail is a dead-coin liquidity-drain event that is **not separable from recovering winners by any return-process temporal structure measurable from the recorded OHLCV stream**.  The lime scale is full: the engine sits at its OHLCV-data ceiling.
+
+### Addendum — full parameter tuning sweep (30-recording subset, q ∈ {2,4,8} × W ∈ {30,60,120,240} × 30 band configurations)
+
+The initial conclusion above was based on a single gate configuration (`vr_q8_60`, band [0.7, 1.3]) and the pre-registration separability test.  A reviewer correctly challenged this — a single point in parameter space cannot rule out a mechanism.  The full tuning sweep below closes that gap.
+
+**Static counterfactual sweep** (all 32 features × all quantile-based bands).  13/32 features have at least one band that beats baseline in static projection.  Best: `vrz_q2_30` band [−2.39, +0.99] $\to +1.457$ SOL vs $+0.965$ baseline ($\Delta = +0.492$).  But split-half unstable: half A $\Delta = +0.580$, half B $\Delta = -0.058$ (blocked PnL flips sign).  Only `vr_q2_30` and `vrz_q2_240` showed both halves positive.
+
+**In-engine tuning sweep** (30 fast recordings, sequential, 30 configs across lo ∈ {−3.0, −2.0, −1.5, −1.0, −0.5} × hi ∈ {0.0, 0.3, 0.5, 0.7, 1.0, 1.5}):
+
+| config | kept trades | net PnL | $\Delta$ vs base | paired $\bar{\Delta}$ | Wilcoxon p | verdict |
+|--------|---:|---:|---:|---:|---:|---|
+| baseline | 38 | $+0.127$ | — | — | — | — |
+| most configs | 6–18 | $+0.01$ to $+0.13$ | $-0.10$ to $-0.01$ | negative | — | REJECT |
+| `[-1.0, +0.5]` (best) | 18 | $+0.133$ | $+0.006$ | $-0.003$ | **0.9375** | **REJECT** |
+
+The single config with positive aggregate $\Delta$ ($+0.006$, the `hi=+0.5` family) was an **artifact**: the gate blocked trades on 15 of 30 recordings that had zero baseline trades (contributing 0 to both sides), inflating the aggregate via the unblocked subset.  The paired-recording mean $\Delta = -0.003$ (1 improved / 4 regressed, 6.7% breadth $\ll$ 50% gate) reveals the true negative effect.  Wilcoxon $p = 0.9375$ — not remotely significant.  **The static $+0.49$ delta evaporates entirely once replacement-entry dynamics apply** — the engine re-enters the same token one bar later at a worse fill (the iter17b/iter31 mechanism, re-confirmed for the VR axis).
+
+**Split-half instability confirmed in-engine**: the only configs with positive static deltas that were split-stable (`vr_q2_30`) showed $\Delta = -0.10$ in-engine on 20 recordings, and $\Delta = -0.13$ on a different 30-recording subset.  The sign is not robust.
+
+**Conclusion (definitive, post-tuning)**: The organicity VR gate fails across the full tuning surface — static counterfactual (the optimistic ceiling) shows $+0.49$ at best but is split-unstable; in-engine (the realistic floor with replacement dynamics) shows $\le -0.003$ paired mean at every surviving config with Wilcoxon $p \ge 0.94$.  No config clears the acceptance gate.  The mechanism is genuinely non-functional, not merely untuned.
