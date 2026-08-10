@@ -96,6 +96,7 @@ def run_backtest_batch(
     engine_version: int = 1,
     recording_ids: Optional[list[int]] = None,
     last_night: bool = False,
+    last_12h: bool = False,
 ) -> list[dict]:
     """
     Run backtests on ALL completed recordings.
@@ -105,6 +106,11 @@ def run_backtest_batch(
     Falls back to parallel processes for very large batches (>20).
 
     If ``last_night`` is True, only recordings whose ``started_at`` falls
+    within the "last night" window — 10:00 PM local time of the previous
+    calendar day through 12:00 PM (noon) local time of the current day —
+    are included.
+
+    If ``last_12h`` is True, only recordings whose ``started_at`` falls
     within the last 12 hours before the moment the batch is run are
     included.
     """
@@ -115,6 +121,13 @@ def run_backtest_batch(
     completed = [r for r in recordings if r.get("status") == "completed"]
 
     if last_night:
+        now = datetime.datetime.now()
+        today_noon = now.replace(hour=12, minute=0, second=0, microsecond=0)
+        yesterday_10_50pm = (now - datetime.timedelta(days=1)).replace(hour=22, minute=50, second=0, microsecond=0)
+        lo = yesterday_10_50pm.timestamp()
+        hi = today_noon.timestamp()
+        completed = [r for r in completed if lo <= (r.get("started_at") or 0) <= hi]
+    elif last_12h:
         hi = datetime.datetime.now().timestamp()
         lo = (datetime.datetime.now() - datetime.timedelta(hours=12)).timestamp()
         completed = [r for r in completed if lo <= (r.get("started_at") or 0) <= hi]

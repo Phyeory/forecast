@@ -467,6 +467,7 @@ async def run_backtest_batch_endpoint(body: dict = Body(default={})):
     if recording_ids is not None:
         recording_ids = [int(r) for r in recording_ids]
     last_night = bool(body.get("last_night", False))
+    last_12h = bool(body.get("last_12h", False))
     try:
         results = await asyncio.to_thread(
             run_backtest_batch,
@@ -480,6 +481,7 @@ async def run_backtest_batch_endpoint(body: dict = Body(default={})):
             engine_version=engine_version,
             recording_ids=recording_ids,
             last_night=last_night,
+            last_12h=last_12h,
         )
         succeeded = [r for r in results if "error" not in r]
         failed = [r for r in results if "error" in r]

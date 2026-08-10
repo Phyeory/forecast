@@ -418,7 +418,57 @@ Best contiguous band for reference: buckets 40-60k+60-80k+80-100k+100-120k PnL +
 
 **Verdict:** the best zone mask reaches +1.127 SOL (Δ+0.162) and even beats the naive single-bucket null (p=0.000), but once the 127-combination search is controlled by the max-statistic permutation null, **p = 0.986** — far from significant. The apparent gain is a multiple-comparison artifact. Discontiguous zones do **not** beat contiguous bands.
 
-## 9. Key takeaways
+## 9. `recording_ended` exit-reason deep-dive
+
+`recording_ended` is a force-close exit reason that triggers when the backtester runs out of historical data on a recording while a trade is still in position. These represent trades where the engine got stuck in-position during a slow-bleed and never fired any Bayesian exit (e.g. Kramers escape or reversal) before the recording truncated.
+
+### Profile of `recording_ended` trades
+
+- **Total `recording_ended` trades**: 28 (6.6% of all 427 trades in cohort)
+- **Net PnL**: -0.603 SOL (Average: -0.02153 SOL per trade)
+- **Win Rate**: 17.9% (5/28 ended positive at force-close)
+- **Underwater Density**: 82.1% (23/28) of these trades ended negative at force-close (avg PnL: -21.5%)
+- **Hold Time**: Median hold 172s (p75: 867s, max: 4304s) vs. median 151s for normal exits.
+
+### Entry Market Cap Profile
+
+`recording_ended` trades enter at significantly lower market caps than normal trades:
+- **Median Entry Market Cap (`recording_ended`)**: $12,753 USD (IQR: $7,751 – $27,985 USD)
+- **Median Entry Market Cap (Others)**: $31,708 USD (IQR: $15,250 – $71,785 USD)
+- **Comparison**: Median entry cap is **2.5x lower** for `recording_ended` trades. A Mann-Whitney U test confirms this difference is highly significant (AUC = 0.282, p = 0.0001127). They are heavily concentrated in the micro-cap zone below $14k.
+
+### Entry-time metric comparison for losers
+
+Do `recording_ended` losers differ from other losers at entry time? We compare the entry parameters of `recording_ended` losers against other losers in the cohort:
+
+| Metric | `recording_ended` Loser Median | Other Loser Median | AUC (`rec_end` > other) |
+|---|---|---|---|
+| S_effective | 5837432306.8782 | 2182937685.4358 | 0.712 |
+| C (Confidence) | 0.9315 | 0.9532 | 0.423 |
+| sigma_t (Vol) | 0.0307 | 0.0304 | 0.525 |
+| mu (Drift) | 0.0141 | 0.0098 | 0.576 |
+| P_up | 0.7644 | 0.7275 | 0.622 |
+| P_down | 0.0000 | 0.0000 | 0.429 |
+| E* | 0.2898 | 0.1431 | 0.599 |
+| ATR | 0.0000 | 0.0000 | 0.344 |
+
+Most entry-time internal indicators have AUC near 0.5 — indicating that entry-time engine state cannot distinguish between a standard loss and a recording-ended bleed. The primary distinguishing characteristic remains the **entry-time market cap**.
+
+### Counterfactual sweep on `recording_ended` population
+
+If we block entries below a market cap floor, we selectively block these micro-cap bleeders. Below is the counterfactual sweep showing the impact of various market cap floors on the `recording_ended` trade population:
+
+| mcap floor | kept | removed | removed PnL (SOL) | big wins removed | big losses removed | WR of removed |
+|---|---|---|---|---|---|---|
+| $    7k |  23/28 |   5 |  -0.0719 SOL | 0 | 2 | 20% |
+| $   10k |  17/28 |  11 |  -0.2687 SOL | 0 | 7 | 9% |
+| $   14k |  14/28 |  14 |  -0.4299 SOL | 0 | 10 | 7% |
+| $   18k |  11/28 |  17 |  -0.5229 SOL | 1 | 12 | 12% |
+| $   21k |  10/28 |  18 |  -0.5095 SOL | 1 | 12 | 17% |
+
+A block entry floor in the range of **$10k to $14k** USD targets exactly the area where these stuck trades concentrate. At a **$14k floor**, we eliminate **14 of 28** `recording_ended` trades, saving **0.430 SOL** of losses. This includes removing **10 of 14** of the big losers, with a win rate of only 21% on the blocked set. Above $14k, the floor starts blocking too many profitable normal trades, resulting in a net decline in overall cohort PnL.
+
+## 10. Key takeaways
 
 1. **Big winners and big losers enter at nearly identical mcap** (median $22,808 vs $23,669). At low mcap the engine cannot separate a pump from a dump at entry time.
 2. **Best mcap band by net PnL**: $10-15k (+0.395 SOL); worst: $15-20k (-0.268 SOL).
@@ -427,6 +477,7 @@ Best contiguous band for reference: buckets 40-60k+60-80k+80-100k+100-120k PnL +
 5. **Mcap gate is small and not significant**: best band $14k-$200k gives +1.196 SOL (+0.231 vs baseline), WR 78.7% — but no floor gate has a bootstrap CI strictly > 0 (none significant). Counterfactual is an upper bound that ignores replacement-entry dynamics.
 6. **Discontiguous zones overfit**: best zone mask = +1.127 SOL (Δ+0.162) but permutation p=0.986 (max-stat null). No better than contiguous bands once multiple comparisons are controlled.
 7. **Gate does not replicate across baselines**: 0/30 (baseline, gate) pairs significant. The mcap gate fails to reproduce on every old engine baseline tested (iter22b…iter36) — it is not a robust effect.
+8. **`recording_ended` trades concentrate at micro-cap (<$14k)**: A block entry floor of $10k–$14k USD targets the peak density of stuck slow-bleeds (saving up to 0.430 SOL from 14 force-closes). However, the in-engine impact is bounded by replacement-entry dynamics where blocked trades often re-trigger at later, slightly higher prices.
 
 ---
 

@@ -2089,16 +2089,19 @@ document.getElementById("bt-run-all-btn").addEventListener("click", async () => 
 });
 
 document.getElementById("bt-run-last-night-btn").addEventListener("click", async () => {
-  // "Last night" = a rolling 12-hour window ending at the moment the button
-  // is clicked. The backend applies the same window against each recording's
-  // started_at timestamp; we pre-compute it here only to preview which
-  // recordings will run.
-  const hi = Math.floor(Date.now() / 1000);
-  const lo = hi - 12 * 60 * 60;
+  // "Last night" window: 10:50 PM local time of the previous calendar day
+  // through 12:00 PM (noon) local time of the current day. The backend
+  // applies the same window against each recording's started_at timestamp;
+  // we pre-compute it here only to preview which recordings will run.
+  const now = new Date();
+  const todayNoon = new Date(now); todayNoon.setHours(12, 0, 0, 0);
+  const yesterday10_50pm = new Date(now); yesterday10_50pm.setDate(now.getDate() - 1); yesterday10_50pm.setHours(22, 50, 0, 0);
+  const lo = yesterday10_50pm.getTime() / 1000;
+  const hi = todayNoon.getTime() / 1000;
 
   const recordings = await apiFetch("/api/recordings");
   const lastNight = recordings.filter(r => r.status === "completed" && r.started_at >= lo && r.started_at <= hi);
-  if (!lastNight.length) return alert("No completed recordings started in the last 12 hours.");
+  if (!lastNight.length) return alert("No completed recordings started last night (10:50 PM prev day – 12 PM today).");
 
   const prog = document.getElementById("bt-progress");
   const progLabel = document.getElementById("bt-progress-label");
@@ -2137,6 +2140,58 @@ document.getElementById("bt-run-last-night-btn").addEventListener("click", async
   } finally {
     prog.classList.add("hidden");
     lastNightBtn.disabled = false;
+    runAllBtn.disabled = false;
+    runBtn.disabled = false;
+    progLabel.textContent = "Running…";
+  }
+});
+
+document.getElementById("bt-run-last-12h-btn").addEventListener("click", async () => {
+  // Last 12h = a rolling 12-hour window ending at the moment the button is clicked.
+  const hi = Math.floor(Date.now() / 1000);
+  const lo = hi - 12 * 60 * 60;
+
+  const recordings = await apiFetch("/api/recordings");
+  const last12h = recordings.filter(r => r.status === "completed" && r.started_at >= lo && r.started_at <= hi);
+  if (!last12h.length) return alert("No completed recordings started in the last 12 hours.");
+
+  const prog = document.getElementById("bt-progress");
+  const progLabel = document.getElementById("bt-progress-label");
+  const last12hBtn = document.getElementById("bt-run-last-12h-btn");
+  const runAllBtn = document.getElementById("bt-run-all-btn");
+  const runBtn = document.getElementById("bt-run-btn");
+  prog.classList.remove("hidden");
+  last12hBtn.disabled = true;
+  runAllBtn.disabled = true;
+  runBtn.disabled = true;
+  progLabel.textContent = `Running last 12h's ${last12h.length} recordings in parallel…`;
+
+  try {
+    const testerConfig = {
+      buy_size_sol: parseFloat(document.getElementById("tester-buy-size").value) || 0.1,
+      slippage_pct: parseFloat(document.getElementById("tester-slippage").value) || 1.0,
+      priority_fee: parseFloat(document.getElementById("tester-priority-fee").value) || 0.0001,
+      bribe_fee: parseFloat(document.getElementById("tester-bribe-fee").value) || 0.00001
+    };
+
+    const result = await apiFetch("/api/backtest/batch", {
+      method: "POST",
+      body: JSON.stringify({
+        engine_params: getEngineParams(),
+        engine_version: engineVersion,
+        recording_ids: last12h.map(r => r.id),
+        last_12h: true,
+        ...testerConfig
+      }),
+    });
+    const msg = `Done: ${result.succeeded}/${result.total} backtests succeeded.`;
+    if (result.failed > 0) alert(msg);
+    loadBacktestsList();
+  } catch (e) {
+    alert(`Last 12h batch backtest failed: ${e.message || e}`);
+  } finally {
+    prog.classList.add("hidden");
+    last12hBtn.disabled = false;
     runAllBtn.disabled = false;
     runBtn.disabled = false;
     progLabel.textContent = "Running…";
