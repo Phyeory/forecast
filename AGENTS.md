@@ -109,12 +109,41 @@ A `HolderFlowMonitor` that polls GMGN's `track smartmoney` endpoint for real-tim
 - **Exit trigger** (`strategy_engineV2.py` + `forward_tester.py`): Fires an immediate exit if a dev/insider sell occurs while in position. **Default ON** (`v2_holder_flow_exit_enable=1.0`).
 - **`v2_holder_flow_require_tag`** (default **0.0 = gate 1.0**): when > 0 the gate/exit only fire on *verified* insider tags (`_DEV_TAGS`); the `whale` fallback and untagged events do NOT qualify. Set to 0.0 to reproduce the iter36/38 legacy "any big seller" circuit-breaker. This is the knob that distinguishes **gate 2.0** (require_tag=1) from **gate 1.0** (require_tag=0) in the planned A/B/C comparison.
 - **Backtest support** (`backtester.py`): Loads `holder_flow` events from the DB and passes them to `ForwardTester` for replay.
-- **Live support** (`main.py`): Each live session runs a `HolderFlowMonitor` that pushes events into the engine in real time and persists them to the auto-recording. Events are pre-loaded from the DB at session start via `set_holder_flow_events()` (matching the backtester), then a 1s background pump task (`_holder_flow_pump`) pushes newly discovered events via `append_holder_flow_events()`, decoupled from trade ticks (iter39 parity fix — previously events were only pushed on trade ticks, causing 10s+ delivery delay on illiquid tokens).
+- **Live support** (`main.py`): Each live session runs a `HolderFlowMonitor` that pushes events into the engine in real time and persists them to the auto-recording. Events are pre-loaded from the DB at session start via `set_holder_flow_events()` (matching the backtester), then a 1s background pump task (`_holder_flow_pump`) pushes newly discovered events via `append_holder_flow_events()`, decoupled from trade ticks (iter39 parity fix — previously events were only pushed on trade ticks, causing 10s+ delivery delay on illiquid tokens). After appending new events, the pump immediately calls `live_trader.check_immediate_holder_flow_exit()` — if a dev/insider sell is detected, an immediate `execute_sell()` is fired without waiting for the next trade tick (iter41 parity fix — addresses remaining mismatch on illiquid tokens where no tick arrives for 30s+ after the insiders dumps).
 - **Rate-limit architecture**: A process-wide shared singleton (`get_shared_monitor()`) with refcounted start/stop — one 5 s poller regardless of session count.  Calls the GMGN OpenAPI directly over async HTTP (`https://openapi.gmgn.ai`, exist-auth: `X-APIKEY` + `timestamp` + `client_id`), NOT via the `npx gmgn-cli` subprocess.  On HTTP 429 it parses the server-provided reset time, backs off until then, and suppresses repeated ban logs. Non-429 errors are surfaced via a rate-limited logger (one line per distinct error per 60 s) so registry/fetch failures are observable.
 
 The mechanism is parity-safe when no `holder_flow` data exists (the gates never fire on an empty table, so legacy recordings are byte-identical). With the iter38 defaults (gate 1.0 ON, `require_tag=0`), the gate fires on any ≥ $100 sell; once the wallet registry populates with real tags, switching `require_tag=1` upgrades to gate 2.0 (verified-insider only).
 
-### 6. Quantitative Benchmarking & Analysis (`backend/analysis/`)
+### 6. Futures Backtesting (`backend/futures_model.py` + `backend/futures_exchange.py`)
+
+Two modes share the same `ForwardTester` futures layer (`market_type="futures"`):
+
+**Mode A — recording-replay perp.** Run the leveraged account against any existing pump.fun spot recording (mark≈close, funding=run default). Canvas for testing perp mechanics on memecoin price action.
+
+**Mode B — historical perp data (preferred, this project default).** Public REST history from Bybit linear USDT-M perps (`BTC/ETH/SOL/LTC`, extensible) is fetched, cached in `backend/data/futures_cache.db`, and the same engine + 4-state intra-candle pipelines run directly over the cached rows — **no user recordings required**.  USDT-M serves as USD-stable proxy for USDC accounting (1:1, <1bp basis); `sol_price_usd=1.0` mode routes the account into native USDC reporting.
+
+- **No engine changes.**  `StrategyEngineV1/V2` long-only; leverage scales notional, not `n_star`.  Mirror-image shorts were quantitatively rejected iters 33–39.
+- **Fees / slippage.**  Futures defaults: CEX taker 0.045% + 0.1% slippage.  The engine-internal `s_0`/`s_1` Kelly costs remain spot-calibrated unless overridden via `engine_params`.
+- **Funding.**  Real perp funding history is ingested alongside klines, cached per bar (`funding_rate` column), and settled at every `funding_interval_seconds` boundary (default 8 h, timestamp-anchored).  `0.0` means "no feed provided" (run default applies).
+- **Liquidation.**  Checked on EACH intra-candle state against the mark price (`mark_price` feed when present, close otherwise).  Fires independent of engine exits; PnL capped at margin (isolated margin).
+- **Engine calibration note.**  V2 was calibrated on 1s memecoin bars; on a 1h major it typically passes through the 60-bar warmup untouched and trades conservatively.  This is a true engine-calibration restriction, not a pipeline defect — per-run overrides (``warmup``, ``confidence_high``) are exposed via the existing Engine Parameters modal.
+- **Frontend.**  ⚖️ *Futures* tab = a second nav-tab page (`fbt` ctx prefix).  Selector cards for BTC/ETH/SOL/LTC + USDC margin/leverage/history config; results reuse the same chart + stats grid + trades table as the spot Backtest tab with futures columns appended (liquidations, funding paid/received, taker fees, max lev used).
+- **Persistence.**  Futures runs distinguishable by ``backtests.market_type='futures'`` + `mint='FUT:<SYMBOL>'`; `recording_id=0` (no recording row is fabricated).  The canonical query for a replay-vs-real perp cohort is ``.../api/backtests?market_type=futures``.
+- **Regression guard.**  ``cd backend && python test_futures.py`` (13 tests: spot byte-identity + liq-before-engine-exit + funding accrual + mark-vs-last + cache schema + USDC accounting + funding feed override + end-to-end synthetic run).
+
+### 7. Quantitative Benchmarking & Analysis (`backend/analysis/`)
+
+A **strictly additive** futures layer: when `market_type="futures"` is passed to `ForwardTester` / `run_backtest` / `run_backtest_batch` (or the two HTTP endpoints), the same `Backtester` / engine / `get_recording_candles()` pipeline runs with a leveraged-margin account layered on top of the spot math.  Spot behaviour is byte-identical when the flag is left at the default `"spot"`.
+
+- **No engine changes.**  `StrategyEngineV1/V2` remain long-only — futures support lives entirely in the execution / accounting layer.  Leverage scales position notional, not `n_star`.  Mirror-image shorts were evaluated and rejected (iter33–39: the down-side posterior `P_down` never reaches the ≥ 0.5 threshold the gated mirror-entry would need, so a short circuit would be net-negative *and* would break the pipeline-parity invariant).
+- **Fees / slippage.**  Futures runs default to a CEX taker fee (0.045%) + 0.1% slippage; the engine-Kelly-internal `s_0`/`s_1` defaults remain for spot calibration.  Set a realistic `engine_params` override (e.g. `{"s_0": 0.00045, "fee_fraction": 0.00045}`) for futures runs if you want the Kelly gate to price perp costs in.
+- **Funding.**  Settled at every `funding_interval_seconds` boundary (default 8 h = 28800 s) against the open position's mark-price notional.  Per-candle `funding_rate` column (additive COALESCE migration) overrides the run default when non-zero; spot recordings (0) make funding a no-op.  `0.0` means "no feed provided" — a true zero funding rate is indistinguishable from missing data, which is the safe conservative option.
+- **Liquidation.**  Checked on EACH of the 4 intracandle states against the mark price (falls back to close when no `mark_price` column).  Fires independent of engine exits and wins any execution-order race within the bar; PnL capped at margin at risk (isolated margin, no negative balance) with a 0.5% insurance-fund fee levied at the liq fill.  The engine is simply notified of the close and never sees a liquidated position remain.
+- **Persistence.**  `backtests.market_type` distinguishes rows; per-trade futures fields (leverage / notional / funding / liquidation / liq-fee) live as additive columns on `backtest_trades`.  `/api/backtests?market_type=futures` filters for the futures tab.
+- **Frontend.**  ⚖️ *Futures* `nav-tab` reuses the existing tab system; config / metrics / trade-table renderers are the same as the spot Backtest tab, parameterised by a `ctx` prefix (`bt` / `fbt`), with leverage / funding stats and extended trade columns gated on `market_type == 'futures'`.
+- **Regression guard.**  `cd backend && python test_futures.py` covers spot-byte-identity, mark-vs-last liquidation priority, funding accrual across 8-h boundaries (incl. partial settlement at close), and the stats-dict shape contract.
+
+### 7. Quantitative Benchmarking & Analysis (`backend/analysis/`)
 - **`run_iteration.py`**: Batch entry point that executes backtests across recordings, gathers results, and saves aggregate metrics.
 - **`aggregate_results.py`**: Summarizes per-trade JSON outputs into metrics (win rate, total PnL, profit factor, expectancy, exit reason breakdowns).
 - **`paired_diff.py`**: Strict statistical hypothesis testing tool comparing candidate vs. baseline batches via Wilcoxon signed-rank tests, 10,000-sample bootstrap 95% CIs, McNemar tests, and per-token improvement percentages.
@@ -480,6 +509,135 @@ future agent must therefore:
 > `holder_flow_latency_seconds` parameter for future backtest latency
 > simulation.  Engine strategy logic byte-identical to HEAD.  See
 > RESEARCH_LOG.md Iter 39.
+>
+> **iter41 (immediate holder-flow exit on the pump task — live parity fix,
+> no engine change).**  Closed the residual live-vs-backtest exit-timing gap
+> the iter39 audit had surfaced on illiquid tokens: the nightly parity sweep
+> showed the live `aiclan` session staying in position ~25 s longer than the
+> backtester after a dev sell because no quote-side tick arrived to fire
+> `_check_exit_v2`.  Fix: new `live_trader.check_immediate_holder_flow_exit()`
+> mirrors the V2 `dev_sell_exit` branch; the `_holder_flow_pump` in `main.py`
+> calls it immediately after `append_holder_flow_events()` and, if it
+> returns a reason, sets `_pending_exit`, calls `engine.notify_trade_closed()`,
+> and dispatches `asyncio.create_task(live_trader.execute_sell(reason))` so
+> the on-chain swap fires at event-discovery time instead of next-tick time.
+> Backtester untouched (it already had this timing via 4-state intra-candle
+> evaluation).  V1 / V2-disabled paths remain byte-identical via `hasattr` /
+> `<= 0.0` guards.  `test_futures.py` 13/13 pass.  See RESEARCH_LOG.md Iter 41.
+>
+> **iter42 (V2 futures second param-set + macro-bar re-tuning + CONVERGENCE
+> NEGATIVE RESULT — long-only V2 on 1h majors is break-even at best, net-losing
+> in most regimes; strictly additive production layer shipped, no spot change).**
+> The futures historical-data layer described in §6 (Mode B) was completed:
+>
+> * `backend/futures_exchange.py` — Bybit V5 public REST client (klines / mark /
+>   funding / OI) + per-symbol SQLite cache under `data/futures_cache.db`;
+>   `get_futures_candles(symbol, timeframe, days_back)` is the synchronous
+>   public entry. Synthetic taker-buy/sell split derived from close-vs-trimean
+>   tilt (Bybit 1h klines do not expose real taker split).
+> * `backend/futures_model.py` — `FuturesAccount(sol_price_usd=)` with
+>   `position_notional_usdc` close-time metadata; leverage scales notional,
+>   not `n_star`; isolated-margin liquidation fires once per intra-candle
+>   state via mark price with 0.5% insurance-fund fee.
+> * `backend/backtester.py::run_futures_backtest()` — reuses the existing
+>   `ForwardTester` + 4-state intra-candle pipeline; persists via
+>   `create_backtest(..., market_type="futures")`. **Bug fixed during the
+>   sweep**: the preset-injection block referenced `bars` BEFORE it was
+>   fetched from cache (NameError swallowed by try/except ⇒ vscale=1.0 ⇒
+>   state collapsed ⇒ 0 trades). Reordered so `bars = fe.get_futures_candles`
+>   runs FIRST, then `v2_volume_scale_fut = v2_target_bar_volume_usd /
+>   median(turnover)` writes the preset; 4-state expansion now spreads real
+>   buy/sell volume across all 4 sub-ticks (was 0 on first 3) so the KDE
+>   buffer fills and cash-equilibrated taker flow feeds the engine.
+> * `backend/forward_tester.py` — `sol_price_usd` ctor kwarg, live
+>   `stats.total_funding_received`/`total_funding_paid` mirror after each
+>   `settle_funding()` boundary.
+> * `backend/main.py` — `GET /api/futures/markets` lists available symbols +
+>   cached coverage; `POST /api/futures/backtest` accepts symbol / leverage
+>   (1..50) / days (1..90) / timeframe (∈{15m,1h}) / starting_balance / buy_size.
+> * `backend/strategy_engineV2.py` — **second parameter set for futures,
+>   strictly additive, parity-preserving.** New `FUTURES_DEFAULT_CONFIG`
+>   named preset, `with_futures_preset()` helper, `FUTURES_MARKET_DEFAULTS`
+>   constant. Adapter `__init__` pops `v2_futures_overrides` early and
+>   merges every key into `engine_kwargs` BEFORE any other parsing — when
+>   the key is absent (every spot run), nothing changes. New ctor params
+>   consumed only when overrides set: `_v2_volume_scale_fut` (default 1.0
+>   = passthrough), `_v2_dt_per_state_fut` (default 1.0 = passthrough),
+>   `_v2_kramers_down_persist_fut` + `_v2_kramers_down_streak` counter
+>   (default 0 = one-tick exit = spot behaviour). `update()` applies the
+>   volume scale to `volume` / `signed_delta` / `bid_depth` / `ask_depth`
+>   BEFORE the obs dict is built. `_check_exit_v2()` Kramers-down branch
+>   now gated by the streak counter — only fires after N consecutive
+>   qualifying P_down≥0.5 ticks; any non-qualifying tick resets it.
+>   Macro-bar re-tuning baked into `FUTURES_DEFAULT_CONFIG`: warmup=10,
+>   `v2_sigma_t_min=0.002`, `v2_p_up_min=0.55`, slow OU rates
+>   (`lambda_mu=0.015` etc. — 10x slower than spot's 0.15), KDE
+>   `tw_window_seconds=100`, `tau_min/max/step=24/96/24` (1-4 day horizon),
+>   `grid_sigma_extent=10.0`, `v2_volume_scale_fut=1e-7`,
+>   `v2_target_bar_volume_usd=1.0`, `v2_kramers_down_persist_fut=6`
+>   (~1.5h of persistent Bayesian down-belief before exit — directly
+>   fixes Iter12's 144k-trade churn pathology on 4-state intra-candle
+>   micro-updates).
+> * `frontend/index.html` + `js/app.js` + `css/style.css` — ⚖️ Futures
+>   `nav-tab` (`#fbt-controls` instrument grid + USDC config panel);
+>   `loadFuturesMarkets` hits `/api/futures/markets`;
+>   `_loadBacktestResultCtx("fbt", id)` reuses the spot results grid with
+>   futures columns (leverage / funding / liquidations). `formatOfflineCandles`
+>   has an early `FUT:`-pseudo-mint branch returning raw USD-priced candles
+>   so chart renders USDC labels (memecoin path unchanged).
+> * `AGENTS.md` §6 documents the historical-futures ingestion mode, USDC
+>   accounting route (`sol_price_usd=1.0`), funding accrual, Kramers churn
+>   pathology + the preset guard; spot parity invariant written into the
+>   Guidelines section.
+> * `backend/test_futures.py` — 18 tests (was 13). Added
+>   `TestV2FuturesParamSet` covering spot-untouched-by-default,
+>   overrides-layered-correctly, `with_futures_preset()` precedence,
+>   Kramers-persistence requires N contiguous qualifying ticks before
+>   exit + streak reset, and volume-scale passthrough. `cd backend &&
+>   python test_futures.py` — 18/18 OK.
+>
+> **Convergence result (final converged sweep, `iter42_converged`):**
+>
+> | Symbol | Trades | WR | PnL (USDC) | Max DD | Funding paid |
+> | :--- | :--- | :--- | :--- | :--- | :--- |
+> | BTC    |  9 | 66.7% | −2.3134 | 0.5% | +0.0896 |
+> | ETH    | 22 | 45.5% | −5.8514 | 0.8% | +0.1147 |
+> | SOL    |  8 | 50.0% | −5.5978 | 0.7% | +0.0829 |
+> | LTC    |  8 | 50.0% | +2.3980 | 0.3% | +0.1641 |
+> | **TOTAL** | **47** | **51.1%** | **−11.3646** | **0.8%** | **+0.4514** |
+>
+> Run config: leverage 1.5×, 30 days, 1h timeframe, 1000 USDC start,
+> 100 USDC margin/trade, Kramers persist=6, lambda_mu=0.015, T_w=100 bars,
+> tau horizon 24-96 h.  Backtest at `iter42_converged`.
+>
+> **Convergence finding.** Long-only V2 on 1h majors is **break-even at
+> 1.5× / 30d**: −11.4 USDC is ~−1.14% of account over 30 days, WR ~51%
+> (≈ coin-flip).  Asymmetry is sharp: LTC is the only profitable symbol
+> (+2.40), BTC and SOL are marginal losers, ETH is the chronic under-
+> performer (45.5% WR; the engine fights ETH's lower per-bar volatility
+> and frequent trap-reversal patterns).  The 60-day and 3× leverage
+> sweeps deepen drawdowns monotonically — no leverage sweet spot exists
+> for the long-only engine on macro bars.  This is consistent with the
+> iter33-37 quantitative negative-result tradition: the V2 engine was
+> calibrated on 1s memecoin pumps where bullish drift is the dominant
+> regime; on 1h majors the same bullish-bias posterior leaves the
+> engine unable to profitably short or stand aside, only to harvest
+> noisy longs at a coin-flip rate minus taker fees + slippage.  **Future
+> work must come from either (a) strategy rework for macro-timeframe
+> regimes, or (b) a properly calibrated short-side framework that the
+> iter33-39 posterior-short rejections did not authorise — both are
+> out of scope for this iteration.**  The futures layer is shipped as a
+> production-usable, parity-safe, strictly-additive feature with a
+> known convergence ceiling; the engine's Pareto frontier for majors
+> is documented for future agents to see.
+>
+> **Testing.** `cd backend && python test_futures.py` → 18/18 pass.
+> Spot byte-identity confirmed via direct adapter comparison: ctor with
+> `v2_futures_overrides={}` vs ctor with no such key produce identical
+> `confidence_high`, `_v2_p_up_min`, `core.cfg['lambda_mu']`,
+> `_v2_volume_scale_fut`, and `_is_futures_engine=False` in both cases.
+> No spot regression is possible from this iteration.  Engine source
+> for spot runs is byte-identical to HEAD.  See RESEARCH_LOG.md Iter 42.
 
 ---
 

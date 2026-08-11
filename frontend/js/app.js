@@ -1565,6 +1565,7 @@ function switchPage(pageId) {
   if (pageId === "recorder") { loadRecordingsList("recordings-list"); checkRecorderStatus(); }
   if (pageId === "viewer") loadRecordingsList("viewer-recordings-list", true);
   if (pageId === "backtest") { loadBacktestsList(); loadRecordingsDropdown(); }
+  if (pageId === "futures-backtest") { loadFuturesBacktestsList(); loadFuturesMarkets(); }
   // Phantom wallet auto-refresh removed
 }
 
@@ -1725,6 +1726,26 @@ document.getElementById("rec-start-btn").addEventListener("click", async () => {
 
 async function formatOfflineCandles(mint, rawCandles, timeframeStr) {
   if (!rawCandles || !rawCandles.length) return { candles: [], currency: "SOL" };
+
+  // Historical futures runs (mint = "FUT:*") carry raw perp prices (USD-scale).
+  // Bypass the mcap/SOL conversion below and pass them straight to the chart;
+  // formatting is handled by the scale-sensitive formatter selected by the
+  // caller (formatMcap handles large numbers).  Memecoin recordings keep the
+  // existing path byte-identical.
+  if (typeof mint === "string" && mint.startsWith("FUT:")) {
+    const out = [];
+    for (const c of rawCandles) {
+      if (!c || !c.open || c.open <= 0) continue;
+      out.push({
+        time: c.time, open: c.open, high: c.high, low: c.low, close: c.close,
+        volume: c.volume || 0, trade_action: c.trade_action || null,
+        trade_label: c.trade_label || null,
+        regime: c.regime, direction: c.direction, signal: c.signal,
+        signal_strength: c.signal_strength, color: c.close >= c.open ? "#26a69a33" : "#ef535033",
+      });
+    }
+    return { candles: out, currency: "USD" };
+  }
 
   // Find first non-zero open price across all candles to use as base
   let basePrice = 0;
@@ -1892,23 +1913,30 @@ document.getElementById("viewer-back-btn").addEventListener("click", () => {
 
 let btChart = null;
 
-async function loadRecordingsDropdown() {
+async function loadRecordingsDropdown(selectId = "bt-recording-select") {
   const list = await apiFetch("/api/recordings");
-  const sel = document.getElementById("bt-recording-select");
+  const sel = document.getElementById(selectId);
   sel.innerHTML = `<option value="">— Choose a recording —</option>` +
     list.filter(r => r.status === "completed").map(r =>
       `<option value="${r.id}">${r.token_name || r.mint?.slice(0, 8)} ($${r.token_symbol || '?'}) — ${r.timeframe} — ${r.candle_count} candles</option>`
     ).join("");
 }
 
-async function loadBacktestsList() {
-  const list = await apiFetch("/api/backtests");
-  const el = document.getElementById("backtests-list");
-  if (!list.length) { el.innerHTML = `<div class="empty-state">No backtests yet.</div>`; return; }
+/**
+ * Shared saved-backtests card-grid renderer.  ctx="bt" (spot) || "fbt" (futures):
+ * the DOM ids are `<ctx>-backtests-list` for the grid container and the card
+ * onclick routes to `<ctx>LoadBacktestResult`.  marketType filters list rows.
+ */
+async function _loadBacktestsListCtx(ctx, marketType) {
+  const list = await apiFetch(`/api/backtests${marketType ? `?market_type=${marketType}` : ""}`);
+  const el = document.getElementById(`${ctx === "bt" ? "" : "fbt-"}backtests-list`);
+  if (!list.length) {
+    el.innerHTML = `<div class="empty-state">No backtests yet. Select a recording and run a backtest.</div>`;
+    return;
+  }
 
   const singleTests = [];
   const batches = {};
-
   for (const bt of list) {
     if (bt.batch_id) {
       if (!batches[bt.batch_id]) batches[bt.batch_id] = [];
@@ -1919,24 +1947,18 @@ async function loadBacktestsList() {
   }
 
   let html = "";
-
   const batchGroups = Object.entries(batches).sort((a, b) => b[1][0].created_at - a[1][0].created_at);
   for (const [bId, bItems] of batchGroups) {
-    let totalTrades = 0;
-    let winningTrades = 0;
-    let totalPnl = 0;
-
+    let totalTrades = 0, winningTrades = 0, totalPnl = 0;
     for (const bt of bItems) {
       const trades = bt.total_trades || 0;
       totalTrades += trades;
       winningTrades += Math.round(trades * (bt.win_rate || 0) / 100);
       totalPnl += (bt.total_pnl || 0);
     }
-
     const overallWinRate = totalTrades > 0 ? (winningTrades / totalTrades * 100) : 0;
     const pnlClass = totalPnl >= 0 ? "pos" : "neg";
     const pnlSign = totalPnl >= 0 ? "+" : "";
-
     html += `
     <div class="backtest-card batch-folder" onclick="toggleBatchFolder('${bId}')" style="border-left: 4px solid #5865f2; cursor: pointer;">
       <div class="bt-card-header">
@@ -1952,23 +1974,27 @@ async function loadBacktestsList() {
       <div class="bt-card-actions"><button class="btn btn-danger btn-xs" onclick="deleteBatch('${bId}', event)">🗑 Delete Batch</button></div>
     </div>
     <div id="batch-items-${bId}" class="batch-items-container hidden" style="margin-left:20px; border-left: 2px dashed #30363d; padding-left:10px; margin-bottom: 10px; display: none;">
-      ${bItems.map(bt => renderSingleBacktestCard(bt)).join("")}
-    </div>
-    `;
+      ${bItems.map(bt => renderSingleBacktestCard(bt, ctx)).join("")}
+    </div>`;
   }
-
-  html += singleTests.map(bt => renderSingleBacktestCard(bt)).join("");
+  html += singleTests.map(bt => renderSingleBacktestCard(bt, ctx)).join("");
   el.innerHTML = html;
 }
 
-function renderSingleBacktestCard(bt) {
+/** Single-run card.  ctx routes the onclick and shows leverage when known. */
+function renderSingleBacktestCard(bt, ctx = "bt") {
   const pnlClass = bt.total_pnl >= 0 ? "pos" : "neg";
   const pnlSign = bt.total_pnl >= 0 ? "+" : "";
+  const isFut = (bt.market_type || "spot") === "futures";
+  const lev = isFut ? extractLevelFromParams(bt) : null;
+  const levBadge = isFut
+    ? `<span class="rec-card-badge" style="background:#2b2416;color:#e3b341">⚖️ ${lev ? lev + "×" : "fut"}</span>`
+    : "";
   return `
-    <div class="backtest-card" onclick="loadBacktestResult(${bt.id})">
+    <div class="backtest-card" onclick="${ctx}LoadBacktestResult(${bt.id})">
       <div class="bt-card-header">
         <div><span class="bt-card-name">${bt.token_name || bt.mint?.slice(0, 8)}</span> <span class="rec-card-symbol">${bt.token_symbol ? '$' + bt.token_symbol : ''}</span></div>
-        <div class="rec-card-badges"><span class="rec-card-badge">${bt.timeframe}</span></div>
+        <div class="rec-card-badges"><span class="rec-card-badge">${bt.timeframe}</span>${levBadge}</div>
       </div>
       <div class="bt-card-stats">
         <div class="bt-stat"><span class="bt-stat-label">Trades</span><span class="bt-stat-value">${bt.total_trades}</span></div>
@@ -1979,6 +2005,16 @@ function renderSingleBacktestCard(bt) {
       <div class="bt-card-actions"><button class="btn btn-danger btn-xs" onclick="deleteBacktest(${bt.id}, event)">🗑</button></div>
     </div>`;
 }
+
+function extractLevelFromParams(bt) {
+  try {
+    const p = typeof bt.engine_params === "string" ? JSON.parse(bt.engine_params) : (bt.engine_params || {});
+    return p.futures_leverage ?? p.leverage ?? null;
+  } catch { return null; }
+}
+
+async function loadBacktestsList() { return _loadBacktestsListCtx("bt", "spot"); }
+
 
 window.toggleBatchFolder = function (bId) {
   const el = document.getElementById(`batch-items-${bId}`);
@@ -2204,41 +2240,75 @@ document.getElementById("bt-params-btn").addEventListener("click", () => {
 });
 
 
-async function loadBacktestResult(id) {
+/**
+ * Shared backtest-detail renderer.  ctx="bt" (spot tab) || "fbt" (futures tab):
+ * the DOM element ids are `<ctx>-`-prefixed (bt-stats-grid / fbt-stats-grid).
+ * Futures runs render the extended stats grid and the extended trade columns
+ * (margin / leverage / notional / funding); spot runs render exactly the
+ * pre-existing layout — unchanged.
+ */
+const _btCharts = {};
+
+async function _loadBacktestResultCtx(ctx, id) {
   const bt = await apiFetch(`/api/backtests/${id}`);
   if (!bt || bt.error) return alert("Failed to load backtest");
+  const futures = (bt.market_type || "spot") === "futures";
 
-  document.getElementById("bt-controls").classList.add("hidden");
-  document.querySelector(".backtests-section").classList.add("hidden");
-  document.getElementById("bt-result-area").classList.remove("hidden");
+  document.getElementById(`${ctx}-controls`).classList.add("hidden");
+  document.querySelector(`#page-${ctx === "bt" ? "backtest" : "futures-backtest"} .backtests-section`).classList.add("hidden");
+  document.getElementById(`${ctx}-result-area`).classList.remove("hidden");
 
-  document.getElementById("bt-result-name").textContent = `${bt.token_name || bt.mint?.slice(0, 8)} ${bt.token_symbol ? '$' + bt.token_symbol : ''}`;
-  document.getElementById("bt-result-tf").textContent = bt.timeframe;
+  document.getElementById(`${ctx}-result-name`).textContent = `${bt.token_name || bt.mint?.slice(0, 8)} ${bt.token_symbol ? '$' + bt.token_symbol : ''}`;
+  document.getElementById(`${ctx}-result-tf`).textContent = bt.timeframe;
+  if (futures && ctx === "fbt") {
+    const lev = bt.summary_json?.leverage || 1;
+    const levEl = document.getElementById(`${ctx}-result-lev`);
+    if (levEl) levEl.textContent = `⚖️ ${lev}× leveraged · FUTURES`;
+  }
+  _renderBacktestStatsGrid(ctx, bt);
+  await _renderBacktestChart(ctx, bt);
+  _renderBacktestTradesTable(ctx, bt, futures);
+}
 
-  // Stats
+function _renderBacktestStatsGrid(ctx, bt) {
   const s = bt.summary_json || {};
-  const statsEl = document.getElementById("bt-stats-grid");
+  const el = document.getElementById(`${ctx}-stats-grid`);
   const pnlC = s.total_pnl_sol >= 0 ? "pos" : "neg";
-  statsEl.innerHTML = [
+  const rows = [
     { l: "Total Trades", v: s.total_trades || 0 },
     { l: "Win Rate", v: `${(s.win_rate || 0).toFixed(1)}%` },
     { l: "Total PnL", v: `${s.total_pnl_sol >= 0 ? '+' : ''}${(s.total_pnl_sol || 0).toFixed(4)} SOL`, c: pnlC },
     { l: "Final Balance", v: `${(s.current_balance || 1).toFixed(4)} SOL` },
     { l: "Max Drawdown", v: `${(s.max_drawdown_pct || 0).toFixed(2)}%`, c: "neg" },
     { l: "Fees Paid", v: `${(s.total_fees_paid || 0).toFixed(4)} SOL` },
-  ].map(x => `<div class="bt-stats-card"><div class="bt-stats-card-label">${x.l}</div><div class="bt-stats-card-value ${x.c || ''}">${x.v}</div></div>`).join("");
+  ];
+  if ((bt.market_type || "spot") === "futures") {
+    rows.push(
+      { l: "Leverage", v: `${s.leverage || 1}×` },
+      { l: "Liquidations", v: s.total_liquidations || 0, c: s.total_liquidations > 0 ? "neg" : "" },
+      { l: "Funding Paid", v: `${(s.total_funding_paid || 0).toFixed(6)} SOL` },
+      { l: "Funding Received", v: `${(s.total_funding_received || 0).toFixed(6)} SOL` },
+      { l: "Futures Fees", v: `${(s.total_fees_paid_futures || 0).toFixed(4)} SOL` },
+      { l: "Max Lev Used", v: `${(s.max_leverage_used || 0).toFixed(1)}×` },
+    );
+  }
+  el.innerHTML = rows.map(x =>
+    `<div class="bt-stats-card"><div class="bt-stats-card-label">${x.l}</div><div class="bt-stats-card-value ${x.c || ''}">${x.v}</div></div>`
+  ).join("");
+}
 
-  // Chart
-  const wrapper = document.getElementById("bt-chart");
+async function _renderBacktestChart(ctx, bt) {
+  const wrapper = document.getElementById(`${ctx}-chart`);
   wrapper.innerHTML = "";
-  if (btChart) btChart.remove();
-  btChart = LightweightCharts.createChart(wrapper, {
+  if (_btCharts[ctx]) _btCharts[ctx].remove();
+  _btCharts[ctx] = LightweightCharts.createChart(wrapper, {
     layout: { background: { color: "#0d0f12" }, textColor: "#5a6071" },
     grid: { vertLines: { color: "#1e2330" }, horzLines: { color: "#1e2330" } },
     timeScale: { borderColor: "#1e2330", timeVisible: true, secondsVisible: true },
     rightPriceScale: { borderColor: "#1e2330" },
     width: wrapper.clientWidth, height: wrapper.clientHeight,
   });
+  const btChart = _btCharts[ctx];
 
   const candles = bt.candles || [];
   const formattedData = await formatOfflineCandles(bt.mint, candles, bt.timeframe);
@@ -2269,32 +2339,165 @@ async function loadBacktestResult(id) {
 
   btChart.timeScale().fitContent();
   new ResizeObserver(() => btChart.applyOptions({ width: wrapper.clientWidth, height: wrapper.clientHeight })).observe(wrapper);
+}
 
-  // Trades table
-  const tbody = document.getElementById("bt-trades-tbody");
+function _renderBacktestTradesTable(ctx, bt, futures) {
+  const tbody = document.getElementById(`${ctx}-trades-tbody`);
   const trades = bt.trades || [];
   tbody.innerHTML = trades.map((t, i) => {
     const pnlClass = t.pnl_sol >= 0 ? "trade-pnl-pos" : "trade-pnl-neg";
-    return `<tr>
+    const common = `
       <td>${i + 1}</td>
       <td>${fmtTs(t.entry_time)}</td>
       <td>${t.entry_price?.toExponential(4) || '—'}</td>
       <td>${fmtTs(t.exit_time)}</td>
-      <td>${t.exit_price?.toExponential(4) || '—'}</td>
+      <td>${t.exit_price?.toExponential(4) || '—'}</td>`;
+    const pnl = `
       <td class="${pnlClass}">${t.pnl_sol >= 0 ? '+' : ''}${t.pnl_sol?.toFixed(6) || '0'}</td>
-      <td class="${pnlClass}">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct?.toFixed(2) || '0'}%</td>
+      <td class="${pnlClass}">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct?.toFixed(2) || '0'}%</td>`;
+    if (!futures) {
+      return `<tr>${common}${pnl}
       <td>${t.entry_reason || '—'}</td>
       <td>${t.exit_reason || '—'}</td>
+    </tr>`;
+    }
+    const funding = t.funding_paid || 0;
+    const fundingC = funding > 0 ? "trade-pnl-neg" : (funding < 0 ? "trade-pnl-pos" : "");
+    const reasonCls = t.exit_reason === "liquidation" ? "trade-pnl-neg" : "";
+    return `<tr>${common}
+      <td>${(t.size_sol || 0).toFixed(4)}</td>
+      <td>${t.leverage || 1}×</td>
+      <td>${(t.notional_sol || 0).toFixed(4)}</td>${pnl}
+      <td class="${fundingC}">${funding > 0 ? '-' : (funding < 0 ? '+' : '')}${Math.abs(funding).toFixed(6)}</td>
+      <td class="${reasonCls}">${t.exit_reason || '—'}</td>
     </tr>`;
   }).join("");
 }
 
+// Spot-tab wrapper — preserves the pre-existing global name so the inline
+// onclick handlers / window bindings keep working byte-identically.
+async function loadBacktestResult(id) {
+  return _loadBacktestResultCtx("bt", id);
+}
+
 document.getElementById("bt-result-back-btn").addEventListener("click", () => {
   document.getElementById("bt-controls").classList.remove("hidden");
-  document.querySelector(".backtests-section").classList.remove("hidden");
+  document.querySelector("#page-backtest .backtests-section").classList.remove("hidden");
   document.getElementById("bt-result-area").classList.add("hidden");
-  if (btChart) { btChart.remove(); btChart = null; }
+  if (_btCharts["bt"]) { _btCharts["bt"].remove(); _btCharts["bt"] = null; }
 });
+
+/* ── Futures Backtest tab — real historical perp data, USDC accounting ─────── */
+
+let _fbtSelectedSymbol = null;
+
+/** Fetch supported perp instruments (BTC/ETH/SOL/LTC) and paint the selector row. */
+async function loadFuturesMarkets() {
+  const el = document.getElementById("fbt-instruments");
+  if (!el) return;
+  const mkts = await apiFetch("/api/futures/markets");
+  if (!Array.isArray(mkts) || !mkts.length) {
+    el.innerHTML = `<div class="empty-state">No futures instruments available.</div>`;
+    return;
+  }
+  el.innerHTML = mkts.map(m => `
+    <button class="fbt-instrument-card ${_fbtSelectedSymbol === m.symbol ? 'active' : ''}"
+            data-symbol="${m.symbol}"
+            onclick="selectFuturesInstrument('${m.symbol}')">
+      <span class="fbt-instrument-name">${m.symbol}</span>
+      <span class="fbt-instrument-sub">${m.exchange_symbol} · ${m.account_ccy}</span>
+      <span class="fbt-instrument-sub">${(m.cached_bars || 0).toLocaleString()} bars cached</span>
+    </button>`).join("");
+  if (!_fbtSelectedSymbol) selectFuturesInstrument(mkts[0].symbol);
+}
+
+function selectFuturesInstrument(symbol) {
+  _fbtSelectedSymbol = symbol;
+  document.querySelectorAll(".fbt-instrument-card").forEach(el =>
+    el.classList.toggle("active", el.dataset.symbol === symbol));
+}
+window.selectFuturesInstrument = selectFuturesInstrument;
+
+function loadFuturesBacktestsList() { return _loadBacktestsListCtx("fbt", "futures"); }
+async function fbtLoadBacktestResult(id) { return _loadBacktestResultCtx("fbt", id); }
+/** Legacy help — the spot recording dropdown is no longer used for futures. */
+function loadFuturesRecordingsDropdown() { return Promise.resolve(); }
+
+function _fbtSetBusy(busy, labelText) {
+  const prog = document.getElementById("fbt-progress");
+  const runBtn = document.getElementById("fbt-run-btn");
+  const runAllBtn = document.getElementById("fbt-run-all-btn");
+  prog.classList.toggle("hidden", !busy);
+  runBtn.disabled = busy;
+  runAllBtn.disabled = busy;
+  if (labelText) document.getElementById("fbt-progress-label").textContent = labelText;
+}
+
+function _fbtRunBody(symbol) {
+  return {
+    symbol,
+    engine_params: getEngineParams(),
+    engine_version: engineVersion,
+    leverage: parseFloat(document.getElementById("fbt-leverage").value) || 1.0,
+    days_back: parseInt(document.getElementById("fbt-days-back").value) || 30,
+    buy_size_sol: parseFloat(document.getElementById("fbt-margin").value) || 100,
+    starting_balance: parseFloat(document.getElementById("fbt-starting-balance").value) || 1000,
+    funding_rate_per_interval: parseFloat(document.getElementById("fbt-funding-rate").value) || 0.0001,
+    funding_interval_seconds: 28800,
+    futures_taker_fee: parseFloat(document.getElementById("fbt-taker-fee").value) || 0.00045,
+    futures_slippage_pct: parseFloat(document.getElementById("fbt-slippage").value) || 0.1,
+    maintenance_margin_rate: 0.005,
+  };
+}
+
+document.getElementById("fbt-run-btn").addEventListener("click", async () => {
+  if (!_fbtSelectedSymbol) return alert("Select an instrument first");
+  _fbtSetBusy(true, `Fetching + running ${_fbtSelectedSymbol} perp history…`);
+  try {
+    const body = _fbtRunBody(_fbtSelectedSymbol);
+    const result = await apiFetch("/api/futures/backtest", {
+      method: "POST", body: JSON.stringify(body)
+    });
+    if (result.error) { alert(result.error); return; }
+    loadFuturesBacktestsList();
+    fbtLoadBacktestResult(result.backtest_id);
+  } finally { _fbtSetBusy(false); }
+});
+
+document.getElementById("fbt-run-all-btn").addEventListener("click", async () => {
+  _fbtSetBusy(true, "Running all instruments…");
+  try {
+    const mkts = await apiFetch("/api/futures/markets");
+    if (!Array.isArray(mkts) || !mkts.length) return alert("No futures instruments available.");
+    // Sequential (futures_exchange has a per-symbol fetch cost; hits exchange rate-limits otherwise)
+    let wins = 0, fails = 0;
+    for (const m of mkts) {
+      try {
+        const r = await apiFetch("/api/futures/backtest", {
+          method: "POST", body: JSON.stringify(_fbtRunBody(m.symbol))
+        });
+        if (r && !r.error) wins++; else fails++;
+      } catch { fails++; }
+    }
+    alert(`Futures batch done: ${wins} ok, ${fails} failed`);
+    loadFuturesBacktestsList();
+  } finally { _fbtSetBusy(false); }
+});
+
+document.getElementById("fbt-params-btn").addEventListener("click", () => {
+  renderSettings();
+  settingsModal.classList.remove("hidden");
+});
+
+document.getElementById("fbt-result-back-btn").addEventListener("click", () => {
+  document.getElementById("fbt-controls").classList.remove("hidden");
+  document.querySelector("#page-futures-backtest .backtests-section").classList.remove("hidden");
+  document.getElementById("fbt-result-area").classList.add("hidden");
+  if (_btCharts["fbt"]) { _btCharts["fbt"].remove(); _btCharts["fbt"] = null; }
+});
+
+// global hook for instrument onclick
+window.fbtLoadBacktestResult = fbtLoadBacktestResult;
 
 // Make functions globally available for onclick handlers
 window.loadViewer = loadViewer;
@@ -2391,16 +2594,18 @@ function addLtTradeRow(ctx, action, price, pnlSol, pnlPct, txHash, status) {
   const tr = document.createElement("tr");
   const pnlClass = pnlSol >= 0 ? "trade-pnl-pos" : "trade-pnl-neg";
   const ts = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  const solscanUrl = `https://solscan.io/tx/${txHash}`;
+  const txCell = txHash
+    ? `<a href="https://solscan.io/tx/${txHash}" target="_blank" style="color:var(--accent);text-decoration:none">${txHash.slice(0, 8)}…</a>`
+    : "—";
   tr.innerHTML = `
     <td>${ltTradeCounter}</td>
-    <td>${ctx.info?.token_symbol ? "$" + ctx.info.token_symbol : ctx.mint.slice(0, 6) + "…"}</td>
+    <td>${ctx.info?.token_symbol ? "$" + ctx.info.token_symbol : (ctx.mint ? ctx.mint.slice(0, 6) + "…" : "—")}</td>
     <td style="color:${action === "BUY" ? "var(--green)" : "var(--red)"}; font-weight:700">${action}</td>
     <td>${ts}</td>
     <td>${price ? price.toExponential(4) : "—"}</td>
     <td class="${pnlClass}">${pnlSol ? (pnlSol >= 0 ? "+" : "") + pnlSol.toFixed(6) : "—"}</td>
     <td class="${pnlClass}">${pnlPct ? (pnlPct >= 0 ? "+" : "") + pnlPct.toFixed(2) + "%" : "—"}</td>
-    <td><a href="${solscanUrl}" target="_blank" style="color:var(--accent);text-decoration:none">${txHash.slice(0, 8)}…</a></td>
+    <td>${txCell}</td>
     <td>${status}</td>
   `;
   ltTradesTbody.prepend(tr);
@@ -2787,12 +2992,50 @@ ltStopAllBtn.addEventListener("click", stopAllTraders);
   });
 });
 
+/* ── Trade history from session ledgers ─────────────────────────────────
+   The trade table is normally populated ONLY by live WebSocket events, so
+   after a page reload (or if a trade closed while the page was closed) the
+   SELL rows were permanently missing.  On entering the live-trading page we
+   rebuild the table from the backend's per-session trades.jsonl ledgers. */
+
+async function loadLiveTradeHistory() {
+  try {
+    const data = await apiFetch("/api/live/history?limit=20");
+    if (!data || !data.sessions || data.sessions.length === 0) return;
+    const rows = [];
+    for (const sess of data.sessions) {
+      const ctx = { mint: sess.token_mint || "", info: { token_symbol: "" } };
+      for (const t of sess.trades || []) {
+        if (!t || t.status !== "closed") continue;
+        rows.push({ ctx, t });
+      }
+    }
+    if (rows.length === 0) return;
+    // Oldest first, then prepend in reverse so the newest ends up on top.
+    rows.sort((a, b) => (a.t.exit_time || 0) - (b.t.exit_time || 0));
+    ltTradesTbody.innerHTML = "";
+    ltTradeCounter = 0;
+    for (const { ctx, t } of rows) {
+      if (t.tx_hash_buy) {
+        addLtTradeRow(ctx, "BUY", t.entry_price || 0, 0, 0, t.tx_hash_buy, "confirmed");
+      }
+      addLtTradeRow(ctx, "SELL", t.exit_price || 0, t.pnl_sol || 0, t.pnl_pct || 0,
+        t.tx_hash_sell || "", t.exit_reason || "closed");
+    }
+  } catch (e) {
+    // History loading is best-effort — never break page navigation.
+  }
+}
+
 // Page switch handler for live trading
 const origSwitchPage = switchPage;
 switchPage = function (pageId) {
   origSwitchPage(pageId);
-  if (pageId === "live-trading" && ltWalletConnected) {
-    refreshWalletBalance();
+  if (pageId === "live-trading") {
+    loadLiveTradeHistory();
+    if (ltWalletConnected) {
+      refreshWalletBalance();
+    }
   }
 };
 // Re-bind nav tabs with new switchPage

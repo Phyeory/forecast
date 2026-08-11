@@ -1089,3 +1089,37 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
   padding: 4px 10px;
 }
 
+
+/* ── Futures instrument selector row (Futures Backtest tab) ─────────────── */
+.fbt-instrument-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+}
+.fbt-instrument-card {
+  background: var(--card, #14161c);
+  border: 1px solid var(--border, #262b38);
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.fbt-instrument-card:hover { border-color: #5865f2; }
+.fbt-instrument-card.active {
+  border-color: #5865f2;
+  background: rgba(88, 101, 242, 0.12);
+}
+.fbt-instrument-name {
+  display: block;
+  font-weight: 700;
+  font-size: 15px;
+}
+.fbt-instrument-sub {
+  display: block;
+  font-size: 11px;
+  color: #888;
+  margin-top: 2px;
+}

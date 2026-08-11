@@ -32,7 +32,8 @@ from forward_tester import ForwardTester
 from live_trader import LiveTrader, keypair_from_private_key
 from autofeed import AutoFeed, AutofeedConfig, Candidate
 import data_store
-from backtester import run_backtest, run_backtest_batch
+from backtester import run_backtest, run_backtest_batch, run_futures_backtest
+import futures_exchange
 from sniper.sniper_router import router as sniper_router, set_engine as set_sniper_engine
 from sniper.sniper_engine import SniperEngine, SniperConfig
 from holder_flow import HolderFlowMonitor, get_shared_monitor
@@ -429,6 +430,24 @@ async def run_backtest_endpoint(body: dict = Body(...)):
         return JSONResponse({"error": "recording_id is required"}, status_code=400)
     engine_params = body.get("engine_params", {})
     engine_version = int(body.get("engine_version", 1))
+    # ── Futures mode params (validated; "spot" is the no-op default) ──────
+    market_type = str(body.get("market_type", "spot")).lower()
+    if market_type not in ("spot", "futures"):
+        return JSONResponse({"error": "market_type must be 'spot' or 'futures'"}, status_code=400)
+    leverage = float(body.get("leverage", 1.0))
+    if not (1.0 <= leverage <= 125.0):
+        return JSONResponse({"error": "leverage must be between 1 and 125"}, status_code=400)
+    futures_kwargs = {}
+    if market_type == "futures":
+        futures_kwargs = {
+            "market_type": "futures",
+            "leverage": leverage,
+            "funding_rate_per_interval": float(body.get("funding_rate_per_interval", 0.0001)),
+            "funding_interval_seconds": int(body.get("funding_interval_seconds", 28800)),
+            "maintenance_margin_rate": float(body.get("maintenance_margin_rate", 0.005)),
+            "futures_taker_fee": float(body.get("futures_taker_fee", 0.00045)),
+            "futures_slippage_pct": body.get("futures_slippage_pct"),
+        }
     try:
         # Run CPU-bound backtest in thread pool to avoid blocking the event loop
         result = await asyncio.to_thread(
@@ -441,6 +460,7 @@ async def run_backtest_endpoint(body: dict = Body(...)):
             slippage_pct=body.get("slippage_pct", 1.0),
             starting_balance=body.get("starting_balance", 1.0),
             engine_version=engine_version,
+            **futures_kwargs,
         )
         return JSONResponse(result)
     except ValueError as e:
@@ -468,6 +488,24 @@ async def run_backtest_batch_endpoint(body: dict = Body(default={})):
         recording_ids = [int(r) for r in recording_ids]
     last_night = bool(body.get("last_night", False))
     last_12h = bool(body.get("last_12h", False))
+    # ── Futures mode params ────────────────────────────────────────────────
+    market_type = str(body.get("market_type", "spot")).lower()
+    if market_type not in ("spot", "futures"):
+        return JSONResponse({"error": "market_type must be 'spot' or 'futures'"}, status_code=400)
+    leverage = float(body.get("leverage", 1.0))
+    if not (1.0 <= leverage <= 125.0):
+        return JSONResponse({"error": "leverage must be between 1 and 125"}, status_code=400)
+    futures_kwargs = {}
+    if market_type == "futures":
+        futures_kwargs = {
+            "market_type": "futures",
+            "leverage": leverage,
+            "funding_rate_per_interval": float(body.get("funding_rate_per_interval", 0.0001)),
+            "funding_interval_seconds": int(body.get("funding_interval_seconds", 28800)),
+            "maintenance_margin_rate": float(body.get("maintenance_margin_rate", 0.005)),
+            "futures_taker_fee": float(body.get("futures_taker_fee", 0.00045)),
+            "futures_slippage_pct": body.get("futures_slippage_pct"),
+        }
     try:
         results = await asyncio.to_thread(
             run_backtest_batch,
@@ -482,6 +520,7 @@ async def run_backtest_batch_endpoint(body: dict = Body(default={})):
             recording_ids=recording_ids,
             last_night=last_night,
             last_12h=last_12h,
+            **futures_kwargs,
         )
         succeeded = [r for r in results if "error" not in r]
         failed = [r for r in results if "error" in r]
@@ -497,8 +536,11 @@ async def run_backtest_batch_endpoint(body: dict = Body(default={})):
 
 
 @app.get("/api/backtests")
-async def list_backtests_endpoint():
-    return JSONResponse(data_store.list_backtests())
+async def list_backtests_endpoint(market_type: Optional[str] = None):
+    rows = data_store.list_backtests()
+    if market_type:
+        rows = [r for r in rows if (r.get("market_type") or "spot") == market_type]
+    return JSONResponse(rows)
 
 
 @app.get("/api/backtests/{backtest_id}")
@@ -525,6 +567,101 @@ async def delete_all_backtests_endpoint():
 async def delete_backtest_batch_endpoint(batch_id: str):
     data_store.delete_batch(batch_id)
     return JSONResponse({"status": "deleted"})
+
+
+# ── Futures data + backtest API ───────────────────────────────────────────────
+
+@app.get("/api/futures/markets")
+async def list_futures_markets():
+    """Listed perp instruments + how much history is currently cached."""
+    return JSONResponse(futures_exchange.list_supported_symbols())
+
+
+@app.post("/api/futures/backtest")
+async def run_futures_backtest_endpoint(body: dict = Body(...)):
+    """
+    Historical perp backtest on Bybit linear-USDT klines (accounted in USDC).
+
+    Required body fields:
+      symbol      – one of BTC / ETH / SOL / LTC
+    Optional:
+      days_back   – 30 (default) … 90    how much history to pull/cache
+      timeframe   – "1h" (default) | "15m"
+      leverage    – 1 (default) … 50
+      buy_size_sol (margin per trade, USDC)          – default 100
+      starting_balance (USDC)                        – default 1000
+      funding_rate_per_interval / funding_interval_seconds
+      futures_taker_fee / futures_slippage_pct / maintenance_margin_rate
+      engine_params / engine_version (1 default, 2 = V2 RBPF)
+      batch_id    – batch label for grouping
+    """
+    symbol = str(body.get("symbol", "")).strip().upper()
+    if symbol not in futures_exchange.DEFAULT_SYMBOLS:
+        return JSONResponse(
+            {"error": f"symbol must be one of {sorted(futures_exchange.DEFAULT_SYMBOLS)}"},
+            status_code=400,
+        )
+
+    timeframe = str(body.get("timeframe", "1h"))
+    days_back = int(body.get("days_back", 30))
+    if days_back < 1 or days_back > 90:
+        return JSONResponse({"error": "days_back must be 1..90"}, status_code=400)
+    if timeframe not in ("15m", "1h"):
+        return JSONResponse({"error": "timeframe must be '1h' or '15m'"}, status_code=400)
+
+    # Pull market-level defaults from the FUTURES_MARKET_DEFAULTS constant so
+    # the user-facing tab inherits the Pareto-optimal starting point (iter42
+    # convergence). Caller-supplied body fields always override.
+    try:
+        from strategy_engineV2 import FUTURES_MARKET_DEFAULTS
+    except Exception:
+        FUTURES_MARKET_DEFAULTS = {}
+    _md = FUTURES_MARKET_DEFAULTS or {}
+
+    leverage = float(body.get("leverage", _md.get("leverage", 1.0)))
+    if not (1.0 <= leverage <= 50.0):
+        return JSONResponse({"error": "leverage must be 1..50"}, status_code=400)
+
+    market_params = {
+        "leverage": leverage,
+        "timeframe": timeframe,
+        "futures_days": days_back,
+        "buy_size_sol": float(body.get("buy_size_sol", _md.get("buy_size_sol", 100.0))),
+        "starting_balance": float(body.get("starting_balance", _md.get("starting_balance", 1000.0))),
+        "futures_taker_fee": float(body.get("futures_taker_fee", _md.get("futures_taker_fee", 0.00045))),
+        "futures_slippage_pct": float(body.get("futures_slippage_pct", _md.get("futures_slippage_pct", 0.1))),
+        "maintenance_margin_rate": float(body.get("maintenance_margin_rate", _md.get("maintenance_margin_rate", 0.005))),
+        "funding_interval_seconds": int(body.get("funding_interval_seconds", _md.get("funding_interval_seconds", 28800))),
+        "funding_rate_per_interval": float(body.get("funding_rate_per_interval", _md.get("funding_rate_per_interval", 0.0001))),
+    }
+    engine_params = body.get("engine_params", {}) or {}
+    engine_version = int(body.get("engine_version", 1))
+    batch_id = body.get("batch_id") or None
+
+    try:
+        # Materialise the cache + run the backtest off-thread (CPU-bound and
+        # does outbound HTTP with retry — never on the event loop).
+        def _run():
+            futures_exchange.get_futures_candles(
+                symbol, timeframe=timeframe, days_back=days_back,
+            )
+            saved = dict(engine_params)
+            saved["futures_symbol"] = symbol
+            saved["futures_timeframe"] = timeframe
+            return run_futures_backtest(
+                symbol=symbol,
+                engine_params=saved,
+                market_params=market_params,
+                engine_version=engine_version,
+                batch_id=batch_id,
+                futures_days=days_back,
+            )
+        return JSONResponse(await asyncio.to_thread(_run))
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except Exception as e:
+        logger.error(f"Futures backtest error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.websocket("/ws/{mint}")
@@ -804,6 +941,56 @@ async def live_status():
             "trade_count": len(trader.trade_history),
         })
     return JSONResponse({"traders": traders, "count": len(traders)})
+
+
+@app.get("/api/live/history")
+async def live_history(limit: int = Query(20, ge=1, le=100)):
+    """Recent completed live-trading sessions with their closed trades.
+
+    Read from each session's physical trades.jsonl ledger (survives restarts
+    and sessions that ended before the page was opened).  Enables the
+    frontend to rebuild the live trade-history table on page load — SELL rows
+    for trades that closed while the dashboard was closed were previously
+    lost forever because the table was only ever fed by live WS events.
+    """
+    from live_session_logger import LOG_ROOT
+    sessions = []
+    if LOG_ROOT.is_dir():
+        dirs = sorted(
+            (p for p in LOG_ROOT.iterdir()
+             if p.is_dir() and (p / "trades.jsonl").exists()),
+            key=lambda p: p.name, reverse=True,
+        )[:limit]
+        for d in dirs:
+            meta = {"token_mint": "", "wallet": ""}
+            trades = []
+            try:
+                with open(d / "trades.jsonl", "r", encoding="utf-8") as f:
+                    for line in f:
+                        try:
+                            rec = json.loads(line)
+                        except Exception:
+                            continue
+                        event = rec.get("event")
+                        if event == "session_open":
+                            meta["token_mint"] = rec.get("token_mint", meta["token_mint"])
+                            meta["wallet"] = rec.get("wallet", meta["wallet"])
+                        elif event == "trade_closed":
+                            t = rec.get("trade") or {}
+                            if isinstance(t, dict) and t.get("status") == "closed":
+                                trades.append({
+                                    "event_ts": rec.get("ts"),
+                                    **t,
+                                })
+            except Exception:
+                pass
+            sessions.append({
+                "session_id": d.name,
+                "token_mint": meta["token_mint"] or d.name.split("_", 2)[-1],
+                "wallet": meta["wallet"],
+                "trades": trades,
+            })
+    return JSONResponse({"sessions": sessions, "count": len(sessions)})
 
 
 @app.post("/api/live/stop")
@@ -1090,6 +1277,16 @@ async def live_trading_ws(
                     _hf_pushed["n"] = len(_hf_events)
                     try:
                         live_trader.engine.append_holder_flow_events(_new)
+                        # Immediately check if this triggers an immediate dev_sell_exit
+                        exit_reason = live_trader.check_immediate_holder_flow_exit()
+                        if exit_reason:
+                            logger.info(f"[HOLDER FLOW] Immediate exit triggered: {exit_reason}")
+                            live_trader._pending_exit = True
+                            live_trader._pending_exit_reason = exit_reason
+                            live_trader._pending_buy = False
+                            live_trader.engine.notify_trade_closed()
+                            # Fire off the sell swap immediately in the background
+                            asyncio.create_task(live_trader.execute_sell(exit_reason))
                     except AttributeError:
                         pass  # V1 engine has no holder-flow surface
             except Exception:

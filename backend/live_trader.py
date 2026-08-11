@@ -202,6 +202,7 @@ class LiveTrade:
     entry_reason: str = ""
     tx_hash_sell: str = ""
     status: str = "open"  # open, closing, closed, failed
+    cost_sol: float = 0.0  # ACTUAL SOL spent on the buy incl. fees (0 = fall back to size_sol)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -396,6 +397,34 @@ class LiveTrader:
         # monitored trade instead of leaving it invisible.
         self._adopted_bag: bool = False
 
+        # ── Explicit buy-in-flight flag ────────────────────────────────────
+        # True from the moment a buy TX is broadcast until it is either
+        # confirmed on-chain (→ open) or proven dead (→ failed).  This is the
+        # authoritative buy-pending signal used by _is_buy_pending() — it is
+        # INDEPENDENT of trade.status, because the exit path sets status to
+        # "closing" BEFORE execute_sell runs, which used to disarm the old
+        # status-based check and let a sell race an unconfirmed buy (the
+        # 2026-08-11 EGPtQP race: sell_attempt fired 4 s before buy_confirmed,
+        # closing the trade via verified_empty_wallet with no sell hash).
+        self._buy_tx_in_flight: bool = False
+
+        # ── Actual-SOL-received accounting ─────────────────────────────────
+        # SOL balance captured when the buy confirmed (post-buy baseline).  A
+        # completed sell's proceeds are MEASURED on-chain (exact per-TX
+        # pre/post balances, wallet-delta fallback) instead of estimated from
+        # the last price or the Jupiter quote outAmount — the number the
+        # dashboard presents must be the SOL the wallet actually received.
+        self._post_buy_sol_balance: float = 0.0
+        self._pre_sell_sol_balance: float = 0.0
+        self._pre_buy_sol_balance: float = 0.0   # SOL balance just before the buy broadcast
+
+        # Last sell signature broadcast (confirmed or not).  Used to give
+        # verified_empty_wallet / watchdog_finalise closes a linkable hash —
+        # previously those paths closed with tx_hash_sell="" so the UI showed
+        # a SELL row with no transaction.
+        self._last_sell_sig: str = ""
+        self._last_broadcast_sig: str = ""   # last sig placed on the wire (any swap)
+
     # ── Structured session ledger helpers ─────────────────────────────────────
 
     def set_session_meta(self, **meta):
@@ -421,11 +450,17 @@ class LiveTrader:
         A pending buy must block every entry path (signal buys, manual buys,
         watchdog) — entering a second position while the first may still land
         is exactly the unmonitored-position bug this invariant fixes.
+
+        Driven by the explicit ``_buy_tx_in_flight`` flag, NOT by
+        ``trade.status``: the exit path sets ``status="closing"`` *before*
+        calling ``execute_sell``, so a status-based check sees
+        ``"closing" != "pending"`` and incorrectly lets a sell race the
+        still-unconfirmed buy.
         """
         ct = self.current_trade
         return (
-            ct is not None
-            and ct.status == "pending"
+            self._buy_tx_in_flight
+            and ct is not None
             and not ct.tx_hash_sell
             and ct.exit_time is None
         )
@@ -689,6 +724,12 @@ class LiveTrader:
             while self._swap_in_flight and time.time() < deadline:
                 await asyncio.sleep(0.5)
 
+        if self._is_buy_pending():
+            logger.info("[CLEANUP] Buy pending — waiting up to 20s for it to settle before emergency sell")
+            deadline = time.time() + 20.0
+            while self._is_buy_pending() and time.time() < deadline:
+                await asyncio.sleep(0.25)
+
         if self.current_trade is not None:
             logger.warning(
                 f"[CLEANUP] Position still open on disconnect for {self.token_mint[:8]}… "
@@ -703,7 +744,7 @@ class LiveTrader:
             try:
                 sig = await asyncio.wait_for(
                     self.execute_sell("connection_closed"),
-                    timeout=45.0,
+                    timeout=90.0,
                 )
                 if sig:
                     logger.info(f"[CLEANUP] Emergency sell completed: {sig}")
@@ -1134,6 +1175,7 @@ class LiveTrader:
 
             if sig is None:
                 return None
+            self._last_broadcast_sig = sig
 
             if wait_for_confirmation:
                 # ── Wait for confirmation (with in-flight rebroadcast) ───────
@@ -1271,6 +1313,7 @@ class LiveTrader:
                 sol_bal = await self._get_sol_balance()
                 self._cached_sol_balance = sol_bal
                 self._cached_balance_ts = time.time()
+            self._pre_buy_sol_balance = sol_bal
             logger.info(
                 f"[BUY] Starting buy: mint={mint_str[:8]}… size={self.buy_size_sol} SOL "
                 f"balance={sol_bal:.4f} SOL (cached) reason={reason}"
@@ -1329,6 +1372,7 @@ class LiveTrader:
             # the Jupiter outAmount so a sell signal that fires before the
             # 4s background balance refresh can still build a swap — the sell
             # path re-reads the authoritative on-chain balance and corrects it.
+            self._buy_tx_in_flight = True
             elapsed = time.time() - buy_start
             out_amount = int(quote.get("outAmount", 0))
             tokens = out_amount / (10 ** self._token_decimals)
@@ -1421,6 +1465,7 @@ class LiveTrader:
             self.current_trade = None
         self._token_balance = 0
         self._cached_token_balance = 0
+        self._buy_tx_in_flight = False
         self._pending_buy = False
         self._pending_buy_reason = ""
         self.engine.notify_trade_closed()
@@ -1493,6 +1538,7 @@ class LiveTrader:
 
         async def _confirm_open(balance: int, via: str):
             """Promote the pending trade to open and reconcile the balance."""
+            self._buy_tx_in_flight = False
             self._token_balance = balance
             self._cached_token_balance = balance
             ct = self.current_trade
@@ -1609,10 +1655,132 @@ class LiveTrader:
             )
 
     async def _refresh_sol_balance_async(self):
-        """Non-blocking stats-balance refresh used after a confirmed buy."""
+        """Non-blocking stats-balance refresh used after a confirmed buy.
+
+        Also captures ``_post_buy_sol_balance`` — the SOL baseline against
+        which the next sell's proceeds are measured (see
+        ``_measure_sell_proceeds``).  If the read looks stale (≥ the pre-buy
+        cached figure, i.e. the buy clearly hasn't been debited yet), retry
+        once after a short lag so the baseline is never the pre-buy balance.
+        """
         bal = await self._get_sol_balance()
         if bal > 0:
             self.stats.starting_balance = bal
+            self._post_buy_sol_balance = bal
+            if bal >= self._cached_sol_balance and self._cached_sol_balance > 0:
+                await asyncio.sleep(0.4)
+                bal2 = await self._get_sol_balance()
+                if bal2 > 0:
+                    self.stats.starting_balance = bal2
+                    self._post_buy_sol_balance = bal2
+            # Actual SOL spent on the buy (incl. priority + base fees) —
+            # measured as the wallet delta, stored on the trade as its real
+            # cost basis so PnL is fully on-chain measured (not nominal
+            # buy_size_sol).
+            if self._pre_buy_sol_balance > 0 and self._post_buy_sol_balance > 0:
+                spent = max(0.0, self._pre_buy_sol_balance - self._post_buy_sol_balance)
+                ct = self.current_trade
+                if spent > 0 and ct is not None and ct.tx_hash_buy:
+                    ct.cost_sol = spent
+
+    async def _get_tx_sol_proceeds(self, sig: str) -> Optional[float]:
+        """EXACT on-chain SOL received by a swap, read from the transaction's
+        own balance-change fields.
+
+        ``getTransaction`` reports every account's balance before and after
+        the TX plus the total fee it paid (base + priority).  For the wallet
+        the net change is ``−fee + proceeds``, so the exact proceeds are
+        ``post − pre + fee`` — no quotes, no slippage bands, no price
+        estimates, and immune to fee burns from unrelated failed attempts.
+
+        Returns None if the TX can't be read yet (not finalized / RPC miss);
+        callers fall back to the wallet-delta measurement.
+        """
+        payload = {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "getTransaction",
+            "params": [
+                sig,
+                {"encoding": "jsonParsed",
+                 "maxSupportedTransactionVersion": 0,
+                 "commitment": "confirmed"},
+            ],
+        }
+        result = None
+        try:
+            s = await self._get_session()
+            for _attempt in range(3):
+                try:
+                    async with s.post(
+                        SOLANA_RPC_PRIMARY, json=payload,
+                        timeout=aiohttp.ClientTimeout(total=4.0),
+                    ) as r:
+                        data = await r.json()
+                    result = data.get("result") if isinstance(data, dict) else None
+                    if result:
+                        break
+                except Exception:
+                    result = None
+                await asyncio.sleep(0.4)
+        except Exception as e:
+            logger.warning(f"[PROCEEDS] getTransaction failed for {sig[:8]}…: {e}")
+            return None
+        if not result:
+            logger.warning(f"[PROCEEDS] No getTransaction result yet for {sig[:8]}…")
+            return None
+        try:
+            meta = result.get("meta") or {}
+            if meta.get("err"):
+                return None
+            pre = meta.get("preBalances") or []
+            post = meta.get("postBalances") or []
+            fee = meta.get("fee") or 0
+            if not pre or not post:
+                return None
+            msg = result.get("transaction", {}).get("message", {})
+            keys = msg.get("accountKeys") or []
+            wallet_idx = None
+            for i, k in enumerate(keys):
+                pk = k if isinstance(k, str) else (k.get("pubkey") if isinstance(k, dict) else None)
+                if pk == self.wallet_pubkey:
+                    wallet_idx = i
+                    break
+            if wallet_idx is None:
+                wallet_idx = 0  # fee payer is always the first account
+            if wallet_idx >= len(pre) or wallet_idx >= len(post):
+                return None
+            pre_w, post_w = pre[wallet_idx], post[wallet_idx]
+            if pre_w is None or post_w is None:
+                return None
+            received = (post_w - pre_w + fee) / 1e9
+            logger.info(f"[PROCEEDS] tx={sig[:8]}… wallet {post_w - pre_w:+d} lamports, fee={fee} → received={received:.8f} SOL")
+            return max(0.0, received)
+        except Exception as e:
+            logger.warning(f"[PROCEEDS] parse failed for {sig[:8]}…: {e}")
+            return None
+
+    async def _measure_sell_proceeds(self) -> Optional[float]:
+        """Actual SOL received from a completed sell, measured on-chain as the
+        SOL-balance delta (post − pre) plus the known priority fee.
+
+        This is the REAL amount the wallet gained — the figure the dashboard
+        should present as the trade's proceeds — rather than the Jupiter
+        quote's outAmount estimate (which can differ by up to the slippage
+        band) or a price×tokens estimate (which is worse).  Returns None when
+        it cannot be measured; callers fall back to an estimate.
+        """
+        pre = self._pre_sell_sol_balance
+        if pre <= 0:
+            return None
+        try:
+            post = await self._get_sol_balance()
+        except Exception:
+            return None
+        if post <= 0:
+            return None
+        fee_sol = self.priority_fee_lamports / 1e9
+        received = post - pre + fee_sol
+        return max(0.0, received)
 
     async def _verify_sell_settled(self, sig: str, closed_trade):
         """
@@ -1731,14 +1899,57 @@ class LiveTrader:
             # past the watchdog timeout without a clear "we tried" mark.
             self._last_exit_signal_ts = time.time()
 
-            # ── If a buy is still pending, wait for it to settle first ────────
-            # Selling into a pending buy races the landing TX.  Wait (bounded)
-            # for the settle loop to resolve it; then read the real balance.
+            # ── If a buy is still pending, WAIT for it to settle ──────────────
+            # Selling into a pending buy races the landing TX (the sell would
+            # quote against a provisional balance and could close a position
+            # that never actually opened on-chain).  Wait for the settle loop
+            # to resolve the buy (bounded by its own finality deadline + grace)
+            # and sell the INSTANT it confirms — the fastest correct option,
+            # with no deferral hop to the watchdog.  If the buy dies instead,
+            # the settle loop clears current_trade and there is nothing to sell.
             if self._is_buy_pending():
                 logger.info("[SELL] Buy still pending — waiting for it to settle before selling")
-                wait_deadline = time.time() + 30.0
+                wait_deadline = time.time() + BUY_CONFIRM_TIMEOUT_S + 5.0
                 while self._is_buy_pending() and time.time() < wait_deadline:
                     await asyncio.sleep(0.25)
+                if self.current_trade is None:
+                    # The buy died while we waited — nothing to sell.
+                    logger.info("[SELL] Buy failed while waiting — no position to sell")
+                    return None
+                if self._is_buy_pending():
+                    # Still unresolved beyond the buy-finality deadline (the
+                    # settle loop is about to declare it dead).  Defend against
+                    # a race with that declaration by deferring to the watchdog.
+                    logger.warning(
+                        "[SELL] Buy still pending past finality deadline — deferring to watchdog"
+                    )
+                    self._journal_event(
+                        "sell_deferred", reason=reason,
+                        detail="buy_pending_past_finality_deadline",
+                        trade=self.current_trade,
+                    )
+                    await self._broadcast_status(
+                        "sell_pending",
+                        "Buy still confirming on-chain — sell fires once it lands",
+                        reason,
+                    )
+                    return None
+
+            # ── Pre-sell SOL baseline for proceeds measurement ────────────────
+            # The proceeds of the sell are MEASURED as the on-chain SOL-balance
+            # delta from this baseline (see _measure_sell_proceeds).  Prefer
+            # the balance captured when the buy confirmed (zero extra reads on
+            # the hot path); fall back to one fresh bounded read.
+            if self._post_buy_sol_balance > 0:
+                self._pre_sell_sol_balance = self._post_buy_sol_balance
+            else:
+                try:
+                    self._pre_sell_sol_balance = (
+                        await asyncio.wait_for(self._get_sol_balance(), timeout=1.5)
+                    ) or 0.0
+                except Exception:
+                    self._pre_sell_sol_balance = 0.0
+            self._last_sell_sig = ""
 
             logger.info(
                 f"[SELL] Starting sell: mint={mint_str[:8]}… reason={reason} "
@@ -1872,6 +2083,13 @@ class LiveTrader:
                     # immediately with a fresh quote + fresh balance.
                     send_res = await self._sign_and_send(swap_tx, wait_for_confirmation=True)
                     sig = send_res["sig"] if send_res else None
+                    if sig:
+                        self._last_sell_sig = sig
+                    elif self._last_broadcast_sig:
+                        # TX was broadcast but the confirmation poll missed it
+                        # (timeout).  It may still have landed — keep the hash
+                        # so a verified-empty close can link the actual sell.
+                        self._last_sell_sig = self._last_broadcast_sig
                     if not sig:
                         logger.warning(f"[SELL FAILED {label}] TX not confirmed — retrying immediately with fresh quote")
                         await asyncio.sleep(0.05)
@@ -1879,7 +2097,16 @@ class LiveTrader:
 
                     # ── Success: TX confirmed on-chain — close ONCE ──────────
                     elapsed = time.time() - sell_start
+                    # EXACT proceeds: read the sell TX's own on-chain pre/post
+                    # balance change.  Fall back to the wallet-delta measurement,
+                    # then to the quote outAmount.  PnL is presented from the
+                    # SOL the wallet actually received, never from an estimate.
                     sol_received = int(quote.get("outAmount", 0)) / 1e9
+                    measured = await self._get_tx_sol_proceeds(sig)
+                    if measured is None:
+                        measured = await self._measure_sell_proceeds()
+                    if measured is not None:
+                        sol_received = measured
 
                     self._token_balance = 0
                     self._cached_token_balance = 0
@@ -1929,29 +2156,51 @@ class LiveTrader:
                         await asyncio.sleep(0.5)
                 if bal == 0:
                     # Wallet empty — the sell DID go through on-chain (otherwise
-                    # we'd still hold tokens). Estimate SOL received from the
-                    # last known token price rather than using 0.0 (which would
-                    # produce a bogus -100% PnL).
-                    est_sol_received = 0.0
-                    if self.current_trade:
-                        est_price = self._last_price or self.current_trade.entry_price
-                        if est_price > 0 and self.current_trade.size_tokens > 0:
-                            est_sol_received = self.current_trade.size_tokens * est_price
+                    # we'd still hold tokens).  Measure the EXACT proceeds from
+                    # the last broadcast sig's own balance change; fall back to
+                    # the wallet-delta, then a price×tokens estimate.
+                    proceeds = None
+                    if self._last_sell_sig:
+                        proceeds = await self._get_tx_sol_proceeds(self._last_sell_sig)
+                    if proceeds is None:
+                        proceeds = await self._measure_sell_proceeds()
+                    estimated = proceeds is None
+                    if proceeds is None:
+                        proceeds = 0.0
+                        if self.current_trade:
+                            est_price = self._last_price or self.current_trade.entry_price
+                            if est_price > 0 and self.current_trade.size_tokens > 0:
+                                proceeds = self.current_trade.size_tokens * est_price
                     logger.info(
-                        "[SELL VERIFIED] Wallet is now empty — exiting sell loop cleanly."
+                        "[SELL VERIFIED] Wallet is now empty — exiting sell loop cleanly "
+                        f"(sol_received={proceeds:.6f}"
+                        f"{' estimated' if estimated else ' measured via balance delta'})."
                     )
                     self._token_balance = 0
                     self._last_exit_signal_ts = 0.0
                     closed_trade = None
                     if self.current_trade:
-                        closed_trade = self.confirm_sell("", est_sol_received, self._last_price)
+                        closed_trade = self.confirm_sell(
+                            self._last_sell_sig or "", proceeds, self._last_price
+                        )
                     self._journal_event(
                         "sell_confirmed", trade=closed_trade, reason=reason,
-                        tx_hash=None, via="verified_empty_wallet",
-                        sol_received=est_sol_received, estimated=True,
+                        tx_hash=self._last_sell_sig or None,
+                        solscan=(f"https://solscan.io/tx/{self._last_sell_sig}"
+                                 if self._last_sell_sig else None),
+                        via="verified_empty_wallet",
+                        sol_received=proceeds, estimated=estimated,
                         attempt_group=attempt_group,
                         pnl_sol=(closed_trade.pnl_sol if closed_trade else None),
                         pnl_pct=(closed_trade.pnl_pct if closed_trade else None),
+                    )
+                    # CRITICAL UI FIX: this close previously never broadcast
+                    # sell_confirmed — the frontend only renders SELL rows from
+                    # that event, so these trades were permanently missing from
+                    # the trade history table.
+                    await self._broadcast_status(
+                        "sell_confirmed", self._last_sell_sig or "", reason,
+                        sol_received=proceeds, closed_trade=closed_trade,
                     )
                     return "verified_empty"
                 token_balance = bal
@@ -2104,18 +2353,50 @@ class LiveTrader:
                     asyncio.ensure_future(self.execute_sell("watchdog_retry"))
                 else:
                     # Swap already completed on-chain but local state was stale.
-                    # Estimate SOL received from the last known price rather than
-                    # using 0.0 (which would produce a bogus -100% PnL).
-                    est_sol_received = 0.0
-                    if self.current_trade:
-                        est_price = self._last_price or self.current_trade.entry_price
-                        if est_price > 0 and self.current_trade.size_tokens > 0:
-                            est_sol_received = self.current_trade.size_tokens * est_price
+                    # Measure the EXACT proceeds from the last broadcast sig's
+                    # own balance change; fall back to the wallet-delta, then a
+                    # price×tokens estimate.
+                    proceeds = None
+                    if self._last_sell_sig:
+                        proceeds = await self._get_tx_sol_proceeds(self._last_sell_sig)
+                    if proceeds is None:
+                        proceeds = await self._measure_sell_proceeds()
+                    estimated = proceeds is None
+                    if proceeds is None:
+                        proceeds = 0.0
+                        if self.current_trade:
+                            est_price = self._last_price or self.current_trade.entry_price
+                            if est_price > 0 and self.current_trade.size_tokens > 0:
+                                proceeds = self.current_trade.size_tokens * est_price
                     logger.info(
                         f"[WATCHDOG] On-chain balance = 0 but current_trade still "
-                        f"open — finalising trade locally (est_sol={est_sol_received:.6f})"
+                        f"open — finalising trade locally "
+                        f"(sol_received={proceeds:.6f}"
+                        f"{' estimated' if estimated else ' measured via balance delta'})"
                     )
-                    self.confirm_sell("watchdog_finalise", est_sol_received, self._last_price)
+                    if self.current_trade is not None:
+                        self.current_trade.exit_reason = "watchdog_finalise"
+                        closed_trade = self.confirm_sell(
+                            self._last_sell_sig or "", proceeds, self._last_price
+                        )
+                        self._journal_event(
+                            "sell_confirmed", trade=closed_trade,
+                            reason="watchdog_finalise",
+                            tx_hash=self._last_sell_sig or None,
+                            solscan=(f"https://solscan.io/tx/{self._last_sell_sig}"
+                                     if self._last_sell_sig else None),
+                            via="watchdog_finalise",
+                            sol_received=proceeds, estimated=estimated,
+                            pnl_sol=(closed_trade.pnl_sol if closed_trade else None),
+                            pnl_pct=(closed_trade.pnl_pct if closed_trade else None),
+                        )
+                        # Previously this close never broadcast sell_confirmed,
+                        # so the UI never showed the SELL row for it.
+                        await self._broadcast_status(
+                            "sell_confirmed", self._last_sell_sig or "",
+                            "watchdog_finalise",
+                            sol_received=proceeds, closed_trade=closed_trade,
+                        )
                     self._last_exit_signal_ts = 0.0
 
             except asyncio.CancelledError:
@@ -2373,6 +2654,37 @@ class LiveTrader:
 
         return result
 
+    def check_immediate_holder_flow_exit(self) -> Optional[str]:
+        """Check if any newly appended holder-flow events trigger an immediate exit
+        under V2 exit rules (e.g. dev_sell_exit) while we are in a position,
+        even if no trade tick has arrived yet."""
+        if (not self.current_trade or self._swap_in_flight or self._pending_exit
+                or self._is_buy_pending()):
+            return None
+
+        # Only V2 adapter has this exit logic
+        if not hasattr(self.engine, "_v2_holder_flow_exit_enable") or not hasattr(self.engine, "_has_recent_dev_sell"):
+            return None
+
+        if self.engine._v2_holder_flow_exit_enable <= 0.0:
+            return None
+
+        now_ts = int(time.time())
+        last_candle_time = getattr(self.engine, "_current_time", 0)
+        reference_time = max(now_ts, last_candle_time)
+
+        if self.engine._has_recent_dev_sell(
+            reference_time,
+            self.engine._v2_holder_flow_exit_window_seconds,
+            self.engine._v2_holder_flow_min_usd
+        ):
+            sell_event = self.engine._get_recent_dev_sell(
+                reference_time, self.engine._v2_holder_flow_exit_window_seconds
+            )
+            wallet_prefix = sell_event.get("wallet", "")[:8] if sell_event else "unknown"
+            return f"dev_sell_exit:{wallet_prefix}"
+        return None
+
     # ── Strategy update loop ──────────────────────────────────────────────────
 
     def update_historical_candle(
@@ -2627,13 +2939,16 @@ class LiveTrader:
         trade.tx_hash_sell = tx_hash
         trade.exit_price = actual_price
         trade.exit_time = time.time()
+        # Cost basis = ACTUAL SOL spent on the buy (measured on-chain incl.
+        # fees); falls back to the nominal buy size when unmeasured.
+        basis = trade.cost_sol if trade.cost_sol > 0 else trade.size_sol
         # Adopted-orphan / zero-cost-basis trades carry size_sol=0.0 — guard
         # the division and treat the entire proceeds as the PnL (there is no
         # known entry cost to subtract).
-        if trade.size_sol > 0:
-            trade.pnl_sol = sol_received - trade.size_sol
+        if basis > 0:
+            trade.pnl_sol = sol_received - basis
             if trade.entry_price > 0:
-                trade.pnl_pct = (trade.pnl_sol / trade.size_sol) * 100
+                trade.pnl_pct = (trade.pnl_sol / basis) * 100
         else:
             trade.pnl_sol = sol_received
             trade.pnl_pct = 0.0
@@ -2660,6 +2975,10 @@ class LiveTrader:
 
         self.trade_history.append(trade)
         self.current_trade = None
+        if trade.entry_reason == "watchdog_adopted_orphan":
+            # A later delayed buy may land after this adopted bag is sold —
+            # re-allow orphan adoption so the next bag is never invisible.
+            self._adopted_bag = False
         self.engine.notify_trade_closed()
         logger.info(f"Trade closed: PnL={trade.pnl_sol:+.6f} SOL ({trade.pnl_pct:+.2f}%)")
         self._journal_event(

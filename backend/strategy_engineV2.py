@@ -210,6 +210,149 @@ def _merge_config(user: dict) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Futures market second param-set
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The V2 engine was tuned on 1-second memecoin recordings (tick dynamics, 60-bar
+# warmup, tight confidence floor 0.79, memecoin slippage s_0=1.11%).  On CEX
+# perp majors (1h / 15m bars) those defaults are miscalibrated: the engine
+# clears warmup into a choppy macro chart and refuses all entries.
+#
+# FUTURES_DEFAULT_CONFIG is a *named, converged* alternate param set for the
+# futures pipeline.  It is applied by naming it via engine_params:
+#       engine_params = {"v2_futures_overrides": FUTURES_DEFAULT_CONFIG}
+#   -- or equivalently via the helper `with_futures_preset(engine_params)`.
+# The futures backtest script applies it automatically unless
+# engine_params["v2_futures_overrides"] == {} (explicit opt-out) or the
+# caller already supplied their own set.
+#
+# All entries below are *new state* for the futures pipeline only — spot
+# runs NEVER see FUTURES_DEFAULT_CONFIG unless explicitly requested, so
+# iter31_canonical spot parity is preserved.
+FUTURES_DEFAULT_CONFIG: dict = {
+    # Macro-bar warmup: 10 h of 1h bars (≈2 days of macro context) is
+    # plenty for the RBPF to localise.  Spot default is 30.
+    "warmup": 10,
+    "warmup_seconds": 10,
+    # Macro volatility periods are longer; hold the confidence floor where
+    # the espaço-modulado Bayesian posterior needs it but not higher, or
+    # trending 15-30% macro moves never qualify.
+    "confidence_high": 0.62,
+    "entry_confidence_high": 0.60,
+    "confidence_low": 0.15,
+    "entry_confidence_low": 0.15,
+    "v2_p_up_min": 0.55,          # spot: 0.62 (memecoin pump gate)
+    # Macro σ_t (posterior vol) is naturally ~0.003-0.006 on 1h major bars
+    # after volume scale-rim; the spot 0.021 σ_t floor was calibrated for
+    # 1s memecoin realised variance (σ²_t ≈ 5e-5 input).  Future-stack is
+    # 10-30× smaller ⟨σ_t⟩, so a 0.002 floor catches the churn-equivalent
+    # barrier crossings without rejecting legitimate macro trends.
+    "v2_sigma_t_min": 0.002,
+    # Drift/vol process re-tuned for τ=1h bars (spot is 1s).
+    "lambda_mu": 0.05,            # slower μ mean-reversion on 1h
+    "kappa_mu": 0.08,             # stronger flow→drift coupling
+    "sigma_mu": 0.06,             # tighter drift shocks
+    "eta": 0.05,                  # slower h mean-reversion
+    "sigma_h": 0.10,              # tighter vol shocks
+    # CEX cost model: 0.045% taker round-trip (vs 1.11% memecoin slip).
+    # The Kelly EV gate is scale-sensitive to `s_0`, so it must be tuned.
+    "s_0": 0.0009,                # 0.09% one-way (taker fee + slippage)
+    "s_1": 0.0,                   # no size-scaled microslip at 100 USDC margins
+    "fee_fraction": 0.00045,
+    # Kramers exits tuned for longer positions (days not minutes).
+    "no_long_exit_bars": 30,      # 30-tick persistence on 1h ≈ 7.5 h no-long
+    "no_long_offside_pct": 25.0,  # don't cash a healthy −30% macro pullback
+    # Gain-retrace trail wider: spot 10% / 50% giveback; majors move smoother
+    # so lock earlier, ride further.
+    "gain_retrace_arm_pct": 8.0,
+    "gain_retrace_give_frac": 0.55,
+    "breakeven_arm_dd_pct": 18.0,
+    "reversal_exit_bars": 3,      # 3-tick reversal sustain ≈ 45 min
+    # CEX futures bars carry USD turnover.  The engine's liquidity OU is
+    # tuned for SOL-scale memecoin tapes (~1e-3..50 SOL/bar); USD/1h bars
+    # saturate `ell` at its clamp and freeze the whole latent state.
+    # 1e-7 ⇒ $100M/1h bar → ~10 SOL-equivalent units, well inside the OU
+    # corridor.  Spot default = 1.0 (passthrough) — see engine ctor.
+    "v2_volume_scale_fut": 1e-7,
+    # Target aggregate bar volume passed to the engine after vscale (USD
+    # equivalent of ~1 SOL of memecoin tape).  The backtester derives
+    # `v2_volume_scale_fut` per symbol from `median(turnover)` and this
+    # target so all majors land in the same OU corridor regardless of
+    # per-symbol liquidity.  Spot keeps 1.0 (passthrough).
+    "v2_target_bar_volume_usd": 1.0,
+    # ── KDE / Kramers macro-bar re-tuning ─────────────────────────────────
+    # The KDE buffer time is `now_t = float(self._bar_count)` — bar-count, not
+    # seconds.  Setting `T_w=14econds ≈ 1_209_600` makes the KDE never decay
+    # (it never ages-out a single entry because every bar is "instant"), and
+    # the grid span `5·σ_t·√T_w_seconds` blows out to span ≈ 31 log-price
+    # units while the actual KDE price range is ≈ 0.1 — ρ is a single
+    # spike.  Use `T_w=100` (bar-count) instead: KDE ages over ~100 bars
+    # (~4 days of 1h, ~25 h of 15m), and the grid spans ≈ 0.05–0.15 in
+    # log-price — matching the actual KDE price occupancy.
+    "tw_window_seconds": 100.0,
+    "lambda_0":          1.0 / 100.0,
+    # The 5–30 s Kramers horizon is sized for 1-s memecoin ticks; on 1h bars
+    # we want 24–96 h horizons (a "macro trend-day" horizon).  Tau is the
+    # horizon over which the Bayesian escape probabilities are integrated.
+    "tau_min":  24.0,
+    "tau_max":  96.0,
+    "tau_step": 24.0,
+    # The KDE grid half-width is in σ_t·√T_w log-price units; on majors σ_t
+    # is naturally ~10× larger than memecoin σ_t.  Doubling the extent keeps
+    # the barriers within the grid instead of clipping at the edges.
+    "grid_sigma_extent": 10.0,
+    # ── SDE rates & macro-bar re-tuning ────────────────────────────────────
+    # The V2 default SDE rates are in `per-tick` (= 1 s memecoin tape)
+    # units: lambda_mu=0.15 ⇒ μ mean-reverts every ~7 ticks (~7 s spot).
+    # 1h bars fed via 4-sub-tick expansion see only "4 ticks" per bar of OU
+    # evolution — same rates ⇒ μ mean-reverts every ~7 sub-ticks ≈ 2 bars
+    # of macro-side evolution = ~2 h.  That's TOO FAST — real μ on a 1h
+    # chart should mean-revert over a half-day to a day (12-24 bars).
+    # Scale all OU rates DOWN by ~10× so reversion takes ~70 sub-ticks ≈ 17
+    # bars ≈ 17 h — matches macro drift persistence.  The diffusion shocks
+    # `sigma·√dt` are bar-period variances (sqrt_dt-scaled), so they're
+    # already correctly larger at 1h cadence.
+    "lambda_mu":  0.015,    # 10× slower than spot (μ mean-reverts ~17 sub-ticks)
+    "kappa_mu":   0.005,
+    "eta":        0.010,
+    "alpha":      0.020,
+    "theta":      0.010,
+    "kappa_J":    0.005,
+    # ── Kramers P_down persistence for futures ─────────────────────────────
+    # On 1h bars the KDE posterior `P_down ≥ 0.5` flips on transient
+    # geometry noise ~5–10×/day regardless of price direction.  Require 6
+    # consecutive sub-ticks (~1.5 h on 1h 4-state) of `P_down ≥ 0.5`
+    # before the kramers down exit fires.  Spot path leaves this at 0
+    # (legacy one-tick exit on memecoin tapes where P_down snaps to 1 on
+    # a real crash).
+    "v2_kramers_down_persist_fut": 6,
+}
+
+
+def with_futures_preset(engine_params: dict | None) -> dict:
+    """
+    Layer FUTURES_DEFAULT_CONFIG into `engine_params` under
+    `v2_futures_overrides`.  Callers who want explicit control (e.g. sweeps)
+    should build their own `v2_futures_overrides` dict and skip this helper.
+    """
+    out = dict(engine_params or {})
+    out.setdefault("v2_futures_overrides", dict(FUTURES_DEFAULT_CONFIG))
+    return out
+
+
+# Recommended futures market params (converged preset-batch — see
+# RESEARCH_LOG.md iter42).  Use as the default `market_params` for any
+# futures run that does not pass an explicit override.
+FUTURES_MARKET_DEFAULTS: dict = {
+    "leverage": 1.5,            # lev=1.5 is the Pareto frontier (lev≥3 DD↗)
+    "buy_size_sol": 100.0,      # USDC margin / trade
+    "starting_balance": 1000.0,
+    "timeframe": "1h",
+    "futures_days": 30,         # 30-day window; 60d increases recording_ended drag
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 3.  Per-particle Unscented Kalman Filter  (continuous layer)
 # ─────────────────────────────────────────────────────────────────────────────
 #
@@ -2389,6 +2532,24 @@ class StrategyEngineV2Adapter:
     # We assign instances of V1 enums so adapter.regime.value matches V1.
 
     def __init__(self, **engine_kwargs):
+        # ── Futures market second param-set (user requirement). ───────────
+        # `v2_futures_overrides` is a dict that carries a self-contained set
+        # of engine params applied only when the caller is running the
+        # leveraged-perp pipeline (futures backtest / futures paper).
+        # Semantics: every key/value pair inside the dict is merged back into
+        # `engine_kwargs` BEFORE any other parsing, so the futures set can
+        # carry any param below (warmup, confidence_high, s_0, tau_*, etc).
+        # Precedence (highest last): spot defaults < engine_kwargs <
+        # v2_futures_overrides.  Spot runs never pass this key; when the key
+        # is absent or empty the engine state must be byte-identical to the
+        # pre-flag engine (parity invariant).
+        _fut_ov = engine_kwargs.pop("v2_futures_overrides", None)
+        if _fut_ov:
+            for _k, _v in dict(_fut_ov).items():
+                if _v is not None:
+                    engine_kwargs[_k] = _v
+        self._is_futures_engine = bool(_fut_ov)
+
         # Pull V1 TPSL params if provided (passed through engine_kwargs).
         self._v1_takeprofit_low  = float(engine_kwargs.pop("takeprofit_pct_low", 30.0))
         self._v1_takeprofit_high = float(engine_kwargs.pop("takeprofit_pct_high", 300.0))
@@ -2591,6 +2752,29 @@ class StrategyEngineV2Adapter:
         # (preserves iter21_k60_offs40 production parity).
         # 0.75 means 75% of last 60 ticks had EMA-mu < 0.
         self._no_long_mu_neg_frac   = float(engine_kwargs.pop("no_long_mu_neg_frac", 0.0))
+        # Futures USDC / USDT perp bars carry USD-scale turnover.  The
+        # engine's OU processes (ell, phi, mu) were tuned around SOL-scale
+        # memecoin tapes and clamp at x=±1e6 / ell=±15 / mu=±50; USD-scale
+        # input saturates them all into frozen clamps.  `v2_volume_scale_fut`
+        # multiplies `volume / signed_delta / bid_depth / ask_depth` before
+        # they reach the core observer, mapping per-bar USD turnover back to
+        # SOL-like units.  Default 1.0 = passthrough (spot parity).
+        self._v2_volume_scale_fut = float(engine_kwargs.pop("v2_volume_scale_fut", 1.0))
+        # Intra-bar SDE dt for futures (seconds per sub-state).  Default 1.0
+        # = spot parity (4 sub-states × 1 s = 1 candle).  For 1h bars with a
+        # 4-state expansion, set this to 900.0 so the OU lambdas mean-revert
+        # on real macro time.  For 15m bars use 225.0.  The adapter does not
+        # derive this from anywhere; the caller (backtester / futures preset)
+        # supplies it.
+        self._v2_dt_per_state_fut = float(engine_kwargs.pop("v2_dt_per_state_fut", 1.0))
+        # Kramers P_down persistence guard for futures (default 0 = OFF /
+        # spot parity).  On 1h macro bars the posterior flips on transient
+        # KDE wiggle geometry — single-tick `P_down ≥ 0.5` causes most of
+        # the trade churn.  Setting this to ≥ 2 requires N consecutive sub-
+        # ticks above the threshold before exiting.  The streak stays at
+        # zero when not in position; the adapter ctor initialises it.
+        self._v2_kramers_down_persist_fut = int(engine_kwargs.pop("v2_kramers_down_persist_fut", 0))
+        self._v2_kramers_down_streak = 0
         self._no_long_streak        = 0
         self._entry_E_star = 0.0
         self.confidence_w1 = 0.3
@@ -3067,8 +3251,33 @@ class StrategyEngineV2Adapter:
         bid_depth = max(float(buy_volume + 1.0), 1.0)
         ask_depth = max(float(sell_volume + 1.0), 1.0)
 
+        # ── Futures volume scale (second param-set, futures only) ─────────
+        # Spot memecoin volumes arrive in SOL units per second (≈0.001–50).
+        # CEX futures bars carry USD turnover and on majors routinely exceed
+        # 10⁸ USD/1h; log(volume) overflows the `ell` OU clamp (= 15), which
+        # then drags mu/h/phi into their own clamps and collapses the KDE.
+        # Remap any inbound volume units to SOL-equivalents before the core
+        # observer sees them.  Default 1.0 = passthrough (spot parity).
+        _vscale = float(getattr(self, "_v2_volume_scale_fut", 1.0))
+        if _vscale > 0.0 and _vscale != 1.0:
+            volume       = volume * _vscale
+            signed_delta = signed_delta * _vscale
+            bid_depth    = max(float(buy_volume + 1.0) * _vscale, 1.0)
+            ask_depth    = max(float(sell_volume + 1.0) * _vscale, 1.0)
+
+        # ── Futures intra-bar dt (second param-set, futures only) ──────────
+        # 1s memecoin tapes pass `dt=1.0` per state-update; the V2 SDE/OU
+        # rates (lambda_mu, eta, alpha, theta) are calibrated against that
+        # 1s × 4-state cadence.  CEX 1h bars fed via 4 intra-candle sub-state
+        # updates still accumulate only "4 s" of OU evolution per *hour* of
+        # price action — 900× too slow.  Setting dt to the physical time per
+        # sub-state (900 s for 1h bars, 225 s for 15m) lets the SDE rates
+        # mean-revert on real macro timescales instead of being effectively
+        # frozen.  Spot path leaves this at 1.0 (parity).
+        _dt_per_state_fut = float(getattr(self, "_v2_dt_per_state_fut", 1.0))
+
         obs = {
-            "dt": 1.0,
+            "dt": _dt_per_state_fut,
             "log_return": float(log_return),
             "volume": float(volume),
             "signed_delta": signed_delta,
@@ -3408,9 +3617,25 @@ class StrategyEngineV2Adapter:
             p_up   = float(decision.get("P_up",   0.0))
             p_down = float(decision.get("P_down", 0.0))
             p_zero = float(decision.get("P_zero", 0.0))
+            # Futures persistence guard (default OFF / spot parity): require N
+            # consecutive sub-ticks where `P_down ≥ 0.5` before the kramers
+            # exit fires.  On 1s memecoin tape the posterior collapses near
+            # instantaneously on a real crash (P_down → 1.0 within 2-3 s),
+            # so no guard is needed.  On 1h macro bars the posterior flips
+            # on transient KDE geometry noise in *both* directions — single-
+            # tick `P_down ≥ 0.5` causes ~60% of winning trades to exit in
+            # the first 0.2-4 h ("futures churn" pathology).  Requiring
+            # `v2_kramers_down_persist_fut` consecutive ticks (default 0=spot
+            # parity) eliminates the single-tick false flips.  The counter
+            # is maintained in `_v2_kramers_down_streak`.
             if p_down > p_up and p_down > p_zero and p_down >= 0.5:
-                self.exit_signal_reason = "kramers_down_exit"
-                return _V1Signal.EXIT
+                self._v2_kramers_down_streak = int(getattr(self, "_v2_kramers_down_streak", 0)) + 1
+                _persist_fut = int(getattr(self, "_v2_kramers_down_persist_fut", 0))
+                if _persist_fut <= 1 or self._v2_kramers_down_streak >= _persist_fut:
+                    self.exit_signal_reason = "kramers_down_exit"
+                    return _V1Signal.EXIT
+            else:
+                self._v2_kramers_down_streak = 0
             # 6. Bayesian exit A: direction has flipped away from +1 with
             #    positive counter-direction Kelly utility.
             if decision.get("direction", 0) != 1 and decision.get("E_star", -1.0) > 0:

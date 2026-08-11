@@ -84,6 +84,15 @@ def init_price_db():
             conn.execute(f"ALTER TABLE candles ADD COLUMN {col} REAL DEFAULT 0")
         except Exception:
             pass  # column already exists
+    # Futures-mode recording metadata (additive; NULL/3 on all legacy rows):
+    #   funding_rate      — per-interval funding rate (fraction, e.g. 0.0001)
+    #   mark_price        — perp mark price (falls back to close when 0/NULL)
+    #   open_interest     — contracts outstanding (informational only)
+    for col in ("funding_rate", "mark_price", "open_interest"):
+        try:
+            conn.execute(f"ALTER TABLE candles ADD COLUMN {col} REAL DEFAULT 0")
+        except Exception:
+            pass  # column already exists
     # Migrate existing databases that were created before the holder_flow table
     conn.execute("""
         CREATE TABLE IF NOT EXISTS holder_flow (
@@ -255,7 +264,10 @@ def get_recording_candles(recording_id: int) -> list[dict]:
                COALESCE(buy_volume, 0.0)  AS buy_volume,
                COALESCE(sell_volume, 0.0) AS sell_volume,
                COALESCE(pool_sol, 0.0)    AS pool_sol,
-               COALESCE(market_cap_usd, 0.0) AS market_cap_usd
+               COALESCE(market_cap_usd, 0.0) AS market_cap_usd,
+               COALESCE(funding_rate, 0.0) AS funding_rate,
+               COALESCE(mark_price, 0.0)   AS mark_price,
+               COALESCE(open_interest, 0.0) AS open_interest
         FROM   candles
         WHERE  id IN (
             SELECT MAX(id)
@@ -400,9 +412,24 @@ def init_backtest_db():
     except sqlite3.OperationalError:
         pass
 
+    # Futures mode flag (additive migration; legacy rows → 'spot').
+    try:
+        conn.execute(
+            "ALTER TABLE backtests ADD COLUMN market_type TEXT DEFAULT 'spot';"
+        )
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
     for col, definition in [
         ("entry_params", "TEXT DEFAULT '{}'"),
         ("exit_params",  "TEXT DEFAULT '{}'"),
+        ("market_type",       "TEXT DEFAULT 'spot'"),
+        ("side",               "TEXT DEFAULT 'long'"),
+        ("leverage",           "REAL DEFAULT 1.0"),
+        ("notional_sol",       "REAL DEFAULT 0"),
+        ("funding_paid",       "REAL DEFAULT 0"),
+        ("liquidation_price",  "REAL DEFAULT 0"),
+        ("liquidation_fee",    "REAL DEFAULT 0"),
     ]:
         try:
             conn.execute(f"ALTER TABLE backtest_trades ADD COLUMN {col} {definition}")
@@ -415,14 +442,16 @@ def init_backtest_db():
 
 def create_backtest(recording_id: int, mint: str, token_name: str, token_symbol: str,
                     timeframe: str, engine_params: dict, stats: dict,
-                    candle_results: list[dict], trades: list[dict], batch_id: Optional[str] = None) -> int:
+                    candle_results: list[dict], trades: list[dict], batch_id: Optional[str] = None,
+                    market_type: str = "spot") -> int:
     """Save a complete backtest run."""
     conn = _get_backtest_conn()
     cur = conn.execute(
         """INSERT INTO backtests
            (recording_id, mint, token_name, token_symbol, timeframe, engine_params,
-            created_at, total_trades, win_rate, total_pnl, max_drawdown, final_balance, summary_json, batch_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            created_at, total_trades, win_rate, total_pnl, max_drawdown, final_balance, summary_json, batch_id,
+            market_type)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             recording_id, mint, token_name, token_symbol, timeframe,
             json.dumps(engine_params), time.time(),
@@ -433,6 +462,7 @@ def create_backtest(recording_id: int, mint: str, token_name: str, token_symbol:
             stats.get("current_balance", 1.0),
             json.dumps(stats),
             batch_id,
+            market_type,
         ),
     )
     bt_id = cur.lastrowid
@@ -464,8 +494,10 @@ def create_backtest(recording_id: int, mint: str, token_name: str, token_symbol:
         """INSERT INTO backtest_trades
            (backtest_id, entry_time, entry_price, exit_time, exit_price,
             size_sol, pnl_sol, pnl_pct, entry_reason, exit_reason, fees_paid, slippage_cost,
-            entry_params, exit_params)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            entry_params, exit_params,
+            market_type, side, leverage, notional_sol, funding_paid,
+            liquidation_price, liquidation_fee)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         [
             (
                 bt_id, t.get("entry_time"), t.get("entry_price"),
@@ -475,6 +507,14 @@ def create_backtest(recording_id: int, mint: str, token_name: str, token_symbol:
                 t.get("fees_paid", 0), t.get("slippage_cost_sol", 0),
                 json.dumps(t.get("entry_params", {})),
                 json.dumps(t.get("exit_params", {})),
+                # ── Futures extensions (spot defaults = no-op) ─────────────
+                t.get("market_type", "spot"),
+                t.get("side", "long"),
+                t.get("leverage", 1.0),
+                t.get("notional_sol", 0.0),
+                t.get("funding_paid", 0.0),
+                t.get("liquidation_price", 0.0),
+                t.get("liquidation_fee", 0.0),
             )
             for t in trades
         ],
