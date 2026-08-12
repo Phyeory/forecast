@@ -2939,16 +2939,19 @@ class LiveTrader:
         trade.tx_hash_sell = tx_hash
         trade.exit_price = actual_price
         trade.exit_time = time.time()
-        # Cost basis = ACTUAL SOL spent on the buy (measured on-chain incl.
-        # fees); falls back to the nominal buy size when unmeasured.
-        basis = trade.cost_sol if trade.cost_sol > 0 else trade.size_sol
+        # Cost basis = the nominal BUY SIZE (the SOL committed to this trade).
+        # The on-chain-measured spend (trade.cost_sol) is deliberately NOT used
+        # as the basis: that wallet-delta measurement inherits stale cached-
+        # balance error and has recorded inflated costs (e.g. 0.0121 SOL for a
+        # 0.01 SOL buy), which reported profitable trades as deep losses.
+        # PnL is always presented as: pnl = SOL received on the sell − buy size.
+        basis = trade.size_sol if trade.size_sol > 0 else trade.cost_sol
         # Adopted-orphan / zero-cost-basis trades carry size_sol=0.0 — guard
         # the division and treat the entire proceeds as the PnL (there is no
         # known entry cost to subtract).
         if basis > 0:
             trade.pnl_sol = sol_received - basis
-            if trade.entry_price > 0:
-                trade.pnl_pct = (trade.pnl_sol / basis) * 100
+            trade.pnl_pct = (trade.pnl_sol / basis) * 100
         else:
             trade.pnl_sol = sol_received
             trade.pnl_pct = 0.0
