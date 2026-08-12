@@ -2992,47 +2992,11 @@ ltStopAllBtn.addEventListener("click", stopAllTraders);
   });
 });
 
-/* ── Trade history from session ledgers ─────────────────────────────────
-   The trade table is normally populated ONLY by live WebSocket events, so
-   after a page reload (or if a trade closed while the page was closed) the
-   SELL rows were permanently missing.  On entering the live-trading page we
-   rebuild the table from the backend's per-session trades.jsonl ledgers. */
-
-async function loadLiveTradeHistory() {
-  try {
-    const data = await apiFetch("/api/live/history?limit=20");
-    if (!data || !data.sessions || data.sessions.length === 0) return;
-    const rows = [];
-    for (const sess of data.sessions) {
-      const ctx = { mint: sess.token_mint || "", info: { token_symbol: "" } };
-      for (const t of sess.trades || []) {
-        if (!t || t.status !== "closed") continue;
-        rows.push({ ctx, t });
-      }
-    }
-    if (rows.length === 0) return;
-    // Oldest first, then prepend in reverse so the newest ends up on top.
-    rows.sort((a, b) => (a.t.exit_time || 0) - (b.t.exit_time || 0));
-    ltTradesTbody.innerHTML = "";
-    ltTradeCounter = 0;
-    for (const { ctx, t } of rows) {
-      if (t.tx_hash_buy) {
-        addLtTradeRow(ctx, "BUY", t.entry_price || 0, 0, 0, t.tx_hash_buy, "confirmed");
-      }
-      addLtTradeRow(ctx, "SELL", t.exit_price || 0, t.pnl_sol || 0, t.pnl_pct || 0,
-        t.tx_hash_sell || "", t.exit_reason || "closed");
-    }
-  } catch (e) {
-    // History loading is best-effort — never break page navigation.
-  }
-}
-
 // Page switch handler for live trading
 const origSwitchPage = switchPage;
 switchPage = function (pageId) {
   origSwitchPage(pageId);
   if (pageId === "live-trading") {
-    loadLiveTradeHistory();
     if (ltWalletConnected) {
       refreshWalletBalance();
     }
