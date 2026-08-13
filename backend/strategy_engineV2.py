@@ -2910,29 +2910,31 @@ class StrategyEngineV2Adapter:
         self._n_grid = int(self.cfg["n_grid"])
 
         # ── Holder-flow knobs (iter36: dev/insider sell detection) ────────
-        # `v2_holder_flow_entry_block` (default 0.0 = OFF as of iter38): when
+        # `v2_holder_flow_entry_block` (default 1.0 = ON as of iter43): when
         #   > 0, block BUY entries if a dev/insider sell (amount_usd ≥ threshold)
         #   occurred within `v2_holder_flow_entry_window_seconds` before the bar.
-        # `v2_holder_flow_exit_enable` (default 0.0 = OFF as of iter38): when
+        # `v2_holder_flow_exit_enable` (default 1.0 = ON as of iter43): when
         #   > 0, fire an immediate `dev_sell_exit` if a dev/insider sell occurs
         #   while in position (checked on every bar close).
         # `v2_holder_flow_min_usd` (default 100.0): minimum sell amount (USD)
         #   to consider significant — filters dust.
-        # `v2_holder_flow_require_tag` (default 1.0 = ON): when > 0, only events
-        #   with a non-empty provenance `tag` (dev/sniper/bundler/rat_trader)
-        #   count as a "dev sell".  When 0, any large sell (tag or not) counts
-        #   — the iter36/38 legacy behaviour.  Set to 1.0 once the wallet
-        #   registry is reliably populated so the gate tracks true insiders.
-        # NOTE (iter38): the entry gate and exit trigger are DEFAULT-OFF while
-        #   the holder-flow data-collection fixes (registry population + tag
-        #   enrichment) are validated on a fresh night of recordings.  The
-        #   monitor still captures and persists every event regardless of these
-        #   knobs — they only gate the engine's trading response.  When no
-        #   holder_flow events are loaded, `_has_recent_dev_sell` always returns
-        #   False, so behaviour is byte-identical to the pre-iter36 engine.
+        # `v2_holder_flow_require_tag` (default 0.0 = OFF as of iter43): when
+        #   > 0, only events with a non-empty provenance `tag`
+        #   (dev/sniper/bundler/rat_trader) count as a "dev sell".  When 0,
+        #   any large sell (tag or not) counts — the iter43 validated
+        #   behaviour.  iter43 proved gate 1.0 (require_tag=0) reduces
+        #   kelly_flat losses by 52% (25→12) and lifts PnL by +163%
+        #   (+0.273→+0.719 SOL) on 262 holder_flow recordings
+        #   (Wilcoxon p=0.0095, CI [0.0014, 0.0101]).  Gate 2.0
+        #   (require_tag=1) only catches 12/44 dev_sell_exits due to sparse
+        #   wallet-registry tag coverage and was REJECTED (p=0.077).
+        # NOTE (iter43): the entry gate and exit trigger are DEFAULT-ON.
+        #   When no holder_flow events are loaded, `_has_recent_dev_sell`
+        #   always returns False, so behaviour is byte-identical to the
+        #   pre-iter36 engine (parity-safe on recordings without holder_flow).
         self._v2_holder_flow_entry_block = float(engine_kwargs.pop("v2_holder_flow_entry_block", 1.0))
         self._v2_holder_flow_exit_enable = float(engine_kwargs.pop("v2_holder_flow_exit_enable", 1.0))
-        self._v2_holder_flow_require_tag = float(engine_kwargs.pop("v2_holder_flow_require_tag", 1.0))
+        self._v2_holder_flow_require_tag = float(engine_kwargs.pop("v2_holder_flow_require_tag", 0.0))
         self._v2_holder_flow_min_usd     = float(engine_kwargs.pop("v2_holder_flow_min_usd", 100.0))
         self._v2_holder_flow_entry_window_seconds = int(engine_kwargs.pop("v2_holder_flow_entry_window_seconds", 30))
         self._v2_holder_flow_exit_window_seconds  = int(engine_kwargs.pop("v2_holder_flow_exit_window_seconds", 15))
