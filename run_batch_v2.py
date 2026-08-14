@@ -15,7 +15,7 @@ if __name__ == "__main__":
         engine_version=2,
         engine_params={},          # use V2 DEFAULT_CONFIG
         buy_size_sol=0.1,
-        max_workers=6,
+        max_workers=8,
     )
 
     print(f"\nCompleted {len(results)} backtests (engine_version=2).")

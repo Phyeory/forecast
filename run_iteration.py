@@ -37,7 +37,8 @@ def main():
     ap.add_argument("--label", required=True, help="iteration label e.g. iter01_baseline")
     ap.add_argument("--params", default=None, help="path to JSON with V2 engine params override")
     ap.add_argument("--buy-size-sol", type=float, default=0.1)
-    ap.add_argument("--max-workers", type=int, default=6)
+    ap.add_argument("--max-workers", type=int, default=8,
+                    help="worker processes (default: 8)")
     ap.add_argument("--recording-ids", nargs="*", type=int, default=None,
                     help="restrict to a subset of recording IDs")
     ap.add_argument("--recording-ids-file", default=None,
@@ -51,13 +52,14 @@ def main():
             recording_ids = json.load(f)
     batch_id = args.label + "_" + str(int(time.time()))
     t0 = time.time()
+    max_workers = args.max_workers
     print(f"Running backtest batch (engine_version=2, batch_id={batch_id})...", flush=True)
 
     results = run_backtest_batch(
         engine_version=2,
         engine_params=params,
         buy_size_sol=args.buy_size_sol,
-        max_workers=args.max_workers,
+        max_workers=max_workers,
         batch_id=batch_id,
         recording_ids=recording_ids,
     )

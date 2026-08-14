@@ -784,6 +784,111 @@ def _kde_eval_kernel(
 
 
 @njit(cache=True)
+def _market_potential_kernel(
+    x_t,
+    h_t,
+    bid_depth,
+    ask_depth,
+    n_grid,
+    tw_seconds,
+    decay_rate,
+    trade_prices,
+    trade_volumes,
+    trade_times,
+    now_t,
+):
+    """Build the KDE-native potential without Python-level grid bookkeeping."""
+    sigma_t = math.exp(0.5 * h_t) if h_t < 15.0 else math.exp(7.5)
+    if sigma_t < 1e-6:
+        sigma_t = 1e-6
+    span = 5.0 * sigma_t * math.sqrt(tw_seconds)
+    if span < 1e-3:
+        span = 1e-3
+
+    grid = np.empty(n_grid)
+    step = (2.0 * span) / (n_grid - 1) if n_grid > 1 else 0.0
+    for i in range(n_grid):
+        grid[i] = x_t - span + i * step
+
+    n = trade_prices.shape[0]
+    if n < 2:
+        bandwidth = 1e-3
+    else:
+        vol_sum = 0.0
+        for i in range(n):
+            vol_sum += trade_volumes[i]
+        if vol_sum <= 0.0:
+            mean = 0.0
+            for i in range(n):
+                mean += trade_prices[i]
+            mean /= n
+            variance = 0.0
+            for i in range(n):
+                d = trade_prices[i] - mean
+                variance += d * d
+            variance /= n
+        else:
+            mean = 0.0
+            for i in range(n):
+                mean += trade_volumes[i] * trade_prices[i]
+            mean /= vol_sum
+            variance = 0.0
+            for i in range(n):
+                d = trade_prices[i] - mean
+                variance += trade_volumes[i] * d * d
+            variance /= vol_sum
+        bandwidth = 0.9 * math.sqrt(max(variance, 1e-12)) * (n ** -0.2)
+        if bandwidth <= 0.0:
+            bandwidth = 1e-3
+
+    if n > 0:
+        rho = _kde_eval_kernel(
+            grid, trade_prices, trade_volumes, trade_times,
+            decay_rate, bandwidth, now_t,
+        )
+    else:
+        rho = np.full(n_grid, 1e-12)
+
+    rho_max = 0.0
+    for i in range(n_grid):
+        if rho[i] > rho_max:
+            rho_max = rho[i]
+    if rho_max <= 0.0:
+        rho_max = 1e-12
+        for i in range(n_grid):
+            rho[i] = rho_max
+    else:
+        for i in range(n_grid):
+            rho[i] /= rho_max
+
+    depth = np.empty(n_grid)
+    ask_base = max(ask_depth, 1e-6)
+    bid_base = max(bid_depth, 1e-6)
+    for i in range(n_grid):
+        u = grid[i]
+        if u >= x_t:
+            frac = (u - x_t) / span
+            if frac > 1.0:
+                frac = 1.0
+            depth[i] = ask_base * math.exp(-3.0 * frac) + 1e-6
+        else:
+            frac = (x_t - u) / span
+            if frac > 1.0:
+                frac = 1.0
+            depth[i] = bid_base * math.exp(-3.0 * frac) + 1e-6
+
+    V_lo, V_hi = _liquidity_cost_kernel(
+        grid, x_t, max(bid_depth + ask_depth, 1e-6), depth,
+    )
+    T_t = math.exp(h_t) * 0.5 if h_t < 15.0 else math.exp(15.0) * 0.5
+    U = np.empty(n_grid)
+    for i in range(n_grid):
+        rho_i = rho[i] if rho[i] > 1e-12 else 1e-12
+        U[i] = -T_t * math.log(rho_i)
+    return grid, U, T_t, rho, V_lo, V_hi, depth, sigma_t, span, bandwidth
+
+
+@njit(cache=True)
 def _liquidity_cost_kernel(
     grid_x,        # (G,) spatial grid
     x_t,           # current log-price
@@ -1748,15 +1853,20 @@ class MarketPotential:
         # Rolling trade buffer (price=ln, volume, time).  Cap the buffer
         # at 2·T_w seconds worth of one-per-second observations (max ~600).
         self._max_buffer = int(self.tw_seconds * 2)
-        self._prices: list[float] = []
-        self._volumes: list[float] = []
-        self._times: list[float] = []
-        
-        # Lazy cached ndarrays (iter16 perf — avoid repeated list→array conversion)
-        self._buf_dirty = True
+        if self._max_buffer < 1:
+            self._max_buffer = 1
+
+        # Keep the active KDE samples in preallocated contiguous arrays.  The
+        # former list-backed buffer recopied every retained sample whenever a
+        # new trade arrived; on a 14,400-second window that turned a recording
+        # replay into O(n²) Python-to-NumPy copies.  Shifting only after the
+        # fixed-size window fills preserves the original chronological sample
+        # order and therefore the numerical KDE result.
         self._prices_arr = np.zeros(self._max_buffer, dtype=np.float64)
         self._volumes_arr = np.zeros(self._max_buffer, dtype=np.float64)
         self._times_arr = np.zeros(self._max_buffer, dtype=np.float64)
+        self._buffer_count = 0
+        self._last_buffer_time = 0.0
 
         # Most-recent potential state (lazily computed in `compute`).
         self.last_grid:    np.ndarray = np.zeros(self.n_grid)
@@ -1769,45 +1879,34 @@ class MarketPotential:
         self.last_bandwidth: float = 1e-3
 
     def add_trade(self, log_price: float, volume: float, t_seconds: float):
-        self._prices.append(log_price)
-        self._volumes.append(max(float(volume), 0.0))
-        self._times.append(float(t_seconds))
-        self._buf_dirty = True
-        # Trim buffer (FIFO) + global decay prune
-        if len(self._prices) > self._max_buffer:
-            self._prices  = self._prices[-self._max_buffer:]
-            self._volumes = self._volumes[-self._max_buffer:]
-            self._times   = self._times[-self._max_buffer:]
-        # Aggressive decay pruning — drop anything older than 3·T_w since
-        # exp(-λ_d · 3T_w) = exp(-3) ≈ 0.05 already, well below floor.
-        if self._times:
-            cutoff = self._times[-1] - 3.0 * self.tw_seconds
-            # First non-stale index (linear scan — buffer is small).
-            i = 0
-            while i < len(self._times) and self._times[i] < cutoff:
-                i += 1
-            if i > 0:
-                self._prices  = self._prices[i:]
-                self._volumes = self._volumes[i:]
-                self._times   = self._times[i:]
+        n = self._buffer_count
+        if n < self._max_buffer:
+            idx = n
+            self._buffer_count = n + 1
+        else:
+            # The original implementation retained the most recent
+            # `_max_buffer` samples in chronological order.  The buffer is
+            # capped at 2*T_w, so its separate 3*T_w age-prune never applies
+            # during normal monotonic replay.  Retain that exact window without
+            # allocating replacement Python lists on each update.
+            self._prices_arr[:-1] = self._prices_arr[1:]
+            self._volumes_arr[:-1] = self._volumes_arr[1:]
+            self._times_arr[:-1] = self._times_arr[1:]
+            idx = self._max_buffer - 1
+
+        self._prices_arr[idx] = float(log_price)
+        self._volumes_arr[idx] = max(float(volume), 0.0)
+        self._times_arr[idx] = float(t_seconds)
+        self._last_buffer_time = float(t_seconds)
 
     def _refresh_buffer_arrays(self):
-        """Copy list buffers into pre-allocated ndarrays (iter16 perf)."""
-        if not self._buf_dirty:
-            return
-        n = len(self._prices)
-        if n > 0:
-            # Use numpy array assignment instead of Python loop (100x+ faster)
-            self._prices_arr[:n] = self._prices
-            self._volumes_arr[:n] = self._volumes
-            self._times_arr[:n] = self._times
-        self._buf_dirty = False
+        """Compatibility no-op: active samples are written directly to arrays."""
 
     def _silverman_bandwidth(self) -> float:
-        if len(self._prices) < 2:
+        if self._buffer_count < 2:
             return 1e-3
         self._refresh_buffer_arrays()
-        n = len(self._prices)
+        n = self._buffer_count
         x = self._prices_arr[:n]
         v = self._volumes_arr[:n]
         # Volume-weighted std σ.
@@ -1832,92 +1931,16 @@ class MarketPotential:
         density D(u, t).  A true L2 snapshot isn't available in this pure
         engine, so we model it as a side-asymmetric exponential taper.
         """
-        sigma_t = math.exp(0.5 * h_t) if h_t < 15.0 else math.exp(7.5)
-        if sigma_t < 1e-6:
-            sigma_t = 1e-6
-        grid_half = self.n_grid * 1e-3  # fallback
-        # ±5 σ √T_w window
-        span = 5.0 * sigma_t * math.sqrt(self.tw_seconds)
-        if span < 1e-3:
-            span = 1e-3
-        grid = np.linspace(x_t - span, x_t + span, self.n_grid)
-
-        h_bw = self._silverman_bandwidth()
+        n = self._buffer_count
+        grid, U, T_t, rho, V_lo, V_hi, depth, sigma_t, span, h_bw = _market_potential_kernel(
+            x_t, h_t, bid_depth, ask_depth,
+            self.n_grid, self.tw_seconds, self.lambda_decay,
+            self._prices_arr[:n], self._volumes_arr[:n], self._times_arr[:n],
+            self._last_buffer_time,
+        )
         self.last_bandwidth = h_bw
-
-        if self._prices:
-            self._refresh_buffer_arrays()
-            n = len(self._prices)
-            P = self._prices_arr[:n]
-            V = self._volumes_arr[:n]
-            T_ = self._times_arr[:n]
-            now_t = float(self._times[-1])
-            rho = _kde_eval_kernel(grid, P, V, T_,
-                                   self.lambda_decay, h_bw, now_t)
-        else:
-            rho = np.ones(self.n_grid) * 1e-12
-
-        # Guard against zero density (log of 0).
-        rho_max = float(rho.max()) if rho.size else 0.0
-        if rho_max <= 0:
-            rho = np.full(self.n_grid, 1e-12)
-            rho_max = 1e-12
-        rho = rho / rho_max  # normalise to [0, 1] for stability
-
-        # ── Depth density D(u, t): asymmetric taper based on bid/ask depth ──
-        # Above x_t we use ask-side depth; below we use bid-side depth.
-        depth = np.empty(self.n_grid)
-        for i in range(self.n_grid):
-            u = grid[i]
-            if u >= x_t:
-                # exponential taper from ask_depth at x_t to 1e-6 at x_t+span
-                frac = (u - x_t) / span if span > 0 else 0.0
-                frac = min(max(frac, 0.0), 1.0)
-                base_d = max(ask_depth, 1e-6)
-                depth[i] = base_d * math.exp(-3.0 * frac) + 1e-6
-            else:
-                frac = (x_t - u) / span if span > 0 else 0.0
-                frac = min(max(frac, 0.0), 1.0)
-                base_d = max(bid_depth, 1e-6)
-                depth[i] = base_d * math.exp(-3.0 * frac) + 1e-6
-
-        # ── Liquidity cost V_liq(x, t) ────────────────────────────────────
-        L_t = math.exp(0.0)  # L_t = exp(ℓ_t) supplied by caller ideally
-        # We use exp(ℓ_posterior) for L_t — passed in as separate param? No.
-        # Simpler: derive from sum of bid+ask depth.
-        L_now = max(bid_depth + ask_depth, 1e-6)
-        V_lo, V_hi = _liquidity_cost_kernel(grid, x_t, L_now, depth)
-
-        T_t = math.exp(h_t) * 0.5 if h_t < 15.0 else math.exp(15.0) * 0.5
-
-        # U(x) = - T_t · log ρ(x)            (KDE-native potential)
-        #
-        # (iter16d, 2026-07-29: V_liq REMOVED from the potential.  On fresh
-        # 1 s memecoin data T_t = σ²/2 ≈ 5e-5 while V_liq ≈ 0.05–0.7, so
-        # the legacy composite U = -T·lnρ + V_liq was entirely dominated by
-        # the synthetic depth taper:  barrier-find then picked ~T-amplitude
-        # KDE wiggles on the V_liq ramp (noise barriers) and the Boltzmann
-        # factor exp(-ΔU/T) ≡ 0 degenerated k± to the {0, 1e6} clamp —
-        # the engine's decision collapsed to a binary 1 s drift-sign
-        # detector (24% WR in both drift-sign conventions; see iter16b).
-        # The spec's structure (§3.3 + §4.3) assigns V_liq the friction
-        # role — γ_t = 1/L_t in the rate prefactor (eq. 14) — while the
-        # escape geometry comes from the volume-density landscape.  With
-        # U = -T·lnρ (HVN = potential well — the dip-buy geometry whose
-        # entries were validated profitable in iter16k/l).  The iter16n
-        # experiment (U = +T·lnρ, HVN = barrier) fixed crash-detection
-        # but destroyed entry quality (smoke +0.43 → -0.05): the two
-        # interpretations are reconciled by keeping the well geometry
-        # for the landscape and fixing the boundary-barrier artifact in
-        # _barrier_find_kernel (iter16o) — during crashes the down side
-        # has NO barrier (monotonic to grid edge) → open escape at the
-        # attempt rate → P_down can fire, without touching the wells.
-        # V_lo/V_hi are still computed above for diagnostics.)
-        eps_rho = 1e-12
-        U_kde   = -T_t * np.log(np.maximum(rho, eps_rho))
-        U_up    = U_kde
-        U_down  = U_kde
-        U       = U_kde
+        U_up = U
+        U_down = U
 
         self.last_grid      = grid
         self.last_U         = U
@@ -3766,6 +3789,3 @@ class StrategyEngineV2Adapter:
         if s_min > 0.0 and float(getattr(self, "s_effective", 0.0)) < s_min:
             return False
         return True
-
-
-

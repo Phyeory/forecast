@@ -84,6 +84,28 @@ def _run_single_backtest_worker(args: dict) -> dict:
         return {"error": str(e), "recording_id": args.get("recording_id")}
 
 
+def _run_backtest_worker_chunk(tasks: list[dict]) -> list[dict]:
+    """Run a balanced group of recordings in one process.
+
+    V2 imports SciPy/Numba and compiles kernels lazily.  A chunk keeps each
+    warm worker busy through several recordings while retaining process
+    isolation and deterministic per-recording execution.
+    """
+    return [_run_single_backtest_worker(task) for task in tasks]
+
+
+def _balanced_task_chunks(tasks: list[dict], max_workers: int) -> list[list[dict]]:
+    """Greedily balance recording work by declared candle count."""
+    worker_count = max(1, min(max_workers, len(tasks)))
+    groups: list[list[dict]] = [[] for _ in range(worker_count)]
+    loads = [0] * worker_count
+    for task in sorted(tasks, key=lambda t: t["candle_count"], reverse=True):
+        i = min(range(worker_count), key=loads.__getitem__)
+        groups[i].append(task["kwargs"])
+        loads[i] += task["candle_count"]
+    return [group for group in groups if group]
+
+
 def run_backtest_batch(
     engine_params: Optional[dict] = None,
     buy_size_sol: float = 0.1,
@@ -166,6 +188,7 @@ def run_backtest_batch(
         maintenance_margin_rate=maintenance_margin_rate,
         futures_taker_fee=futures_taker_fee,
         futures_slippage_pct=futures_slippage_pct,
+        persist_results=False,
     )
 
     # Scheduling only (per-recording computation is identical either way):
@@ -183,14 +206,23 @@ def run_backtest_batch(
         return results
 
     # Large batches: use parallel processes
-    tasks = [{"recording_id": rec["id"], **common_kwargs} for rec in completed]
-    workers = max_workers or min(len(tasks), max(1, os.cpu_count() or 4))
+    tasks = [
+        {
+            "candle_count": max(int(rec.get("candle_count") or 0), 1000),
+            "kwargs": {"recording_id": rec["id"], **common_kwargs},
+        }
+        for rec in completed
+    ]
+    workers = min(max_workers or (os.cpu_count() or 4), len(tasks))
     results = []
 
     pool = _get_pool(workers)
-    futures = {pool.submit(_run_single_backtest_worker, t): t for t in tasks}
+    # One balanced task per worker amortizes imports/JIT compilation and keeps
+    # the slow long-recording tail close to the batch's average worker load.
+    futures = [pool.submit(_run_backtest_worker_chunk, chunk)
+               for chunk in _balanced_task_chunks(tasks, workers)]
     for future in as_completed(futures):
-        results.append(future.result())
+        results.extend(future.result())
 
     return results
 
@@ -213,6 +245,7 @@ def run_backtest(
     maintenance_margin_rate: float = 0.005,
     futures_taker_fee: float = 0.00045,
     futures_slippage_pct: Optional[float] = None,
+    persist_results: bool = True,
 ) -> dict:
     """
     Run a full backtest on a saved recording.
@@ -257,8 +290,10 @@ def run_backtest(
         futures_slippage_pct=futures_slippage_pct,
     )
 
-    # One chart result per stored candle
-    candle_results = []
+    # Saving full candle series is useful for an interactive single backtest,
+    # but it dominates SQLite I/O in iteration batches and is not consumed by
+    # aggregate/paired analysis.  Batch workers keep only the execution stream.
+    candle_results = [] if persist_results else None
 
     # Local refs for speed
     ft_update = ft.update
@@ -328,28 +363,29 @@ def run_backtest(
             trade_action_for_candle = fwd["trade_action"]
             trade_label_for_candle  = fwd.get("trade_label")
 
-        # Read indicators directly from engine state — no dict overhead
-        candle_results.append({
-            "time":            t,
-            "open":            o,
-            "high":            h,
-            "low":             l,
-            "close":           c,
-            "volume":          vol,
-            "regime":          engine.regime.value,
-            "direction":       engine.direction.value,
-            "signal":          result.get("signal", "none") if result else "none",
-            "signal_strength": engine.signal_strength,
-            "ema_fast":        engine.ema_fast_val,
-            "ema_slow":        engine.ema_slow_val,
-            "atr":             engine.atr_val,
-            "roc":             engine.m_hat,
-            "confidence":      engine.trend_confidence,
-            "trade_action":    trade_action_for_candle,
-            "trade_label":     trade_label_for_candle,
-            "balance":         round(ft.balance, 6),
-            "unrealized_pnl":  0,
-        })
+        if persist_results:
+            # Read indicators directly from engine state — no dict overhead
+            candle_results.append({
+                "time":            t,
+                "open":            o,
+                "high":            h,
+                "low":             l,
+                "close":           c,
+                "volume":          vol,
+                "regime":          engine.regime.value,
+                "direction":       engine.direction.value,
+                "signal":          result.get("signal", "none") if result else "none",
+                "signal_strength": engine.signal_strength,
+                "ema_fast":        engine.ema_fast_val,
+                "ema_slow":        engine.ema_slow_val,
+                "atr":             engine.atr_val,
+                "roc":             engine.m_hat,
+                "confidence":      engine.trend_confidence,
+                "trade_action":    trade_action_for_candle,
+                "trade_label":     trade_label_for_candle,
+                "balance":         round(ft.balance, 6),
+                "unrealized_pnl":  0,
+            })
 
         last_candle = (t, o, h, l, c)
 
@@ -378,19 +414,21 @@ def run_backtest(
         )
         saved_params["market_type"] = "futures"
 
-    bt_id = create_backtest(
-        recording_id=recording_id,
-        mint=recording["mint"],
-        token_name=recording.get("token_name", ""),
-        token_symbol=recording.get("token_symbol", ""),
-        timeframe=timeframe,
-        engine_params=saved_params,
-        stats=stats,
-        candle_results=candle_results,
-        trades=trades,
-        batch_id=batch_id,
-        market_type=market_type,
-    )
+    bt_id = None
+    if persist_results:
+        bt_id = create_backtest(
+            recording_id=recording_id,
+            mint=recording["mint"],
+            token_name=recording.get("token_name", ""),
+            token_symbol=recording.get("token_symbol", ""),
+            timeframe=timeframe,
+            engine_params=saved_params,
+            stats=stats,
+            candle_results=candle_results,
+            trades=trades,
+            batch_id=batch_id,
+            market_type=market_type,
+        )
 
     # ── Write per-token JSON trade log (only when trades were placed) ────────
     if trades:
@@ -411,7 +449,7 @@ def run_backtest(
         "token_name":    recording.get("token_name", ""),
         "token_symbol":  recording.get("token_symbol", ""),
         "timeframe":     timeframe,
-        "candle_count":  len(candle_results),
+        "candle_count":  len(candles),
         "stats":         stats,
         "trade_count":   len(trades),
     }
@@ -726,4 +764,3 @@ def _write_trade_log(
         json.dump(payload, f, indent=2)
 
     return filepath
-

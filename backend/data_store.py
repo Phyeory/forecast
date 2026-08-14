@@ -29,6 +29,13 @@ def _get_price_conn() -> sqlite3.Connection:
     return conn
 
 
+def _get_price_read_conn() -> sqlite3.Connection:
+    """Open a read-only connection for isolated backtest workers."""
+    conn = sqlite3.connect(f"file:{PRICE_DB}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def init_price_db():
     conn = _get_price_conn()
     conn.executescript("""
@@ -212,7 +219,7 @@ def insert_holder_flow(
 
 def get_holder_flow(recording_id: int, start_time: Optional[int] = None, end_time: Optional[int] = None) -> list[dict]:
     """Fetch holder-flow events for a recording, optionally filtered by time range."""
-    conn = _get_price_conn()
+    conn = _get_price_read_conn()
     query = "SELECT * FROM holder_flow WHERE recording_id = ?"
     params: list = [recording_id]
     if start_time is not None:
@@ -233,14 +240,14 @@ def get_holder_flow_for_window(recording_id: int, center_time: int, window_secon
 
 
 def list_recordings() -> list[dict]:
-    conn = _get_price_conn()
+    conn = _get_price_read_conn()
     rows = conn.execute("SELECT * FROM recordings ORDER BY started_at DESC").fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
 def get_recording(recording_id: int) -> Optional[dict]:
-    conn = _get_price_conn()
+    conn = _get_price_read_conn()
     row = conn.execute("SELECT * FROM recordings WHERE id = ?", (recording_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
@@ -257,7 +264,7 @@ def get_recording_candles(recording_id: int) -> list[dict]:
     highest id (most recently written = most complete accumulated OHLCV state)
     for each time bucket.
     """
-    conn = _get_price_conn()
+    conn = _get_price_read_conn()
     rows = conn.execute(
         """
         SELECT time, open, high, low, close, volume,
