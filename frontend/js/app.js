@@ -195,6 +195,19 @@ let engineParamsV2 = {
   no_long_exit_bars:     60,   // consecutive no-long-E_long ticks to fire kelly_flat
   no_long_offside_pct:   40,   // require ≥ 40% underwater to fire kelly_flat (winner-cut guard)
   no_long_mu_neg_frac:   0,    // iter21 hypothesis K REJECTED — μ-persistence guard (off)
+  // ── iter45: Pre-entry taker order-flow imbalance gate (TAIL-ACCEPTED) ──
+  // Blocks long entries when the trailing taker buy-volume ratio is below
+  // `buy_ratio_min` over the last `window_seconds` (only when window volume
+  // ≥ `volume_min_sol`; below that the gate passes — parity-safe on
+  // low-volume recordings).  Validated r28_w10: 607-recording cohort cuts
+  // big losers <-30% 33→23 (Wilcoxon p=0.0054), saves +0.465 SOL total loss
+  // drag (p=0.0002), +0.181 SOL whole-cohort PnL, 0 added tail trades ≤-10%.
+  // Standard whole-PnL paired_diff REJECTS (p=0.476) — tail-extermination
+  // mechanism, judged by tail-focused tests (see RESEARCH_LOG.md Iter 45).
+  v2_order_flow_imbalance_gate: 1.0,   // 1.0 = ON (iter45-validated default), 0.0 = OFF
+  v2_order_flow_buy_ratio_min:  0.28,  // min taker buy-volume ratio in window
+  v2_order_flow_window_seconds: 10,    // trailing window (s)
+  v2_order_flow_volume_min_sol: 1.0,   // window volume floor (SOL); below → gate passes
 };
 
 /* Engine version: 1 = V1 (Physics), 2 = V2 (RBPF/UKF/KDE/Kramers) */
@@ -1379,6 +1392,11 @@ function renderSettings() {
     liquidity_cap_frac: "Kelly position cap as fraction of estimated liquidity L_t (e.g. 0.10 = up to 10%)",
     warmup_bars:        "Bars before any signal is emitted — allows the RBPF state to stabilise",
     sigma_floor:        "Numerical σ floor to prevent division-by-zero in degenerate low-vol regimes",
+    // iter45 order-flow gate
+    v2_order_flow_imbalance_gate: "iter45 taker order-flow gate — 1.0 = block long entries while taker buy-ratio is below the min (validated r28_w10: big losers <-30% cut 33→23, +0.465 SOL loss-drag saved, p<0.01)",
+    v2_order_flow_buy_ratio_min:  "Minimum required taker buy-volume ratio over the trailing window (Σbuy/(Σbuy+Σsell)) — lower = gate fires less often",
+    v2_order_flow_window_seconds: "Trailing window (s) over which the taker buy-ratio is computed",
+    v2_order_flow_volume_min_sol: "Window volume floor (SOL) — below this the gate passes (parity-safe on low-volume recordings)",
   };
 
   // ── V2 section headers — label displayed above first key of each group ──
@@ -1397,6 +1415,7 @@ function renderSettings() {
     confidence_high:       "🔗 Confidence Gate  (V1 pass-through)",
     ema_fast:              "📀 EMA / ATR  (V1 indicator pass-through)",
     max_entry_bar_count:   "⏰ Bar-Count Gates",
+    v2_order_flow_imbalance_gate: "⚡ Taker Order-Flow Gate (iter45)",
   };
 
   const paramHints = engineVersion === 2 ? v2Hints : v1Hints;

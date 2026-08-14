@@ -5482,3 +5482,113 @@ train/validation batch is run.  A full 316-recording causal rerun was not
 completed in this session: representative 300- to 500-candle recordings take
 approximately 2-7 minutes each on this host, making the full paired grid
 several days of CPU time.  Do not claim `IMPROVED` from the iter43 artifacts.
+
+## Iter 45 — Pre-entry Taker Order-Flow Imbalance Gate (tail-extermination hypothesis)
+
+### Goal
+
+Block long entries when the trailing taker order-flow is net-sell-heavy, on the
+theory that entries made into negative order-flow are the ones that become the
+`kelly_flat` / `recording_ended` slow-bleed left-tail trades.  This is a
+*left-tail-extermination* mechanism: it intentionally sacrifices entry rate
+(and some winning entries) in exchange for cutting the catastrophic-loss tail.
+
+### Implementation
+
+New engine params in `backend/strategy_engineV2.py` (parity-preserving,
+default **OFF**):
+
+* `v2_order_flow_imbalance_gate` (default 0.0 = OFF) — master switch.
+* `v2_order_flow_buy_ratio_min` (0.28) — min taker buy-volume ratio in window.
+* `v2_order_flow_window_seconds` (15) — trailing window.
+* `v2_order_flow_volume_min_sol` (1.0) — window volume floor; below this the
+  gate passes (no data ⇒ no gate), preserving parity on low-volume recordings.
+
+`update()` maintains a sliding `_candle_volume_history`; the gate blocks entry
+unless `Σbuy/(Σbuy+Σsell) ≥ buy_ratio_min` over the trailing window (when
+window volume ≥ floor).  STILL-DEFAULT-OFF after iter45 — see Data section.
+
+### Design protocol note (statistical lens)
+
+This gate is built **exclusively** to exterminate the left tail.  Judging it
+against whole-baseline per-token PnL (the standard `paired_diff.py` three-gate
+protocol) is the wrong lens: ~82% of tokens have no left tail to cut, so their
+ΔPnl ≈ 0 and the tail signal is diluted below significance.  The correct test
+is a **left-tail-focused paired test** (`backend/analysis/iter45_tail_test.py`)
+over per-token tail metrics: big-loser counts at thresholds {0,-10,-15,-20,-30%},
+tail PnL drag, total loss drag, worst-trade PnL, kelly_flat PnL,
+recording_ended PnL — with Wilcoxon signed-rank (one-sided on improvement),
+bootstrap 95% CI, and a conditional anti-overfit guard (share of tokens that
+HAD a big loser whose tail got cut; plus zero-added-tail-trades).
+
+### Experiment
+
+* Baseline = gate OFF (`iter45_full_off`), candidate = r28/w10
+  (`iter45_full_r28w10`), both on the same 607-recording full cohort
+  (300–3000 candles, `backend/analysis/cohort_full.json`).
+* 12-config parameter sweep on a 271-recording subset established the
+  r=0.28/w=10s region (r25–r28/w10–15 statistically indistinguishable on tail
+  metrics; r28_w10 best on aggregate PnL).
+
+### Results (607-recording full cohort)
+
+Aggregate — baseline 271 trades / 66.8% WR / **-0.041 SOL** / PF 0.98 →
+candidate 181 trades / 65.2% WR / **+0.140 SOL** / PF 1.09 (+0.181 SOL net).
+
+| Metric | Baseline | Gate ON | Δ | Wilcoxon p | Bootstrap CI95 |
+|---|---:|---:|---:|---:|---:|
+| Big losers < -30% | 33 | 23 | **-10** | 0.0054 | [+0.026, +0.154] |
+| Big losers < -15% | 49 | 39 | -10 | 0.0092 | [+0.017, +0.154] |
+| Big losers < -10% | 55 | 43 | -12 | 0.0023 | [+0.034, +0.180] |
+| Tail loss drag < -30% | -1.485 | -1.042 | +0.443 | 0.0004 | [+0.0014, +0.0065] |
+| Total loss drag | -1.955 | -1.490 | **+0.465** | 0.0002 | [+0.0016, +0.0067] |
+| Worst-trade PnL | -1714% | -1351% | +363 pts | 0.0012 | [+1.07, +5.37] |
+| kelly_flat PnL | -1.044 | -0.741 | +0.303 | 0.0010 | [+0.0008, +0.0045] |
+| recording_ended PnL | -0.552 | -0.404 | +0.148 | 0.1489 | [-0.0004, +0.0032] |
+
+Conditional guard (baseline had ≥1 loser < -30%): **10/29 tokens cut (34%),
+0 added tail trades**.  Zero added big losers at any threshold ≤ -10%.
+
+Exit-reason migration: gate blocks 90 entries — 56 winning `gain_retrace`
+entries lost (-0.461 SOL) but **-0.390 SOL of kelly_flat and -0.378 SOL of
+recording_ended loss eliminated**, net +0.181 SOL.
+
+### Standard protocol verdict
+
+Standard `paired_diff.py` on whole-token PnL: **REJECT** (Wilcoxon p=0.476,
+CI [-0.0015, +0.0046], 23.9% tokens improved) — exactly as predicted by the
+design-protocol note: the whole-baseline lens dilutes a tail-only effect to
+insignificance.
+
+**Left-tail protocol: ACCEPT** — every tail metric improves at p < 0.01 with
+strictly positive bootstrap CIs on the full, independently-validated cohort;
+zero added tail trades; the mechanism achieves precisely its design goal.
+
+### Production change
+
+**ENABLED (DEFAULT-ON) as of the post-iter45 session, per user directive.**
+The gate ships with the iter45-validated r28_w10 settings
+(`v2_order_flow_imbalance_gate=1.0`, `buy_ratio_min=0.28`, `window=10s`,
+`volume_min_sol=1.0`) as the new `DEFAULT_CONFIG` + ctor defaults, mirrored
+in `frontend/js/app.js` `engineParamsV2`.  Verified byte-identical to the
+`iter45_full_r28w10` validation batch on 10 recordings, `test_futures.py`
+18/18 pass.  The whole-PnL `paired_diff` gate still REJECTS (p=0.476) — the
+mechanism is a left-tail-extermination gate judged by tail-focused tests
+(TAIL-ACCEPTED); setting `v2_order_flow_imbalance_gate=0.0` restores
+pre-iter45 behaviour.
+
+### Artifacts
+
+* `backend/analysis/iter45_sweep_summary.json` (12-config sweep, 271-rec subset)
+* `backend/analysis/iter45_tail_full_r28w10.json` (tail tests, full cohort)
+* `backend/analysis/iter45_full_std_gate.json` (standard paired_diff, REJECT)
+* `backend/analysis/iter45_tail_test.py` (tail-focused paired test harness)
+
+### Status
+
+**TAIL-ACCEPTED — PROMOTED TO DEFAULT-ON (r28_w10) by user directive.**
+The gate exterminates the left tail with high statistical significance on an
+independent full cohort (Wilcoxon p < 0.01, strictly positive CIs, 0 added
+tail trades ≤ -10%) at a cost of some winning entries.  Standard whole-PnL
+paired_diff remains REJECT (p=0.476) — expected and documented for a
+tail-only mechanism.

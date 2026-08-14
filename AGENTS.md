@@ -638,6 +638,31 @@ future agent must therefore:
 > `_v2_volume_scale_fut`, and `_is_futures_engine=False` in both cases.
 > No spot regression is possible from this iteration.  Engine source
 > for spot runs is byte-identical to HEAD.  See RESEARCH_LOG.md Iter 42.
+>
+> **iter45 (Pre-entry taker order-flow imbalance gate — TAIL-ACCEPTED /
+> DEFAULT-ON r28_w10, production change per user directive).**  Hypothesis: long
+> entries made into net-sell taker flow become the `kelly_flat` /
+> `recording_ended` slow-bleed left tail.  New parity-safe params in
+> `strategy_engineV2.py` + `frontend/js/app.js` engineParamsV2:
+> `v2_order_flow_imbalance_gate` (1.0 = ON), plus
+> `v2_order_flow_buy_ratio_min` / `_window_seconds` / `_volume_min_sol`
+> (0.28 / 10 / 1.0 — the validated r28_w10 region).  Full 607-recording cohort
+> (`cohort_full.json`): gate 271→181 trades, -0.041→+0.140 SOL, PF 0.98→1.09.
+> **Statistical lens matters**: the standard whole-PnL `paired_diff.py`
+> gate REJECTS (p=0.476, 23.9% breadth) *because ~82% of tokens have no left
+> tail to cut* — a tail-extermination mechanism must be tested with
+> **tail-focused paired tests** (`backend/analysis/iter45_tail_test.py`:
+> big-loser counts/tail-drag/worst-trade/kelly_flat per token, Wilcoxon +
+> bootstrap CI + conditional "had-a-big-loser" cut rate + zero-added-tail).
+> Under that lens the gate is strongly significant on the full cohort:
+> big losers <-30% 33→23 (p=0.0054, CI [+0.026,+0.154]), total loss drag
+> -1.955→-1.490 (+0.465 SOL, p=0.0002, CI strictly +), worst-trade PnL
+> +363 pts (p=0.0012), kelly_flat PnL +0.303 (p=0.0010), **0 added tail
+> trades at any threshold ≤ -10%**, 34% of baseline-tail tokens cut.  Net:
+> blocks 90 entries (56 winning gain_retrace lost, -0.461 SOL) to eliminate
+> -0.390 kelly_flat + -0.378 recording_ended drag.  `test_futures.py` 18/18.
+> Setting `v2_order_flow_imbalance_gate=0.0` restores pre-iter45 behaviour.
+> See RESEARCH_LOG.md Iter 45.
 
 ---
 

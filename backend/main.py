@@ -510,6 +510,7 @@ async def run_backtest_batch_endpoint(body: dict = Body(default={})):
         results = await asyncio.to_thread(
             run_backtest_batch,
             engine_params=engine_params,
+            max_workers=os.cpu_count() or 8,
             buy_size_sol=body.get("buy_size_sol", 0.1),
             priority_fee=0.0001,
             bribe_fee=0.0,
