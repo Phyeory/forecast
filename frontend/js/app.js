@@ -2499,6 +2499,7 @@ document.getElementById("fbt-result-back-btn").addEventListener("click", () => {
 
 // global hook for instrument onclick
 window.fbtLoadBacktestResult = fbtLoadBacktestResult;
+window.btLoadBacktestResult = loadBacktestResult;
 
 // Make functions globally available for onclick handlers
 window.loadViewer = loadViewer;
