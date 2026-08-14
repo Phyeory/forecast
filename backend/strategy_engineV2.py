@@ -53,9 +53,16 @@ from strategy_engine import Regime as _V1Regime, \
                             Signal as _V1Signal, \
                             Direction as _V1Direction
 
+import os as _os
+import warnings as _warnings
+
 # numba is optional at import time so the module can still be imported in
-# environments where the JIT compiler is unavailable (kernels fall back to
-# a pure-NumPy path).  In production both `numba` and `scipy` are installed.
+# environments where the JIT compiler is unavailable.  BEWARE: the fallback is
+# NOT a fast "pure-NumPy path" — the @njit decorator becomes a no-op and every
+# kernel runs as an interpreted scalar Python loop.  Measured penalty is ~75x
+# end-to-end (900-candle recording: ~2.3s JIT-compiled vs >180s interpreted),
+# which silently turns a 1000-recording batch from minutes into many hours.
+# `numba` is therefore pinned in requirements.txt and its absence is loud.
 try:
     from numba import njit
     _HAVE_NUMBA = True
@@ -83,6 +90,39 @@ except Exception:  # pragma: no cover
             if x[i] > x[i - 1] and x[i] >= x[i + 1]:
                 peaks.append(i)
         return np.asarray(peaks, dtype=np.int64), None
+
+
+if not _HAVE_NUMBA:
+    _msg = (
+        "\n"
+        "==============================================================================\n"
+        " strategy_engineV2: numba IS NOT INSTALLED — running ~75x SLOWER (interpreted)\n"
+        "------------------------------------------------------------------------------\n"
+        " Every RBPF/UKF/KDE/Kramers kernel is falling back to scalar Python loops.\n"
+        " A 1000-recording backtest batch will take HOURS instead of minutes.\n"
+        "\n"
+        "   FIX:  cd backend && source .venv/bin/activate && pip install -r requirements.txt\n"
+        "\n"
+        " Set V2_ALLOW_NO_NUMBA=1 to silence this and accept the slowdown.\n"
+        "=============================================================================="
+    )
+    if _os.environ.get("V2_ALLOW_NO_NUMBA", "").strip() not in ("1", "true", "TRUE"):
+        # Loud on stderr: a silent fallback previously cost hours per batch.
+        import sys as _sys
+        print(_msg, file=_sys.stderr, flush=True)
+    _warnings.warn(
+        "strategy_engineV2: numba unavailable — kernels are interpreted (~75x slower)",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+
+if not _HAVE_SCIPY:
+    _warnings.warn(
+        "strategy_engineV2: scipy unavailable — using slower/less-accurate "
+        "find_peaks fallback for HVN barrier detection",
+        RuntimeWarning,
+        stacklevel=2,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1666,7 +1706,7 @@ class RaoBlackwellisedParticleFilter:
 #
 # relative to the dynamically derived noise floors
 #     μ* = σ_t / √τ         (drift noise floor)
-#     φ* = σ_φ / √α         (order-flow noise floor)
+#     ��* = σ_φ / √α         (order-flow noise floor)
 #
 # No fixed numeric thresholds.
 
@@ -2216,7 +2256,7 @@ class MemecoinStrategyEngine:
         self._alpha_regime = float(self.cfg["alpha"])
         self._tau_default = float(self.cfg["tau_max"])
 
-        # ── State ─────────────────────────────────────────────────────
+        # ── State ───────────────────────────────────────────────��─────
         self._rbpf = RaoBlackwellisedParticleFilter(
             n_particles=int(self.cfg["n_particles"]),
             x0=0.0,
