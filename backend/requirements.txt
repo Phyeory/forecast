@@ -8,3 +8,4 @@ solders>=0.21.0
 base58>=2.1.1
 yfinance>=0.2.0
 python-binance>=1.0.0
+numba
