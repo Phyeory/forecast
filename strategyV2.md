@@ -246,7 +246,7 @@ Table 1 lists all 16 SDE free parameters and the principal structural meta-param
 | $f$ | `fee_fraction` | 0.0011 | flat fee fraction |
 | $\Delta_{\text{lat}}$ | `latency_seconds` | 0.5 | execution latency (s) |
 | — | `liquidity_cap_frac` | 0.10 | Kelly cap as fraction of $L_t$ |
-| — | `warmup_seconds` | 30 | bars before first decision |
+| — | `warmup_bars` | 60 | bars before first decision (V1 parity: V1's `max(warmup, 60)` gate) |
 | $\sigma_{fl}$ | `sigma_floor` | $10^{-6}$ | numerical volatility floor |
 | — | `logprob_floor` | −50 | log-likelihood clamp |
 | — | `v2_drift_work_fraction` | 0.0 | disabled drift-work knob (§5.5) |

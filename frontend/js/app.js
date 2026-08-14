@@ -145,7 +145,8 @@ let engineParamsV2 = {
   fee_fraction:       0.0011, // fee fraction  (iter16h cost-cal ~0.11%)
   latency_seconds:    0.5,   // execution latency Δ_lat
   liquidity_cap_frac: 0.10,  // Kelly position cap  (0.10 = up to 10% of L_t)
-  warmup_seconds:     30,    // bars before any decision is emitted
+  warmup_bars:        60,    // bars (engine update() intakes) before any decision is emitted
+                            // V1 parity: V1 suppresses signals through max(warmup=30, 60) = 60 bars
   sigma_floor:        1e-6,  // numerical σ floor
   // ── Shared TP/SL parameters (V1 contract, adapter reads these) ──────
   stoploss_pct: 0,        // Hard-stop removed (iter18b): stoploss_pct=0 disables all price floors.
@@ -1376,7 +1377,7 @@ function renderSettings() {
     fee_fraction:       "Jupiter DEX fee fraction (e.g. 0.001 = 0.1%)",
     latency_seconds:    "Execution latency Δ_lat in seconds — cost of delayed execution is baked into Kelly",
     liquidity_cap_frac: "Kelly position cap as fraction of estimated liquidity L_t (e.g. 0.10 = up to 10%)",
-    warmup_seconds:     "Bars before any signal is emitted — allows the RBPF state to stabilise",
+    warmup_bars:        "Bars before any signal is emitted — allows the RBPF state to stabilise",
     sigma_floor:        "Numerical σ floor to prevent division-by-zero in degenerate low-vol regimes",
   };
 

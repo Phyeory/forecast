@@ -185,7 +185,8 @@ DEFAULT_CONFIG = {
     "fee_fraction":      0.0011,  # f   (iter16h cost-cal, ~0.11%)
     "latency_seconds":   0.5,   # Δ_lat
     "liquidity_cap_frac":0.10,   # n*  ≤ 0.1 · L_t
-    "warmup_seconds":    30,     # bars below which no decision is emitted
+    "warmup_bars":       60,     # V1-parity: V1's `max(warmup=30, 60)` belt-and-suspenders
+                             #   gate suppresses signals for 60 engine bars; V2 matches.
     "ticks_per_state":   4,      # V1 4-state intra-candle expansion count
                                  #   (adapter-only; pure V2 ignores)
     "sigma_floor":       1e-6,   # numerical floor on σ
@@ -230,10 +231,12 @@ def _merge_config(user: dict) -> dict:
 # runs NEVER see FUTURES_DEFAULT_CONFIG unless explicitly requested, so
 # iter31_canonical spot parity is preserved.
 FUTURES_DEFAULT_CONFIG: dict = {
-    # Macro-bar warmup: 10 h of 1h bars (≈2 days of macro context) is
-    # plenty for the RBPF to localise.  Spot default is 30.
+    # Macro-bar warmup: 10 bars of engine intake (4 per candle) is plenty
+    # for the RBPF to localise; the adapter's max(warmup, 60) signal floor
+    # raises the effective warmup to 60 bars ≈ 15 of 1h candles.  Spot
+    # default is 60 bars (V1 parity: max(30, 60) signal floor).
     "warmup": 10,
-    "warmup_seconds": 10,
+    "warmup_bars": 10,
     # Macro volatility periods are longer; hold the confidence floor where
     # the espaço-modulado Bayesian posterior needs it but not higher, or
     # trending 15-30% macro moves never qualify.
@@ -2426,7 +2429,7 @@ class MemecoinStrategyEngine:
 
     # ── Spec method 3: get_decision ───────────────────────────────────
     def get_decision(self, horizon: int = 30) -> dict:
-        if self._bar_count < int(self.cfg["warmup_seconds"]):
+        if self._bar_count < int(self.cfg["warmup_bars"]):
             return {
                 "n_star": 0.0, "direction": 0, "E_star": -1e3, "tau": float(horizon),
                 "reason": "warmup",
@@ -2560,7 +2563,9 @@ class StrategyEngineV2Adapter:
         # (Kramers P_down, reversal regime, gain-retrace, mu_drift_down_exit).
         self.stoploss_pct         = float(engine_kwargs.pop("stoploss_pct", 0.0))
         self.takeprofit_pct       = float(engine_kwargs.pop("takeprofit_pct", 0.0))
-        self._warmup_seconds      = int(engine_kwargs.pop("warmup", 30))
+        # warmup counts engine update() intakes (bars).  V1 default is 30 but its
+        # belt-and-suspenders gate floors at max(warmup, 60) — V1-parity default 60.
+        self._warmup_bars          = int(engine_kwargs.pop("warmup", 60))
 
         # Forward remaining kwargs into V2 config (the 16 free params +
         # themselves listed in strategyV2.md §2 require N_p, n_grid, etc.).
@@ -2573,8 +2578,8 @@ class StrategyEngineV2Adapter:
             if k in _pass_through_v2_keys:
                 v2_cfg[k] = v
         # Re-inject needed control knobs that don't crash V2.
-        if self._warmup_seconds:
-            v2_cfg.setdefault("warmup_seconds", self._warmup_seconds)
+        if self._warmup_bars:
+            v2_cfg.setdefault("warmup_bars", self._warmup_bars)
 
         # Build the V2 core engine.
         self.core = MemecoinStrategyEngine(v2_cfg)
@@ -2785,7 +2790,7 @@ class StrategyEngineV2Adapter:
         self.ema_slow_p = 7
         self.atr_period = 7
         self.roc_period = 3
-        self.warmup = self._warmup_seconds
+        self.warmup = self._warmup_bars
         self.S_strong = 4.0
         self.S_weak = 2.0
         self.S_noise = 1.15
