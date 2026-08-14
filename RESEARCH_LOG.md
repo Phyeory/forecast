@@ -5368,3 +5368,117 @@ Even without the top 5 improvements (PIPO +0.110, Haymaker +0.072, Bowser64 +0.0
 ### Status
 
 **ACCEPTED.** `v2_holder_flow_require_tag` default changed to 0.0 (gate 1.0). This is the first informational alpha source accepted since iter21 (kelly_flat exit). The engine's OHLCV-only ceiling has been broken by exogenous on-chain sell data — exactly as iter37 predicted.
+
+---
+
+## Iter 44 — Holder-flow replay causality audit (REJECTED: prior acceptance is not yet reproducible under a causal replay)
+
+**Date:** 2026-08-14
+
+### Problem
+
+Iter43 loaded the complete recording-level `holder_flow` table into
+`StrategyEngineV2Adapter` before replaying its first candle.  At every candle
+`t`, `_has_recent_dev_sell(t, ...)` searched that complete table.  A sell that
+occurred later in the recording was excluded by its timestamp, but a sell with
+timestamp `t` was available to States 1-3 of candle `t`, before the replayed
+OHLCV path reached that event.  That violates the 4-state causal information
+set and makes the gate/exit fill more favorable than the live monitor can
+guarantee.
+
+The current canonical source was locked at `9454c74` per the user directive.
+This audit did not alter strategy parameters or production defaults.
+
+### Hypothesis
+
+If the iter43 effect is genuine information alpha rather than intra-candle
+lookahead, then revealing a holder-flow event only at the candle close should
+retain a positive, statistically significant paired improvement against gates
+OFF.  Let `E_t` be events with on-chain timestamp `s` and let
+
+\[
+\mathcal F_t^{HF}=\{E_s:s\leq t-\delta\},\qquad \delta\geq0.
+\]
+
+The causal replay rule appends all `E_s` with `s+\delta\leq t` immediately
+before State 4 of candle `t`; States 1-3 use only `\mathcal F_{t-1}^{HF}`.
+The entry/exit condition remains unchanged:
+
+\[
+I_t=\mathbf1\{\exists e\in\mathcal F_t^{HF}:e.side=sell,
+ e.amount\_usd\geq100\},
+\]
+
+with `v2_holder_flow_require_tag=0`.  This is a plumbing correction, not a
+new predictive feature.  It is valid only under the explicit assumption that
+GMGN's event timestamp is its on-chain occurrence time; non-zero `\delta`
+models additional delivery latency.
+
+### Implementation
+
+`backend/backtester.py` now loads events but does not preload them into
+`ForwardTester`.  It advances an ordered cursor after States 1-3 and calls the
+adapter's existing `append_holder_flow_events()` before State 4.  New optional
+`holder_flow_latency_seconds` arguments on `run_backtest`,
+`run_backtest_batch`, and `run_iteration.py` shift only availability time.
+The engine, factory, ForwardTester, LiveTrader, live holder-flow pump, fill
+model, 1-bar execution delay, and force-close semantics are unchanged.
+
+Backtester logs now include zero-trade recordings.  This repairs a separate
+measurement flaw: entry gates can intentionally eliminate all trades on a
+recording, and omitting that zero PnL observation from paired analysis changes
+the denominator.  `test_futures.py` covers the pairable-zero log and tests the
+causal append ordering.
+
+### Prior-Artifact Audit
+
+The iter43 accepted comparison was not a clean full-batch experiment:
+
+| Artifact | Requested cohort | Available logs | Common recordings |
+|---|---:|---:|---:|
+| `iter43_hf_gates_off_1786646526` | 262 stated | 95 | 89 vs selected gate run |
+| `iter43_hf_gate1_1786648591` | 262 stated | 89 | 89 |
+
+The gate run reported +0.719 SOL versus +0.273 SOL gates-off, but the common
+89-recording subset is +0.7187 versus +0.2280; six gates-off-only recordings
+contributed +0.0448 SOL net.  The recorded `iter43_gate1_vs_off.json` correctly
+shows only 26.97% of common recordings improved, below the documented 50%
+breadth acceptance rule.  Its Wilcoxon p=0.00954 and mean bootstrap CI
+[+0.00143,+0.01007] therefore cannot independently clear the project's stated
+three-gate protocol.  Furthermore, parameter selection and validation used
+the same cohort, so the nominal p-value is exploratory after the documented
+threshold/window sweep.
+
+### Causal Smoke A/B
+
+An independently selected short-recording temporal slice was used only to
+verify that the corrected replay is wired into the trade path:
+
+`[1395,1432,1433,1467,1468,1470,1505,1523,1524,1665,1758,1778]`.
+
+| Metric | Gates OFF | Gate 1 causal | Difference |
+|---|---:|---:|---:|
+| Recordings | 12 | 12 | 0 |
+| Trades | 4 | 2 | -2 |
+| Win rate | 50.0% | 100.0% | +50.0 pp |
+| PnL | -0.04220 SOL | +0.00633 SOL | +0.04853 SOL |
+| PF | 0.1305 | infinity | n/a |
+| Max token drawdown | 4.66% | 0.00% | -4.66 pp |
+
+The candidate blocked the `ALING` recording-ended loss (-0.046452 SOL) and
+the losing `call` retrace (-0.002080 SOL).  This is a wiring/sanity check, not
+selection evidence: only 2/12 recordings improve, Wilcoxon is undefined after
+zero-difference removal, paired t p=0.317, bootstrap mean CI [0,+0.01179], and
+breadth is 16.7%.  The official paired report is
+`backend/analysis/iter44_causal_subset_gate1_vs_off.json`.
+
+### Decision
+
+**REJECTED.**  This audit rejects promotion of any new holder-flow parameter
+or strategy change.  More importantly, it withdraws iter43 as sufficient
+evidence for production acceptance: the existing default may remain only as
+an explicitly experimental circuit breaker until a fresh, causal, disjoint
+train/validation batch is run.  A full 316-recording causal rerun was not
+completed in this session: representative 300- to 500-candle recordings take
+approximately 2-7 minutes each on this host, making the full paired grid
+several days of CPU time.  Do not claim `IMPROVED` from the iter43 artifacts.
