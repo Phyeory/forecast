@@ -188,7 +188,8 @@ def run_backtest_batch(
         maintenance_margin_rate=maintenance_margin_rate,
         futures_taker_fee=futures_taker_fee,
         futures_slippage_pct=futures_slippage_pct,
-        persist_results=False,
+        persist_results=True,
+        persist_candles=False,
     )
 
     # Scheduling only (per-recording computation is identical either way):
@@ -206,6 +207,14 @@ def run_backtest_batch(
         return results
 
     # Large batches: use parallel processes
+    if engine_version == 2:
+        try:
+            from engine_factory import create_engine
+            _w_eng = create_engine(engine_version=2)
+            _w_eng.update(time=0, o=1.0, h=1.0, l=1.0, c=1.0, volume=1.0, buy_volume=0.5, sell_volume=0.5)
+        except Exception:
+            pass
+
     tasks = [
         {
             "candle_count": max(int(rec.get("candle_count") or 0), 1000),
@@ -246,11 +255,16 @@ def run_backtest(
     futures_taker_fee: float = 0.00045,
     futures_slippage_pct: Optional[float] = None,
     persist_results: bool = True,
+    persist_candles: bool = True,
 ) -> dict:
     """
     Run a full backtest on a saved recording.
 
     Returns a summary dict with the backtest_id and stats.
+
+    ``persist_candles=False`` still saves the backtest row and trade list to
+    the DB (so results show up on the UI) but skips the heavy per-candle
+    series insert, which is what batch mode uses.
     """
     # Fee is always fixed at 0.0001 SOL priority + 0.0 bribe = 0.0001 SOL/tx.
     priority_fee = 0.0001
@@ -291,9 +305,10 @@ def run_backtest(
     )
 
     # Saving full candle series is useful for an interactive single backtest,
-    # but it dominates SQLite I/O in iteration batches and is not consumed by
-    # aggregate/paired analysis.  Batch workers keep only the execution stream.
-    candle_results = [] if persist_results else None
+    # but it dominates SQLite I/O in iteration batches.  Batch runs keep the
+    # backtest row + trades (so results appear on the UI) while skipping the
+    # candle series, which aggregate/paired analysis does not consume.
+    candle_results = [] if persist_results and persist_candles else None
 
     # Local refs for speed
     ft_update = ft.update
@@ -363,7 +378,7 @@ def run_backtest(
             trade_action_for_candle = fwd["trade_action"]
             trade_label_for_candle  = fwd.get("trade_label")
 
-        if persist_results:
+        if candle_results is not None:
             # Read indicators directly from engine state — no dict overhead
             candle_results.append({
                 "time":            t,
@@ -424,7 +439,7 @@ def run_backtest(
             timeframe=timeframe,
             engine_params=saved_params,
             stats=stats,
-            candle_results=candle_results,
+            candle_results=candle_results or [],
             trades=trades,
             batch_id=batch_id,
             market_type=market_type,

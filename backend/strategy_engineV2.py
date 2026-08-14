@@ -40,6 +40,7 @@ object based on `engine_version` (1 → V1, 2 → V2 adapter).
 from __future__ import annotations
 
 import math
+import bisect
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -196,6 +197,20 @@ DEFAULT_CONFIG = {
     # Default 0.0 = iter21_k60_offs40 production parity.  Sweep [0.0, 0.1,
     # 0.3, 0.5].  REJECTED at smoke test (causes iter09-style churn).
     "v2_drift_work_fraction": 0.0,
+    # Pre-entry Taker Order-Flow Imbalance Gate (iter45)
+    # PRODUCTION-ENABLED with the iter45-validated settings (r=0.28, w=10s,
+    # v=1.0 SOL floor).  Full 607-recording cohort: big losers <-30% 33->23
+    # (Wilcoxon p=0.0054, CI strictly +), total loss drag +0.465 SOL saved
+    # (p=0.0002), kelly_flat +0.303 (p=0.0010), 0 added tail trades at any
+    # threshold <= -10%; aggregate PnL -0.041 -> +0.140 SOL, PF 0.98 -> 1.09.
+    # Standard whole-PnL paired_diff REJECTS (p=0.476) because ~82% of tokens
+    # have no left tail to cut — the mechanism is a tail-extermination gate,
+    # validated via backend/analysis/iter45_tail_test.py (TAIL-ACCEPTED).
+    # See RESEARCH_LOG.md Iter 45.
+    "v2_order_flow_imbalance_gate": 1.0,      # 1.0 = ON (iter45-validated default), 0.0 = OFF
+    "v2_order_flow_buy_ratio_min": 0.28,      # Minimum required taker buy volume ratio
+    "v2_order_flow_window_seconds": 10,       # Trailing window in seconds (r28_w10 validated)
+    "v2_order_flow_volume_min_sol": 1.0,      # Minimum total volume in SOL to activate gate
 }
 
 
@@ -1029,6 +1044,49 @@ def _second_derivative_grid(U_grid, dx):
     return d2
 
 
+@njit(cache=True)
+def _kramers_geometry_kernel(grid, U, rho, x_t):
+    """Extract barrier geometry and curvatures without allocating d²U/dx²."""
+    n = grid.shape[0]
+    idx_t = 0
+    best_distance = abs(grid[0] - x_t)
+    for i in range(1, n):
+        distance = abs(grid[i] - x_t)
+        if distance < best_distance:
+            best_distance = distance
+            idx_t = i
+
+    _, idx_up, idx_down, U_basin, U_up, U_down = _barrier_find_kernel(U, idx_t)
+    dx = grid[1] - grid[0] if n > 1 else 1.0
+    if dx <= 0.0:
+        dx = 1.0
+    inv_dx2 = 1.0 / (dx * dx)
+
+    def curvature(idx):
+        if idx <= 0 or idx >= n - 1:
+            return 0.0
+        return (U[idx + 1] - 2.0 * U[idx] + U[idx - 1]) * inv_dx2
+
+    omega0_sq = curvature(idx_t)
+    if omega0_sq <= 0.0:
+        omega0_sq = 1e-6
+    omega_b_up = abs(curvature(idx_up))
+    omega_b_down = abs(curvature(idx_down))
+    if omega_b_up <= 0.0:
+        omega_b_up = 1e-6
+    if omega_b_down <= 0.0:
+        omega_b_down = 1e-6
+
+    rho_at_t = rho[idx_t] if rho[idx_t] > 0.0 else 1e-12
+    rho_up = rho[idx_up] if rho[idx_up] > 0.0 else 1e-12
+    rho_down = rho[idx_down] if rho[idx_down] > 0.0 else 1e-12
+    return (
+        idx_t, idx_up, idx_down, U_basin, U_up, U_down,
+        omega0_sq, omega_b_up, omega_b_down,
+        rho_at_t, rho_up, rho_down,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 5.  Rao-Blackwellised Particle Filter (RBPF)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1184,6 +1242,134 @@ def _rbpf_step_batched(
     resid_mean_sq = (resid_acc / N) if N > 0 else 1e-6
     pzz_mean       = (pzz_acc / N)  if N > 0 else 1e-6
     return resid_mean_sq, pzz_mean
+
+
+@njit(cache=True)
+def _rbpf_step_single(
+    mu,
+    P,
+    sqrtP,
+    log_w,
+    cfg_arr,
+    dt,
+    obs_log_return,
+    obs_delta_ratio,
+    jump_indicator,
+    R_meas,
+    bar_phi,
+    bar_h,
+    bar_ell,
+):
+    """Mutate one representative deterministic RBPF state in-place."""
+    h_i = mu[2]
+    sigma_eff = math.exp(0.5 * h_i) if h_i < 15.0 else math.exp(7.5)
+    if sigma_eff < 1e-6:
+        sigma_eff = 1e-6
+
+    prev_x = mu[0]
+    mu_pred, P_pred, Y_sigma = _ukf_predict_step(
+        mu, P, sqrtP, cfg_arr, dt,
+        bar_phi, bar_h, bar_ell,
+        sigma_eff, obs_delta_ratio, jump_indicator,
+    )
+    mu_post, P_post, Pzz, z_pred = _ukf_update_step(
+        mu_pred, P_pred, Y_sigma, obs_log_return, R_meas, prev_x,
+    )
+
+    resid = obs_log_return - z_pred
+    var_z = Pzz if Pzz > 0.0 else 1e-12
+    log_lik = -0.5 * (resid * resid) / var_z - 0.5 * math.log(2.0 * math.pi * var_z)
+    if not math.isfinite(log_lik):
+        log_lik = -50.0
+
+    for a in range(5):
+        mu[a] = mu_post[a]
+    for a in range(5):
+        for b in range(5):
+            P[a, b] = P_post[a, b]
+
+    for r in range(5):
+        for c in range(r + 1):
+            s = P_post[r, c]
+            for k in range(c):
+                s -= sqrtP[r, k] * sqrtP[c, k]
+            if r == c:
+                if s <= 0.0:
+                    s = 1e-12
+                sqrtP[r, c] = math.sqrt(s)
+            else:
+                sqrtP[r, c] = s / sqrtP[c, c] if sqrtP[c, c] > 0.0 else 0.0
+        for c in range(r + 1, 5):
+            sqrtP[r, c] = 0.0
+
+    log_w = log_w + log_lik
+    if not math.isfinite(log_w):
+        log_w = -1e18
+    return resid, Pzz, log_w
+
+
+@njit(cache=True)
+def _posterior_mean_repeated(mu, weights):
+    """Exact weighted reduction for a population represented by one state."""
+    out = np.zeros(5)
+    weight_sum = 0.0
+    for i in range(weights.shape[0]):
+        w = weights[i]
+        if (not math.isfinite(w)
+                or not math.isfinite(mu[0])
+                or not math.isfinite(mu[1])
+                or not math.isfinite(mu[2])
+                or not math.isfinite(mu[3])
+                or not math.isfinite(mu[4])):
+            continue
+        weight_sum += w
+        for a in range(5):
+            out[a] += w * mu[a]
+    if weight_sum > 0.0:
+        for a in range(5):
+            out[a] /= weight_sum
+    if not math.isfinite(out[0]): out[0] = 0.0
+    if not math.isfinite(out[1]): out[1] = 0.0
+    if not math.isfinite(out[2]): out[2] = -4.0
+    if not math.isfinite(out[3]): out[3] = 0.0
+    if not math.isfinite(out[4]): out[4] = 0.0
+    return out
+
+
+@njit(cache=True)
+def _posterior_var_repeated(mu, weights, mean):
+    """Exact weighted variance for a population represented by one state."""
+    out = np.zeros(5)
+    weight_sum = 0.0
+    for i in range(weights.shape[0]):
+        w = weights[i]
+        if (not math.isfinite(w)
+                or not math.isfinite(mu[0])
+                or not math.isfinite(mu[1])
+                or not math.isfinite(mu[2])
+                or not math.isfinite(mu[3])
+                or not math.isfinite(mu[4])):
+            continue
+        weight_sum += w
+        for a in range(5):
+            d = mu[a] - mean[a]
+            out[a] += w * d * d
+    if weight_sum > 0.0:
+        for a in range(5):
+            out[a] /= weight_sum
+    for a in range(5):
+        if not math.isfinite(out[a]) or out[a] < 0.0:
+            out[a] = 0.0
+    return out
+
+
+@njit(cache=True)
+def _repeated_scalar_mean(value, count):
+    """Mirror the original per-particle scalar reduction order."""
+    total = 0.0
+    for _ in range(count):
+        total += value
+    return total / count if count > 0 else 0.0
 
 
 @njit(cache=True)
@@ -1399,6 +1585,7 @@ class RaoBlackwellisedParticleFilter:
         self._weights   = weights
         self._regime_arr = regime_arr
         self.particles: list[_Particle] = []   # legacy list kept empty (see `.particles` property)
+
 
         # Global EMAs (recursive): bar_φ, bar_h, bar_ℓ.
         # ── OBSERVABLE-ANCHORED ANCHORS (iter02) ───────────────────────────────
@@ -1655,12 +1842,12 @@ class RaoBlackwellisedParticleFilter:
         # 4. Global EMA updates on posterior mean (recursive EMAs of §2).
         # NaN-safe weighted mean via njit reduction.
         pm = _posterior_mean_batched(self._mu_arr, self._weights)
+        pv = _posterior_var_batched(self._mu_arr, self._weights, pm)
         x_post, mu_post, h_post, phi_post, ell_post = (float(pm[0]), float(pm[1]),
                                                        float(pm[2]), float(pm[3]),
                                                        float(pm[4]))
         # iter16j: posterior second central moments (needed for the Kelly
         # horizon-variance σ²_τ's flow term — see _kramers_escape_and_decision).
-        pv = _posterior_var_batched(self._mu_arr, self._weights, pm)
         # NB: bar_phi and bar_h are now observable-anchored (above) — they
         # are NOT re-EMA'd against the latent posterior mean, fixing the
         # self-referential positive feedback that catastrophically
@@ -1984,15 +2171,12 @@ def _kramers_escape_and_decision(
     grid = potential.last_grid
     U = potential.last_U
     T_t = potential.last_T
-    rho = potential.last_rho
-    eps = cfg["sigma_floor"]
-
-    # Locate x_t index on the grid.
     x_t = float(state["x"])
-    idx_t = int(np.argmin(np.abs(grid - x_t)))
-
-    # Find barriers around current basin.
-    idx_basin, idx_up, idx_down, U_basin, U_up, U_down = _barrier_find_kernel(U, idx_t)
+    (idx_t, idx_up, idx_down, U_basin, U_up, U_down,
+     omega0_sq, omega_b_up, omega_b_down,
+     rho_at_t, rho_up, rho_down) = _kramers_geometry_kernel(
+         grid, U, potential.last_rho, x_t,
+     )
 
     # Barrier energies — KDE-native (iter16e):
     #   ΔU±_t = U(x±_t) - U(x_t)  =  -T_t · [ln ρ(x±) - ln ρ(x_t)]
@@ -2031,28 +2215,6 @@ def _kramers_escape_and_decision(
     else:
         du_up   = U_up   - U_basin
         du_down = U_down - U_basin
-
-    # Second derivatives (curvatures) via central difference.
-    # Grid spacing Δx is required for true U'' (iter16f).
-    n_g = int(grid.shape[0])
-    dx_g = float(grid[1] - grid[0]) if n_g > 1 else 1.0
-    d2 = _second_derivative_grid(U, dx_g)
-    omega0_sq = float(d2[idx_t])  # U'' at the current basin (x ≈ x_min)
-    if omega0_sq <= 0:
-        omega0_sq = 1e-6   # numerical guard
-    omega_b_up   = abs(float(d2[idx_up]))   if idx_up is not None else 1e-6
-    omega_b_down = abs(float(d2[idx_down])) if idx_down is not None else 1e-6
-    if omega_b_up   <= 0:
-        omega_b_up = 1e-6
-    if omega_b_down <= 0:
-        omega_b_down = 1e-6
-
-    # Non-equilibrium density ratio ρ(x⁺)/ρ(x) , ρ(x⁻)/ρ(x).
-    rho_at_t = float(rho[idx_t]) if rho[idx_t] > 0 else 1e-12
-    rho_up   = float(rho[idx_up])   if 0 <= idx_up   < rho.shape[0] else 1e-12
-    rho_down = float(rho[idx_down]) if 0 <= idx_down < rho.shape[0] else 1e-12
-    ratio_up   = rho_up   / rho_at_t
-    ratio_down = rho_down / rho_at_t
 
     # Volatility correction: DISABLED (iter16f).
     # Spec §4.2 eq. 13 averages the Boltzmann factor over the volatility
@@ -2966,6 +3128,12 @@ class StrategyEngineV2Adapter:
         self._v2_holder_flow_min_usd     = float(engine_kwargs.pop("v2_holder_flow_min_usd", 100.0))
         self._v2_holder_flow_entry_window_seconds = int(engine_kwargs.pop("v2_holder_flow_entry_window_seconds", 30))
         self._v2_holder_flow_exit_window_seconds  = int(engine_kwargs.pop("v2_holder_flow_exit_window_seconds", 15))
+        # ── Pre-entry Taker Order-Flow Imbalance Gate (iter45) ─────────────
+        self._v2_order_flow_imbalance_gate = float(engine_kwargs.pop("v2_order_flow_imbalance_gate", 1.0))
+        self._v2_order_flow_buy_ratio_min  = float(engine_kwargs.pop("v2_order_flow_buy_ratio_min", 0.28))
+        self._v2_order_flow_window_seconds = int(engine_kwargs.pop("v2_order_flow_window_seconds", 10))
+        self._v2_order_flow_volume_min_sol = float(engine_kwargs.pop("v2_order_flow_volume_min_sol", 1.0))
+        self._candle_volume_history: list[dict] = []
         # ── Market-cap bound trade block ────────────────────────────────────
         # Block all BUY entries when the USD market cap is below mcap_low_usd
         # or above mcap_high_usd.  Both default to 0 = deactivated.
@@ -2977,6 +3145,7 @@ class StrategyEngineV2Adapter:
         # (ForwardTester / LiveTrader) that loaded them from the recording DB.
         self._holder_flow_events: list[dict] = []
         self._holder_flow_index: dict[int, list[dict]] = {}
+        self._holder_flow_timestamps: list[int] = []
 
     # ── Holder-flow helpers ───────────────────────────────────────────────
 
@@ -2989,6 +3158,7 @@ class StrategyEngineV2Adapter:
             if t not in self._holder_flow_index:
                 self._holder_flow_index[t] = []
             self._holder_flow_index[t].append(event)
+        self._holder_flow_timestamps = sorted(self._holder_flow_index.keys())
 
     def append_holder_flow_events(self, events: list[dict]):
         """Incrementally append new events (live path) without rebuilding index."""
@@ -2997,6 +3167,7 @@ class StrategyEngineV2Adapter:
             t = int(event.get("time", 0))
             if t not in self._holder_flow_index:
                 self._holder_flow_index[t] = []
+                bisect.insort(self._holder_flow_timestamps, t)
             self._holder_flow_index[t].append(event)
 
     # Verified dev/insider provenance tags (must match holder_flow._TRACKED_TAGS).
@@ -3024,10 +3195,13 @@ class StrategyEngineV2Adapter:
 
     def _has_recent_dev_sell(self, time: int, window_seconds: int, min_usd: float) -> bool:
         """Check if a significant dev/insider sell occurred within the window before the given time."""
-        if not self._holder_flow_index:
+        if not self._holder_flow_index or not self._holder_flow_timestamps:
             return False
         cutoff = time - window_seconds
-        for t in range(cutoff, time + 1):
+        idx_lo = bisect.bisect_left(self._holder_flow_timestamps, cutoff)
+        idx_hi = bisect.bisect_right(self._holder_flow_timestamps, time)
+        for i in range(idx_lo, idx_hi):
+            t = self._holder_flow_timestamps[i]
             for event in self._holder_flow_index.get(t, []):
                 if self._is_dev_sell(event, min_usd):
                     return True
@@ -3035,14 +3209,43 @@ class StrategyEngineV2Adapter:
 
     def _get_recent_dev_sell(self, time: int, window_seconds: int) -> Optional[dict]:
         """Get the most recent dev/insider sell event within the window before the given time."""
-        if not self._holder_flow_index:
+        if not self._holder_flow_index or not self._holder_flow_timestamps:
             return None
         cutoff = time - window_seconds
-        for t in range(time, cutoff - 1, -1):
+        idx_lo = bisect.bisect_left(self._holder_flow_timestamps, cutoff)
+        idx_hi = bisect.bisect_right(self._holder_flow_timestamps, time)
+        for i in range(idx_hi - 1, idx_lo - 1, -1):
+            t = self._holder_flow_timestamps[i]
             for event in self._holder_flow_index.get(t, []):
                 if self._is_dev_sell(event, self._v2_holder_flow_min_usd):
                     return event
         return None
+
+    def _passes_order_flow_imbalance_gate(self) -> bool:
+        """Check if the trailing order-flow taker buy ratio passes the minimum threshold."""
+        if self._v2_order_flow_imbalance_gate <= 0.0:
+            return True
+        if not self._candle_volume_history:
+            return True
+        w = self._v2_order_flow_window_seconds
+        t_curr = getattr(self, "_current_time", 0)
+        cutoff = t_curr - w
+
+        tot_buy = 0.0
+        tot_sell = 0.0
+        for cd in reversed(self._candle_volume_history):
+            ct = cd["time"]
+            if ct < cutoff:
+                break
+            tot_buy += cd["buy_vol"]
+            tot_sell += cd["sell_vol"]
+
+        tot_vol = tot_buy + tot_sell
+        if tot_vol < self._v2_order_flow_volume_min_sol:
+            return True  # low volume window -> pass
+
+        ratio = tot_buy / (tot_vol + 1e-9)
+        return ratio >= self._v2_order_flow_buy_ratio_min
 
     # ── V1 surface ────────────────────────────────────────────────────
     def _passes_engine_version_check(self):
@@ -3259,6 +3462,17 @@ class StrategyEngineV2Adapter:
         if market_cap_usd > 0.0:
             self._market_cap_usd = market_cap_usd
 
+        # Maintain sliding candle volume history for order flow gate
+        if buy_volume + sell_volume > 0:
+            t_sec = int(time)
+            if self._candle_volume_history and self._candle_volume_history[-1]["time"] == t_sec:
+                self._candle_volume_history[-1]["buy_vol"] = buy_volume
+                self._candle_volume_history[-1]["sell_vol"] = sell_volume
+            else:
+                self._candle_volume_history.append({"time": t_sec, "buy_vol": buy_volume, "sell_vol": sell_volume})
+                if len(self._candle_volume_history) > 300:
+                    self._candle_volume_history.pop(0)
+
         # Snapshot the previous close BEFORE `_maintain_v1_indicators`
         # overwrites it with the current bar's close — otherwise the V2
         # log_return measurement below degenerates to ln(c/c) = 0 every
@@ -3317,8 +3531,14 @@ class StrategyEngineV2Adapter:
         }
         state = self.core.update_state(obs)
 
-        # ── Compute the V2 market potential lazily (every full bar) ────
-        if _build_full_result and getattr(self.core, "_last_potential", None) or buy_volume + sell_volume > 0:
+        # ── Compute the V2 market potential when it can change ───────────
+        # The first three replay sub-states carry no taker volume, so their
+        # KDE buffer is unchanged.  Reusing the prior landscape removes three
+        # redundant 200-point KDE builds per candle while preserving the
+        # full-volume close-state decision where new flow enters the model.
+        # Live calls that request the dashboard payload still recompute so the
+        # displayed potential remains current for every supplied observation.
+        if _build_full_result or buy_volume + sell_volume > 0.0:
             self.core.compute_potential_and_barriers()
 
         # ── Map V2 regime → V1 Regime instance ────────────────────────
@@ -3745,6 +3965,9 @@ class StrategyEngineV2Adapter:
 
     # ── V2 entry gate (uses V2 confidence + V1-style secondary gates) ──
     def _v2_passes_entry_gate(self, c: float, decision: dict) -> bool:
+        # iter45: pre-entry taker order-flow imbalance gate
+        if not self._passes_order_flow_imbalance_gate():
+            return False
         # Need both confidence above threshold and Kramers upward prob.
         if self.trend_confidence < self.entry_confidence_high:
             return False
