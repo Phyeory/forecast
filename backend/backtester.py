@@ -127,6 +127,7 @@ def run_backtest_batch(
     maintenance_margin_rate: float = 0.005,
     futures_taker_fee: float = 0.00045,
     futures_slippage_pct: Optional[float] = None,
+    persist_results: bool = True,
 ) -> list[dict]:
     """
     Run backtests on ALL completed recordings.
@@ -188,7 +189,7 @@ def run_backtest_batch(
         maintenance_margin_rate=maintenance_margin_rate,
         futures_taker_fee=futures_taker_fee,
         futures_slippage_pct=futures_slippage_pct,
-        persist_results=True,
+        persist_results=persist_results,
         persist_candles=False,
     )
 

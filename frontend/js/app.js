@@ -204,7 +204,7 @@ let engineParamsV2 = {
   // drag (p=0.0002), +0.181 SOL whole-cohort PnL, 0 added tail trades ≤-10%.
   // Standard whole-PnL paired_diff REJECTS (p=0.476) — tail-extermination
   // mechanism, judged by tail-focused tests (see RESEARCH_LOG.md Iter 45).
-  v2_order_flow_imbalance_gate: 1.0,   // 1.0 = ON (iter45-validated default), 0.0 = OFF
+  v2_order_flow_imbalance_gate: 0.0,   // 1.0 = ON (iter45-validated default), 0.0 = OFF
   v2_order_flow_buy_ratio_min:  0.28,  // min taker buy-volume ratio in window
   v2_order_flow_window_seconds: 10,    // trailing window (s)
   v2_order_flow_volume_min_sol: 1.0,   // window volume floor (SOL); below → gate passes
