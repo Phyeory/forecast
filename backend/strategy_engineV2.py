@@ -198,16 +198,10 @@ DEFAULT_CONFIG = {
     # 0.3, 0.5].  REJECTED at smoke test (causes iter09-style churn).
     "v2_drift_work_fraction": 0.0,
     # Pre-entry Taker Order-Flow Imbalance Gate (iter45)
-    # PRODUCTION-ENABLED with the iter45-validated settings (r=0.28, w=10s,
-    # v=1.0 SOL floor).  Full 607-recording cohort: big losers <-30% 33->23
-    # (Wilcoxon p=0.0054, CI strictly +), total loss drag +0.465 SOL saved
-    # (p=0.0002), kelly_flat +0.303 (p=0.0010), 0 added tail trades at any
-    # threshold <= -10%; aggregate PnL -0.041 -> +0.140 SOL, PF 0.98 -> 1.09.
-    # Standard whole-PnL paired_diff REJECTS (p=0.476) because ~82% of tokens
-    # have no left tail to cut — the mechanism is a tail-extermination gate,
-    # validated via backend/analysis/iter45_tail_test.py (TAIL-ACCEPTED).
+    
+
     # See RESEARCH_LOG.md Iter 45.
-    "v2_order_flow_imbalance_gate": 1.0,      # 1.0 = ON (iter45-validated default), 0.0 = OFF
+    "v2_order_flow_imbalance_gate": 0.0,      # 1.0 = ON, 0.0 = OFF
     "v2_order_flow_buy_ratio_min": 0.28,      # Minimum required taker buy volume ratio
     "v2_order_flow_window_seconds": 10,       # Trailing window in seconds (r28_w10 validated)
     "v2_order_flow_volume_min_sol": 1.0,      # Minimum total volume in SOL to activate gate

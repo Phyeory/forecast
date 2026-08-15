@@ -5560,22 +5560,11 @@ CI [-0.0015, +0.0046], 23.9% tokens improved) — exactly as predicted by the
 design-protocol note: the whole-baseline lens dilutes a tail-only effect to
 insignificance.
 
-**Left-tail protocol: ACCEPT** — every tail metric improves at p < 0.01 with
+**Left-tail protocol: REJECT** — While every tail metric improves at p < 0.01 with
 strictly positive bootstrap CIs on the full, independently-validated cohort;
-zero added tail trades; the mechanism achieves precisely its design goal.
+The mechanism performed significantly worse than the engine without the gate when tested with a full batch backtest.
+The gate achieved a dissapointing winrate of 71% and a total pnl of +1.013 SOL across 1088 recording, whereas the gateless backtest achieved 1.6 SOL
 
-### Production change
-
-**ENABLED (DEFAULT-ON) as of the post-iter45 session, per user directive.**
-The gate ships with the iter45-validated r28_w10 settings
-(`v2_order_flow_imbalance_gate=1.0`, `buy_ratio_min=0.28`, `window=10s`,
-`volume_min_sol=1.0`) as the new `DEFAULT_CONFIG` + ctor defaults, mirrored
-in `frontend/js/app.js` `engineParamsV2`.  Verified byte-identical to the
-`iter45_full_r28w10` validation batch on 10 recordings, `test_futures.py`
-18/18 pass.  The whole-PnL `paired_diff` gate still REJECTS (p=0.476) — the
-mechanism is a left-tail-extermination gate judged by tail-focused tests
-(TAIL-ACCEPTED); setting `v2_order_flow_imbalance_gate=0.0` restores
-pre-iter45 behaviour.
 
 ### Artifacts
 
@@ -5584,11 +5573,4 @@ pre-iter45 behaviour.
 * `backend/analysis/iter45_full_std_gate.json` (standard paired_diff, REJECT)
 * `backend/analysis/iter45_tail_test.py` (tail-focused paired test harness)
 
-### Status
 
-**TAIL-ACCEPTED — PROMOTED TO DEFAULT-ON (r28_w10) by user directive.**
-The gate exterminates the left tail with high statistical significance on an
-independent full cohort (Wilcoxon p < 0.01, strictly positive CIs, 0 added
-tail trades ≤ -10%) at a cost of some winning entries.  Standard whole-PnL
-paired_diff remains REJECT (p=0.476) — expected and documented for a
-tail-only mechanism.

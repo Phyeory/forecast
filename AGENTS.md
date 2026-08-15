@@ -639,9 +639,8 @@ future agent must therefore:
 > No spot regression is possible from this iteration.  Engine source
 > for spot runs is byte-identical to HEAD.  See RESEARCH_LOG.md Iter 42.
 >
-> **iter45 (Pre-entry taker order-flow imbalance gate — TAIL-ACCEPTED /
-> DEFAULT-ON r28_w10, production change per user directive).**  Hypothesis: long
-> entries made into net-sell taker flow become the `kelly_flat` /
+> **iter45 Pre-entry taker order-flow imbalance gate — REJECTED /
+> Hypothesis: long entries made into net-sell taker flow become the `kelly_flat` /
 > `recording_ended` slow-bleed left tail.  New parity-safe params in
 > `strategy_engineV2.py` + `frontend/js/app.js` engineParamsV2:
 > `v2_order_flow_imbalance_gate` (1.0 = ON), plus
