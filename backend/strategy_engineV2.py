@@ -3123,7 +3123,7 @@ class StrategyEngineV2Adapter:
         self._v2_holder_flow_entry_window_seconds = int(engine_kwargs.pop("v2_holder_flow_entry_window_seconds", 30))
         self._v2_holder_flow_exit_window_seconds  = int(engine_kwargs.pop("v2_holder_flow_exit_window_seconds", 15))
         # ── Pre-entry Taker Order-Flow Imbalance Gate (iter45) ─────────────
-        self._v2_order_flow_imbalance_gate = float(engine_kwargs.pop("v2_order_flow_imbalance_gate", 1.0))
+        self._v2_order_flow_imbalance_gate = float(engine_kwargs.pop("v2_order_flow_imbalance_gate", 0.0))
         self._v2_order_flow_buy_ratio_min  = float(engine_kwargs.pop("v2_order_flow_buy_ratio_min", 0.28))
         self._v2_order_flow_window_seconds = int(engine_kwargs.pop("v2_order_flow_window_seconds", 10))
         self._v2_order_flow_volume_min_sol = float(engine_kwargs.pop("v2_order_flow_volume_min_sol", 1.0))
