@@ -5719,3 +5719,91 @@ confirmation-scaled ENTRY gating rather than add-ons).
   `/tmp/iter46_final_validation.json`
 * per-token logs `backend/v2_results/*_iter46_baseline_1786836227_*` and
   `*_iter46_cwse04m04_*`
+
+---
+
+## Iter 47 — Drift-Completed Down-Escape Channel (2026-08-16)
+
+### 1. Hypothesis & Mathematical Formulation
+
+The Kramers down-barrier escape probability $P_{\text{down}}$ is a quasi-equilibrium
+transition probability driven by the KDE visit-density ratio. During a one-directional
+crash, the price territory **below** current price has never been visited ($\rho \approx 0$).
+Consequently, the down-barrier is degenerate and $P_{\text{down}} \to 0$ (median $\approx 6 \times 10^{-6}$
+at `kelly_flat` exit) — even though the RBPF Ornstein-Uhlenbeck drift posterior $\mu_t$
+is strongly negative ($\mu < 0$ on 100% of catastrophic breach ticks). The engine is
+structurally blind to its own negative drift in crashes because the KDE model is undefined
+in unvisited support.
+
+Iter 47 introduced a **drift-completed down-escape channel** in probability space,
+completing the downward transition probability with the SDE's analytical OU first-passage
+probability when the KDE mass below $x_t$ is below $\text{mass\_max}$ (crash geometry):
+
+$$\nu = \frac{\mu_t}{\lambda_\mu} (1 - e^{-\lambda_\mu \tau}), \quad s = \sigma_t \sqrt{\tau}, \quad \delta = m \sigma_t \sqrt{\tau}$$
+$$P_{\text{fp}} = \Phi\left(-\frac{\nu+\delta}{s}\right) + \exp\left(-\frac{2\nu\delta}{s^2}\right) \Phi\left(\frac{\nu-\delta}{s}\right)$$
+$$P_{\text{down}}' = P_{\text{down}} + (1 - P_{\text{down}}) \cdot w \cdot P_{\text{fp}}$$
+
+Renormalising $P_{\text{up}}$ and $P_{\text{zero}}$ preserves probability conservation.
+When `v2_drift_escape_enable=0.0`, the calculation is bypassed and returns exact byte-parity.
+
+### 2. Parameter Sweep on Shuffled 60-Recording Subset
+
+Evaluated 6 parameter configurations across $\sigma_m \in \{1.5, 2.0, 2.5, 3.0\}$,
+$\text{mass\_max} \in \{0.05, 0.10\}$, and $w \in \{0.6, 1.0\}$ on a random 60-recording
+cohort (206,682 candles, paired against on-disk `iter46_baseline_1786836227` logs):
+
+| Configuration | Trades | Win Rate | Total PnL (SOL) | Δ PnL vs Base | Tail Count (≤−30%) | Tail PnL (SOL) |
+|---|---|---|---|---|---|---|
+| **Baseline (on disk)** | 169 | 72.8% | **+0.43465** | — | 22 | −0.96201 |
+| `cand_s2.0_m0.05_w1.0` | 252 | 42.1% | −0.18733 | −0.62198 | **4 (−82%)** | **−0.16289 (+0.80)** |
+| `cand_s1.5_m0.05_w1.0` | 257 | 38.9% | −0.51285 | −0.94750 | 5 (−77%) | −0.20177 (+0.76) |
+| `cand_s2.5_m0.05_w1.0` | 237 | 44.7% | −0.12732 | −0.56198 | 7 (−68%) | −0.26970 (+0.69) |
+| `cand_s3.0_m0.05_w1.0` | 229 | 46.7% | −0.10481 | −0.53946 | 8 (−64%) | −0.30084 (+0.66) |
+| `cand_s2.0_m0.10_w1.0` | 269 | 39.4% | −0.31299 | −0.74764 | 3 (−86%) | −0.12408 (+0.84) |
+| `cand_s2.0_m0.05_w0.6` | 231 | 45.9% | −0.22124 | −0.65589 | 6 (−73%) | −0.23569 (+0.73) |
+
+### 3. Statistical Testing & Paired Differences
+
+On `cand_s2.0_m0.05_w1.0`:
+- **Tail extermination lens**:
+  - Catastrophic count: 22 → 4 (Wilcoxon $p = 2.85 \times 10^{-5}$, bootstrap CI $[+0.183, +0.433]$).
+  - Tail PnL drag: −0.962 → −0.163 SOL (Wilcoxon $p = 3.81 \times 10^{-6}$, bootstrap CI $[+0.0080, +0.0191]$).
+  - Zero added tail trades: 0 added tail trades across all 60 recordings.
+- **Whole-PnL protocol lens**:
+  - Total PnL: +0.435 → −0.187 SOL ($\Delta = -0.622$ SOL, Wilcoxon one-sided $p = 0.907$ FAIL).
+  - Bootstrap 95% CI of mean $\Delta$: $[-0.0219, -0.0005]$ (strictly negative, FAIL).
+  - Trade expansion: 169 → 252 trades (+49% churn).
+  - Win rate collapse: 72.8% → 42.1% (−30.7 percentage points).
+
+### 4. Causal Autopsy: Re-Confirmation of the Iter 37 Oracle Bound
+
+Trade-level forensic autopsy on worst-delta recordings revealed two structural failure modes:
+1. **Premature Winner Truncation**: Intact trending memecoins routinely pull back into
+   unvisited territory during healthy multi-minute upward expansions. For instance, on
+   `rec86`, the baseline entered at $t=1785205659$, weathered normal pullbacks, and exited
+   via `kramers_down_exit` for **+0.0965 SOL (+96.5%)**. In the candidate, a transient dip
+   into unvisited support triggered drift first-passage completion, pushing $P_{\text{down}} \ge 0.5$
+   and chopping out the position after only 25 seconds for **−0.0053 SOL (−5.3%)**.
+2. **Replacement-Entry Churn**: Exiting early from a bleeding token frees capital that
+   immediately re-enters on micro-pullbacks. On `rec106`, baseline had 1 slow-bleed loss
+   to `kelly_flat` (−0.052 SOL). Candidate exited after 3 seconds (−0.011 SOL), but immediately
+   re-bought 4 consecutive times on upward flickers (−0.005, −0.005, −0.018, +0.006 SOL),
+   accumulating equivalent losses plus 4× spread and transaction fees.
+
+This confirms the **Iter 37 Oracle Impossibility Bound**: within the single-asset OHLCV stream,
+any exit mechanism triggered earlier in drawdown truncates winning trade rebounds and produces
+replacement entries on persistent losers, ensuring total PnL is bounded strictly below baseline.
+
+### 5. Decision
+
+**REJECTED.** The mechanism achieves strong tail reduction (−82% tail count, +0.80 SOL tail drag
+reduction) but fails the mandatory protocol PnL gate ($\Delta = -0.622$ SOL, Wilcoxon $p = 0.907$,
+CI strictly negative) due to winner truncation and replacement-entry churn.
+
+The mechanism is reverted to maintain clean baseline parity.
+
+### 6. Artifacts
+
+- `backend/analysis/iter47_sweep_subset.py`, `backend/analysis/iter47_tail_stats.py`
+- `backend/analysis/iter47_trace.py`, `backend/analysis/iter47_ab_cata.py`
+- `/tmp/iter47_subset_summary.json`, `/tmp/cand_s2.0_m0.05_w1.0.json`
