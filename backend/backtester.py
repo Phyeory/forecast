@@ -55,6 +55,8 @@ from data_store import (
 
 import multiprocessing
 
+from process_watchdog import guard_parent
+
 # Directory where per-token JSON trade logs are written.
 # Allow override via env var so V2 iteration runs can persist to a safe location
 # (e.g. backend/v2_results/) that is NOT wiped by external V1 param-sweep scripts
@@ -72,7 +74,7 @@ def _get_pool(max_workers: int) -> ProcessPoolExecutor:
     if multiprocessing.current_process().name != 'MainProcess':
         raise RuntimeError("Cannot spawn process pool from a child process")
     if _pool is None:
-        _pool = ProcessPoolExecutor(max_workers=max_workers)
+        _pool = ProcessPoolExecutor(max_workers=max_workers, initializer=guard_parent)
     return _pool
 
 
@@ -91,6 +93,7 @@ def _run_backtest_worker_chunk(tasks: list[dict]) -> list[dict]:
     warm worker busy through several recordings while retaining process
     isolation and deterministic per-recording execution.
     """
+    guard_parent()
     return [_run_single_backtest_worker(task) for task in tasks]
 
 

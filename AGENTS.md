@@ -57,6 +57,7 @@ python backend/analysis/aggregate_results.py --batch-id iter04_full --save iter0
 6. **Engine Factory Indirection**: All pipelines instantiate strategy engines via `engine_factory.create_engine(engine_version=1|2, **params)`. Both V1 (`StrategyEngine`) and V2 (`StrategyEngineV2Adapter`) present the exact same public interface.
 7. **Database Isolation**: Real market datasets reside in SQLite DBs under `backend/data/` (`price_data.db`, `backtest_data.db`, `sniper.db`). Do not write to `backend/candles.db` (legacy file).
 8. **Isolated Result Directories**: Use `BACKTEST_RESULTS_DIR=backend/v2_results` during V2 sweeps to protect benchmark artifacts from being cleared by V1 parameter sweeps.
+9. **No Orphaned Pool Workers**: Every `ProcessPoolExecutor` / `mp.Pool` worker (backtester `_get_pool`, `run_orderflow_*`, `run_stage1_sweep`, `iter06_probe`) must start with `guard_parent()` (via `initializer=` or a call at the top of the worker function) from `backend/process_watchdog.py`. It hard-exits the worker within 1 s if its spawn parent dies (SIGKILL / crash / closed terminal), preventing the CPU-burning orphan pools that previously kept running for 17+ h with PPID=1. The guard is a pure safety net — a live parent is unaffected and backtest output is byte-identical. Pool workers spawned before a code change do NOT carry the guard — restart `main.py` after deployments so its backtest pool re-initializes.
 
 ---
 

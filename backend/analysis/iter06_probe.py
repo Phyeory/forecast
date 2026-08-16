@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import forward_tester as ftm
 import strategy_engineV2 as se2
 import numpy as np
+from process_watchdog import guard_parent
 
 
 # ── V2 adapter hook ────────────────────────────────────────────────────────
@@ -268,7 +269,7 @@ def main():
         recs = json.load(f)
     print(f"probing {len(recs)} recordings on {args.max_workers} workers", flush=True)
 
-    with mp.Pool(args.max_workers) as pool:
+    with mp.Pool(args.max_workers, initializer=guard_parent) as pool:
         out = pool.starmap(run_one_recording, [(r, args.label) for r in recs])
 
     # Now load all output JSONs into a trade-level aggregate

@@ -5574,3 +5574,148 @@ The gate achieved a dissapointing winrate of 71% and a total pnl of +1.013 SOL a
 * `backend/analysis/iter45_tail_test.py` (tail-focused paired test harness)
 
 
+
+## Iter 46 — Left-tail discovery protocol → CWSE (Confirmation-Weighted Staged Exposure). Tail compressed, PnL REJECTED at full batch. Default stays OFF.
+
+**Directive (user).** NOVEL LEFT-TAIL DISCOVERY PROTOCOL: do not re-sweep
+investigated mechanisms. Define the tail mathematically, autopsy every
+catastrophic loser individually, categorize all prior mechanisms, generate
+5–10 genuinely novel candidate mechanisms, rank them, implement the
+strongest, and pass the non-negotiable full-batch validation gate. Verdict
+must be IMPROVED / REJECTED / INCONCLUSIVE.
+
+### 1. Mathematical definition of the left tail (full-batch baseline `iter46_baseline`)
+
+304 recordings with trades, 741 trades, +1.641 SOL, 72.3% WR, PF 1.32.
+Loss variable L_i = −pnl_sol:
+
+* Q_95(L)=0.054, Q_99(L)=0.062, max L=0.074 SOL (the -74% rec1993 shock)
+* CVaR_95=0.059, CVaR_99=0.066
+* pnl_pct P01=-56.3%, P05=-44.0%, worst=-73.97%
+* 85 catastrophic trades (≤-30%) = **-3.845 SOL = 75.5% of all loss PnL**
+  (-5.095); worst-20 = +1.128 SOL of loss. Tail alone exceeds total net PnL.
+
+### 2. Causal autopsy (`backend/analysis/iter46_autopsy.py`)
+
+Taxonomy of catastrophes on the 266-trade earlier artifact cohort: oscillating
+slow-bleed 8, fast-crash<2min 8, shock<30s 7 (incl. -74% in 1s), persistent
+submersion 3, short-recording dump 3. Post-entry separation (the only
+separable axis found anywhere):
+
+* **MFE@+10%: catastrophes 0/29 (and 0/38 on the second cohort) ever reach
+  it; winners 86-88%** — near-perfect order-statistic separation.
+* MFE@+5%: 31-32% of catastrophes vs 93-94% of winners.
+* Time-to-confirm +3%: winners median 15s; dip-then-recover winners 53s.
+
+### 3. Entry-time information is exhausted (new measurement class)
+
+AUC(cata vs win) over ALL entry-time features including every engine-posterior
+variable (E*, n*, P_up/down, σ_t, σ²_τ, κ_up/down, confidence, regime code,
+bar_count): 0.44–0.61 (best 0.614, v2_sigma2_tau). All 105 pairwise
+median-quadrant conjunctions: best |AUC-0.5| = 0.122. Pre-entry OHLCV
+context distributions IDENTICAL across groups. Holder-flow pre-300s: 0
+discriminating power. Temporal clustering: p=1.0. ⇒ No entry-time gate —
+including engine-internal ones — can separate the tail (extends iter31/34/35
+to engine decision variables + 2-feature interactions; prior iters never
+tested those axes).
+
+### 4. Candidate mechanisms generated & novelty-tested
+
+| # | mechanism | verdict |
+|---|---|---|
+| M1 | **CWSE** — enter f0·size, deploy the withheld (1−f0) only if price confirms entry·(1+m) | **selected, full-batch tested** |
+| M2 | EODR event-ordered de-risk (touch −d% before +m%) | runner-up: fires 100% of catastrophes but 14-32% of winners breach first; net ≤ 0 |
+| M3 | M1b timeout de-risk at T if unconfirmed | negative: unconfirmed-at-T winners carry +0.19–0.5 SOL; net ≤ 0 |
+| M4 | drawdown-de-risk (partial sell) | net-neutral at every threshold: winners breach −10% and recover (+0.51 SOL at risk) |
+| M5–10 | survival hazard / CUSUM / EV-tail gate / conformal bounds / regime-switch size / breadth | blocked by §3 exhaustion + prior negative results |
+
+Novelty: every prior left-tail attempt (iters 5–45) was an entry filter
+(bounded at ~0 by §3) or a downside-reactive exit/de-risk (pays the
+recovering-winner cost). CWSE never reacts to downside — it makes exposure a
+function of the realized upside path, exploiting the ONE separable axis (§2).
+No scale-in / add-on / partial-commitment concept exists anywhere in
+iters 1–45.
+
+### 5. Implementation (parity-safe, default-OFF, engine untouched)
+
+`backend/forward_tester.py`: `cwse_enable/cwse_initial_fraction/cwse_confirm_pct`
+(defaults 0.0/0.4/0.04) popped BEFORE `create_engine`; `_open_long` deploys
+f0·size; `_maybe_cwse_addon` buys the remainder at max(threshold, open)·(1+slip)
++fee when HIGH crosses entry·(1+m) on a candle strictly after entry; spot-only;
+`Trade.cwse_added/cwse_addon_price/cwse_addon_sol` audit fields persisted.
+`backend/live_trader.py`: same kwargs route; entry deploys f0 on-chain;
+`check_cwse_addon(high)` fires a second-leg `execute_buy(is_addon=True)` with
+its own failure contract (`_fail_addon` leaves the position OPEN on the
+initial leg — the withheld capital WAS the protection; engine notified never).
+`frontend/js/app.js`: three params, default OFF.
+
+Parity: OFF path byte-identical (multiple recs, trade tuples + balances equal);
+test_futures.py 18/18; strategy signals computed on identical candle stream —
+CWSE changes only how much SOL the executor commits.
+
+### 6. Full-batch validation (`iter46_baseline_1786836227` vs `iter46_cwse04m04_1786840302`)
+
+| metric | baseline | CWSE (f0=0.4, m=+4%) | Δ |
+|---|---|---|---|
+| trades | 741 | 743 (+594 add-on legs) | +2 |
+| total PnL (SOL) | **+1.641** | **+1.208** | **−0.433** |
+| profit factor | 1.322 | 1.356 | +0.034 |
+| win rate | 72.3% | 58.1% | −14.2 |
+| avg loser | −0.0249 | −0.0109 | +0.014 |
+| CVaR_95(L) | 0.0594 | 0.0493 | **−17%** |
+| Q_99(L) / max L | 0.062 / 0.074 | 0.053 / 0.062 | −15% / −17% |
+| worst-10 sum | 0.599 | 0.519 | −13% |
+| catastrophic (≤−30%) n / SOL | 85 / −3.845 | 86 / **−2.212** | **−42.5%** |
+| loss PnL total | −5.095 | −3.395 | **+1.700** |
+| catastrophic share of loss PnL | 75.5% | 65.1% | −10.4 |
+
+Paired tests (306 recordings): Wilcoxon one-sided p=1.000 (z=−4.28, FAIL);
+bootstrap 95% CI of mean Δ [−0.00296, +0.00020] (straddles 0, FAIL); breadth
+80/306 improved (26%, FAIL ≥50%). Tail-focused test: catastrophic PnL cut
++1.63 SOL but the standard protocol gates on total-PnL paired tests;
+FAIL. 105 W→L flips vs 0 L→W — the add-on's fee/slippage flips every
+marginal small-winner negative.
+
+### 7. Why the tail compression is real but the PnL is not (cost decomposition)
+
+* Unconfirmed legs (148 trades, losers that never confirmed): **Δ = +2.106
+  SOL** — the design works exactly as intended; loser exposure scaled by 0.4.
+* Confirmed legs (593 trades): **Δ = −2.558 SOL** and this is the fatal
+  cost: the add-on re-buys at +4% above entry. Of these, 510 were baseline
+  winners → Δ −2.308 (buying high into exits that mostly give back only a few
+  %: gain_retrace +4.02→+2.10); 23 were catastrophes that DID confirm +4%
+  first (dead-cat bounce) → re-bought into the crash (Δ −0.042, small because
+  the leg is only 60% of size); plus 238 marginal (+0…6.5%) winners flipped
+  W→L by the leg's own fees.
+* Static counterfactual (+0.05…+0.17) had assumed the add-on exits at the
+  trade's original return-minus-m; the real fill geometry (fill high in the
+  bar, exit at the same instant the initial leg does) is strictly worse.
+
+### 8. Decision
+
+**REJECTED.** Full-batch protocol gates fail decisively (Wilcoxon p=1.000,
+CI straddles 0, 26% breadth, ΔPnL = −0.433 SOL). CWSE is the first mechanism
+in 9+ attempts to provably compress the left tail at scale (catastrophic drag
+−42.5%, loss PnL +1.70 SOL, every mandatory tail quantile improved) — but the
+confirmation add-on's adverse-selection-and-fee drag (−2.56 SOL) exceeds the
+tail saving (+2.11 SOL) **because this engine's confirmed winners have small
+post-confirmation continuation: paying m=+4% to deploy late on an exit leg
+that averages +9.4% gross is a bad price.** The discovery itself is the
+durable result: upside-confirmation order is the only separable axis; any
+future use of it must take value BEFORE paying confirmation premium
+(i.e. the entry leg is the value, not the add-on).
+
+Engine default is `cwse_enable=0.0` → byte-identical pre-iter46 behaviour.
+Implementation retained (default-OFF, parity-safe) for any future variant
+that resolves the add-on cost (e.g. f0≥0.8 with a much higher m, or
+confirmation-scaled ENTRY gating rather than add-ons).
+
+### Artifacts
+
+* `backend/analysis/iter46_tail_def.py`, `iter46_autopsy.py`,
+  `iter46_earlywarn.py`, `iter46_staged_sim.py`, `iter46_eodr_sim.py`,
+  `iter46_m1b_sim.py`, `iter46_interaction.py`
+* `backend/analysis/iter46_final_validation.py` +
+  `/tmp/iter46_final_validation.json`
+* per-token logs `backend/v2_results/*_iter46_baseline_1786836227_*` and
+  `*_iter46_cwse04m04_*`
