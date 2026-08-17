@@ -198,13 +198,25 @@ DEFAULT_CONFIG = {
     # 0.3, 0.5].  REJECTED at smoke test (causes iter09-style churn).
     "v2_drift_work_fraction": 0.0,
     # Pre-entry Taker Order-Flow Imbalance Gate (iter45)
-    
+
 
     # See RESEARCH_LOG.md Iter 45.
     "v2_order_flow_imbalance_gate": 0.0,      # 1.0 = ON, 0.0 = OFF
     "v2_order_flow_buy_ratio_min": 0.28,      # Minimum required taker buy volume ratio
     "v2_order_flow_window_seconds": 10,       # Trailing window in seconds (r28_w10 validated)
     "v2_order_flow_volume_min_sol": 1.0,      # Minimum total volume in SOL to activate gate
+    # Entry-Validation Response triage exit (iter48) — see RESEARCH_LOG.md Iter 48.
+    # evr9 config validated on 953-recording full cohort: +1.142 SOL kelly_flat saving,
+    # catastrophics ≤−30% cut 87→76 (p=0.0038), PnL +1.724→+1.753 SOL.
+    "v2_evr_enable":        1.0,    # 1.0 = ON (production default); 0.0 = OFF
+    "v2_evr_confirm_pct":   10.0,   # confirmation threshold: peak ≥ entry·(1+m); 0% catas never hit +10%
+    "v2_evr_eval_delay":    120,    # seconds after fill before triage can fire
+    "v2_evr_grace_seconds": 0,      # >0: fire only within [delay, delay+grace) (one-shot)
+    "v2_evr_flow_window":   20,     # trailing taker-flow window (s)
+    "v2_evr_buy_ratio_max": 0.45,   # fire when trailing buy-ratio < r (validated r=0.45)
+    "v2_evr_volume_min_sol": 1.0,   # no-data guard (below ⇒ no triage)
+    "v2_evr_require_offside": 1.0,  # fire only when close < entry
+    "v2_evr_offside_min_pct": 20.0, # require close ≤ entry*(1-20/100); winner MAE q10=−16.2%
 }
 
 
@@ -3128,6 +3140,25 @@ class StrategyEngineV2Adapter:
         self._v2_order_flow_window_seconds = int(engine_kwargs.pop("v2_order_flow_window_seconds", 10))
         self._v2_order_flow_volume_min_sol = float(engine_kwargs.pop("v2_order_flow_volume_min_sol", 1.0))
         self._candle_volume_history: list[dict] = []
+        # ── Entry-Validation Response triage exit (iter48) ──────────────────
+        # Post-entry evidence channel: the market's taker-flow RESPONSE to the
+        # engine's own entry.  Autopsy on iter46_baseline: pre-entry flow has
+        # zero separation (brpre AUC 0.49) but post-entry flow does (buy-ratio
+        # over [0,40]s: catastrophic median 0.40 vs winner 0.61); catastrophes
+        # never confirm +10% MFE (0/85) while winners confirm fast (69% within
+        # 20 s).  EVR exits an UNCONFIRMED, flow-INVALIDATED, offside position
+        # once `eval_delay` seconds have elapsed since entry.  Default 1.0 =
+        # ON (evr9 production config, full-cohort validated iter48).
+        self._v2_evr_enable        = float(engine_kwargs.pop("v2_evr_enable", 1.0))
+        self._v2_evr_confirm_pct   = float(engine_kwargs.pop("v2_evr_confirm_pct", 10.0))
+        self._v2_evr_eval_delay    = int(engine_kwargs.pop("v2_evr_eval_delay", 120))
+        self._v2_evr_grace_seconds = int(engine_kwargs.pop("v2_evr_grace_seconds", 0))
+        self._v2_evr_flow_window   = int(engine_kwargs.pop("v2_evr_flow_window", 20))
+        self._v2_evr_buy_ratio_max = float(engine_kwargs.pop("v2_evr_buy_ratio_max", 0.45))
+        self._v2_evr_volume_min_sol = float(engine_kwargs.pop("v2_evr_volume_min_sol", 1.0))
+        self._v2_evr_require_offside = float(engine_kwargs.pop("v2_evr_require_offside", 1.0))
+        self._v2_evr_offside_min_pct = float(engine_kwargs.pop("v2_evr_offside_min_pct", 20.0))
+        self._evr_entry_time: int = 0
         # ── Market-cap bound trade block ────────────────────────────────────
         # Block all BUY entries when the USD market cap is below mcap_low_usd
         # or above mcap_high_usd.  Both default to 0 = deactivated.
@@ -3241,6 +3272,60 @@ class StrategyEngineV2Adapter:
         ratio = tot_buy / (tot_vol + 1e-9)
         return ratio >= self._v2_order_flow_buy_ratio_min
 
+    def _evr_trailing_buy_ratio(self):
+        """iter48 EVR: trailing taker buy-ratio over the last `_v2_evr_flow_window`
+        seconds, or None when the window carries less than `_v2_evr_volume_min_sol`
+        of volume (no-data ⇒ no triage; parity with the iter45 gate convention)."""
+        if not self._candle_volume_history:
+            return None
+        cutoff = int(getattr(self, "_current_time", 0)) - self._v2_evr_flow_window
+        tot_buy = 0.0
+        tot_sell = 0.0
+        for cd in reversed(self._candle_volume_history):
+            if cd["time"] < cutoff:
+                break
+            tot_buy += cd["buy_vol"]
+            tot_sell += cd["sell_vol"]
+        tot_vol = tot_buy + tot_sell
+        if tot_vol < self._v2_evr_volume_min_sol:
+            return None
+        return tot_buy / (tot_vol + 1e-9)
+
+    def _check_evr_triage_exit(self, c: float, entry: float) -> bool:
+        """iter48 EVR branch condition: the entry has gone UNCONFIRMED (peak
+        price since entry never reached entry*(1+confirm_pct/100)), the trailing
+        taker flow has NOT validated the entry (buy-ratio below max), the trade
+        is offside, and at least `eval_delay` seconds have passed since the
+        fill.  Fires at most on the first qualifying sub-tick after the delay
+        (confirmation is monotone in `_peak_price`, so a trade that confirms
+        later can never fire)."""
+        if self._v2_evr_enable <= 0.0 or entry <= 0:
+            return False
+        t_now = int(getattr(self, "_current_time", 0))
+        _age = t_now - self._evr_entry_time
+        if _age < self._v2_evr_eval_delay:
+            return False
+        # Grace window (default 0 = continuous evaluation, the behaviour the
+        # iter48 A/B configs tested): when > 0, the triage is one-shot-faithful
+        # to the static counterfactual — it may only fire inside
+        # [delay, delay+grace).  Past the window the position is never EVR-cut.
+        if self._v2_evr_grace_seconds > 0 and _age >= self._v2_evr_eval_delay + self._v2_evr_grace_seconds:
+            return False
+        if self._peak_price >= entry * (1.0 + self._v2_evr_confirm_pct / 100.0):
+            return False
+        if self._v2_evr_require_offside > 0.0 and c >= entry:
+            return False
+        # Offside DEPTH gate (default 0.0 = any offside close, the originally
+        # tested semantics): winner whole-trade MAE q10 is -16.2% while every
+        # catastrophic passes through -25%+ — a depth floor at 20-25% removes
+        # the recovering-winner fires that cost win rate.
+        if self._v2_evr_offside_min_pct > 0.0 and c > entry * (1.0 - self._v2_evr_offside_min_pct / 100.0):
+            return False
+        br = self._evr_trailing_buy_ratio()
+        if br is None or br >= self._v2_evr_buy_ratio_max:
+            return False
+        return True
+
     # ── V1 surface ────────────────────────────────────────────────────
     def _passes_engine_version_check(self):
         # Pass through.  No-op standalone — the symbol is there in case
@@ -3254,6 +3339,8 @@ class StrategyEngineV2Adapter:
         self._peak_price = float(entry_price)
         self.entry_bar_count = self.bar_count
         self._be_armed = False  # iter17 breakeven-scratch arming flag
+        # iter48: EVR entry clock — anchored at the fill tick's timestamp.
+        self._evr_entry_time = int(getattr(self, "_current_time", 0))
         # Seed EMA from the current posterior mu so the window starts calibrated.
         _cur_mu = getattr(self, '_mu_post_ema', 0.0)  # keep current EMA value
         self._mu_post_neg_window.clear()
@@ -3934,6 +4021,18 @@ class StrategyEngineV2Adapter:
                     and self._no_long_mu_neg_frac <= _mu_neg_frac
                     and entry > 0 and c <= entry * (1.0 - self._no_long_offside_pct / 100.0)):
                 self.exit_signal_reason = "kelly_flat"
+                return _V1Signal.EXIT
+            # 7b. iter48 Entry-Validation Response (EVR) triage exit.
+            #     The engine's exits above are PRICE-posterior driven; EVR adds
+            #     the entry-anchored evidence axis measured in the iter48
+            #     autopsy: a memecoin entry is a self-validating event — the
+            #     herd either follows within seconds (confirmation + taker buy
+            #     flow, winner profile: MFE@+10% on 86-88% of winners, never on
+            #     catastrophes 0/85) or it does not (bleed profile).  Fires on
+            #     unconfirmed + flow-invalidated + offside positions after
+            #     `v2_evr_eval_delay` seconds.  Default 0.0 = OFF.
+            if self._check_evr_triage_exit(c, entry):
+                self.exit_signal_reason = "evr_triage"
                 return _V1Signal.EXIT
             # 8. iter36 holder-flow exit: dev/insider sell while in position.
             #    A dev/insider sell is an exogenous adverse event that the

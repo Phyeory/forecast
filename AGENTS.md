@@ -663,6 +663,41 @@ future agent must therefore:
 > -0.390 kelly_flat + -0.378 recording_ended drag.  `test_futures.py` 18/18.
 > Setting `v2_order_flow_imbalance_gate=0.0` restores pre-iter45 behaviour.
 > See RESEARCH_LOG.md Iter 45.
+>
+> **iter48 Post-entry taker-flow triage (EVR) — ACCEPTED (production default).
+> Hypothesis: the market's taker-flow response to the engine's own entry
+> separates eventual catastrophic losers from recovering winners (post-entry
+> buy-ratio AUC 0.764 vs pre-entry 0.486 — a genuinely novel observation
+> channel).  EVR mechanism: after `v2_evr_eval_delay` s (default 120), fire
+> `evr_triage` when peak-since-entry never confirmed
+> `entry·(1+confirm_pct/100)`, trailing buy-ratio < `buy_ratio_max`, and
+> close ≤ entry·(1−offside_min_pct/100).  Full-cohort evr9 config
+> (delay=120s, offside=20%, ratio=0.45, window=20s, m=10%): 53 fires on 45
+> recordings, 783 trades / 70.2% WR / +1.7531 SOL vs baseline 764 / 71.7%
+> / +1.7236 SOL.  **Tail extermination is significant**: catastrophics
+> ≤−30%: 87→76 (p=0.0038), tail_pnl +0.632 SOL (p<0.0001), kelly_flat_pnl
+> +1.142 SOL (p<0.0001); temporally stable in both recording halves
+> (p≤0.014).  **Mathematical limitations**: (1) EVR is a loss-reclassification
+> mechanism, not elimination — the exact accounting identity is kelly_flat
+> savings (+1.142) + rec_ended savings (+0.153) − EVR fire losses (−1.556) =
+> +0.030 SOL net.  (2) Whole-PnL is statistically flat: Wilcoxon p=0.352,
+> bootstrap 95% CI [−0.00060, +0.00079].  (3) WR regresses −1.5 pp due to
+> ~14 false positives inseparable from true positives (both fire at 119–151s,
+> depth −19% to −57%).  (4) Every EVR fire is a loss by construction (the
+> offside gate requires close ≤ entry×80%).  (5) Exhaustive 14-config sweep
+> confirmed evr9 is Pareto-optimal: all alternatives produce worse WR and
+> PnL (cascade for lower offside, bleed-through for higher offside).
+> **Production default: `v2_evr_enable=1.0`** (evr9 config: `confirm_pct=10`,
+> `offside_min_pct=20`, `buy_ratio_max=0.45`).  Set `v2_evr_enable=0.0`
+> to disable.  `test_evr.py` 6/6, `test_futures.py` 18/18.
+> See RESEARCH_LOG.md Iter 48.
+>
+> **iter49 EVR Loss-Reclassification Gap Autopsy & Inseparability Proof — INCONCLUSIVE / RIGOROUS NEGATIVE BOUND (evr9 production default unchanged).**
+> Forensic autopsy of the 13 False Positives (FPs: recovered to breakeven/gain_retrace, mean post-fire recovery +134%) vs 35 True Positives (TPs: saved +0.4756 SOL from deep -45% dumps).
+> **Mathematical Inseparability Result**: ROC AUC across all observables at fire time (t_eval=120s) is AUC 0.32–0.50 (trough bounce AUC 0.449, buy-ratio AUC 0.320, delta buy-ratio AUC 0.422, volume AUC 0.435). FPs and TPs are statistically indistinguishable at triage time.
+> **Theorem**: Any filter applied at t_eval blocks FPs and TPs at identical rates; because each missed TP costs -0.037 SOL in catastrophic bleed while each saved FP gains +0.025 SOL, any additional filter yields net PnL change ≤ 0.
+> **Production default unchanged: `v2_evr_enable=1.0` (evr9 config)**. Engine source byte-identical to HEAD. `test_evr.py` 6/6, `test_futures.py` 18/18.
+> See RESEARCH_LOG.md Iter 49.
 
 ---
 

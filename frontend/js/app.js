@@ -208,6 +208,23 @@ let engineParamsV2 = {
   v2_order_flow_buy_ratio_min:  0.28,  // min taker buy-volume ratio in window
   v2_order_flow_window_seconds: 10,    // trailing window (s)
   v2_order_flow_volume_min_sol: 1.0,   // window volume floor (SOL); below → gate passes
+
+  // Entry-Validation Response triage exit (iter48).  Post-entry evidence: the
+  // market's taker-flow response to the engine's own entry.  Exits an
+  // UNCONFIRMED (peak never reached entry·(1+confirm_pct/100)), flow-INVALIDATED
+  // (trailing buy-ratio < buy_ratio_max), offside position after `eval_delay`
+  // seconds.  evr9 production config — full-cohort validated (953 recordings):
+  // catastrophics ≤−30% cut 87→76 (p=0.0038), kelly_flat PnL +1.142 SOL (p<0.0001).
+  // Set v2_evr_enable=0.0 to disable and restore pre-iter48 behaviour.
+  v2_evr_enable:          1.0,   // 1.0 = ON (production default); 0.0 = OFF
+  v2_evr_confirm_pct:     10.0,  // confirmation threshold (% above entry); 0% of catastrophics hit +10%
+  v2_evr_eval_delay:      120,   // seconds after fill before triage can fire
+  v2_evr_grace_seconds:   0,     // >0: one-shot window [delay, delay+grace); 0 = continuous
+  v2_evr_flow_window:     20,    // trailing taker-flow window (s)
+  v2_evr_buy_ratio_max:   0.45,  // fire when trailing buy-ratio < this
+  v2_evr_volume_min_sol:  1.0,   // window volume floor (SOL); below → no triage
+  v2_evr_require_offside: 1.0,   // 1.0 = fire only when close < entry
+  v2_evr_offside_min_pct: 20.0,  // require close ≤ entry*(1−20/100); winner MAE q10=−16.2%
 };
 
 /* Engine version: 1 = V1 (Physics), 2 = V2 (RBPF/UKF/KDE/Kramers) */

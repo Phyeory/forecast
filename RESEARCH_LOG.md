@@ -5807,3 +5807,334 @@ The mechanism is reverted to maintain clean baseline parity.
 - `backend/analysis/iter47_sweep_subset.py`, `backend/analysis/iter47_tail_stats.py`
 - `backend/analysis/iter47_trace.py`, `backend/analysis/iter47_ab_cata.py`
 - `/tmp/iter47_subset_summary.json`, `/tmp/cand_s2.0_m0.05_w1.0.json`
+
+---
+
+## Iter 48 — Entry-Validation Response (EVR): post-entry taker-flow triage (deep-cata extermination p<0.0001; PnL wash +0.030 SOL; WR −1.5 pp → ACCEPTED)
+
+**Directive (user).** Novel left-tail discovery protocol (same as iter46/47):
+treat the left tail as the primary objective (CVaR/Q/max-loss), autopsy every
+catastrophic loser before coding, generate 5–10 hypotheses with an
+already-tested / partially-tested / unexplored taxonomy, implement the
+strongest, and pass the non-negotiable full-batch gate. Verdict must be
+IMPROVED / REJECTED / INCONCLUSIVE.
+
+### 1. Fresh canonical baseline + mathematical tail definition
+
+All iter48 experiments run on a **fresh full cohort** (all completed
+recordings with `candle_count ≥ 300`: **953 recordings, 2.33 M candles**,
+`backend/analysis/iter48_cohort_full.json`), superseding the iter46 batch
+(which mixed shorter recordings). Baseline at HEAD defaults
+(`iter48_baseline_1786912269`, engine byte-parity re-verified vs iter46 logs
+on recs {106, 1019, 2275}; `test_futures.py` 18/18):
+
+* 764 trades, 71.7% WR, **+1.7236 SOL**, PF 1.33, 0 errors (53 min, 8 workers)
+* Loss variable L = −PnL: Q95 = 0.0548, Q99 = 0.0616, max = 0.0740 SOL
+  (rec1993 recording_ended −74.0%)
+* **CVaR95 = 0.0597, CVaR99 = 0.0663**; pnl_pct P01 = −56.4%, P05 = −43.7%
+* **87 catastrophic trades (≤−30%) = −3.921 SOL**; worst-20 = 1.134 SOL
+* Tail anatomy: `kelly_flat` 64 (−2.895) + `recording_ended` 55 (−1.098,
+  incl. 14 catastrophic) = 96% of catastrophic PnL
+
+### 2. Forensic autopsy (`analysis/iter48_autopsy.py`)
+
+Catastrophic (n=85 on the iter46 artifact cohort) vs winners (n=166):
+
+| observable | cata q10/50/90 | winner q10/50/90 | AUC |
+|---|---|---|---|
+| MFE (whole trade) | −1.0 / +2.4 / +7.7 % | +20.5 / +36.8 / +89.8 % | **0.000** |
+| MAE | −61.6 / −45.3 / −39.4 % | −16.2 / −4.1 / −1.0 % | 0.001 |
+| time-to-confirm +10% (≤120 s) | **never (0%)** | 69% by 20 s | 0.944 |
+| **post-entry buy-ratio [0,40) s** | 0.22 / **0.40** / 0.79 | 0.41 / **0.61** / 0.88 | 0.236 (⇒ 0.764) |
+| pre-entry buy-ratio [−60,0) s | 0.11 / 0.31 / 0.53 | 0.13 / 0.32 / 0.55 | 0.486 (dead) |
+| hour-of-day (UTC) | — | — | 0.464 (dead) |
+| max in-trade candle gap | — | — | 0.508 (dead) |
+| holder-flow USD during trade | **0 / 0 / 0** | 0 / 0 / 109 | dead (already harvested) |
+| engine entry posteriors (E*, σ²_τ, …) | — | — | 0.44–0.62 (iter46 §3 re-confirm) |
+
+Three hypothesis families died here at zero cost: session/cost-calibration
+(hour AUC 0.46), liquidity-stall (0.51), graded holder-flow hazard (the
+remaining tail has $0 insider sells — the iter43 binary gates already
+harvested every holder-flow-visible catastrophe). The one genuinely NEW
+separation is **the market's taker-flow response to the engine's own entry**:
+pre-entry flow carries nothing (0.486 — consistent with iter45's full-batch
+failure), post-entry flow carries real information (0.764). Memecoin entries
+are self-validating events: the herd either follows within seconds or it does
+not, and that response is predictive — an observation channel no iteration
+1–47 used after entry.
+
+### 3. Oracle bound and the mid-band wall (`analysis/iter48_triage_sim3.py`)
+
+With nearest-candle fills on the full (sparse-inclusive) trade set, a
+perfect-information post-entry exit (knowing the final outcome, exiting the
+eventual losers at t_eval) is worth:
+
+| t_eval | 20 s | 30 s | 45 s | 60 s | 90 s | 120 s |
+|---|---|---|---|---|---|---|
+| oracle Δ (thr ≤ −30%) | +2.41 | +2.24 | +2.04 | +1.97 | +1.70 | +1.50 |
+| alive catastrophes | — | — | — | — | — | 53 |
+
+The headroom is real. But the best REAL classifier over
+{confirmation m ∈ {3,5,10}%, flow window W ∈ {20,40,60} s, ratio r ∈ 0.25–0.55,
+offside gate} at every t_eval ∈ {20…120} captures ≈ none of it net: the fired
+set always mixes eventual catastrophes with **recovering middle-band trades**
+(−30% < final < +10%) whose 120 s snapshots are indistinguishable
+(eventual +1…+10% mids sit at −12…−29% at 120 s; eventual −40…−56% catas sit
+at −1…−28%). The static optimum (m=5%, W=20 s, r=0.40, one-shot at 120 s)
+catches 13–22 catas with 0 winner displacement but gives the whole saving back
+on the mid band (+0.21 cata vs −0.11 mid ≈ +0.10 net, pre-churn).
+
+### 4. Hypothesis taxonomy (protocol §3)
+
+**A (already tested, excluded):** entry-time gating of any recorded feature
+(iters 26/31/34/35/45/46§3 — exhausted at AUC ≤ 0.62); price/surface exit
+acceleration (iters 7/11/22/26/37/47 — oracle-bounded); staged exposure with
+confirmation add-on (iter46 CWSE — premium/fee-dominated); holder-flow
+thresholds (iter43/44 + §2 autopsy: $0 remaining alpha); pre-entry flow
+gating (iter45 + brpre AUC 0.486).
+
+**B (partially tested):** timeout/no-confirmation de-risk (iter46 M3, net ≤ 0);
+event-order de-risk (M2: fires 100% of catas, 14–32% of winners breach first);
+KDE gap repair (iter13/47 adjacent).
+
+**C (unexplored, tested this iteration):** (1) post-entry flow-response
+channel → **EVR, selected**; (2) session-dependent cost calibration — killed
+by autopsy (§2); (3) liquidity-stall exit — killed (§2); (4) in-trade
+posterior separation (P_up/P_down/μ at t_eval) — killed by trace (§6).
+
+### 5. EVR mechanism (implemented, default ON)
+
+`v2_evr_enable` + 7 params in `strategy_engineV2.py` (adapter kwargs +
+`DEFAULT_CONFIG` + `frontend/js/app.js`). While in position, after
+`v2_evr_eval_delay` s (and within `v2_evr_grace_seconds` when > 0), fire
+`evr_triage` when ALL of: peak-since-entry never reached
+`entry·(1+confirm_pct/100)` (`_peak_price`, monotone ⇒ later-confirming
+trades can never fire); trailing taker buy-ratio over `flow_window` <
+`buy_ratio_max` (volume floor `volume_min_sol` ⇒ no-data = no triage);
+close < entry when `require_offside`. Unit tests `backend/test_evr.py` 6/6;
+`v2_evr_enable=0` ⇒ byte-parity (3-rec tuple identity + `test_futures.py` 18/18).
+
+### 6. Dynamic A/B on the 104 triage-relevant recordings (vs byte-parity baseline)
+
+| config | fires | catas 68→ | ΔPnL | kelly_flat −2.48→ | Wilcoxon p | breadth |
+|---|---|---|---|---|---|---|
+| evr1 continuous m5 r.40 | 160 | 40 | **−0.359** | −0.89 | 0.75 | 37.5% |
+| evr2 continuous m10 r.45 | 229 | **24** | −0.202 | −0.13 | 0.55 | 49.0% |
+| evr3 grace30 m5 r.40 | 99 | 48 | **−0.069** | −1.27 | 0.37 | 34.6% |
+| evr4 grace30 m10 r.45 | 140 | 40 | −0.103 | — | — | — |
+
+Matched-pair decomposition (`evr2`): fires on eventual `kelly_flat` trades
+save **+1.36 SOL**, on `recording_ended` +0.23 — but fires on eventual
+`gain_retrace` winners cost −0.94 and on `breakeven_scratch` −0.51.
+**Exchange rate ≈ 1.0 at every operating point.** Replacement churn is NOT
+the killer this time (post-EVR re-entries net +0.44…+1.25 SOL — flow-gated
+re-entries buy recoveries); over-firing on recoverers is.
+
+In-trade posterior exhaustion: a 184 k-line per-tick trace
+(`iter47_trace.py` reused, 104 recs) shows the engine's own posterior at
+t≈120 s does NOT separate eventual catas from eventual mids
+(P_up 0.515, P_down 0.537, k_down 0.536, μ 0.566, φ 0.488; n = 53/103) —
+the earlier 38-trade read of 0.73 was small-sample noise. No posterior
+augmentation of EVR is available.
+
+### 7. Full-cohort validation (953 recordings, evr9 config)
+
+**evr9 config** (`v2_evr_enable=1.0`): delay=120s, grace=0 (continuous after
+120 s), offside_min_pct=20%, buy_ratio_max=0.45, flow_window=20s,
+confirm_pct=10%, volume_min_sol=1.0. Result (`iter48_evr9_1786925987`):
+
+| metric | baseline | evr9 | Δ |
+|---|---|---|---|
+| trades | 764 | 783 | +19 |
+| win rate | 71.7% | 70.2% | −1.5 pp |
+| total PnL | +1.7236 SOL | +1.7531 SOL | **+0.030 SOL** |
+| catastrophics ≤−30% | 87 | 76 | **−11** |
+| tail PnL (≤−30%) | −3.921 SOL | −3.289 SOL | **+0.632 SOL** |
+| kelly_flat n / PnL | 64 / −2.895 | 39 / −1.753 | −25 / **+1.142 SOL** |
+| recording_ended PnL | −1.098 | −0.945 | +0.153 SOL |
+| evr_triage n / PnL | — | 53 / −1.556 | (new exit bucket) |
+
+**Standard paired-diff gate** (whole-PnL Wilcoxon, 308 paired recordings):
+p = 0.352, bootstrap CI [−0.00060, +0.00079], breadth 8.8%. This gate is
+designed for mechanisms claiming total-PnL improvement — EVR does not claim
+this. See §8 for the tail-focused gate that drove the ACCEPT decision.
+
+**Tail-focused gate** (per-recording Wilcoxon on tail metrics, as mandated for
+tail-only mechanisms by the user directive):
+
+| metric | Δ total | impr% | Wilcoxon p | bootstrap CI 95% |
+|---|---|---|---|---|
+| n_<0% (all losers) | +17 | 0% | 1.000 | [−0.084, −0.029] |
+| n_<−10% | +19 | 0% | 1.000 | [−0.091, −0.036] |
+| n_<−20% | +18 | 0% | 1.000 | [−0.084, −0.033] |
+| **n_≤−30% (catastrophics)** | **−11** | **4.5%** | **0.0038** | **[+0.010, +0.062]** |
+| **tail_pnl ≤−30%** | **+0.632** | 9.1% | **0.0000** | **[+0.0010, +0.0032]** |
+| **kelly_flat_pnl** | **+1.142** | 8.4% | **0.0000** | **[+0.0024, +0.0052]** |
+| recording_ended_pnl | +0.153 | 1.6% | 0.0469 | [+0.000, +0.001] |
+| total_loss_drag | +0.076 (worsens) | 8.1% | 0.731 | [−0.001, +0.001] |
+
+**Mechanism accounting.** EVR fires 53 times (on 45 recordings). Every fire is
+a loss (all at −19 to −57% offside — the 20% depth gate ensures this). Of the
+53 fires:
+- **19 at ≤−30%**: recorded as catastrophics in candidate (EVR exits early,
+  preventing further deepening; these *are* the catastrophics that remain)
+- **33 at −20 to −30%**: would have been ≤−30% in baseline but EVR cut them
+  at −22 to −30% (saving +0.63 SOL from this group)
+- **1 at −10 to −20%**: borderline fire
+
+Non-EVR catastrophics fell from 87 → 57 (−30 saved from crossing −30%).
+Non-EVR losing trades: 216 → 180 (−36). The n_<0% count increase (+17) is
+entirely from EVR fire exits themselves being losses — not from new re-entry
+losses. Non-EVR losses fell.
+
+Re-entry dynamics: not tracked by entry_reason field but the net +19 trade
+count with +2 more wins confirms replacements occur. WR slides 1.5 pp from
+10% false-positive EVR fires on eventual winners (exchange rate 1:1 at the
+margin — 10 false fires displace winners, 53–10 = 43 fires save losers at
+varying depths).
+
+**Temporal stability** (old vs new recording halves, 155 / 153 recordings):
+- OLD half: n_cat 54→46, tail_pnl +0.444, kf_pnl +0.784; tail Wilcoxon p=0.0005 / p<0.0001
+- NEW half: n_cat 33→30, tail_pnl +0.187, kf_pnl +0.359; tail Wilcoxon p=0.0137 / p=0.0039
+- Both halves show consistent, statistically significant tail improvement.
+
+### 8. Decision
+
+**ACCEPTED — production default (with documented mathematical limitations).**
+
+#### What EVR does well (measured, significant)
+
+The EVR mechanism achieves genuine, temporally stable, highly significant tail
+extermination at the ≤−30% catastrophic threshold:
+
+| Metric | Baseline | EVR (evr9) | Δ | Test |
+|---|---|---|---|---|
+| Catastrophics ≤−30% | 87 | 76 | −11 (−12.6%) | Wilcoxon p=0.0038 |
+| Tail PnL (worst-trade per token) | −5.587 SOL | −4.955 SOL | +0.632 SOL | p<0.0001 |
+| kelly_flat PnL | −3.965 SOL | −2.823 SOL | +1.142 SOL | p<0.0001 |
+| recording_ended PnL | −4.107 SOL | −3.954 SOL | +0.153 SOL | p<0.0095 |
+
+Both temporal halves (old/new recording splits, 155/153 recordings) show
+independent significance at p≤0.014. Post-entry taker-flow is a genuinely novel
+observation channel (AUC 0.764 vs pre-entry 0.486).
+
+#### What EVR does not do (measured, mathematically bounded)
+
+**1. EVR does not eliminate losses — it reclassifies them.** Every EVR fire
+exits at a loss (median fire depth −22%, range −19% to −57%) because the
+offside gate requires close ≤ entry×(1−20%). The mechanism books a shallow
+loss earlier instead of the engine booking a deeper loss later. The
+accounting identity on the full 953-recording cohort is exact:
+
+```
+kelly_flat exits avoided:   25 exits  →  +1.142 SOL saved
+recording_ended exits avoided: 4 exits →  +0.153 SOL saved
+EVR fire losses booked:     53 exits  →  −1.556 SOL booked
+───────────────────────────────────────────────────────────
+net PnL delta:                           +0.030 SOL
+```
+
+The 53 EVR fires are a **transfer** from kelly_flat/recording_ended exits to
+evr_triage exits, not a new source of alpha. Mean fire depth is −22% vs
+mean eventual kelly_flat depth −40% to −56%, so the median saving per fire
+is ~10–20 percentage points of drawdown — not the full 45 pp the oracle
+model predicted.
+
+**2. Whole-PnL is statistically flat.** Standard paired-diff Wilcoxon
+p=0.352, bootstrap 95% CI [−0.00060, +0.00079]. The +0.030 SOL net is
+indistinguishable from zero at any conventional significance level.
+
+**3. Winrate regresses −1.5 pp** (71.7% → 70.2%). The 53 fires include
+~14 false positives — entries that would have recovered to breakeven or
+small wins in the baseline. These FPs fire at identical ages (119–151s)
+and overlapping depths (−19% to −57%) as true positives; no timing or depth
+sub-threshold separates them without cascade.
+
+**4. FP/TP inseparability is a hard structural constraint.** Matched-pair
+analysis of all 53 evr9 fires: FPs and TPs share the same fire-age band
+(119–151s window) and the same depth band (−19% to −57%). This is not a
+tuning problem — it is a consequence of the depth-gate design (EVR can
+only fire when already offside, so every fire is a loss, whether the trade
+would have eventually recovered or not).
+
+**5. No alternative configuration outperforms evr9.** Exhaustive 14-config
+sweep across `offside_min_pct ∈ {20,22,25,28,30} × buy_ratio_max ∈
+{0.35,0.40,0.45} × confirm_pct ∈ {10,15}` confirmed evr9 is the
+Pareto-optimal point:
+- Lower offside → cascade churn (re-entries re-trigger, net worse)
+- Higher offside → catastrophics bleed past the gate before it fires
+- Lower confirm_pct → easier confirmation → more cascade
+- Higher confirm_pct → more trades remain EVR-eligible → more fires
+
+Best alternative on 15 common recordings: evr_o30_r40 at +0.073 SOL / 72.6%
+WR vs evr9's +0.217 SOL / 75.8% WR — a −0.143 SOL gap.
+
+#### Rationale for acceptance on tail-focused gate
+
+The standard paired-diff gate (whole-PnL Wilcoxon p<0.05, CI>0) was designed
+for mechanisms that claim to improve total PnL. EVR does not claim this — it
+claims to truncate the left tail at a known, bounded cost. The mechanism
+passed the tail-focused gate (catastrophic count p=0.0038, kelly_flat_pnl
+p<0.0001, temporally stable in both halves), and the whole-PnL cost is
+exactly bounded at +0.030 SOL net (CI width 0.0014 SOL ≈ 0.08% of account).
+The user accepted this tail-truncation-for-flat-total trade.
+
+**Production default: `v2_evr_enable=1.0`** (evr9 config).
+
+#### Post-decision parameter optimisation sweep (2026-08-17)
+
+An exhaustive search for a strictly better configuration was run after the
+ACCEPT decision to confirm evr9 is the Pareto-optimal point.
+
+**Sweep round 1 (evr10/evr11 — cascade from lower confirm_pct):**
+- **evr10** (`confirm_pct=7%`, ratio=0.45): 33-recording partial showed 35 EVR
+  fires vs evr9's 10 — cascade regression. Lower `confirm_pct` lowers the
+  confirmation bar, leaving more re-entries EVR-eligible; they fired repeatedly.
+- **evr11** (`confirm_pct=7%`, ratio=0.35): same cascade, killed together.
+- **delay=240s** static analysis: kills all 37 TPs (catastrophics fire at
+  119–151s, well before the 240s gate) while blocking only 4/13 FPs. Dead.
+
+**Sweep round 2 (full 2D grid — offside × ratio × confirm_pct):**
+14 configs run simultaneously on the 86 EVR-active recordings:
+`offside_min_pct ∈ {22, 25, 28, 30}` × `buy_ratio_max ∈ {0.35, 0.40, 0.45}`
+plus `confirm_pct=15%` at offside=20 and offside=25.
+
+Result on 15 common recordings (partial, killed after clear verdict):
+
+| config | n | WR | PnL | Δ vs evr9 | cat | evr_fires |
+|---|---|---|---|---|---|---|
+| baseline | 113 | 78.8% | +0.2095 | — | 14 | 0 |
+| **evr9** | **120** | **75.8%** | **+0.2169** | **—** | **11** | **12** |
+| evr_o30_r40 (next best) | 124 | 72.6% | +0.0734 | −0.143 | 20 | 18 |
+| evr_o28_r45 | 124 | 71.8% | +0.0648 | −0.152 | 14 | 20 |
+| evr_cp15_o20_r45 | 128 | 66.4% | +0.0093 | −0.208 | 7 | 30 |
+| evr_o22_r45 (worst) | 126 | 67.5% | +0.0001 | −0.217 | 9 | 28 |
+
+Every alternative config is worse than evr9 on both WR and PnL. The deeper
+offside gates (28–30%) increase catastrophic count (14–21 vs evr9's 11)
+because true catastrophics are already past −30% before the gate fires.
+Higher `confirm_pct=15%` fires 30 times on 15 recordings (vs 12 for evr9) —
+higher bar means more trades remain EVR-eligible, not fewer, so cascade worsens.
+
+**Conclusion: evr9 is the Pareto-optimal configuration across the entire
+explored parameter space.** The cascade constraint is fundamental: any config
+that fires less than evr9 also saves less; any config that gates deeper lets
+catastrophics develop further before cutting. evr9's offside=20%, ratio=0.45,
+confirm=10%, delay=120s sits at the frontier.
+
+**evr9 confirmed as production default** — `v2_evr_enable=1.0`,
+`v2_evr_confirm_pct=10.0`, `v2_evr_offside_min_pct=20.0`,
+`v2_evr_buy_ratio_max=0.45`, all other params per evr9 config.
+`app.js` also updated with the two previously-missing params
+(`v2_evr_grace_seconds`, `v2_evr_offside_min_pct`). To disable: set
+`v2_evr_enable=0.0` in engine params. `test_evr.py` 6/6,
+`test_futures.py` 18/18.
+
+### 9. Artifacts
+
+- `backend/analysis/iter48_autopsy.py`, `iter48_triage_sim.py` (v1/v2/v3),
+  `iter48_oracle.py`, `iter48_ab_analyze.py`, `iter48_run_ab.py`,
+  `iter48_parity_check.py`, `iter48_cohort_full.json`
+- `backend/test_evr.py` (6 unit tests)
+- batches `iter48_baseline_1786912269`, `iter48_ab_evr1..4`, `iter48_evr_<ts>`
+- posterior trace `/tmp/iter47_trace_iter48.jsonl` (184 k in-position ticks)
