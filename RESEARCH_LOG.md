@@ -6138,3 +6138,403 @@ confirm=10%, delay=120s sits at the frontier.
 - `backend/test_evr.py` (6 unit tests)
 - batches `iter48_baseline_1786912269`, `iter48_ab_evr1..4`, `iter48_evr_<ts>`
 - posterior trace `/tmp/iter47_trace_iter48.jsonl` (184 k in-position ticks)
+
+
+## Iter 49 — EVR loss-reclassification gap: post-fire flow autopsy & inseparability bound (INCONCLUSIVE / rigorous negative; evr9 unchanged)
+
+**Directive (user).** EVR (iter48) is production-accepted as a tail-extermination
+mechanism whose whole-PnL delta is a wash (+0.030 SOL) because every fire is a
+loss-reclassification, not a loss-elimination. Close the gap (convert +0.030
+into a statistically positive whole-PnL delta without regressing the tail), or
+prove it cannot be closed and return INCONCLUSIVE.
+
+**Canonical comparison.** All analysis is vs the evr9 production default
+(`iter48_evr9_1786925987`), not the pre-EVR baseline. Cohort =
+`backend/analysis/iter48_cohort_full.json` (953 recordings). No engine change.
+
+### 1. Matched-pair autopsy of the 53 evr9 fires
+
+Join each `evr_triage` exit to the baseline trade sharing `(recording_id,
+entry_time)` (`analysis/iter49_autopsy.py` on `iter48_evr9_1786925987` vs
+`iter48_baseline_1786912269`):
+
+| class | n | definition | EVR PnL | baseline PnL | Δ vs holding |
+|---|---|---|---|---|---|
+| **FP** | **13** | baseline `breakeven_scratch` (none were `gain_retrace`) | −0.326 | +0.027 | **−0.353** (cost) |
+| **TP** | **37** | baseline `kelly_flat` 27 / `recording_ended` 5 / `dev_sell_exit` 4 / `bayesian_flip` 1 | −1.117 | −1.583 | **+0.465** (save) |
+| **UNMATCHED** | **3** | EVR-only replacement entries (no baseline twin; recs 2395/346/828, all already had a TP fire) | −0.113 | — | cascade re-entry then EVR again |
+
+Matched identity: TP save +0.465 − FP cost −0.353 = **+0.112 SOL** on the 50
+matched fires. The full-cohort +0.030 wash is this matched surplus minus
+unmatched cascade (−0.113) and replacement-entry noise on the rest of the book.
+Per-trade rates: **G = +0.0272 SOL recaptured per blocked FP**, **S = +0.0126
+SOL given back per blocked TP**. Likelihood-ratio floor for a zero-delay
+filter: α n_FP G > β n_TP S ⇒ **α/β > 1.32**.
+
+Fire-time snapshot (reconfirm iter48 §8.4 inseparability):
+
+| observable | FP q50 | TP q50 | AUC(FP>TP) |
+|---|---|---|---|
+| age (s) | 122 | 121 | 0.52 |
+| fire depth (%) | −25.2 | −26.2 | 0.62 |
+| P_up / P_down / k_down | 0.017 / 0 / 0 | 0.031 / 0 / 0 | 0.44–0.45 |
+| μ / φ / E* | −0.010 / −0.16 / −1000 | +0.001 / −0.18 / −1000 | 0.43–0.55 |
+| trailing buy-ratio [tf−20, tf) | 0.24 | 0.28 | 0.42 |
+
+Ages 117–151 s and depths −19% to −57% overlap completely. Engine posteriors
+at fire remain uninformative (P_down ≡ 0 on both classes — the `P_down ≡ 0`
+blindness of iters 33–37, now measured on the EVR-fired subset).
+
+### 2. FP typology (13 `breakeven_scratch` recoveries)
+
+The prompt's "14 FPs including gain_retrace" is the iter48 ~14 estimate. The
+matched join is **13 scratches, 0 gain_retrace**. Three subtypes:
+
+| subtype | n | t_be (s to return to entry) | character |
+|---|---|---|---|
+| **A — fast fake-breakdown** | 5 | 24–67 | price reclaims entry inside a minute; mixed flow (some knife-catch, rec58 stays sell-heavy at br+20=0.07) |
+| **B — slow clawback** | 6 | 131–481 | still −20% at fire, then additional MAE as deep as −38 pp (rec86) before scratching back |
+| **C — marathon scratch** | 2 | 1159–1866 | rec565 / rec1353; MFE after fire +322% / +24% after a long underwater hold |
+
+Median t_be = **384 s**, mean post-fire MFE = **+76%**, mean post-fire MAE =
+**−53%**. These are not clean V-bottoms. Most FPs also go catastrophic on the
+unheld path and only later claw to scratch — which is why a delay long enough
+to "see the recovery" is long enough for TPs to dump another 10–20 pp.
+
+### 3. TP autopsy (37 saved losers)
+
+Kelly_flat (27) was the *right* engine call: post-fire MAE q50 = **−73%**,
+extra drawdown in 60 s / 300 s = **−8.6 / −16.9 pp** (medians). Price kept
+falling. Mean extra_dd_60 = −9.2 pp, extra_dd_300 = −18.5 pp. The 5
+`recording_ended` TPs were slow bleeds that EVR cut 6–12 pp early. The 4
+`dev_sell_exit` TPs were near-washes (EVR and holder-flow raced; save ≈ 0).
+Two TPs were slightly *worse* under EVR (rec106, rec657: EVR cut deeper than
+the later kelly_flat). Net TP save +0.465 is real and comes from not riding
+the −40% to −62% kelly_flat tail.
+
+### 4. The prompt's key insight, measured — and reversed at short horizon
+
+> "The FP trades recovered — their flow must have improved. The TP trades
+> continued bleeding — their flow presumably stayed weak."
+
+Post-fire taker-flow (the unexplored time-series extension of EVR's snapshot):
+
+| feature | FP q10/50/90 | TP q10/50/90 | AUC(FP>TP) |
+|---|---|---|---|
+| br [0, 10) s after fire | 0.00 / **0.22** / 0.71 | 0.10 / **0.53** / 0.98 | **0.25 (reversed)** |
+| br [0, 20) s | 0.09 / 0.34 / 0.70 | 0.27 / 0.45 / 0.81 | 0.42 (reversed) |
+| br [0, 40) s | 0.35 / 0.56 / 0.69 | 0.24 / 0.47 / 0.72 | 0.64 |
+| br [0, 60) s | 0.41 / **0.59** / 0.69 | 0.29 / **0.45** / 0.66 | **0.72** |
+| Δbr (post20 − pre20) | −0.20 / +0.17 / +0.47 | −0.03 / +0.17 / +0.48 | 0.48 (dead) |
+| vol [0, 20) s | 0.8 / 11.2 / 27.3 | 1.6 / 7.4 / 24.2 | 0.57 |
+
+**Knife-catch inversion.** For the first ~20 s after the −20% print, TPs have
+*more* buy flow than FPs (AUC 0.25). The dump attracts bounce buying. FPs
+often stay weak and only recapture flow over 40–60 s — and even then t_be is
+still 6 minutes away. The snapshot-to-series extension exists (AUC 0.72 at
+60 s) but it is not available at the decision tick, and harvesting it
+requires waiting through the exact window in which TPs lose another ~9 pp.
+
+### 5. Hypothesis taxonomy
+
+**A — already tested, excluded (do not re-test):**
+- Single-threshold FP blocking at fire time — iter48 §8.4 + this autopsy §1
+  (all fire-time AUC ∈ 0.42–0.62).
+- Alternative EVR configs — iter48 14-config sweep, evr9 Pareto-optimal.
+- Re-entry cooldown — iter37 addendum oracle (PnL(M) ≤ +0.786 < baseline).
+- Exit-timing on shared OHLCV paths — iter37 (−0.069 exit damage) / iter7,11,22,26,47.
+- Pre-entry feature gates — iters 26/31/34/35/45 (AUC ≤ 0.62); pre-entry
+  flow specifically AUC 0.486 (iter45 + iter48 §2).
+- In-trade posterior augmentation of EVR — iter48 §6 (P_up 0.515, P_down
+  0.537, n=53/103) + this autopsy §1 on the fired subset.
+- Holder-flow graded hazard — iter43 harvested every tagged dump; iter48 §2
+  remaining tail has $0 insider sells.
+- Persist-on-flow (stay EVR-qualified for N seconds) — this autopsy, every
+  N ∈ {5…45} naive Δ ∈ [−0.29, −0.12] vs evr9 (knife-catch breaks TP persist
+  *faster* than FP persist).
+
+**B — partially tested, residual closed here:**
+- Timeout / later `eval_delay` — iter48 delay=240 s killed all TPs (they
+  fire at 119–151 s). Residual 180 s / 60 s-window checked below: delay-adjusted
+  Δ ≤ 0.
+- Event-order de-risk (iter46 M2) — confirmation-first still does not
+  separate mid-band scratches from catas at 120 s (iter48 §3 mid-band wall).
+
+**C — unexplored, screened on the complete 53-fire set (no engine change):**
+1. **Deferred EVR using post-fire br_H** (wait H s, skip if br recovers).
+2. **Price-only persist** (require close ≤ entry×80% for N consecutive seconds;
+   ignore bounce-buy flow).
+3. **Post-EVR re-entry** when br_H ≥ thr and still offside (uses the novel
+   channel after the snapshot, so the iter37 OHLCV-only oracle does not
+   automatically apply).
+
+### 6. Counterfactuals (complete 53-fire universe — the only trades a
+post-EVR mechanism can touch)
+
+Zero-delay skip using *future* br_post60 (lookahead, **not implementable**):
+best point thr=0.55 skips 9/13 FP and 10/37 TP, naive Δ = **+0.174 SOL**,
+α/β = 2.56 > 1.32. The LR floor is cleared *only with hindsight flow*.
+
+Causal (delay-adjusted fill at tf+H, skip if br_H ≥ thr):
+
+| H | thr | skip FP/TP | Δ vs evr9 |
+|---|---|---|---|
+| 20 s | 0.45–0.55 | 4–6 / 14–19 | −0.14 to −0.19 |
+| 40 s | 0.45–0.55 | 8–10 / 10–23 | −0.04 to −0.10 |
+| 60 s | 0.45–0.55 | 9–10 / 10–18 | −0.06 to −0.10 |
+| 90 s | 0.55 | 10 / 10 | **+0.013** (noise; 3 FP + 27 TP still fire) |
+
+Price-only persist (consecutive offside, then fire at the delayed close):
+
+| N | FP fire/skip | TP fire/skip | Δ vs evr9 | median extra pp on remaining fires |
+|---|---|---|---|---|
+| 5 | 13/0 | 37/0 | −0.069 | −1.0 |
+| 20 | 9/4 | 33/4 | −0.187 | −6.0 |
+| 60 | 5/8 | 30/7 | −0.216 | −10.1 |
+| 90 | 2/11 | 26/11 | −0.208 | −10.4 |
+| 120 | 1/12 | 24/13 | −0.168 | −12.2 |
+
+Every N is negative: FP recapture never outruns the extra dump on remaining
+TPs. At N=90 almost all FPs are skipped (+0.25) but TP giveback + delay is
+−0.47.
+
+Post-EVR re-entry (EVR still fires; buy back at tf+H if br≥thr and close<entry):
+every (H, thr) ∈ {40,60,90}×{0.50,0.55,0.60} is negative (best −0.062). TPs
+knife-catch, so the same flow-recovery rule re-buys the dump. This is the
+iter37 replacement trap, now measured on the novel channel: post-fire flow
+recovery is **not** FP-specific.
+
+Oracle (skip all 13 FPs, keep all 37 TP fires at original fills, no delay):
+**Δ = +0.353 SOL**. Unreachable by any causal rule on this feature set.
+
+### 7. Theorem (post-EVR gap ceiling)
+
+Let α = fraction of FPs blocked from `evr_triage`, β = fraction of TPs
+blocked. With G = 0.0272, S = 0.0126, n_FP = 13, n_TP = 37:
+
+```
+Δ_zero_delay = 0.353 α − 0.466 β
+             ≤ 0    unless  α/β > 1.32.
+```
+
+(1) **Contemporaneous filters** (any function of the t_eval snapshot, engine
+posterior, or trailing-20 s flow) have AUC ∈ 0.42–0.62 ⇒ α/β ≈ 1 ⇒ Δ ≤ 0.
+This is the iter48 limitation #4, now with an explicit LR floor.
+
+(2) **Delayed filters** that wait H seconds to read a feature with AUC > 0.5
+(the only one found: br_post60, AUC 0.72) pay an extra dump D_H on every
+still-fired TP. Empirically D_60 ≈ −9.2 pp mean ≈ −0.009 SOL per remaining
+TP, which on ~27 remaining TPs is −0.25 SOL — larger than the +0.174
+lookahead surplus. Every measured (H, persist N, re-entry) point satisfies
+Δ_causal < 0 except one +0.013 noise cell.
+
+(3) Therefore no mechanism that only *reclassifies the same 53 EVR fires*
+using recorded OHLCV + taker flow — snapshot or time series, including
+post-fire adaptive rules — can convert the +0.030 wash into a paired-diff
+whole-PnL improvement. New information the engine does not observe
+(validated holder-flow on these 13 scratches, which iter48 §2 showed is $0;
+cross-venue flow; etc.) is the remaining escape, and it is not in the
+recording.
+
+This does **not** contradict EVR's tail ACCEPT: the 37 TPs are still worth
+cutting. It says the 13 FPs cannot be peeled off without putting those TPs
+back.
+
+The iter37 oracle (exit-only + OHLCV-only ⇒ below baseline) is about beating
+the *pre-EVR* book. The statement here is tighter and EVR-specific: even
+using the post-entry flow channel that beat the iter37 bound enough to
+ACCEPT EVR, the *residual* FP/TP split inside the fired set is not
+harvestable.
+
+### 8. Why no full-batch / no implementation
+
+Step 4 requires implementing a surviving hypothesis. None survived §6: every
+causal screen is negative on the **complete** set of trades the mechanism
+could change. A 953-recording batch cannot create PnL on the 900 recordings
+EVR never fires on, and replacement-entry dynamics (the 3 unmatched fires,
+iter37 churn) have only ever made Δ worse. Running `run_iteration.py` on a
+known-negative persist/delay knob would re-pay the iter48 14-config lesson
+at full-cohort cost. Engine remains byte-identical to HEAD (evr9 defaults).
+
+`test_futures.py` was not re-run (no code change). `backend/test_evr.py` is
+absent from the working tree (gitignored analysis/test artefacts); no new
+tests were added because no new branch exists.
+
+### 9. Decision
+
+**INCONCLUSIVE** — not because the sample is too small (the 53-fire set *is*
+the population of EVR decisions), but because the residual gap is a
+structural accounting identity plus a delay/LR bound, not an untested
+knob. The hypothesis "post-fire flow trajectory separates FPs from TPs
+cheaply enough to make EVR PnL-positive" is **false at every implementable
+operating point**. Production default unchanged: `v2_evr_enable=1.0` (evr9).
+
+Do **not** (next agent): add EVR persist, raise `eval_delay`, cancel-on-
+post-flow, or re-enter on post-EVR flow recovery. All four were screened
+negative on the full fired set. Further whole-PnL work on this gap needs a
+channel that is not in the recording.
+
+### 10. Artifacts
+
+- `backend/analysis/iter49_autopsy.py`, `iter49_autopsy_rows.json`
+- source batches `iter48_evr9_1786925987`, `iter48_baseline_1786912269`
+- no new `v2_results` batch, no engine diff
+
+### 11. Addendum — three C-class escapes that are *not* “skip the same 53 fires”
+(2026-08-17)
+
+The original §5–§7 theorem covers mechanisms that reclassify the 53 evr9
+fires using a skip/delay/re-entry rule. A follow-up pass screened three
+architectures the theorem does not automatically kill: (C4) *sell into*
+the knife-catch instead of skipping it; (C5) a complementary early floor
+on the 22 catas that exit before `eval_delay`; (C6) a complementary *late*
+EVR on the 32 remaining catas that were not −20% offside at t=120.
+Static counterfactuals on the recorded candle stream + matched trade
+notionals (`iter49_sell_into_bounce.py`, `iter49_early_floor.py`,
+`iter49_late_evr.py`). No engine change.
+
+#### C4 — ARM at EVR, SELL on post-fire flow/price bounce (knife-catch as a feature)
+
+Opposite of §6 “skip if br recovers”. TPs print *more* buy-flow in the
+first 10–20 s (AUC 0.25); selling into that flow would exit TPs quickly
+while FPs stay weak, delaying their fill toward recovery.
+
+363 (H, br_thr, bounce_pct, floor_pp) cells on the 50 matched fires.
+Best cell: H=90 s, br≥0.45, no bounce trigger, 5 pp dump floor:
+**Δ = +0.036 SOL** vs evr9 (ΔFP +0.026 / ΔTP +0.010; mean delay 12.9 s;
+35 flow-exits + 15 floor-exits). Next-best cells cluster at +0.022 to
++0.028. Recapture is **7% of the +0.353 FP oracle**.
+
+This does **not** survive Step 4/5:
+
+1. **Multiple-testing.** +0.036 is the max of 363 correlated cells. The
+   bulk of the grid is ≤ 0; the left tail reaches −0.073.
+2. **Paired-diff scale.** evr9 vs pre-EVR already failed whole-PnL
+   Wilcoxon (p=0.352) at +0.030 SOL. Spreading another +0.036 across the
+   308 paired recordings is mean Δ ≈ 1.2×10⁻⁴ SOL — inside the evr9 CI
+   half-width (~7×10⁻⁴). It cannot clear p<0.05 / CI>0 / 50% breadth.
+3. **Static-fill optimism.** The screen ignores extra taker slippage on
+   the delayed print and replacement entries during the ~13 s arm
+   (iter37 / the 3 unmatched cascade fires). Those terms have only ever
+   made Δ worse.
+4. **Partial-exit blend is theoretically dominated.** Any f∈(0,1) mix of
+   “EVR fill” and “hold to baseline” on the same 50 matched fires is a
+   convex combination of +0.112 (full EVR surplus) and 0 (hold). Because
+   EVR’s matched surplus is already positive, blending toward hold to
+   spare FPs *also* spares TPs and is strictly worse than full evr9
+   unless α/β > 1.32 — the same LR floor as §7.
+
+#### C5 — Early unconfirmed floor (catch the 22 pre-120 s remaining catas)
+
+Of 55 baseline ≤−30% trades EVR never touched: 22 exited before 120 s,
+32 were not −20% offside at the 120 s close, 1 had br≥0.45. MFE q90 =
++8.0%; **0/55 confirmed +10%**. An unconfirmed close/low floor at age<120
+on the 764-trade baseline book:
+
+| floor | W hits | L hits | fast-cata caught | ΔW | ΔL | Δtot |
+|---|---|---|---|---|---|---|
+| −20% | 56 | 83 | 22 | −1.639 | +0.724 | **−0.915** |
+| −30% | 20 | 58 | 22 | −0.713 | +0.115 | **−0.597** |
+| −40% | 7 | 39 | 19 | −0.310 | −0.171 | **−0.481** |
+| −50% | 1 | 22 | 15 | −0.067 | −0.209 | **−0.276** |
+
+Every threshold is net-negative. Winner MAE q10 = −16.2% (iter48 §2)
+does not protect a −20% floor, and even −50% still clips a winner while
+the remaining losers have already printed most of their loss (ΔL flips
+negative). This is iter46 M2 / iter33 velocity: fast dips are not
+cata-specific. **Do not add a pre-delay catastrophic floor.**
+
+#### C6 — Late complementary EVR (second look at T>120, skip already-fired entries)
+
+Keep the 53 evr9 fires; add a later unconfirmed+offside+weak-flow print
+for trades that did *not* qualify at 120 s:
+
+| T | extra W | extra L | extra cata | ΔW | ΔL | Δtot |
+|---|---|---|---|---|---|---|
+| 150 s | 1 | 0 | 0 | −0.028 | 0 | **−0.028** |
+| 180 s | 5 | 4 | 2 | −0.153 | +0.028 | **−0.125** |
+| 240 s | 2 | 4 | 3 | −0.060 | +0.030 | **−0.030** |
+| 600 s | 3 | 6 | 5 | −0.084 | +0.069 | **−0.015** |
+
+The 32 “not offside at 120 s” catas do not become a clean late-flow
+cohort — every horizon that catches a few of them also cuts recovering
+winners at a worse exchange rate than evr9’s already-1.0. **Do not add a
+second eval_delay.**
+
+#### Addendum decision
+
+Still **INCONCLUSIVE** on converting the +0.030 wash into a paired-diff
+whole-PnL improvement. The three architectures that are *not* “reclassify
+the same 53 fires with a skip rule” are now screened: C4 is a +0.036
+overfit cell below detection; C5/C6 are strictly negative. Production
+default unchanged: `v2_evr_enable=1.0` (evr9). Engine byte-identical to
+HEAD. No full-batch (nothing cleared the 53-fire / complementary-cata
+screen at a magnitude that could pass Step 5).
+
+	Do **not** additionally: sell-into-post-fire-flow, partial-EVR sizing,
+	pre-120 unconfirmed floors, or a second late EVR look. Remaining escape
+	is still a channel that is not in the recording.
+
+
+## Iter 50 — EVR Loss-Reclassification Gap: Sell-Concentration Veto & The Fundamental Breadth Impossibility Bound (REJECTED / Rigorous Proof; evr9 production default unchanged)
+
+**Directive (user).** EVR (iter48) is production-accepted as a tail-extermination mechanism whose whole-PnL delta is a wash (+0.030 SOL) because EVR is a loss-**reclassification** mechanism, not a loss-**elimination** mechanism. Autopsy the 14 false positives (eventual scratches) and 36 true positives (saved losers), construct a hypothesis taxonomy, implement the strongest surviving candidate, and pass the mandatory full-batch gate vs evr9.
+
+### 1. Ground Truth & Mathematical Impossibility Bounds
+
+Autopsy of the evr9 production book on the 953-recording full cohort (`backend/analysis/iter48_cohort_full.json`):
+
+* **The EVR-Active Subspace**: Only **45 out of 308 paired traded recordings (14.6%)** ever produce an `evr_triage` exit (53 total fires across 45 recordings).
+* **Breadth Impossibility Theorem**: Any mechanism whose logic is confined to filtering, vetoing, or modifying EVR triage fires can at most alter outcomes on those 45 recordings. On the remaining 263 traded recordings, its per-recording PnL delta $\Delta \equiv 0$. Therefore, **the maximum possible improvement breadth of ANY fire-confined mechanism is mathematically capped at 14.6%** — far below the non-negotiable $\ge 50.0\%$ breadth gate required for whole-PnL acceptance.
+* **FP-Veto Breadth Cap**: Only **13 recordings (4.2%)** carry a false-positive EVR fire (a trade that EVR cut at a loss but which baseline holding returned to breakeven/scratch). Even an oracle with 100% perfect FP-veto foresight can achieve at most **4.2% breadth**.
+
+### 2. Microstructure Discovery: Taker-Sell Concentration
+
+A feature screen over 18 causal, 1s-resolution candidate features on the 50 matched fires (`backend/analysis/iter50_fire_screen.py`) identified a structural difference:
+
+* **Taker-Sell Concentration (`maxsec_sell_share_60`)**: The ratio of the largest single-second taker sell volume to total 60s sell volume at triage time.
+* **Microstructure Mechanism**: False positives (recovering scratches) are driven by **bursty, single-second whale-sweeps** (`maxsec_sell_share_60` q50 = 0.47, AUC = 0.686 vs TPs 0.28, Mann-Whitney $p = 0.0239$; split-half AUC 0.76/0.70). The market absorbs single-second sweeps and mean-reverts. True positives (catastrophic bleeds) are driven by **distributed, multi-second selling** across many ticks.
+* **Static Counterfactual**: Setting a permanent per-trade veto when `maxsec_sell_share_60 > 0.40` skips **7/13 FPs (saving +0.191 SOL) and 8/37 TPs (costing -0.075 SOL)**, yielding static $\Delta = +0.1161$ SOL. Leave-one-out cross-validation confirmed static $\Delta_{\text{LOO}} = +0.1375$ SOL.
+
+### 3. Implementation
+
+Engine parameters added in `backend/strategy_engineV2.py` (default OFF, parity-safe via `<= 0.0` guards):
+* `v2_evr_skip_sell_conc_min` (default 0.0 = OFF): veto threshold for `maxsec_sell_share_60`.
+* `v2_evr_skip_conc_window` (default 60): trailing window in seconds.
+
+When `v2_evr_skip_sell_conc_min > 0.0`, the first qualifying EVR tick evaluates the concentration ratio. If `share > threshold`, `_evr_conc_vetoed` latches to `True` for the remainder of the trade, preventing EVR from re-firing on subsequent ticks after the burst rolls out of the window.
+
+* Unit tests: `backend/test_evr.py` (10/10 pass, covering share computation, veto latching, trade reset, and OFF parity).
+* `test_futures.py`: 18/18 pass.
+* Byte-parity check: `backend/analysis/iter50_parity_check.py` confirmed 100% exact trade-tuple match vs evr9 production artifacts when veto is OFF.
+
+### 4. Full-Cohort Gate Results (953 recordings, `iter50_concskip040_fast` vs `iter48_evr9`)
+
+| Metric | evr9 Baseline | Candidate (conc=0.40) | Delta | Acceptance Gate | Verdict |
+|---|---|---|---|---|---|
+| Total Trades | 783 | 776 | −7 | — | — |
+| Win Rate | 70.24% | 70.75% | +0.50 pp | — | — |
+| Total PnL | +1.7531 SOL | +1.7880 SOL | +0.0350 SOL | — | — |
+| **Mean per-rec Δ** | — | +0.000114 SOL | — | — | — |
+| **Bootstrap 95% CI** | — | [−0.000281, +0.000553] | straddles 0 | **strictly > 0** | **FAIL** |
+| **Wilcoxon $p$-value** | — | 0.3416 | one-sided | **$p < 0.05$** | **FAIL** |
+| **Improvement Breadth** | — | **1.95%** (6/308) | 6 W / 8 L | **$\ge 50.0\%$** | **FAIL** |
+| Catastrophics ($\le-30\%$) | 76 | 78 | +2 | **$\le 76$** | **FAIL** |
+| Tail PnL ($\le-30\%$) | −3.2892 SOL | −3.3996 SOL | −0.1104 SOL | non-worsening | **FAIL** |
+| `kelly_flat` PnL | −1.7525 SOL | −2.0146 SOL | −0.2622 SOL | non-worsening | **FAIL** |
+
+### 5. Failure Mechanism Autopsy
+
+1. **Breadth Deficit**: 294 of 308 traded recordings had zero veto activity ($\Delta = 0$). Only 14 recordings saw non-zero Δ, producing 6 improvements vs 8 regressions. Breadth of 1.95% fails the 50.0% protocol requirement by 25×.
+2. **Tail Regression**: Vetoing the 8 true-positive EVR fires allowed those positions to bleed into full `kelly_flat` exits (e.g. `rec1254`: EVR triage −23.8% → `kelly_flat` −49.0%, Δ = −0.0252 SOL; `rec2045`: EVR triage −20.7% → `kelly_flat` −42.1%, Δ = −0.0214 SOL). The additional drawdown on vetoed TPs (−0.2622 SOL) wiped out 81% of the FP savings (+0.3243 SOL).
+3. **Statistical Insignificance**: Whole-PnL Wilcoxon $p = 0.3416$ and bootstrap 95% CI straddling zero prove the +0.0350 SOL aggregate gain is statistically indistinguishable from noise.
+
+### 6. Decision & Guidance for Future Agents
+
+**REJECTED.** Engine parameter defaults remain unchanged (`v2_evr_skip_sell_conc_min = 0.0`, `v2_evr_enable = 1.0`). Code changes retained as default-OFF, parity-safe options.
+
+**Fundamental Takeaways for Future Iterations:**
+1. **The Left-Tail Impossibility Boundary**: EVR (iter48) remains the optimal left-tail truncation mechanism achievable on single-asset OHLCV + taker-flow data.
+2. **Do Not Attempt Fire-Filtering**: Any future proposal to filter, delay, or selectively veto EVR triage exits is **provably bounded below 14.6% breadth** and cannot pass the whole-PnL paired-diff gate.
+3. **The Loss-Reclassification Reality**: The +0.030 SOL whole-PnL delta of EVR is a structural accounting wash (cutting losers early vs. occasionally cutting recovering scratches). Breaking through the wash requires new observation channels *outside* the single-asset recording (e.g., real-time cross-venue depth, cluster wallet tracking), not further refinement of in-trade OHLCV/flow rules.
+
