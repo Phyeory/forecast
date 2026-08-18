@@ -2352,7 +2352,16 @@ async function _renderBacktestChart(ctx, bt) {
   });
   const btChart = _btCharts[ctx];
 
-  const candles = bt.candles || [];
+  let candles = bt.candles || [];
+  // Batch runs (Run All / Last Night / Last 12h) are persisted without
+  // backtest_candles rows — fall back to the recording's candle stream.
+  if (!candles.length && bt.recording_id) {
+    try {
+      candles = await apiFetch(`/api/recordings/${bt.recording_id}/candles`) || [];
+    } catch (e) {
+      console.warn("Failed to load recording candles for backtest", bt.recording_id, e);
+    }
+  }
   const formattedData = await formatOfflineCandles(bt.mint, candles, bt.timeframe);
   chartCurrency = formattedData.currency;
 
