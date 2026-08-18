@@ -580,11 +580,12 @@ class LiveTrader:
                     self._get_sol_balance(),
                     self._get_token_balance(),
                 )
-                self._cached_sol_balance = sol
+                if sol is not None:
+                    self._cached_sol_balance = sol
+                    self._cached_balance_ts = time.time()
                 if tok > 0:
                     self._cached_token_balance = tok
                     self._token_balance = tok
-                self._cached_balance_ts = time.time()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -1267,11 +1268,11 @@ class LiveTrader:
                 f"[TX FAILED ON-CHAIN] sig={sig[:16]}… error={confirm_result['error']}"
             )
 
-    async def _get_sol_balance(self) -> float:
+    async def _get_sol_balance(self, timeout_s: float = 1.2) -> Optional[float]:
         """Fetch wallet SOL balance — fast-path cached RPC, fanout otherwise.
 
-        Returns 0.0 if no RPC answered; the caller treats 0 as 'stale RPC'
-        and falls back to cached figures rather than failing the swap.
+        Returns None if no RPC answered; callers can fall back to cached figures
+        or retry rather than failing the swap or overwriting cache with zero.
         """
         payload = {
             "jsonrpc": "2.0", "id": 1,
@@ -1288,8 +1289,8 @@ class LiveTrader:
             except Exception:
                 return None
 
-        result = await self._rpc_fanout_first_wins(payload, timeout_s=1.2, result_fn=_extract)
-        return result if isinstance(result, float) else 0.0
+        result = await self._rpc_fanout_first_wins(payload, timeout_s=timeout_s, result_fn=_extract)
+        return result if isinstance(result, float) else None
 
     async def _get_token_balance(self, commitment: str = "processed") -> int:
         """
@@ -1497,23 +1498,43 @@ class LiveTrader:
             mint_str = str(self.token_mint)
 
             # ── Cached SOL balance (no RPC round-trip on the hot path) ──────
-            # The background balance cache keeps this figure fresh (~4s).  If
-            # the cache has never been populated (session just started) we do
-            # one blocking read; otherwise the swap proceeds immediately.
+            # The background balance cache keeps this figure fresh (~8s).  If
+            # the cache has never been populated (session just started) or is
+            # zero/stale, we perform an inline RPC read.
             sol_bal = self._get_cached_sol_balance()
-            if self._cached_balance_ts == 0.0:
-                sol_bal = await self._get_sol_balance()
-                self._cached_sol_balance = sol_bal
-                self._cached_balance_ts = time.time()
-            self._pre_buy_sol_balance = sol_bal
+            if self._cached_balance_ts == 0.0 or sol_bal <= 0.0 or (time.time() - self._cached_balance_ts) > 30.0:
+                fresh_sol = await self._get_sol_balance(timeout_s=1.5)
+                if fresh_sol is None and (sol_bal <= 0.0 or self._cached_balance_ts == 0.0):
+                    fresh_sol = await self._get_sol_balance(timeout_s=2.5)
+                if fresh_sol is not None:
+                    sol_bal = fresh_sol
+                    self._cached_sol_balance = fresh_sol
+                    self._cached_balance_ts = time.time()
+                elif self._cached_sol_balance > 0.0 and self._cached_balance_ts > 0.0:
+                    sol_bal = self._cached_sol_balance
+                else:
+                    sol_bal = None
+
+            sol_bal_val = sol_bal if sol_bal is not None else 0.0
+            self._pre_buy_sol_balance = sol_bal_val
             logger.info(
                 f"[BUY] Starting buy: mint={mint_str[:8]}… size={self.buy_size_sol} SOL "
-                f"balance={sol_bal:.4f} SOL (cached) reason={reason}"
+                f"balance={sol_bal_val:.4f} SOL (cached) reason={reason}"
             )
             self._journal_event(
                 "buy_attempt", reason=reason, size_sol=self.buy_size_sol,
-                amount_lamports=amount_lam, sol_balance=sol_bal,
+                amount_lamports=amount_lam, sol_balance=sol_bal_val,
             )
+
+            if sol_bal is None:
+                logger.error("[BUY FAILED] Balance check failed: RPC timed out/failed and no cache available")
+                self._journal_event(
+                    "buy_rejected", reason=reason, error="balance_check_failed",
+                    sol_balance=0.0, required_sol=self.buy_size_sol,
+                )
+                await self._fail_buy_flat("RPC balance check failed", reason)
+                return None
+
             if sol_bal * 1e9 < amount_lam + 50_000:  # buy size + gas buffer
                 logger.error(f"[BUY FAILED] Insufficient balance: {sol_bal:.4f} SOL but need ~{self.buy_size_sol} SOL")
                 self._journal_event(
@@ -1870,13 +1891,13 @@ class LiveTrader:
         once after a short lag so the baseline is never the pre-buy balance.
         """
         bal = await self._get_sol_balance()
-        if bal > 0:
+        if bal is not None and bal > 0:
             self.stats.starting_balance = bal
             self._post_buy_sol_balance = bal
             if bal >= self._cached_sol_balance and self._cached_sol_balance > 0:
                 await asyncio.sleep(0.4)
                 bal2 = await self._get_sol_balance()
-                if bal2 > 0:
+                if bal2 is not None and bal2 > 0:
                     self.stats.starting_balance = bal2
                     self._post_buy_sol_balance = bal2
             # Actual SOL spent on the buy (incl. priority + base fees) —
@@ -1982,7 +2003,7 @@ class LiveTrader:
             post = await self._get_sol_balance()
         except Exception:
             return None
-        if post <= 0:
+        if post is None or post <= 0:
             return None
         fee_sol = self.priority_fee_lamports / 1e9
         received = post - pre + fee_sol
