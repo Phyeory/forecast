@@ -1068,18 +1068,25 @@ def _second_derivative_grid(U_grid, dx):
 def _kramers_geometry_kernel(grid, U, rho, x_t):
     """Extract barrier geometry and curvatures without allocating d²U/dx²."""
     n = grid.shape[0]
-    idx_t = 0
-    best_distance = abs(grid[0] - x_t)
-    for i in range(1, n):
-        distance = abs(grid[i] - x_t)
-        if distance < best_distance:
-            best_distance = distance
-            idx_t = i
-
-    _, idx_up, idx_down, U_basin, U_up, U_down = _barrier_find_kernel(U, idx_t)
+    # Use integer arithmetic on the uniform grid spacing to locate x_t.
+    # The old FP-subtraction sequential scan produced different results between
+    # the numba JIT (ARM64 mandatory FMA) and pure-Python (no FMA) when x_t
+    # landed within ~1 ULP of a cell midpoint — a 1e-13 difference in x_t
+    # from the RBPF posterior flipped idx_t by one cell, causing a 29× change
+    # in omega_b_up and a direction flip.  Round-to-nearest on the grid index
+    # is bit-identical across platforms for any x_t not exactly at a midpoint.
     dx = grid[1] - grid[0] if n > 1 else 1.0
     if dx <= 0.0:
         dx = 1.0
+    raw_idx = (x_t - grid[0]) / dx
+    if raw_idx < 0.0:
+        idx_t = 0
+    elif raw_idx >= n - 1:
+        idx_t = n - 1
+    else:
+        idx_t = int(raw_idx + 0.5)  # round-to-nearest
+
+    _, idx_up, idx_down, U_basin, U_up, U_down = _barrier_find_kernel(U, idx_t)
     inv_dx2 = 1.0 / (dx * dx)
 
     def curvature(idx):
