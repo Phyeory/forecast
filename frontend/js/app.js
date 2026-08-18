@@ -2663,6 +2663,35 @@ function addLtTradeRow(ctx, action, price, pnlSol, pnlPct, txHash, status) {
   ltTradesTbody.prepend(tr);
 }
 
+/* ── Session stats bar (aggregate across active traders) ─────────────── */
+
+function updateSessionStats(serverTraders = null) {
+  const el = $("lt-session-card");
+  if (!el) return;
+  const traders = serverTraders || Object.values(ltActiveTraders);
+  if (!traders.length) { el.style.display = "none"; return; }
+  el.style.display = "";
+
+  let pnl = 0, upnl = 0, wins = 0, trades = 0;
+  for (const t of traders) {
+    const st = t.stats || {};
+    pnl += st.total_pnl_sol || 0;
+    upnl += t.unrealizedPnl || 0;
+    wins += st.winning_trades || 0;
+    trades += st.total_trades || 0;
+  }
+  const wr = trades > 0 ? (wins / trades) * 100 : 0;
+  const cls = v => (v >= 0 ? "pos" : "neg");
+  const fmt = v => `${v >= 0 ? "+" : ""}${v.toFixed(4)} SOL`;
+
+  const pnlEl = $("lts-pnl"), upnlEl = $("lts-upnl");
+  pnlEl.textContent = fmt(pnl); pnlEl.className = "bt-stat-value " + cls(pnl);
+  upnlEl.textContent = fmt(upnl); upnlEl.className = "bt-stat-value " + cls(upnl);
+  $("lts-wr").textContent = `${wr.toFixed(1)}%`;
+  $("lts-trades").textContent = trades;
+  $("lts-tokens").textContent = traders.length;
+}
+
 /* ── Trader card rendering ───────────────────────────────────────────── */
 
 function updateTraderCard(mint) {
@@ -2782,6 +2811,8 @@ function updateTraderCard(mint) {
   document.getElementById(`lt-events-${mint}`).innerHTML = ctx.events.slice(0, 5).map(e =>
     `<div class="${e.type}">${e.ts} — ${e.msg}</div>`
   ).join("");
+
+  updateSessionStats();
 }
 
 function manualTrade(mint, action) {
@@ -2997,6 +3028,7 @@ function startLiveTrader(mint, _delayOverride = null) {
 function stopLiveTrader(mint) {
   const ctx = ltActiveTraders[mint];
   if (!ctx) return;
+  updateSessionStats();
   if (ctx.ws) ctx.ws.close();
   apiFetch("/api/live/stop", { method: "POST", body: JSON.stringify({ mint }) }).catch(() => { });
   delete ltActiveTraders[mint];
@@ -3052,6 +3084,9 @@ switchPage = function (pageId) {
     if (ltWalletConnected) {
       refreshWalletBalance();
     }
+    apiFetch("/api/live/status")
+      .then(status => { if (status && Array.isArray(status.traders)) updateSessionStats(status.traders); })
+      .catch(() => { });
   }
 };
 // Re-bind nav tabs with new switchPage

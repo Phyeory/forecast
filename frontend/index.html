@@ -469,6 +469,32 @@
           </div>
         </div>
 
+        <!-- Session Stats (aggregated across active traders) -->
+        <div class="glass-card" id="lt-session-card" style="display:none">
+          <div style="display:flex;align-items:flex-start;gap:28px;flex-wrap:wrap;">
+            <div class="bt-stat">
+              <span class="bt-stat-label">Session PnL</span>
+              <span class="bt-stat-value" id="lts-pnl">+0.0000 SOL</span>
+            </div>
+            <div class="bt-stat">
+              <span class="bt-stat-label">Unrealized</span>
+              <span class="bt-stat-value" id="lts-upnl">+0.0000 SOL</span>
+            </div>
+            <div class="bt-stat">
+              <span class="bt-stat-label">Win Rate</span>
+              <span class="bt-stat-value" id="lts-wr">0.0%</span>
+            </div>
+            <div class="bt-stat">
+              <span class="bt-stat-label">Trades</span>
+              <span class="bt-stat-value" id="lts-trades">0</span>
+            </div>
+            <div class="bt-stat">
+              <span class="bt-stat-label">Tokens</span>
+              <span class="bt-stat-value" id="lts-tokens">0</span>
+            </div>
+          </div>
+        </div>
+
         <!-- Wallet Connection (Private Key) -->
         <div class="glass-card" id="lt-wallet-card">
           <div class="lt-wallet-row">
@@ -959,7 +985,7 @@
       setTimeout(check, 1000);
     })();
   </script>
-  <script src="/static/js/app.js?v=111"></script>
+  <script src="/static/js/app.js?v=112"></script>
   <script src="/static/js/sniper.js"></script>
 </body>
 
