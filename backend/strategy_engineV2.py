@@ -187,6 +187,13 @@ DEFAULT_CONFIG = {
     "latency_seconds":   0.5,   # Δ_lat
     "liquidity_cap_frac":0.10,   # n*  ≤ 0.1 · L_t
     "warmup_bars":       60,     # V1-parity: V1's `max(warmup=30, 60)` belt-and-suspenders
+    # Deterministic RNG seed for the systematic resampler.  The RBF resample
+    # previously drew `np.random.random()` from the process-global (unseeded)
+    # stream, so identical backtests differed run-to-run AND across machines
+    # (macOS vs Codespaces Linux).  `default_rng` (PCG64) is stable for a
+    # given seed across numpy versions.  Set to None to fall back to the
+    # legacy global stream.
+    "rng_seed":           42,     # deterministic resample (None = legacy)
                              #   gate suppresses signals for 60 engine bars; V2 matches.
     "ticks_per_state":   4,      # V1 4-state intra-candle expansion count
                                  #   (adapter-only; pure V2 ignores)
@@ -1564,9 +1571,18 @@ class RaoBlackwellisedParticleFilter:
     over regimes.
     """
 
-    def __init__(self, n_particles: int, x0: float):
+    def __init__(self, n_particles: int, x0: float, rng_seed=None):
         N = int(n_particles)
         self.N = N
+        # Deterministic per-filter RNG for the systematic resampler (iter51
+        # parity fix).  When a seed is supplied the resample offset is fully
+        # reproducible across runs and across machines (PCG64 is stable for a
+        # fixed seed across numpy versions); when None we fall back to the
+        # legacy process-global stream to preserve pre-seed behaviour.
+        if rng_seed is not None:
+            self._rng = np.random.default_rng(int(rng_seed))
+        else:
+            self._rng = np.random   # legacy: global module stream
         # Initial covariance (mild inflation so the first step has spread).
         P0 = np.eye(5) * 0.01
         sqrt0 = _chol_lower_5x5(P0)
@@ -1938,7 +1954,7 @@ class RaoBlackwellisedParticleFilter:
         `_regime_arr`) — copies selected particles' state into fresh
         arrays so subsequent in-place updates don't mutate resampled
         siblings."""
-        u = float(np.random.random())
+        u = float(self._rng.random())
         idx = _systematic_resample_indices(self._weights, u)
         N = self.N
         new_mu    = np.empty_like(self._mu_arr)
@@ -2418,6 +2434,7 @@ class MemecoinStrategyEngine:
         self._rbpf = RaoBlackwellisedParticleFilter(
             n_particles=int(self.cfg["n_particles"]),
             x0=0.0,
+            rng_seed=self.cfg.get("rng_seed"),
         )
         self.potential = MarketPotential(
             n_grid=int(self.cfg["n_grid"]),
