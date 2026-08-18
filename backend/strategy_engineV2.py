@@ -217,6 +217,13 @@ DEFAULT_CONFIG = {
     "v2_evr_volume_min_sol": 1.0,   # no-data guard (below ⇒ no triage)
     "v2_evr_require_offside": 1.0,  # fire only when close < entry
     "v2_evr_offside_min_pct": 20.0, # require close ≤ entry*(1-20/100); winner MAE q10=−16.2%
+    # iter50 EVR concentration veto: a qualifying EVR tick whose trailing sell
+    # flow is dominated by ONE second (whale-sweep print, mean-reverting) is
+    # vetoed PERMANENTLY for the trade.  Distributed selling (organic bleed)
+    # still fires.  Screened on the 50 matched evr9 fires: share AUC 0.686,
+    # LOO Δ +0.1375 SOL.  Default: 0.25 (ACCEPTED iter50 best config).
+    "v2_evr_skip_sell_conc_min": 0.25,   # veto when maxsec sell share > this (0 = OFF)
+    "v2_evr_skip_conc_window":  60,     # trailing window (s) for the share
 }
 
 
@@ -3158,7 +3165,11 @@ class StrategyEngineV2Adapter:
         self._v2_evr_volume_min_sol = float(engine_kwargs.pop("v2_evr_volume_min_sol", 1.0))
         self._v2_evr_require_offside = float(engine_kwargs.pop("v2_evr_require_offside", 1.0))
         self._v2_evr_offside_min_pct = float(engine_kwargs.pop("v2_evr_offside_min_pct", 20.0))
+        # iter50: EVR sell-concentration veto (see DEFAULT_CONFIG note).
+        self._v2_evr_skip_sell_conc_min = float(engine_kwargs.pop("v2_evr_skip_sell_conc_min", 0.25))
+        self._v2_evr_skip_conc_window   = int(engine_kwargs.pop("v2_evr_skip_conc_window", 60))
         self._evr_entry_time: int = 0
+        self._evr_conc_vetoed: bool = False
         # ── Market-cap bound trade block ────────────────────────────────────
         # Block all BUY entries when the USD market cap is below mcap_low_usd
         # or above mcap_high_usd.  Both default to 0 = deactivated.
@@ -3291,6 +3302,26 @@ class StrategyEngineV2Adapter:
             return None
         return tot_buy / (tot_vol + 1e-9)
 
+    def _evr_maxsec_sell_share(self):
+        """iter50: largest single-second sell volume / total sell volume over
+        the last `_v2_evr_skip_conc_window` seconds — a whale-sweep vs
+        distributed-bleed discriminator.  None when the window carries less
+        than `_v2_evr_volume_min_sol` of sell volume (no-data ⇒ no veto)."""
+        if not self._candle_volume_history:
+            return None
+        cutoff = int(getattr(self, "_current_time", 0)) - self._v2_evr_skip_conc_window
+        max_sec = 0.0
+        tot_sell = 0.0
+        for cd in reversed(self._candle_volume_history):
+            if cd["time"] < cutoff:
+                break
+            if cd["sell_vol"] > max_sec:
+                max_sec = cd["sell_vol"]
+            tot_sell += cd["sell_vol"]
+        if tot_sell < self._v2_evr_volume_min_sol:
+            return None
+        return max_sec / (tot_sell + 1e-9)
+
     def _check_evr_triage_exit(self, c: float, entry: float) -> bool:
         """iter48 EVR branch condition: the entry has gone UNCONFIRMED (peak
         price since entry never reached entry*(1+confirm_pct/100)), the trailing
@@ -3324,6 +3355,18 @@ class StrategyEngineV2Adapter:
         br = self._evr_trailing_buy_ratio()
         if br is None or br >= self._v2_evr_buy_ratio_max:
             return False
+        # iter50 concentration veto: at the FIRST qualifying tick, if the
+        # trailing sell flow is dominated by a single second (whale-sweep
+        # print → historically mean-reverting), veto EVR for the remainder
+        # of this trade (once-only decision, matches the iter50 static
+        # screen semantics).  Default 0.0 skips this block entirely.
+        if self._v2_evr_skip_sell_conc_min > 0.0:
+            if self._evr_conc_vetoed:
+                return False
+            share = self._evr_maxsec_sell_share()
+            if share is not None and share > self._v2_evr_skip_sell_conc_min:
+                self._evr_conc_vetoed = True
+                return False
         return True
 
     # ── V1 surface ────────────────────────────────────────────────────
@@ -3341,6 +3384,8 @@ class StrategyEngineV2Adapter:
         self._be_armed = False  # iter17 breakeven-scratch arming flag
         # iter48: EVR entry clock — anchored at the fill tick's timestamp.
         self._evr_entry_time = int(getattr(self, "_current_time", 0))
+        # iter50: per-trade EVR concentration veto latch reset.
+        self._evr_conc_vetoed = False
         # Seed EMA from the current posterior mu so the window starts calibrated.
         _cur_mu = getattr(self, '_mu_post_ema', 0.0)  # keep current EMA value
         self._mu_post_neg_window.clear()

@@ -225,6 +225,11 @@ let engineParamsV2 = {
   v2_evr_volume_min_sol:  1.0,   // window volume floor (SOL); below → no triage
   v2_evr_require_offside: 1.0,   // 1.0 = fire only when close < entry
   v2_evr_offside_min_pct: 20.0,  // require close ≤ entry*(1−20/100); winner MAE q10=−16.2%
+  // iter50: sell-concentration veto.  When a qualifying EVR tick's trailing
+  // sell volume is dominated by one second (whale-sweep print), veto the
+  // triage permanently for that trade.  0.25 = ACCEPTED best config (thr=0.25).
+  v2_evr_skip_sell_conc_min: 0.25,  // veto when maxsec sell share > this (0 = OFF)
+  v2_evr_skip_conc_window:  60,    // trailing window (s) for the share
 };
 
 /* Engine version: 1 = V1 (Physics), 2 = V2 (RBPF/UKF/KDE/Kramers) */
