@@ -2669,6 +2669,39 @@ function addTraderEvent(ctx, type, msg) {
 
 /* ── Trade history table ─────────────────────────────────────────────── */
 
+function renderLtTradeTable(trades) {
+  if (!ltTradesTbody || !Array.isArray(trades)) return;
+  ltTradesTbody.innerHTML = "";
+  ltTradeCounter = 0;
+  for (const t of trades) {
+    ltTradeCounter++;
+    const tr = document.createElement("tr");
+    const pnlSol = t.pnl_sol || 0;
+    const pnlPct = t.pnl_pct || 0;
+    const pnlClass = pnlSol >= 0 ? "trade-pnl-pos" : "trade-pnl-neg";
+    const ts = t.timestamp ? new Date(t.timestamp * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "—";
+    const txHash = t.tx_hash || "";
+    const txCell = txHash
+      ? `<a href="https://solscan.io/tx/${txHash}" target="_blank" style="color:var(--accent);text-decoration:none">${txHash.slice(0, 8)}…</a>`
+      : "—";
+    const action = (t.action || "BUY").toUpperCase();
+    const tokenSymbol = t.token_symbol ? "$" + t.token_symbol : (t.mint ? t.mint.slice(0, 6) + "…" : "—");
+    const price = t.price || 0;
+    tr.innerHTML = `
+      <td>${ltTradeCounter}</td>
+      <td>${tokenSymbol}</td>
+      <td style="color:${action === "BUY" ? "var(--green)" : "var(--red)"}; font-weight:700">${action}</td>
+      <td>${ts}</td>
+      <td>${price ? price.toExponential(4) : "—"}</td>
+      <td class="${pnlClass}">${action === "SELL" ? (pnlSol >= 0 ? "+" : "") + pnlSol.toFixed(6) : "—"}</td>
+      <td class="${pnlClass}">${action === "SELL" ? (pnlPct >= 0 ? "+" : "") + pnlPct.toFixed(2) + "%" : "—"}</td>
+      <td>${txCell}</td>
+      <td>${t.status || "confirmed"}</td>
+    `;
+    ltTradesTbody.prepend(tr);
+  }
+}
+
 function addLtTradeRow(ctx, action, price, pnlSol, pnlPct, txHash, status) {
   ltTradeCounter++;
   const tr = document.createElement("tr");
@@ -2683,32 +2716,48 @@ function addLtTradeRow(ctx, action, price, pnlSol, pnlPct, txHash, status) {
     <td style="color:${action === "BUY" ? "var(--green)" : "var(--red)"}; font-weight:700">${action}</td>
     <td>${ts}</td>
     <td>${price ? price.toExponential(4) : "—"}</td>
-    <td class="${pnlClass}">${pnlSol ? (pnlSol >= 0 ? "+" : "") + pnlSol.toFixed(6) : "—"}</td>
-    <td class="${pnlClass}">${pnlPct ? (pnlPct >= 0 ? "+" : "") + pnlPct.toFixed(2) + "%" : "—"}</td>
+    <td class="${pnlClass}">${action === "SELL" ? (pnlSol ? (pnlSol >= 0 ? "+" : "") + pnlSol.toFixed(6) : "—") : "—"}</td>
+    <td class="${pnlClass}">${action === "SELL" ? (pnlPct ? (pnlPct >= 0 ? "+" : "") + pnlPct.toFixed(2) + "%" : "—") : "—"}</td>
     <td>${txCell}</td>
     <td>${status}</td>
   `;
   ltTradesTbody.prepend(tr);
 }
 
-/* ── Session stats bar (aggregate across active traders) ─────────────── */
+/* ── Session stats bar (aggregate across server sessions) ─────────────── */
 
-function updateSessionStats(serverTraders = null) {
+function updateSessionStats(summary = null, serverTraders = null) {
   const el = $("lt-session-card");
   if (!el) return;
-  const traders = serverTraders || Object.values(ltActiveTraders);
-  if (!traders.length) { el.style.display = "none"; return; }
+
+  let pnl = 0, upnl = 0, wr = 0, trades = 0, tokens = 0;
+
+  if (summary) {
+    pnl = summary.total_pnl_sol || 0;
+    upnl = summary.unrealized_pnl_sol || 0;
+    wr = summary.win_rate || 0;
+    trades = summary.total_trades || 0;
+    tokens = summary.tokens_traded || 0;
+  } else {
+    const traders = serverTraders || Object.values(ltActiveTraders);
+    let wins = 0;
+    for (const t of traders) {
+      const st = t.stats || {};
+      pnl += st.total_pnl_sol || 0;
+      upnl += t.unrealizedPnl || 0;
+      wins += st.winning_trades || 0;
+      trades += st.total_trades || 0;
+    }
+    wr = trades > 0 ? (wins / trades) * 100 : 0;
+    tokens = traders.length;
+  }
+
+  if (trades === 0 && tokens === 0 && Object.keys(ltActiveTraders).length === 0) {
+    el.style.display = "none";
+    return;
+  }
   el.style.display = "";
 
-  let pnl = 0, upnl = 0, wins = 0, trades = 0;
-  for (const t of traders) {
-    const st = t.stats || {};
-    pnl += st.total_pnl_sol || 0;
-    upnl += t.unrealizedPnl || 0;
-    wins += st.winning_trades || 0;
-    trades += st.total_trades || 0;
-  }
-  const wr = trades > 0 ? (wins / trades) * 100 : 0;
   const cls = v => (v >= 0 ? "pos" : "neg");
   const fmt = v => `${v >= 0 ? "+" : ""}${v.toFixed(4)} SOL`;
 
@@ -2717,7 +2766,7 @@ function updateSessionStats(serverTraders = null) {
   upnlEl.textContent = fmt(upnl); upnlEl.className = "bt-stat-value " + cls(upnl);
   $("lts-wr").textContent = `${wr.toFixed(1)}%`;
   $("lts-trades").textContent = trades;
-  $("lts-tokens").textContent = traders.length;
+  $("lts-tokens").textContent = tokens;
 }
 
 /* ── Trader card rendering ───────────────────────────────────────────── */
@@ -3149,21 +3198,30 @@ function stopAllTraders() {
 /* ── Re-attach to server-side sessions ───────────────────────────────── */
 
 function refreshLiveSessions() {
-  // Live sessions run server-side and survive tab closes.  On page load (and
+  // Live sessions run server-side and survive tab closes. On page load (and
   // whenever the live-trading tab is opened), re-attach a viewer card for
   // every running session this tab isn't showing yet.
   apiFetch("/api/live/status")
     .then(st => {
-      if (!st || !Array.isArray(st.traders)) return;
-      updateSessionStats(st.traders);
-      for (const t of st.traders) {
-        if (t.status !== "running") continue;
-        if (ltActiveTraders[t.mint]) continue;
-        startLiveTrader(t.mint, 0, {
-          attach: true,
-          timeframe: t.timeframe,
-          engineVersion: t.engine_version,
-        });
+      if (!st) return;
+      if (st.session_summary) {
+        updateSessionStats(st.session_summary, st.traders);
+      } else if (Array.isArray(st.traders)) {
+        updateSessionStats(null, st.traders);
+      }
+      if (Array.isArray(st.trades)) {
+        renderLtTradeTable(st.trades);
+      }
+      if (Array.isArray(st.traders)) {
+        for (const t of st.traders) {
+          if (t.status !== "running") continue;
+          if (ltActiveTraders[t.mint]) continue;
+          startLiveTrader(t.mint, 0, {
+            attach: true,
+            timeframe: t.timeframe,
+            engineVersion: t.engine_version,
+          });
+        }
       }
     })
     .catch(() => { });
@@ -3207,10 +3265,7 @@ switchPage = function (pageId) {
     if (ltWalletConnected) {
       refreshWalletBalance();
     }
-    apiFetch("/api/live/status")
-      .then(status => { if (status && Array.isArray(status.traders)) updateSessionStats(status.traders); })
-      .catch(() => { });
-    // Pick up server-side sessions started from other tabs / before reload
+    // Pick up server-side sessions, stats, and trade log started from other tabs / before reload
     refreshLiveSessions();
   }
 };

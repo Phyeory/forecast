@@ -973,6 +973,43 @@ async def chart_ws(
 _active_live_traders: dict[str, "_LiveSession"] = {}   # keyed by token mint
 _live_session_lock = asyncio.Lock()
 
+# Persistent session stats and trade events for the current server run
+_completed_live_sessions: list[dict] = []
+_server_trade_events: list[dict] = []
+
+
+def _record_server_trade_event(*, mint: str, token_symbol: str, event: str, payload: dict):
+    ts = payload.get("timestamp") or time.time()
+    sig = payload.get("detail") or ""
+    if event == "buy_confirmed":
+        ct = payload.get("current_trade") or {}
+        _server_trade_events.append({
+            "id": len(_server_trade_events) + 1,
+            "mint": mint,
+            "token_symbol": token_symbol,
+            "action": "BUY",
+            "timestamp": ts,
+            "price": ct.get("entry_price") or 0.0,
+            "pnl_sol": 0.0,
+            "pnl_pct": 0.0,
+            "tx_hash": sig,
+            "status": "confirmed",
+        })
+    elif event == "sell_confirmed":
+        ct = payload.get("closed_trade") or payload.get("current_trade") or {}
+        _server_trade_events.append({
+            "id": len(_server_trade_events) + 1,
+            "mint": mint,
+            "token_symbol": token_symbol,
+            "action": "SELL",
+            "timestamp": ts,
+            "price": ct.get("exit_price") or 0.0,
+            "pnl_sol": ct.get("pnl_sol") or 0.0,
+            "pnl_pct": ct.get("pnl_pct") or 0.0,
+            "tx_hash": sig,
+            "status": "confirmed",
+        })
+
 
 class _LiveSession:
     """Server-side live-trading session, decoupled from any browser tab.
@@ -1027,6 +1064,19 @@ class _LiveSession:
 
     async def broadcast_text(self, payload: str) -> None:
         # LiveTrader._broadcast_status sends pre-serialised JSON strings
+        try:
+            data = json.loads(payload) if isinstance(payload, str) else payload
+            if isinstance(data, dict) and data.get("type") == "trade_update":
+                evt = data.get("event")
+                if evt in ("buy_confirmed", "sell_confirmed"):
+                    _record_server_trade_event(
+                        mint=self.real_mint,
+                        token_symbol=self.token_symbol,
+                        event=evt,
+                        payload=data,
+                    )
+        except Exception:
+            pass
         self.broadcast(payload)
 
     def wallet(self) -> str:
@@ -1317,6 +1367,14 @@ class _LiveSession:
 
             # Wake up any remaining viewers so their UIs reflect the end
             self.broadcast({"type": "session_ended", "reason": self.stop_reason or "session_ended"})
+            _completed_live_sessions.append({
+                "mint": real_mint,
+                "token_name": self.token_name,
+                "token_symbol": self.token_symbol,
+                "stats": live_trader.stats.to_dict(),
+                "rec_id": rec_id,
+                "ended_at": time.time(),
+            })
             if _active_live_traders.get(real_mint) is self:
                 del _active_live_traders[real_mint]
             logger.info(
@@ -1327,8 +1385,40 @@ class _LiveSession:
 @app.get("/api/live/status")
 async def live_status():
     traders = []
+    seen_mints = set()
+
+    total_pnl = 0.0
+    unrealized_pnl = 0.0
+    winning_trades = 0
+    losing_trades = 0
+    total_trades = 0
+
+    # 1. Completed sessions in this server run
+    for cs in _completed_live_sessions:
+        m = cs.get("mint")
+        if m:
+            seen_mints.add(m)
+        st = cs.get("stats", {})
+        total_pnl += st.get("total_pnl_sol", 0.0)
+        winning_trades += st.get("winning_trades", 0)
+        losing_trades += st.get("losing_trades", 0)
+        total_trades += st.get("total_trades", 0)
+
+    # 2. Active sessions
     for mint, session in _active_live_traders.items():
         trader: LiveTrader = session.trader
+        st = trader.stats.to_dict()
+        if mint:
+            seen_mints.add(mint)
+        total_pnl += st.get("total_pnl_sol", 0.0)
+        winning_trades += st.get("winning_trades", 0)
+        losing_trades += st.get("losing_trades", 0)
+        total_trades += st.get("total_trades", 0)
+
+        if trader.current_trade and trader._last_price > 0 and trader.current_trade.entry_price > 0:
+            upnl = (trader._last_price - trader.current_trade.entry_price) / trader.current_trade.entry_price * trader.current_trade.size_sol
+            unrealized_pnl += upnl
+
         traders.append({
             "mint": mint,
             "token_name": session.token_name,
@@ -1338,11 +1428,27 @@ async def live_status():
             "status": "running" if not session.cancelled.is_set() else "stopping",
             "recording_id": session.rec_id,
             "viewers": len(session.subscribers),
-            "stats": trader.stats.to_dict(),
+            "stats": st,
             "current_trade": trader.current_trade.to_dict() if trader.current_trade else None,
             "trade_count": len(trader.trade_history),
         })
-    return JSONResponse({"traders": traders, "count": len(traders)})
+
+    win_rate = (winning_trades / total_trades * 100.0) if total_trades > 0 else 0.0
+
+    return JSONResponse({
+        "traders": traders,
+        "count": len(traders),
+        "session_summary": {
+            "total_pnl_sol": round(total_pnl, 6),
+            "unrealized_pnl_sol": round(unrealized_pnl, 6),
+            "winning_trades": winning_trades,
+            "losing_trades": losing_trades,
+            "total_trades": total_trades,
+            "win_rate": round(win_rate, 2),
+            "tokens_traded": len(seen_mints),
+        },
+        "trades": _server_trade_events,
+    })
 
 
 @app.get("/api/live/history")
