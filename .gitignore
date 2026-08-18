@@ -1,6 +1,11 @@
 *.db
 backend/data/backtest_data.db
 backend/data/price_data.db
+backend/data/price_data.db-wal
+backend/data/price_data.db-shm
+backend/data/backtest_data.db-shm
+backend/data/backtest_data.db-wal
+
 
 # Python bytecode/cache and testing cache files
 __pycache__/
