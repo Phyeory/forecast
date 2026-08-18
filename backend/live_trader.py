@@ -744,14 +744,14 @@ class LiveTrader:
             return r
         return None
 
-    async def cleanup(self):
+    async def cleanup(self, reason: str = "connection_closed"):
         """
-        Emergency cleanup before WebSocket disconnect.
+        Emergency cleanup at live-session teardown.
 
-        If a swap is already in flight, wait briefly for it to land — killing the
-        WS while a sell TX is mid-flight would abandon a position mid-execution.
-        Then, if a position is STILL open, run the emergency sell path (which
-        now retries indefinitely until tokens leave the wallet).
+        If a swap is already in flight, wait briefly for it to land — tearing
+        the session down while a sell TX is mid-flight would abandon a position
+        mid-execution.  Then, if a position is STILL open, run the emergency
+        sell path (which retries indefinitely until tokens leave the wallet).
         """
         if self._swap_in_flight:
             logger.info("[CLEANUP] Swap in flight — waiting up to 20s for it to finish")
@@ -767,14 +767,14 @@ class LiveTrader:
 
         if self.current_trade is not None:
             logger.warning(
-                f"[CLEANUP] Position still open on disconnect for {self.token_mint[:8]}… "
-                f"— launching emergency sell"
+                f"[CLEANUP] Position still open at session teardown "
+                f"({reason}) for {self.token_mint[:8]}… — launching emergency sell"
             )
             self.current_trade.status = "closing"
-            self.current_trade.exit_reason = "connection_closed"
+            self.current_trade.exit_reason = reason
             self._journal_event(
                 "emergency_cleanup_sell", trade=self.current_trade,
-                reason="connection_closed",
+                reason=reason,
             )
             try:
                 sig = await asyncio.wait_for(

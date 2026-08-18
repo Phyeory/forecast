@@ -67,6 +67,48 @@ if FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
 
+KEY_FILE_PATH = Path(__file__).parent / "data" / "live_key.json"
+
+
+def _save_backend_private_key(pk: str):
+    try:
+        KEY_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        KEY_FILE_PATH.write_text(json.dumps({"private_key": pk}), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[LIVE] Failed to persist private key to disk: {e}")
+
+
+def _clear_backend_private_key():
+    try:
+        if KEY_FILE_PATH.exists():
+            KEY_FILE_PATH.unlink()
+    except Exception as e:
+        logger.warning(f"[LIVE] Failed to remove persistent private key file: {e}")
+
+
+def _load_backend_private_key() -> str:
+    try:
+        if KEY_FILE_PATH.exists():
+            data = json.loads(KEY_FILE_PATH.read_text(encoding="utf-8"))
+            return data.get("private_key", "")
+    except Exception as e:
+        logger.warning(f"[LIVE] Failed to read persistent private key file: {e}")
+    return ""
+
+
+@app.on_event("startup")
+async def startup_load_live_key():
+    pk = _load_backend_private_key()
+    if pk:
+        try:
+            kp = keypair_from_private_key(pk)
+            app.state.lt_private_key = pk
+            app.state.lt_wallet_connected = True
+            logger.info(f"[LIVE] Restored server-side private key for wallet {str(kp.pubkey())[:8]}…")
+        except Exception as e:
+            logger.warning(f"[LIVE] Saved private key file invalid: {e}")
+
+
 @app.on_event("startup")
 async def startup_sniper():
     """Initialize and start the SniperEngine on app startup."""
@@ -923,20 +965,379 @@ async def chart_ws(
 
 
 # ── Live trading state ───────────────────────────────────────────────────
-_active_live_traders: dict[str, dict] = {}   # keyed by token mint
+# Live sessions are SERVER-SIDED: they own the trader, the market stream, the
+# auto-recording and the holder-flow pump, and keep running independently of
+# any browser tab.  Tabs attach as viewers over /ws/live/{mint}; closing a tab
+# only detaches that viewer.  A session ends when it is explicitly stopped
+# (POST /api/live/stop, the ⏹ Stop button) or a safety stop fires.
+_active_live_traders: dict[str, "_LiveSession"] = {}   # keyed by token mint
+_live_session_lock = asyncio.Lock()
+
+
+class _LiveSession:
+    """Server-side live-trading session, decoupled from any browser tab.
+
+    The /ws/live/{mint} handler creates one _LiveSession per token and then
+    attaches as a viewer.  All trading logic lives in `run()`, a detached
+    background task that survives tab closes/reopens.  Viewers receive every
+    candle/strategy/trade_update via per-viewer broadcast queues and can send
+    control messages (update_config, manual_trade) at any time.
+    """
+
+    def __init__(self, *, real_mint: str, token_name: str, token_symbol: str,
+                 timeframe: str, trader: LiveTrader, token_info: Optional[dict],
+                 engine_version: int = 1):
+        self.real_mint = real_mint
+        self.token_name = token_name
+        self.token_symbol = token_symbol
+        self.timeframe = timeframe
+        self.trader = trader
+        self.token_info = token_info
+        self.engine_version = engine_version
+        self.cancelled = asyncio.Event()
+        self.warmed = asyncio.Event()      # set once historical warmup finished
+        self.subscribers: set[asyncio.Queue] = set()
+        self.task: Optional[asyncio.Task] = None
+        self.rec_id: Optional[int] = None
+        self.warmup_candles: list[dict] = []
+        self.warmup_strategy: list[dict] = []
+        self.last_strategy_result: Optional[dict] = None
+        self.stop_reason: str = ""
+        # LiveTrader pushes trade_update JSON strings here → fanned out to viewers
+        trader.broadcast_fn = self.broadcast_text
+
+    # ── viewer fan-out ────────────────────────────────────────────────────
+
+    def subscribe(self) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        self.subscribers.add(q)
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        self.subscribers.discard(q)
+
+    def broadcast(self, obj) -> None:
+        """Fan a message out to every attached viewer.  Never blocks the
+        trading loop: a slow/full viewer just misses messages."""
+        for q in list(self.subscribers):
+            try:
+                q.put_nowait(obj)
+            except asyncio.QueueFull:
+                pass
+
+    async def broadcast_text(self, payload: str) -> None:
+        # LiveTrader._broadcast_status sends pre-serialised JSON strings
+        self.broadcast(payload)
+
+    def wallet(self) -> str:
+        return str(self.trader.keypair.pubkey())
+
+    def stop(self, reason: str = "manual_stop") -> None:
+        if not self.cancelled.is_set():
+            self.stop_reason = reason
+            self.cancelled.set()
+
+    # ── session runner ────────────────────────────────────────────────────
+
+    async def run(self) -> None:
+        real_mint = self.real_mint
+        live_trader = self.trader
+        timeframe = self.timeframe
+        token_info = self.token_info or {}
+        rec_id = self.rec_id
+        logger.info(f"[LIVE] Session start  mint={real_mint[:8]}…  wallet={self.wallet()[:8]}…  tf={timeframe}")
+
+        # Resolve live data source
+        live_source = token_info.get("_live_source", "pumpportal")
+        live_query = token_info.get("pair_address") or real_mint
+        if live_source == "solana_rpc" and token_info.get("pair_address"):
+            ws_client = PumpSwapRPCClient(live_query)
+        elif live_source == "dexscreener":
+            poll_seconds = 0.25 if timeframe in {"1s", "5s", "15s"} else 0.5
+            ws_client = DexScreenerPollClient(live_query, poll_seconds=poll_seconds)
+        else:
+            ws_client = PumpFunWSClient(real_mint)
+
+        aggregator = CandleAggregator(timeframe)
+        last_sent_price = None
+
+        # ── Holder-flow monitor (live dev/insider sell detection) ────────────
+        # Watches the token and persists events to the auto-recording's
+        # holder_flow table (so the live session is itself backtestable), and
+        # feeds the events into the strategy engine so the iter36 entry gate /
+        # exit trigger fire in real time.  Parity: the engine checks the same
+        # event list the backtester would later replay from the DB.
+        # Shared process-wide monitor — one GMGN poller regardless of how many
+        # sessions are active (iter36 rate-limit fix).
+        holder_monitor = None
+        _hf_pump_task = None
+        _hf_stop = asyncio.Event()
+        # Track how many events we've already pushed into the engine (append-only)
+        _hf_pushed = {"n": 0}
+
+        async def _holder_flow_pump():
+            """Background task that pushes new holder-flow events into the engine
+            every 1s, decoupled from trade ticks.  Without this, events discovered
+            by the GMGN poller sit in the monitor's buffer until the next trade
+            arrives — which may be 10s+ on illiquid tokens, making dev_sell_exit
+            fire far later than the backtester (which sees events at their exact
+            on-chain timestamp)."""
+            while not _hf_stop.is_set():
+                try:
+                    _hf_events = holder_monitor.get_events_as_dicts(real_mint)
+                    if len(_hf_events) > _hf_pushed["n"]:
+                        _new = _hf_events[_hf_pushed["n"]:]
+                        _hf_pushed["n"] = len(_hf_events)
+                        try:
+                            live_trader.engine.append_holder_flow_events(_new)
+                            # Immediately check if this triggers an immediate dev_sell_exit
+                            exit_reason = live_trader.check_immediate_holder_flow_exit()
+                            if exit_reason:
+                                logger.info(f"[HOLDER FLOW] Immediate exit triggered: {exit_reason}")
+                                live_trader._pending_exit = True
+                                live_trader._pending_exit_reason = exit_reason
+                                live_trader._pending_buy = False
+                                live_trader.engine.notify_trade_closed()
+                                # Fire off the sell swap immediately in the background
+                                asyncio.create_task(live_trader.execute_sell(exit_reason))
+                        except AttributeError:
+                            pass  # V1 engine has no holder-flow surface
+                except Exception:
+                    pass
+                await asyncio.sleep(1.0)
+
+        try:
+            holder_monitor = get_shared_monitor()
+            await holder_monitor.start()
+            holder_monitor.watch_token(real_mint, recording_id=rec_id)
+            # Pre-load any holder_flow events already persisted for this
+            # recording (e.g. from a prior session on the same token, or events
+            # the monitor captured before the session started).  This matches
+            # the backtester which calls set_holder_flow_events() with the full
+            # event list before the candle loop starts.
+            _existing_hf = data_store.get_holder_flow(rec_id)
+            if _existing_hf:
+                try:
+                    live_trader.engine.set_holder_flow_events(_existing_hf)
+                except AttributeError:
+                    pass  # V1 engine has no holder-flow surface
+            _hf_pushed["n"] = len(_existing_hf)
+            _hf_pump_task = asyncio.ensure_future(_holder_flow_pump())
+
+            # ── Historical warm-up (seeds the recording + the engine) ────────
+            try:
+                async with _resolve_sem:
+                    hist = await asyncio.wait_for(
+                        get_historical_candles(real_mint, timeframe), timeout=15.0
+                    )
+            except asyncio.TimeoutError:
+                logger.warning(f"[LIVE] get_historical_candles timed out for {real_mint[:8]}")
+                hist = []
+            if hist:
+                # Seed the auto-recording with the same historical candles
+                data_store.insert_candles_batch(rec_id, hist)
+
+                strategy_results = []
+                for candle in hist:
+                    result = live_trader.update_historical_candle(
+                        time_val=int(candle["time"]),
+                        o=candle["open"], h=candle["high"],
+                        l=candle["low"], c=candle["close"],
+                        volume=candle.get("volume", 0),
+                        pool_sol=candle.get("pool_sol", 0.0),
+                    )
+                    strategy_results.append(result)
+
+                self.warmup_candles = hist
+                self.warmup_strategy = strategy_results
+                if strategy_results:
+                    self.last_strategy_result = strategy_results[-1]
+                last = hist[-1]
+                aggregator.process_trade(last["close"], 0.0, float(last["time"]))
+                logger.info(f"[LIVE] Warmed up on {len(hist)} historical candles for {real_mint[:8]}")
+            self.warmed.set()
+
+            async def _process_stream(client) -> bool:
+                nonlocal last_sent_price
+                got_trade = False
+                async for trade in client.stream():
+                    if self.cancelled.is_set():
+                        break
+                    got_trade = True
+                    is_synthetic = bool(trade.get("synthetic"))
+                    is_buy_live: Optional[bool] = None
+                    if not is_synthetic:
+                        tx_live = trade.get("tx_type", "")
+                        if tx_live == "buy":
+                            is_buy_live = True
+                        elif tx_live == "sell":
+                            is_buy_live = False
+                    candle, is_new = aggregator.process_trade(
+                        trade["price"], trade["sol_amount"], trade["timestamp"],
+                        synthetic=is_synthetic,
+                        is_buy=is_buy_live,
+                        pool_sol=trade.get("pool_sol", 0.0),
+                        market_cap_usd=trade.get("market_cap_usd", 0.0),
+                    )
+                    candle_dict = candle.to_dict()
+                    current_price = candle_dict["close"]
+
+                    # Persist candle to the auto-recording (same as standalone recorder)
+                    ct = candle_dict["time"]
+                    data_store.insert_candle(
+                        rec_id, ct,
+                        candle_dict["open"], candle_dict["high"],
+                        candle_dict["low"], candle_dict["close"],
+                        candle_dict.get("volume", 0),
+                        candle_dict.get("buy_volume", 0.0),
+                        candle_dict.get("sell_volume", 0.0),
+                        candle_dict.get("pool_sol", 0.0),
+                        candle_dict.get("market_cap_usd", 0.0),
+                    )
+
+                    if last_sent_price is not None and current_price == last_sent_price and not is_new:
+                        continue
+                    last_sent_price = current_price
+
+                    strategy_result = live_trader.update(
+                        time_val=candle_dict["time"],
+                        o=candle_dict["open"], h=candle_dict["high"],
+                        l=candle_dict["low"], c=candle_dict["close"],
+                        volume=candle_dict.get("volume", 0),
+                        buy_volume=candle_dict.get("buy_volume", 0.0),
+                        sell_volume=candle_dict.get("sell_volume", 0.0),
+                        is_new=is_new,
+                        market_cap_usd=candle_dict.get("market_cap_usd", 0.0),
+                        pool_sol=candle_dict.get("pool_sol", 0.0),
+                    )
+                    self.last_strategy_result = strategy_result
+
+                    trade_payload = None if is_synthetic else {
+                        "price": trade["price"],
+                        "sol_amount": trade["sol_amount"],
+                        "tx_type": trade["tx_type"],
+                        "trader": trade["trader"],
+                        "tx_hash": trade["tx_hash"],
+                    }
+
+                    self.broadcast({
+                        "type": "candle",
+                        "candle": candle_dict,
+                        "is_new": is_new,
+                        "market_cap_sol": trade.get("market_cap_sol", 0),
+                        "market_cap_usd": trade.get("market_cap_usd", 0),
+                        "trade": trade_payload,
+                        "strategy": strategy_result,
+                    })
+
+                    # ── Market-cap safety floor check ─────────────────────────
+                    # update_market_cap() blocks until any emergency sell has
+                    # fully settled on-chain (or the MCAP_STOP_SELL_TIMEOUT_SECONDS
+                    # backstop fires), so by the time it returns True the wallet
+                    # is empty and it is safe to terminate immediately — no
+                    # grace sleep needed.
+                    mcap_usd = trade.get("market_cap_usd", 0)
+                    if mcap_usd and await live_trader.update_market_cap(float(mcap_usd)):
+                        logger.warning(
+                            f"[LIVE] Market cap floor triggered for {real_mint[:8]}… — "
+                            f"emergency sell settled, stopping session"
+                        )
+                        self.stop("mcap_floor")
+                        break
+
+                    # ── No-motion stop check ─────────────────────────────────
+                    # Only fires when idle (no position, no pending signals) —
+                    # never interrupts an active position.
+                    if live_trader.no_motion_stop_triggered:
+                        logger.warning(
+                            f"[LIVE] No-motion stop triggered for {real_mint[:8]}… — "
+                            f"session idle, shutting down"
+                        )
+                        self.stop("no_motion")
+                        break
+                return got_trade
+
+            async def stream_live():
+                got = await _process_stream(ws_client)
+                if not got and not self.cancelled.is_set() and not isinstance(ws_client, PumpFunWSClient):
+                    fallback = PumpFunWSClient(real_mint)
+                    try:
+                        await _process_stream(fallback)
+                    finally:
+                        fallback.stop()
+
+            async def _shutdown():
+                await self.cancelled.wait()
+                ws_client.stop()
+
+            await asyncio.gather(stream_live(), _shutdown())
+            if not self.cancelled.is_set():
+                # The market stream itself died (source disconnect).  An
+                # unattended position with no data feed must not be held —
+                # stop the session; the finally block emergency-sells.
+                logger.warning(f"[LIVE] Market stream ended for {real_mint[:8]}… — stopping session")
+                self.stop("stream_ended")
+        except asyncio.CancelledError:
+            # Server shutdown — let the finally block run its cleanup
+            if not self.cancelled.is_set():
+                self.stop_reason = "server_shutdown"
+        except Exception:
+            # Unexpected runner crash — mark the reason, teardown still runs
+            logger.exception(f"[LIVE] Session runner crashed  mint={real_mint[:8]}…")
+            if not self.cancelled.is_set():
+                self.stop_reason = "runner_error"
+        finally:
+            ws_client.stop()
+
+            # Stop the holder-flow background pump
+            _hf_stop.set()
+            if _hf_pump_task is not None:
+                _hf_pump_task.cancel()
+                try:
+                    await _hf_pump_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            # Stop the holder-flow monitor for this session
+            if holder_monitor is not None:
+                try:
+                    holder_monitor.unwatch_token(real_mint)
+                    await holder_monitor.stop()
+                except Exception:
+                    pass
+
+            # ── Emergency position cleanup before session teardown ──────────
+            # If a position is still open when the session ends, execute an
+            # emergency sell to avoid leaving positions unattended.
+            await live_trader.cleanup(reason=self.stop_reason or "session_ended")
+
+            # Finalize the auto-recording so it's available for backtesting
+            data_store.stop_recording(rec_id)
+            logger.info(f"[LIVE] Finalized recording {rec_id}")
+
+            # Wake up any remaining viewers so their UIs reflect the end
+            self.broadcast({"type": "session_ended", "reason": self.stop_reason or "session_ended"})
+            if _active_live_traders.get(real_mint) is self:
+                del _active_live_traders[real_mint]
+            logger.info(
+                f"[LIVE] Session ended  mint={real_mint[:8]}…  reason={self.stop_reason or 'session_ended'}"
+            )
 
 
 @app.get("/api/live/status")
 async def live_status():
     traders = []
-    for mint, info in _active_live_traders.items():
-        trader: LiveTrader = info["trader"]
+    for mint, session in _active_live_traders.items():
+        trader: LiveTrader = session.trader
         traders.append({
             "mint": mint,
-            "token_name": info.get("token_name", ""),
-            "token_symbol": info.get("token_symbol", ""),
-            "timeframe": info.get("timeframe", "1m"),
-            "status": "running" if not info.get("cancelled", asyncio.Event()).is_set() else "stopped",
+            "token_name": session.token_name,
+            "token_symbol": session.token_symbol,
+            "timeframe": session.timeframe,
+            "engine_version": session.engine_version,
+            "status": "running" if not session.cancelled.is_set() else "stopping",
+            "recording_id": session.rec_id,
+            "viewers": len(session.subscribers),
             "stats": trader.stats.to_dict(),
             "current_trade": trader.current_trade.to_dict() if trader.current_trade else None,
             "trade_count": len(trader.trade_history),
@@ -997,20 +1398,111 @@ async def live_history(limit: int = Query(20, ge=1, le=100)):
 @app.post("/api/live/stop")
 async def live_stop(body: dict = Body(...)):
     mint = body.get("mint", "").strip()
-    if not mint or mint not in _active_live_traders:
+    session = _active_live_traders.get(mint)
+    if not mint or session is None:
         return JSONResponse({"error": "No active trader for this mint"}, status_code=404)
-    info = _active_live_traders[mint]
-    info["cancelled"].set()
-    del _active_live_traders[mint]
-    return JSONResponse({"status": "stopped", "mint": mint})
+    # Signals the session runner to stop.  The runner performs the emergency
+    # position cleanup + recording finalization asynchronously and removes
+    # itself from _active_live_traders when done.
+    session.stop("manual_stop")
+    return JSONResponse({"status": "stopping", "mint": mint})
 
 
 @app.post("/api/live/stop_all")
 async def live_stop_all():
-    for mint, info in list(_active_live_traders.items()):
-        info["cancelled"].set()
-    _active_live_traders.clear()
-    return JSONResponse({"status": "all_stopped"})
+    n = 0
+    for session in list(_active_live_traders.values()):
+        session.stop("manual_stop")
+        n += 1
+    return JSONResponse({"status": "all_stopped", "count": n})
+
+
+async def _get_or_create_live_session(
+    *,
+    real_mint: str,
+    private_key: str = "",
+    buy_size: float = 0.1,
+    slippage_bps: int = 1000,
+    skip_sim: bool = True,
+    engine_params: Optional[dict] = None,
+    engine_version: int = 1,
+    timeframe: str = "1s",
+    token_name: str = "",
+    token_symbol: str = "",
+    token_info: Optional[dict] = None,
+) -> tuple[Optional["_LiveSession"], bool]:
+    """Get an existing server-side live session or create a new one.
+
+    Returns (session, created_flag). If no session exists and no valid private
+    key is provided or stored in backend memory, returns (None, False).
+    """
+    async with _live_session_lock:
+        session = _active_live_traders.get(real_mint)
+        if session is not None and not session.cancelled.is_set():
+            return session, False
+
+        # Fallback to server-side stored private key if none passed in call
+        key_str = private_key or getattr(app.state, "lt_private_key", "") or _load_backend_private_key()
+        if not key_str:
+            return None, False
+
+        try:
+            keypair = keypair_from_private_key(key_str)
+        except Exception as e:
+            logger.warning(f"[LIVE] Invalid private key for session creation: {e}")
+            return None, False
+
+        # Keep server-side memory synced with working key
+        app.state.lt_private_key = key_str
+        app.state.lt_wallet_connected = True
+
+        if token_info is None or not token_name:
+            try:
+                async with _resolve_sem:
+                    real_mint, fetched_info = await asyncio.wait_for(
+                        resolve_input(real_mint), timeout=20.0
+                    )
+                    token_info = token_info or fetched_info
+            except Exception:
+                pass
+
+        token_name = token_name or (token_info or {}).get("name", "")
+        token_symbol = token_symbol or (token_info or {}).get("symbol", "")
+
+        live_trader = LiveTrader(
+            token_mint=real_mint,
+            keypair=keypair,
+            buy_size_sol=buy_size,
+            slippage_bps=slippage_bps,
+            priority_fee_lamports=100_000,
+            engine_kwargs=engine_params or {},
+            skip_simulation=skip_sim,
+            engine_version=engine_version,
+        )
+        live_trader.start_watchdog()
+
+        session = _LiveSession(
+            real_mint=real_mint,
+            token_name=token_name,
+            token_symbol=token_symbol,
+            timeframe=timeframe,
+            trader=live_trader,
+            token_info=token_info,
+            engine_version=engine_version,
+        )
+
+        session.rec_id = data_store.create_recording(
+            real_mint, timeframe, token_name, token_symbol
+        )
+        logger.info(f"[LIVE] Auto-recording candles → recording {session.rec_id}")
+        live_trader.set_session_meta(
+            recording_id=session.rec_id, token_name=token_name,
+            token_symbol=token_symbol, timeframe=timeframe,
+        )
+
+        _active_live_traders[real_mint] = session
+        session.task = asyncio.create_task(session.run())
+        return session, True
 
 
 # ── AutoFeed state & manager ───────────────────────────────────────────────
@@ -1031,7 +1523,9 @@ def _autofeed_active_count() -> int:
 
 
 async def _autofeed_forward(cand: Candidate):
-    """Called by AutoFeed for each accepted candidate. Broadcasts to /ws/autofeed clients."""
+    """Called by AutoFeed for each accepted candidate.
+    Broadcasts to /ws/autofeed clients and auto-starts live trader server-side if
+    private key is configured."""
     payload = {
         "type": "autofeed_candidate",
         "candidate": cand.to_dict(),
@@ -1047,13 +1541,30 @@ async def _autofeed_forward(cand: Candidate):
             pass
     logger.info(f"[AutoFeed] Forward ${cand.symbol} to {pushed}/{n_clients} WS clients")
 
+    # If backend has a private key, auto-spawn live trader session server-side
+    pk = getattr(app.state, "lt_private_key", "") or _load_backend_private_key()
+    if pk:
+        try:
+            session, created = await _get_or_create_live_session(
+                real_mint=cand.mint,
+                private_key=pk,
+                token_name=cand.name or "",
+                token_symbol=cand.symbol or "",
+                timeframe="1s",
+            )
+            if created:
+                logger.info(f"[AutoFeed] Auto-started server-side session for ${cand.symbol} ({cand.mint[:8]}…)")
+        except Exception as e:
+            logger.error(f"[AutoFeed] Error auto-starting session for {cand.mint[:8]}…: {e}")
+
 
 @app.get("/api/autofeed/status")
 async def autofeed_status():
     snap = _autofeed.snapshot()
     snap["clients_connected"] = len(_autofeed_clients)
     # Wallet-gate exposed for the frontend toggle state
-    snap["wallet_connected"] = getattr(app.state, "lt_wallet_connected", False)
+    pk = getattr(app.state, "lt_private_key", "") or _load_backend_private_key()
+    snap["wallet_connected"] = bool(pk) or getattr(app.state, "lt_wallet_connected", False)
     return JSONResponse(snap)
 
 
@@ -1069,12 +1580,14 @@ async def autofeed_config(body: dict = Body(...)):
 @app.post("/api/autofeed/start")
 async def autofeed_start(body: dict = Body(default={})):
     """Turn ON the autofeed. Refuses if no private key is set in the backend."""
-    private_key = getattr(app.state, "lt_private_key", "") or getattr(app.state, "lt_wallet_connected", False)
+    private_key = getattr(app.state, "lt_private_key", "") or _load_backend_private_key()
     if not private_key:
         return JSONResponse(
             {"error": "Cannot start autofeed without a private key set."},
             status_code=400,
         )
+    app.state.lt_private_key = private_key
+    app.state.lt_wallet_connected = True
     if body:
         _autofeed.set_config({k: v for k, v in body.items() if k != "enabled"})
     _autofeed.config.enabled = True
@@ -1089,18 +1602,61 @@ async def autofeed_stop():
     return JSONResponse({"status": "stopped", "snapshot": _autofeed.snapshot()})
 
 
+@app.get("/api/live/private_key")
+async def live_get_private_key():
+    """Get the current wallet connection status and public key."""
+    pk = getattr(app.state, "lt_private_key", "") or _load_backend_private_key()
+    if pk and not getattr(app.state, "lt_private_key", ""):
+        app.state.lt_private_key = pk
+        app.state.lt_wallet_connected = True
+    pubkey = ""
+    if pk:
+        try:
+            pubkey = str(keypair_from_private_key(pk).pubkey())
+        except Exception:
+            pass
+    return JSONResponse({
+        "connected": bool(pk),
+        "pubkey": pubkey,
+        "autofeed_running": _autofeed.is_running(),
+    })
+
+
 @app.post("/api/live/private_key")
 async def live_set_private_key(body: dict = Body(...)):
-    """Frontend tells backend it has a private key set (gates the autofeed switch).
-    The key itself is not posted here — it is sent over the /ws/live WebSocket query
-    string. This endpoint only records connection-state for gating purposes."""
+    """Frontend tells backend it has a private key set (or passes the key to persist)."""
     connected = bool(body.get("connected", False))
-    app.state.lt_wallet_connected = connected
-    if not connected:
-        # Wallet unset → forcibly stop autofeed
+    pk = str(body.get("private_key", "")).strip()
+
+    if not connected or (not pk and not getattr(app.state, "lt_private_key", "") and not _load_backend_private_key()):
+        app.state.lt_wallet_connected = False
+        app.state.lt_private_key = ""
+        _clear_backend_private_key()
         _autofeed.config.enabled = False
         await _autofeed.stop()
-    return JSONResponse({"connected": connected, "autofeed_running": _autofeed.is_running()})
+        return JSONResponse({"connected": False, "autofeed_running": False})
+
+    if pk:
+        try:
+            kp = keypair_from_private_key(pk)
+            app.state.lt_private_key = pk
+            app.state.lt_wallet_connected = True
+            _save_backend_private_key(pk)
+            pubkey = str(kp.pubkey())
+        except ValueError as e:
+            return JSONResponse({"error": f"Invalid private key: {e}"}, status_code=400)
+    else:
+        # Re-affirming connected state with key already in memory or disk
+        pk = getattr(app.state, "lt_private_key", "") or _load_backend_private_key()
+        app.state.lt_private_key = pk
+        app.state.lt_wallet_connected = True
+        pubkey = str(keypair_from_private_key(pk).pubkey()) if pk else ""
+
+    return JSONResponse({
+        "connected": True,
+        "pubkey": pubkey,
+        "autofeed_running": _autofeed.is_running(),
+    })
 
 
 async def _autofeed_ws_handler(websocket: WebSocket):
@@ -1149,24 +1705,22 @@ async def live_trading_ws(
     params: str = Query(default="{}"),
     engine_version: int = Query(default=1),
 ):
+    """Viewer/control socket for a live session.
+
+    If no session exists for the token, one is created (private_key required)
+    and this socket becomes its first viewer.  If a session already exists —
+    same tab re-opened, second tab, autofeed re-feed — this socket simply
+    attaches to it; no private key is needed to view/control an existing
+    session because the trader's keypair already lives server-side.  Closing
+    the socket only detaches this viewer; the session keeps trading until it
+    is stopped via /api/live/stop or a safety stop fires.
+    """
     if timeframe not in TIMEFRAME_SECONDS:
         await websocket.close(code=4000, reason="Unknown timeframe")
         return
-    if not private_key:
-        await websocket.close(code=4001, reason="Private key required")
-        return
 
-    try:
-        keypair = keypair_from_private_key(private_key)
-    except ValueError as e:
-        await websocket.close(code=4002, reason=f"Invalid private key: {e}")
-        return
-
-    wallet_pubkey = str(keypair.pubkey())
-
-    await websocket.accept()
-    logger.info(f"[LIVE] Connect  mint={mint[:8]}…  wallet={wallet_pubkey[:8]}…  tf={timeframe}")
-
+    # Resolve the mint first so we can find an existing session regardless of
+    # whether the caller passed a mint / pair address / symbol.
     try:
         async with _resolve_sem:
             real_mint, token_info = await asyncio.wait_for(
@@ -1175,126 +1729,37 @@ async def live_trading_ws(
     except asyncio.TimeoutError:
         logger.warning(f"[LIVE] resolve_input timed out for {mint[:8]} — using raw mint")
         real_mint, token_info = mint, None
-    token_name = (token_info or {}).get("name", "")
-    token_symbol = (token_info or {}).get("symbol", "")
 
     try:
         engine_params = json.loads(params)
     except Exception:
         engine_params = {}
 
-    live_trader = LiveTrader(
-        token_mint=real_mint,
-        keypair=keypair,
-        buy_size_sol=buy_size,
+    session, created = await _get_or_create_live_session(
+        real_mint=real_mint,
+        private_key=private_key,
+        buy_size=buy_size,
         slippage_bps=slippage_bps,
-        priority_fee_lamports=100_000,
-        engine_kwargs=engine_params,
-        skip_simulation=skip_sim,
+        skip_sim=skip_sim,
+        engine_params=engine_params,
         engine_version=engine_version,
-    )
-    # Arm the never-give-up sell watchdog as soon as the trader exists.
-    live_trader.start_watchdog()
-
-    cancelled = asyncio.Event()
-    _active_live_traders[real_mint] = {
-        "trader": live_trader,
-        "token_name": token_name,
-        "token_symbol": token_symbol,
-        "timeframe": timeframe,
-        "cancelled": cancelled,
-        "wallet": wallet_pubkey,
-    }
-
-    # Resolve live data source
-    live_source = (token_info or {}).get("_live_source", "pumpportal")
-    live_query = (token_info or {}).get("pair_address") or real_mint
-    if live_source == "solana_rpc" and (token_info or {}).get("pair_address"):
-        ws_client = PumpSwapRPCClient(live_query)
-    elif live_source == "dexscreener":
-        poll_seconds = 0.25 if timeframe in {"1s", "5s", "15s"} else 0.5
-        ws_client = DexScreenerPollClient(live_query, poll_seconds=poll_seconds)
-    else:
-        ws_client = PumpFunWSClient(real_mint)
-
-    aggregator = CandleAggregator(timeframe)
-    last_sent_price = None
-
-    # ── Auto-record candles so backtests replay identical data ─────────────
-    # The live trader and a standalone recorder would use separate
-    # CandleAggregator instances fed from separate WebSocket connections,
-    # causing subtle OHLCV differences.  By recording directly from the
-    # live trader's own aggregator, the backtester sees the exact same
-    # candle data.
-    rec_id = data_store.create_recording(
-        real_mint, timeframe, token_name, token_symbol
-    )
-    logger.info(f"[LIVE] Auto-recording candles → recording {rec_id}")
-    # Link the session's persistent trade ledger to this recording so every
-    # live trade can be cross-referenced against its backtestable candle data.
-    live_trader.set_session_meta(
-        recording_id=rec_id, token_name=token_name,
-        token_symbol=token_symbol, timeframe=timeframe,
+        timeframe=timeframe,
+        token_info=token_info,
     )
 
-    # ── Holder-flow monitor (live dev/insider sell detection) ────────────
-    # Watches the token and persists events to the auto-recording's
-    # holder_flow table (so the live session is itself backtestable), and
-    # feeds the events into the strategy engine so the iter36 entry gate /
-    # exit trigger fire in real time.  Parity: the engine checks the same
-    # event list the backtester would later replay from the DB.
-    # Shared process-wide monitor — one GMGN poller regardless of how many
-    # sessions are active (iter36 rate-limit fix).
-    holder_monitor = get_shared_monitor()
-    await holder_monitor.start()
-    holder_monitor.watch_token(real_mint, recording_id=rec_id)
-    # Pre-load any holder_flow events already persisted for this recording
-    # (e.g. from a prior session on the same token, or events the monitor
-    # captured before the live WS connected).  This matches the backtester
-    # which calls set_holder_flow_events() with the full event list before
-    # the candle loop starts.
-    _existing_hf = data_store.get_holder_flow(rec_id)
-    if _existing_hf:
-        try:
-            live_trader.engine.set_holder_flow_events(_existing_hf)
-        except AttributeError:
-            pass  # V1 engine has no holder-flow surface
-    # Track how many events we've already pushed into the engine (append-only)
-    _hf_pushed = {"n": len(_existing_hf)}
-    _hf_stop = asyncio.Event()
+    if session is None:
+        await websocket.close(code=4001, reason="Private key required")
+        return
 
-    async def _holder_flow_pump():
-        """Background task that pushes new holder-flow events into the engine
-        every 1s, decoupled from trade ticks.  Without this, events discovered
-        by the GMGN poller sit in the monitor's buffer until the next trade
-        arrives — which may be 10s+ on illiquid tokens, making dev_sell_exit
-        fire far later than the backtester (which sees events at their exact
-        on-chain timestamp)."""
-        while not _hf_stop.is_set():
-            try:
-                _hf_events = holder_monitor.get_events_as_dicts(real_mint)
-                if len(_hf_events) > _hf_pushed["n"]:
-                    _new = _hf_events[_hf_pushed["n"]:]
-                    _hf_pushed["n"] = len(_hf_events)
-                    try:
-                        live_trader.engine.append_holder_flow_events(_new)
-                        # Immediately check if this triggers an immediate dev_sell_exit
-                        exit_reason = live_trader.check_immediate_holder_flow_exit()
-                        if exit_reason:
-                            logger.info(f"[HOLDER FLOW] Immediate exit triggered: {exit_reason}")
-                            live_trader._pending_exit = True
-                            live_trader._pending_exit_reason = exit_reason
-                            live_trader._pending_buy = False
-                            live_trader.engine.notify_trade_closed()
-                            # Fire off the sell swap immediately in the background
-                            asyncio.create_task(live_trader.execute_sell(exit_reason))
-                    except AttributeError:
-                        pass  # V1 engine has no holder-flow surface
-            except Exception:
-                pass
-            await asyncio.sleep(1.0)
+    # ── Attach as a viewer ─────────────────────────────────────────────────
+    await websocket.accept()
+    logger.info(
+        f"[LIVE] {'Start' if created else 'Attach'} viewer  mint={real_mint[:8]}…  "
+        f"wallet={session.wallet()[:8]}…  tf={session.timeframe}  "
+        f"viewers={len(session.subscribers) + 1}"
+    )
 
-    _hf_pump_task = asyncio.ensure_future(_holder_flow_pump())
+    q = session.subscribe()
 
     async def send(obj: dict) -> bool:
         try:
@@ -1303,161 +1768,71 @@ async def live_trading_ws(
         except Exception:
             return False
 
-    if token_info:
-        await send({"type": "token_info", "data": token_info})
-
-    # Send historical candles + run through strategy (warm up indicators)
     try:
-        async with _resolve_sem:
-            hist = await asyncio.wait_for(
-                get_historical_candles(real_mint, timeframe), timeout=15.0
-            )
-    except asyncio.TimeoutError:
-        logger.warning(f"[LIVE] get_historical_candles timed out for {real_mint[:8]}")
-        hist = []
-    if hist:
-        # Seed the auto-recording with the same historical candles
-        data_store.insert_candles_batch(rec_id, hist)
+        if session.cancelled.is_set():
+            # Session is already tearing down — tell the viewer instead of
+            # leaving it parked on a dead broadcast queue.
+            await send({"type": "session_ended", "reason": session.stop_reason or "session_ended"})
+            return
 
-        strategy_results = []
-        for candle in hist:
-            result = live_trader.update_historical_candle(
-                time_val=int(candle["time"]),
-                o=candle["open"], h=candle["high"],
-                l=candle["low"], c=candle["close"],
-                volume=candle.get("volume", 0),
-                pool_sol=candle.get("pool_sol", 0.0),
-            )
-            strategy_results.append(result)
+        if session.token_info:
+            await send({"type": "token_info", "data": session.token_info})
+        await send({
+            "type": "session_info",
+            "real_mint": real_mint,
+            "token_name": session.token_name,
+            "token_symbol": session.token_symbol,
+            "timeframe": session.timeframe,
+            "engine_version": session.engine_version,
+            "recording_id": session.rec_id,
+            "created": created,
+        })
 
-        await send({"type": "historical", "candles": hist, "strategy": strategy_results})
-        last = hist[-1]
-        aggregator.process_trade(last["close"], 0.0, float(last["time"]))
-        logger.info(f"[LIVE] Sent {len(hist)} historical candles for {real_mint[:8]}")
-
-    async def _process_stream(client) -> bool:
-        nonlocal last_sent_price
-        got_trade = False
-        async for trade in client.stream():
-            if cancelled.is_set():
-                break
-            got_trade = True
-            is_synthetic = bool(trade.get("synthetic"))
-            is_buy_live: Optional[bool] = None
-            if not is_synthetic:
-                tx_live = trade.get("tx_type", "")
-                if tx_live == "buy":
-                    is_buy_live = True
-                elif tx_live == "sell":
-                    is_buy_live = False
-            candle, is_new = aggregator.process_trade(
-                trade["price"], trade["sol_amount"], trade["timestamp"],
-                synthetic=is_synthetic,
-                is_buy=is_buy_live,
-                pool_sol=trade.get("pool_sol", 0.0),
-                market_cap_usd=trade.get("market_cap_usd", 0.0),
-            )
-            candle_dict = candle.to_dict()
-            current_price = candle_dict["close"]
-
-            # Persist candle to the auto-recording (same as standalone recorder)
-            ct = candle_dict["time"]
-            data_store.insert_candle(
-                rec_id, ct,
-                candle_dict["open"], candle_dict["high"],
-                candle_dict["low"], candle_dict["close"],
-                candle_dict.get("volume", 0),
-                candle_dict.get("buy_volume", 0.0),
-                candle_dict.get("sell_volume", 0.0),
-                candle_dict.get("pool_sol", 0.0),
-                candle_dict.get("market_cap_usd", 0.0),
-            )
-
-            if last_sent_price is not None and current_price == last_sent_price and not is_new:
-                continue
-            last_sent_price = current_price
-
-            strategy_result = live_trader.update(
-                time_val=candle_dict["time"],
-                o=candle_dict["open"], h=candle_dict["high"],
-                l=candle_dict["low"], c=candle_dict["close"],
-                volume=candle_dict.get("volume", 0),
-                buy_volume=candle_dict.get("buy_volume", 0.0),
-                sell_volume=candle_dict.get("sell_volume", 0.0),
-                is_new=is_new,
-                market_cap_usd=candle_dict.get("market_cap_usd", 0.0),
-                pool_sol=candle_dict.get("pool_sol", 0.0),
-            )
-
-            trade_payload = None if is_synthetic else {
-                "price": trade["price"],
-                "sol_amount": trade["sol_amount"],
-                "tx_type": trade["tx_type"],
-                "trader": trade["trader"],
-                "tx_hash": trade["tx_hash"],
-            }
-
-            ok = await send({
-                "type": "candle",
-                "candle": candle_dict,
-                "is_new": is_new,
-                "market_cap_sol": trade.get("market_cap_sol", 0),
-                "market_cap_usd": trade.get("market_cap_usd", 0),
-                "trade": trade_payload,
-                "strategy": strategy_result,
-            })
-            if not ok:
-                break
-
-            # ── Market-cap safety floor check ─────────────────────────────
-            # update_market_cap() blocks until any emergency sell has fully
-            # settled on-chain (or the MCAP_STOP_SELL_TIMEOUT_SECONDS
-            # backstop fires), so by the time it returns True the wallet is
-            # empty and it is safe to terminate immediately — no grace
-            # sleep needed.
-            mcap_usd = trade.get("market_cap_usd", 0)
-            if mcap_usd and await live_trader.update_market_cap(float(mcap_usd)):
-                logger.warning(
-                    f"[LIVE] Market cap floor triggered for {real_mint[:8]}… — "
-                    f"emergency sell settled, stopping session"
-                )
-                cancelled.set()
-                break
-
-            # ── No-motion stop check ─────────────────────────────────────
-            # Only fires when idle (no position, no pending signals) —
-            # never interrupts an active position.
-            if live_trader.no_motion_stop_triggered:
-                logger.warning(
-                    f"[LIVE] No-motion stop triggered for {real_mint[:8]}… — "
-                    f"session idle, shutting down"
-                )
-                cancelled.set()
-                break
-        return got_trade
-
-    async def stream_live():
-        got = await _process_stream(ws_client)
-        if not got and not cancelled.is_set() and not isinstance(ws_client, PumpFunWSClient):
-            fallback = PumpFunWSClient(real_mint)
+        # ── Historical candles for the chart ─────────────────────────────
+        if created:
+            # The runner is warming up; wait so this viewer gets the same
+            # warmup strategy results the old single-tab flow provided.
             try:
-                await _process_stream(fallback)
-            finally:
-                fallback.stop()
+                await asyncio.wait_for(session.warmed.wait(), timeout=45.0)
+            except asyncio.TimeoutError:
+                pass
+            candles = session.warmup_candles
+            strategy = session.warmup_strategy
+        else:
+            # Re-attach: replay everything recorded so far.  The engine has
+            # already processed these candles — the chart just needs the data.
+            try:
+                candles = data_store.get_recording_candles(session.rec_id) if session.rec_id else []
+            except Exception:
+                candles = []
+            strategy = [session.last_strategy_result] if session.last_strategy_result else []
+        if candles:
+            await send({"type": "historical", "candles": candles, "strategy": strategy})
+            logger.info(f"[LIVE] Sent {len(candles)} historical candles for {real_mint[:8]}")
 
-    async def keepalive():
-        while not cancelled.is_set():
-            await asyncio.sleep(15)
-            if not await send({"type": "ping"}):
-                break
+        async def viewer():
+            """Drain the session broadcast queue → this tab."""
+            while True:
+                try:
+                    msg = await asyncio.wait_for(q.get(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    # Heartbeat
+                    if not await send({"type": "ping"}):
+                        return
+                    continue
+                try:
+                    if isinstance(msg, str):
+                        await websocket.send_text(msg)
+                    else:
+                        await websocket.send_json(msg)
+                except Exception:
+                    return
 
-    # Allow LiveTrader to push trade updates directly to this WS
-    live_trader.broadcast_fn = websocket.send_text
-
-    async def listen():
-        """Listen for messages from frontend (config updates, manual trades)."""
-        try:
-            while not cancelled.is_set():
+        async def listen():
+            """Control channel from the tab (config updates, manual trades).
+            A disconnect here detaches only this viewer — the session itself
+            keeps running server-side."""
+            while True:
                 data = await websocket.receive_text()
                 try:
                     msg = json.loads(data)
@@ -1467,70 +1842,38 @@ async def live_trading_ws(
 
                 if msg_type == "update_config":
                     if "buy_size" in msg:
-                        live_trader.buy_size_sol = float(msg["buy_size"])
+                        session.trader.buy_size_sol = float(msg["buy_size"])
                     if "slippage_bps" in msg:
-                        live_trader.slippage_bps = int(msg["slippage_bps"])
+                        session.trader.slippage_bps = int(msg["slippage_bps"])
                     # priority_fee is fixed at 100_000 micro-lamports (0.0001 SOL) — ignored
                 elif msg_type == "manual_trade":
                     action = msg.get("action")
-                    tx_sig = None
                     if action == "buy":
-                        tx_sig = await live_trader.force_buy()
+                        await session.trader.force_buy()
                     elif action == "sell":
-                        tx_sig = await live_trader.force_sell()
-                    if tx_sig:
-                        # Trade updates will be pushed by LiveTrader._broadcast_status
-                        pass
+                        await session.trader.force_sell()
                 elif msg_type == "pong":
                     pass
-        except WebSocketDisconnect:
+
+        v_task = asyncio.ensure_future(viewer())
+        l_task = asyncio.ensure_future(listen())
+        try:
+            await asyncio.gather(v_task, l_task)
+        except (WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
             pass
         finally:
-            cancelled.set()
-            ws_client.stop()
-
-    async def shutdown():
-        await cancelled.wait()
-        ws_client.stop()
-        try:
-            await websocket.close(code=1000, reason="Session stopped")
-        except Exception:
-            pass
-
-    try:
-        await asyncio.gather(stream_live(), keepalive(), listen(), shutdown())
-    except (WebSocketDisconnect, asyncio.CancelledError):
+            for t in (v_task, l_task):
+                if not t.done():
+                    t.cancel()
+    except (WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
         pass
     finally:
-        cancelled.set()
-        ws_client.stop()
-
-        # Stop the holder-flow background pump
-        _hf_stop.set()
-        _hf_pump_task.cancel()
-        try:
-            await _hf_pump_task
-        except (asyncio.CancelledError, Exception):
-            pass
-
-        # Stop the holder-flow monitor for this session
-        try:
-            holder_monitor.unwatch_token(real_mint)
-            await holder_monitor.stop()
-        except Exception:
-            pass
-
-        # ── Emergency position cleanup before disconnect ──────────────────────
-        # If a position is open when the WebSocket terminates, execute an
-        # emergency sell to avoid leaving positions unattended.
-        await live_trader.cleanup()
-        
-        # Finalize the auto-recording so it's available for backtesting
-        data_store.stop_recording(rec_id)
-        logger.info(f"[LIVE] Finalized recording {rec_id}")
-        if real_mint in _active_live_traders:
-            del _active_live_traders[real_mint]
-        logger.info(f"[LIVE] Disconnect  mint={real_mint[:8]}…")
+        # Detach only — never terminates the session.
+        session.unsubscribe(q)
+        logger.info(
+            f"[LIVE] Detach viewer  mint={real_mint[:8]}…  "
+            f"remaining={len(session.subscribers)}"
+        )
 
 
 if __name__ == "__main__":

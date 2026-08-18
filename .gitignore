@@ -28,6 +28,7 @@ backend/backtest_results/*
 
 # Live trading log artifacts
 backend/data/live_logs/
+backend/data/live_key.json
 
 backend/analysis/*
 

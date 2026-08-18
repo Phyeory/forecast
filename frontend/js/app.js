@@ -286,7 +286,7 @@ function initChart() {
     layout: { background: { color: "#0d0f12" }, textColor: "#5a6071" },
     grid: { vertLines: { color: "#1e2330" }, horzLines: { color: "#1e2330" } },
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal, vertLine: { color: "#5865f2", labelBackgroundColor: "#5865f2" }, horzLine: { color: "#5865f2", labelBackgroundColor: "#5865f2" } },
-    timeScale: { borderColor: "#1e2330", timeVisible: true, secondsVisible: true, rightBarStaysOnScroll: true, shiftVisibleRangeOnNewBar: true },
+    timeScale: { borderColor: "#1e2330", timeVisible: true, secondsVisible: true, rightBarStaysOnScroll: true, shiftVisibleRangeOnNewBar: true, rightOffset: 5, barSpacing: 6 },
     rightPriceScale: { borderColor: "#1e2330", scaleMargins: { top: 0.12, bottom: 0.28 } },
     handleScroll: { mouseWheel: true, pressedMouseMove: true },
     handleScale: { mouseWheel: true, pinch: true },
@@ -1233,7 +1233,6 @@ function connect(mint, timeframe) {
       }
 
       chart.timeScale().scrollToRealTime();
-      chart.timeScale().fitContent();
       hideOverlay();
     }
 
@@ -2591,27 +2590,56 @@ const ltTradesTbody = $("lt-trades-tbody");
 
 /* ── Wallet Setup (Private Key) ────────────────────────────────────────── */
 
-let _privateKey = "";
+let _privateKey = localStorage.getItem("lt_private_key") || "";
 
-function connectWallet() {
+async function connectWallet() {
   const pkInput = $("lt-private-key").value.trim();
   if (!pkInput) return alert("Please enter your base58 private key.");
   if (pkInput.length < 32) return alert("Private key seems too short. Expected a base58 string.");
 
-  _privateKey = pkInput;
-  ltWalletPubkey = "connected";
-  ltWalletConnected = true;
+  try {
+    const res = await apiFetch("/api/live/private_key", {
+      method: "POST",
+      body: JSON.stringify({ private_key: pkInput, connected: true }),
+    });
+    if (res.error) return alert("Error saving private key: " + res.error);
 
-  ltWalletDot.className = "dot connected";
-  ltWalletLabel.textContent = "Key Set";
-  ltWalletAddr.textContent = "(Server-side signing)";
-  ltWalletBal.textContent = "";
-  ltConnectBtn.textContent = "✅ Key Saved";
-  ltAddBtn.disabled = false;
+    _privateKey = pkInput;
+    localStorage.setItem("lt_private_key", pkInput);
+    ltWalletPubkey = res.pubkey || "connected";
+    ltWalletConnected = true;
 
-  $("lt-private-key").value = "";
-  $("lt-private-key").placeholder = "Key securely set in memory.";
+    ltWalletDot.className = "dot connected";
+    ltWalletLabel.textContent = "Key Set";
+    ltWalletAddr.textContent = res.pubkey ? `${res.pubkey.slice(0, 6)}…${res.pubkey.slice(-4)}` : "(Server-side signing)";
+    ltWalletBal.textContent = "";
+    ltConnectBtn.textContent = "✅ Key Saved";
+    ltAddBtn.disabled = false;
+
+    $("lt-private-key").value = "";
+    $("lt-private-key").placeholder = "Key securely saved in backend memory.";
+    if (typeof afUpdateToggleGate === "function") afUpdateToggleGate();
+  } catch (e) {
+    alert("Failed to connect wallet: " + e);
+  }
 }
+
+async function initWalletState() {
+  try {
+    const status = await apiFetch("/api/live/private_key");
+    if (status && status.connected) {
+      ltWalletConnected = true;
+      ltWalletPubkey = status.pubkey || "connected";
+      ltWalletDot.className = "dot connected";
+      ltWalletLabel.textContent = "Key Set";
+      ltWalletAddr.textContent = status.pubkey ? `${status.pubkey.slice(0, 6)}…${status.pubkey.slice(-4)}` : "(Server-side signing)";
+      ltConnectBtn.textContent = "✅ Key Saved";
+      ltAddBtn.disabled = false;
+      if (typeof afUpdateToggleGate === "function") afUpdateToggleGate();
+    }
+  } catch (e) { }
+}
+initWalletState();
 
 ltConnectBtn.addEventListener("click", connectWallet);
 
@@ -2737,7 +2765,7 @@ function updateTraderCard(mint) {
       layout: { background: { type: 'solid', color: 'transparent' }, textColor: '#8b949e', fontSize: 11 },
       grid: { vertLines: { color: '#30363d33' }, horzLines: { color: '#30363d33' } },
       rightPriceScale: { borderVisible: false },
-      timeScale: { borderVisible: false, timeVisible: true, secondsVisible: true },
+      timeScale: { borderVisible: false, timeVisible: true, secondsVisible: true, rightBarStaysOnScroll: true, shiftVisibleRangeOnNewBar: true, rightOffset: 5, barSpacing: 6 },
       crosshair: { mode: 0 }
     });
     const cSeries = chart.addCandlestickSeries({
@@ -2830,20 +2858,31 @@ window.manualTrade = manualTrade;
 let _ltConnectCount = 0;
 let _ltConnectResetTimer = null;
 
-function startLiveTrader(mint, _delayOverride = null) {
-  if (!ltWalletPubkey) return alert("Connect wallet first");
-  if (ltActiveTraders[mint]) return alert("Already trading this token");
-  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)) return alert("Invalid Solana address");
+function startLiveTrader(mint, _delayOverride = null, opts = {}) {
+  // opts.attach: re-attach to an already-running server-side session instead
+  // of creating a new one — no private key sent, no new trader spawned.
+  const attach = !!opts.attach;
+  if (!attach) {
+    if (!ltWalletPubkey) return alert("Connect wallet first");
+    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)) return alert("Invalid Solana address");
+  }
+  if (ltActiveTraders[mint]) return attach ? undefined : alert("Already trading this token");
 
   // Stagger: each successive call within 2s adds 400ms extra delay
   const delayMs = _delayOverride !== null ? _delayOverride : _ltConnectCount * 400;
-  _ltConnectCount++;
-  clearTimeout(_ltConnectResetTimer);
-  _ltConnectResetTimer = setTimeout(() => { _ltConnectCount = 0; }, 2000);
+  if (!attach) {
+    _ltConnectCount++;
+    clearTimeout(_ltConnectResetTimer);
+    _ltConnectResetTimer = setTimeout(() => { _ltConnectCount = 0; }, 2000);
+  }
 
   const config = getLtConfig();
   const paramsStr = encodeURIComponent(JSON.stringify(getLtEngineParams()));
-  const wsUrl = `${LT_WS_BASE}/${mint}?timeframe=${config.timeframe}&private_key=${encodeURIComponent(_privateKey)}&buy_size=${config.buySize}&slippage_bps=${config.slippageBps}&params=${paramsStr}&engine_version=${ltEngineVersion}`;
+  // Attach mode NEVER sends the private key — it must not spawn a new session
+  // if the existing one ended between the status check and this connect.
+  const wsUrl = attach
+    ? `${LT_WS_BASE}/${mint}?timeframe=${encodeURIComponent(opts.timeframe || config.timeframe)}`
+    : `${LT_WS_BASE}/${mint}?timeframe=${config.timeframe}&private_key=${encodeURIComponent(_privateKey)}&buy_size=${config.buySize}&slippage_bps=${config.slippageBps}&params=${paramsStr}&engine_version=${ltEngineVersion}`;
 
   // Register the card immediately so the UI shows "Connecting…" right away
   const ctx = {
@@ -2858,11 +2897,14 @@ function startLiveTrader(mint, _delayOverride = null) {
     regime: "idle",
     direction: "none",
     sVal: 0,
-    engineVersion: ltEngineVersion,
+    engineVersion: opts.engineVersion || ltEngineVersion,
+    timeframe: opts.timeframe || config.timeframe,
+    realMint: null,     // resolved on-chain mint (from session_info)
+    manualStop: false,  // true once the user (or session_ended) closed this card — blocks reconnect
   };
   ltActiveTraders[mint] = ctx;
   ltStopAllBtn.style.display = "inline-flex";
-  addTraderEvent(ctx, "info", delayMs > 0 ? `Connecting… (staggered ${delayMs}ms)` : "Connecting…");
+  addTraderEvent(ctx, "info", attach ? "Re-attaching to running session…" : (delayMs > 0 ? `Connecting… (staggered ${delayMs}ms)` : "Connecting…"));
   updateTraderCard(mint);
 
   setTimeout(() => {
@@ -2876,6 +2918,25 @@ function startLiveTrader(mint, _delayOverride = null) {
       let msg;
       try { msg = JSON.parse(ev.data); } catch { return; }
 
+      if (msg.type === "session_info") {
+        ctx.realMint = msg.real_mint || ctx.mint;
+        if (msg.engine_version) ctx.engineVersion = msg.engine_version;
+        if (!ctx.info && (msg.token_name || msg.token_symbol)) {
+          ctx.info = { name: msg.token_name, symbol: msg.token_symbol };
+        }
+        updateTraderCard(mint);
+      }
+
+      if (msg.type === "session_ended") {
+        // Server-side session finished (manual stop from any tab, mcap floor,
+        // no-motion, stream end). Don't reconnect when the socket closes.
+        ctx.manualStop = true;
+        addTraderEvent(ctx, "error", `🛑 Session ended (${msg.reason || "stopped"})`);
+        const card = document.querySelector(`.lt-trader-card[data-mint="${mint}"]`);
+        if (card) { card.style.borderColor = "var(--red)"; card.style.opacity = "0.7"; }
+        setTimeout(() => stopLiveTrader(mint), 8000);
+      }
+
       if (msg.type === "token_info") {
         ctx.info = msg.data;
         addTraderEvent(ctx, "info", `Token: ${msg.data.name || mint.slice(0, 8)}`);
@@ -2885,7 +2946,7 @@ function startLiveTrader(mint, _delayOverride = null) {
       if (msg.type === "historical" && msg.strategy) {
         addTraderEvent(ctx, "info", `Loaded ${msg.candles?.length || 0} historical candles`);
         if (ctx.candleSeries && msg.candles) {
-          const res = await formatOfflineCandles(mint, msg.candles, config.timeframe);
+          const res = await formatOfflineCandles(mint, msg.candles, ctx.timeframe);
           ctx.baseMcap = res.baseMcap;
           ctx.basePrice = res.basePrice;
           ctx.lastClose = res.lastClose;
@@ -2893,7 +2954,7 @@ function startLiveTrader(mint, _delayOverride = null) {
 
           ctx.candleSeries.setData(res.candles);
           ctx.volSeries.setData(res.candles.map(c => ({ time: c.time, value: c.volume || 0, color: c.color })));
-          if (ctx.chart) ctx.chart.timeScale().fitContent();
+          if (ctx.chart) ctx.chart.timeScale().scrollToRealTime();
         }
         if (Array.isArray(msg.strategy) && msg.strategy.length > 0) {
           const lastS = msg.strategy[msg.strategy.length - 1];
@@ -2921,7 +2982,7 @@ function startLiveTrader(mint, _delayOverride = null) {
 
           // Gap filling and new candle bridging
           if (msg.is_new) {
-            const tfSec = timeframeToSeconds(config.timeframe);
+            const tfSec = timeframeToSeconds(ctx.timeframe);
             if (ctx.lastTime && msg.candle.time > ctx.lastTime + tfSec) {
               const gap = Math.floor((msg.candle.time - ctx.lastTime) / tfSec) - 1;
               if (gap <= 15) {
@@ -2950,6 +3011,7 @@ function startLiveTrader(mint, _delayOverride = null) {
 
           ctx.lastClose = close;
           ctx.lastTime = msg.candle.time;
+          if (ctx.chart) ctx.chart.timeScale().scrollToRealTime();
         }
 
         // Update live_trade data
@@ -3019,18 +3081,44 @@ function startLiveTrader(mint, _delayOverride = null) {
     ws.onclose = () => {
       addTraderEvent(ctx, "info", "Disconnected");
       updateTraderCard(mint);
+      // The backend session keeps running independently of this tab.  Unless
+      // this card was explicitly stopped, probe the backend and re-attach as
+      // a viewer if the session is still alive (covers tab sleep, network
+      // blips, and backend restarts that ended the session cleanly).
+      if (!ctx.manualStop && ltActiveTraders[mint] === ctx) {
+        setTimeout(() => {
+          if (ctx.manualStop || ltActiveTraders[mint] !== ctx) return;
+          const probeMint = ctx.realMint || mint;
+          apiFetch("/api/live/status")
+            .then(st => {
+              if (ctx.manualStop || ltActiveTraders[mint] !== ctx) return;
+              const t = st && Array.isArray(st.traders)
+                ? st.traders.find(t => t.mint === probeMint && t.status === "running")
+                : null;
+              if (t) {
+                // Drop this card and re-attach fresh (rebuilds the chart from
+                // the session's recorded candles).
+                detachTraderCard(mint);
+                startLiveTrader(t.mint, 0, {
+                  attach: true,
+                  timeframe: t.timeframe,
+                  engineVersion: t.engine_version,
+                });
+              } else {
+                detachTraderCard(mint);
+              }
+            })
+            .catch(() => { });
+        }, 3000);
+      }
     };
   }, delayMs);
 }
 
 /* ── Stop trader ─────────────────────────────────────────────────────── */
 
-function stopLiveTrader(mint) {
-  const ctx = ltActiveTraders[mint];
-  if (!ctx) return;
-  updateSessionStats();
-  if (ctx.ws) ctx.ws.close();
-  apiFetch("/api/live/stop", { method: "POST", body: JSON.stringify({ mint }) }).catch(() => { });
+function detachTraderCard(mint) {
+  // Remove the local card only — the backend session (if any) is untouched.
   delete ltActiveTraders[mint];
   const card = document.querySelector(`.lt-trader-card[data-mint="${mint}"]`);
   if (card) card.remove();
@@ -3038,12 +3126,47 @@ function stopLiveTrader(mint) {
     ltTradersGrid.innerHTML = '<div class="empty-state">No active traders. Connect wallet and add tokens above.</div>';
     ltStopAllBtn.style.display = "none";
   }
+  updateSessionStats();
+}
+
+function stopLiveTrader(mint) {
+  const ctx = ltActiveTraders[mint];
+  if (!ctx) return;
+  ctx.manualStop = true;
+  if (ctx.ws) ctx.ws.close();
+  // Session key is the resolved on-chain mint (may differ from what the user
+  // typed if a pair address / symbol was used to start it).
+  apiFetch("/api/live/stop", { method: "POST", body: JSON.stringify({ mint: ctx.realMint || mint }) }).catch(() => { });
+  detachTraderCard(mint);
 }
 
 function stopAllTraders() {
   for (const mint of Object.keys(ltActiveTraders)) {
     stopLiveTrader(mint);
   }
+}
+
+/* ── Re-attach to server-side sessions ───────────────────────────────── */
+
+function refreshLiveSessions() {
+  // Live sessions run server-side and survive tab closes.  On page load (and
+  // whenever the live-trading tab is opened), re-attach a viewer card for
+  // every running session this tab isn't showing yet.
+  apiFetch("/api/live/status")
+    .then(st => {
+      if (!st || !Array.isArray(st.traders)) return;
+      updateSessionStats(st.traders);
+      for (const t of st.traders) {
+        if (t.status !== "running") continue;
+        if (ltActiveTraders[t.mint]) continue;
+        startLiveTrader(t.mint, 0, {
+          attach: true,
+          timeframe: t.timeframe,
+          engineVersion: t.engine_version,
+        });
+      }
+    })
+    .catch(() => { });
 }
 
 /* ── Event listeners ─────────────────────────────────────────────────── */
@@ -3087,6 +3210,8 @@ switchPage = function (pageId) {
     apiFetch("/api/live/status")
       .then(status => { if (status && Array.isArray(status.traders)) updateSessionStats(status.traders); })
       .catch(() => { });
+    // Pick up server-side sessions started from other tabs / before reload
+    refreshLiveSessions();
   }
 };
 // Re-bind nav tabs with new switchPage
@@ -3094,6 +3219,8 @@ navTabs.forEach(tab => {
   tab.removeEventListener("click", () => { });
   tab.addEventListener("click", () => switchPage(tab.dataset.page));
 });
+// Sessions keep running with the tab closed — re-attach on first load too
+refreshLiveSessions();
 
 
 window.stopLiveTrader = stopLiveTrader;
@@ -3469,8 +3596,8 @@ afTestPollBtn.addEventListener("click", async () => {
 
 /* ── Wire into wallet connect lifecycle ────────────────────────────── */
 const _origConnectWallet = connectWallet;
-connectWallet = function () {
-  _origConnectWallet();
+connectWallet = async function () {
+  await _origConnectWallet();
   if (ltWalletConnected) {
     afUpdateToggleGate();
     // Refresh backend status once WS is open
