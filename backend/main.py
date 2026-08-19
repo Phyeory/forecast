@@ -1439,47 +1439,18 @@ async def live_status():
     losing_trades = 0
     total_trades = 0
 
-    # 1. Completed sessions — aggregated from the physical session ledger
-    # (live_logs/*/trades.jsonl), which survives server restarts.  Using the
-    # in-memory _completed_live_sessions alone resets pnl/winrate to 0 after a
-    # restart until a fresh trade lands.
-    from live_session_logger import LOG_ROOT
-    active_journals = {
-        str(session.trader.journal.dir)
-        for session in _active_live_traders.values()
-    }
-    if LOG_ROOT.is_dir():
-        for d in sorted(LOG_ROOT.iterdir(), key=lambda p: p.name, reverse=True):
-            if str(d) in active_journals:
-                continue  # running session — counted from live memory below
-            ledger = d / "trades.jsonl"
-            if not d.is_dir() or not ledger.exists():
-                continue
-            last_stats = None
-            mint = ""
-            try:
-                with open(ledger, "r", encoding="utf-8") as f:
-                    for line in f:
-                        try:
-                            rec = json.loads(line)
-                        except Exception:
-                            continue
-                        ev = rec.get("event")
-                        if ev == "session_open":
-                            mint = rec.get("token_mint") or mint
-                        elif ev in ("trade_closed", "session_close"):
-                            st = rec.get("stats")
-                            if isinstance(st, dict):
-                                last_stats = st
-            except Exception:
-                last_stats = None
-            if last_stats:
-                total_pnl += last_stats.get("total_pnl_sol", 0.0)
-                winning_trades += last_stats.get("winning_trades", 0)
-                losing_trades += last_stats.get("losing_trades", 0)
-                total_trades += last_stats.get("total_trades", 0)
-                if mint:
-                    seen_mints.add(mint)
+    # 1. Completed sessions in this server run — in-memory only, so the
+    # session performance (pnl / winrate) resets whenever the program
+    # restarts, but survives a mere page refresh.
+    for cs in _completed_live_sessions:
+        m = cs.get("mint")
+        if m:
+            seen_mints.add(m)
+        st = cs.get("stats", {})
+        total_pnl += st.get("total_pnl_sol", 0.0)
+        winning_trades += st.get("winning_trades", 0)
+        losing_trades += st.get("losing_trades", 0)
+        total_trades += st.get("total_trades", 0)
 
     # 2. Active sessions
     for mint, session in _active_live_traders.items():
