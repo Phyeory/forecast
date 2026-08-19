@@ -2660,7 +2660,11 @@ async function initWalletState() {
       ltWalletAddr.textContent = status.pubkey ? `${status.pubkey.slice(0, 6)}…${status.pubkey.slice(-4)}` : "(Server-side signing)";
       ltConnectBtn.textContent = "✅ Key Saved";
       ltAddBtn.disabled = false;
-      if (typeof afUpdateToggleGate === "function") afUpdateToggleGate();
+      if (typeof afRestoreState === "function") {
+        afRestoreState();
+      } else if (typeof afUpdateToggleGate === "function") {
+        afUpdateToggleGate();
+      }
     }
   } catch (e) { }
 }
@@ -3621,10 +3625,12 @@ afToggle.addEventListener("change", async () => {
   if (afToggle.checked) {
     if (!ltWalletConnected) {
       afToggle.checked = false;
+      localStorage.setItem("lt_autofeed_enabled", "false");
       alert("⚠️  Cannot turn on autofeed without a private key set. Connect your wallet first.");
       afUpdateToggleGate();
       return;
     }
+    localStorage.setItem("lt_autofeed_enabled", "true");
     // Tell backend the wallet-gate is satisfied (gate the autofeed loop)
     try {
       await apiFetch("/api/live/private_key", {
@@ -3644,10 +3650,14 @@ afToggle.addEventListener("change", async () => {
       afConnectWS();
     } catch (e) {
       afToggle.checked = false;
+      localStorage.setItem("lt_autofeed_enabled", "false");
+      afSettingsWrap.style.display = "none";
       console.error("[AutoFeed] start failed", e);
       alert("AutoFeed start failed: " + e.message);
     }
   } else {
+    localStorage.setItem("lt_autofeed_enabled", "false");
+    afSettingsWrap.style.display = "none";
     try {
       await apiFetch("/api/autofeed/stop", { method: "POST" });
       afSetStatus("off", "Stopped");
@@ -3697,20 +3707,44 @@ afTestPollBtn.addEventListener("click", async () => {
   }
 });
 
+async function afRestoreState() {
+  afUpdateToggleGate();
+  try {
+    const snap = await apiFetch("/api/autofeed/status");
+    afHandleStatus(snap);
+    const savedEnabled = localStorage.getItem("lt_autofeed_enabled") === "true";
+    if (ltWalletConnected && (snap.is_running || savedEnabled)) {
+      afToggle.checked = true;
+      afSettingsWrap.style.display = "block";
+      localStorage.setItem("lt_autofeed_enabled", "true");
+      if (!snap.is_running) {
+        try {
+          const cfg = afReadForm();
+          await apiFetch("/api/autofeed/config", {
+            method: "POST",
+            body: JSON.stringify(cfg),
+          });
+          await apiFetch("/api/autofeed/start", { method: "POST", body: "{}" });
+        } catch (err) {
+          console.warn("[AutoFeed] Failed to auto-start backend autofeed", err);
+        }
+      }
+      afConnectWS();
+    } else if (!snap.is_running && !savedEnabled) {
+      afToggle.checked = false;
+      afSettingsWrap.style.display = "none";
+    }
+  } catch (e) {
+    console.warn("[AutoFeed] Restore state failed", e);
+  }
+}
+
 /* ── Wire into wallet connect lifecycle ────────────────────────────── */
 const _origConnectWallet = connectWallet;
 connectWallet = async function () {
   await _origConnectWallet();
   if (ltWalletConnected) {
-    afUpdateToggleGate();
-    // Refresh backend status once WS is open
-    setTimeout(async () => {
-      try {
-        const snap = await apiFetch("/api/autofeed/status");
-        afHandleStatus(snap);
-        afConnectWS();
-      } catch (e) { /* ignore */ }
-    }, 200);
+    await afRestoreState();
   }
 };
 window.connectWallet = connectWallet;  // keep inline `onclick="connectWallet()"` working
@@ -3718,19 +3752,7 @@ ltConnectBtn.removeEventListener("click", _origConnectWallet);
 ltConnectBtn.addEventListener("click", connectWallet);
 
 /* ── Initial state ─────────────────────────────────────────────────── */
-afUpdateToggleGate();
-// Pull initial status from backend (in case autofeed is already running)
-(async () => {
-  try {
-    const snap = await apiFetch("/api/autofeed/status");
-    afHandleStatus(snap);
-    if (snap.is_running) {
-      afToggle.checked = true;
-      afSettingsWrap.style.display = "block";
-      afConnectWS();
-    }
-  } catch (e) { /* ignore until user navigates to page */ }
-})();
+afRestoreState();
 
 // When wallet disconnects or page is left, gracefully shutdown
 window.addEventListener("beforeunload", () => {
