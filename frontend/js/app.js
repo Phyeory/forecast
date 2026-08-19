@@ -2769,21 +2769,43 @@ function addLtTradeRow(ctx, action, price, pnlSol, pnlPct, txHash, status) {
   ltTradesTbody.prepend(tr);
 }
 
-/* ── Session stats bar (aggregate across server sessions) ─────────────── */
+/* ── Session stats bar (aggregate across server sessions) ───────────────
+   The server owns the ground-truth session_summary (in-memory: it survives
+   page refreshes and resets when the program restarts).  The frontend caches
+   the last summary and re-renders it on live events instead of recomputing
+   from per-card stats — recomputing from the local cards reset the bar to 0
+   right after a page refresh (freshly attached cards start with empty stats)
+   and silently dropped completed (stopped) sessions. */
+let _ltServerSummary = null;          // last session_summary from /api/live/status
+let _summaryRefreshTimer = null;      // debounce for post-trade aggregate refresh
+
+function scheduleSessionSummaryRefresh() {
+  if (_summaryRefreshTimer) return;
+  _summaryRefreshTimer = setTimeout(() => {
+    _summaryRefreshTimer = null;
+    apiFetch("/api/live/status")
+      .then(st => { if (st && st.session_summary) updateSessionStats(st.session_summary); })
+      .catch(() => { /* keep last cached summary */ });
+  }, 1200);
+}
 
 function updateSessionStats(summary = null, serverTraders = null) {
   const el = $("lt-session-card");
   if (!el) return;
 
+  if (summary) _ltServerSummary = summary;
+
   let pnl = 0, upnl = 0, wr = 0, trades = 0, tokens = 0;
 
-  if (summary) {
-    pnl = summary.total_pnl_sol || 0;
-    upnl = summary.unrealized_pnl_sol || 0;
-    wr = summary.win_rate || 0;
-    trades = summary.total_trades || 0;
-    tokens = summary.tokens_traded || 0;
+  if (_ltServerSummary) {
+    pnl = _ltServerSummary.total_pnl_sol || 0;
+    upnl = _ltServerSummary.unrealized_pnl_sol || 0;
+    wr = _ltServerSummary.win_rate || 0;
+    trades = _ltServerSummary.total_trades || 0;
+    tokens = _ltServerSummary.tokens_traded || 0;
   } else {
+    // No server round-trip yet (very first page load) — approximate from the
+    // attached cards so a just-started session isn't blank.
     const traders = serverTraders || Object.values(ltActiveTraders);
     let wins = 0;
     for (const t of traders) {
@@ -2796,6 +2818,11 @@ function updateSessionStats(summary = null, serverTraders = null) {
     wr = trades > 0 ? (wins / trades) * 100 : 0;
     tokens = traders.length;
   }
+
+  // A live trade / detach / attach event means the aggregate may have moved —
+  // refresh it from the server shortly (debounced).  Only the summary path
+  // renders the authoritative numbers.
+  if (!summary) scheduleSessionSummaryRefresh();
 
   if (trades === 0 && tokens === 0 && Object.keys(ltActiveTraders).length === 0) {
     el.style.display = "none";
