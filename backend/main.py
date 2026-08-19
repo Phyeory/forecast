@@ -1547,6 +1547,18 @@ async def _get_or_create_live_session(
         if session is not None and not session.cancelled.is_set():
             return session, False
 
+        # ── Attach-only guard — never spawn a new session at defaults ─────
+        # Re-attaching viewers (page reload, tab sleep, /api/live/status
+        # re-probe) never pass a private key.  Without this guard, the
+        # stored-key fallback below silently CREATED a new session with the
+        # endpoint defaults (buy_size=0.1, slippage_bps=1000, engine V1)
+        # whenever the intended session had ended between the status probe
+        # and this connect — the "live trades always enter 0.1 SOL" bug.
+        # Creating a session therefore requires an explicit key from the
+        # caller; a bare attach can only ever attach.
+        if not private_key:
+            return None, False
+
         # Fallback to server-side stored private key if none passed in call
         key_str = private_key or getattr(app.state, "lt_private_key", "") or _load_backend_private_key()
         if not key_str:

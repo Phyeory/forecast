@@ -2914,6 +2914,10 @@ function startLiveTrader(mint, _delayOverride = null, opts = {}) {
   if (!attach) {
     if (!ltWalletPubkey) return alert("Connect wallet first");
     if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)) return alert("Invalid Solana address");
+    // The backend now refuses to spawn a session without an explicit key
+    // (a key-less connect is treated as attach-only).  Fail loudly here
+    // instead of a silent WS 4001 close + card teardown.
+    if (!_privateKey) return alert("Wallet key not available in this browser — re-enter it above (server-side key alone is not enough to start)");
   }
   if (ltActiveTraders[mint]) return attach ? undefined : alert("Already trading this token");
 
@@ -2926,11 +2930,21 @@ function startLiveTrader(mint, _delayOverride = null, opts = {}) {
   }
 
   const config = getLtConfig();
+  // Never let an empty/zero Buy Size input silently fall back to 0.1 SOL on
+  // session creation (the `|| 0.1` default in getLtConfig is only a URL
+  // well-formedness fallback) — fail loudly instead.
+  if (!attach && !(config.buySize > 0)) {
+    return alert("Enter a valid Buy Size (SOL) > 0 in Trading Configuration before starting");
+  }
   const paramsStr = encodeURIComponent(JSON.stringify(getLtEngineParams()));
   // Attach mode NEVER sends the private key — it must not spawn a new session
   // if the existing one ended between the status check and this connect.
+  // The dashboard config IS still sent on attach: it is ignored when a real
+  // session exists, but it guarantees that any session created from this
+  // connect inherits the dashboard's buy size / slippage / engine version
+  // instead of the backend's 0.1 SOL defaults.
   const wsUrl = attach
-    ? `${LT_WS_BASE}/${mint}?timeframe=${encodeURIComponent(opts.timeframe || config.timeframe)}`
+    ? `${LT_WS_BASE}/${mint}?timeframe=${encodeURIComponent(opts.timeframe || config.timeframe)}&buy_size=${config.buySize}&slippage_bps=${config.slippageBps}&params=${paramsStr}&engine_version=${opts.engineVersion || ltEngineVersion}`
     : `${LT_WS_BASE}/${mint}?timeframe=${config.timeframe}&private_key=${encodeURIComponent(_privateKey)}&buy_size=${config.buySize}&slippage_bps=${config.slippageBps}&params=${paramsStr}&engine_version=${ltEngineVersion}`;
 
   // Register the card immediately so the UI shows "Connecting…" right away
@@ -3246,12 +3260,15 @@ ltStopAllBtn.addEventListener("click", stopAllTraders);
     const config = getLtConfig();
     for (const ctx of Object.values(ltActiveTraders)) {
       if (ctx.ws && ctx.ws.readyState === WebSocket.OPEN) {
-        ctx.ws.send(JSON.stringify({
+        const msg = {
           type: "update_config",
-          buy_size: config.buySize,
           slippage_bps: config.slippageBps,
           // priority_fee is fixed at 0.0001 SOL — not sent
-        }));
+        };
+        // Only push a valid buy size — an empty/invalid input must never
+        // hot-set a running session to the 0.1 SOL fallback.
+        if (config.buySize > 0) msg.buy_size = config.buySize;
+        ctx.ws.send(JSON.stringify(msg));
       }
     }
   });
