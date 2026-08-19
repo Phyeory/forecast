@@ -2,7 +2,8 @@
    pump-chart  ·  Price Action + Strategy Dashboard
    ────────────────────────────────────────────────────────────────────────── */
 
-const WS_BASE = `ws://${location.host}/ws`;
+const WS_PROTO = location.protocol === "https:" ? "wss:" : "ws:";
+const WS_BASE = `${WS_PROTO}//${location.host}/ws`;
 const MAX_TRADES = 60;
 const RECONNECT_MS = 1500;
 const CANDLE_UP = "#26a69a";
@@ -2591,7 +2592,7 @@ const JUPITER_QUOTE = "https://lite-api.jup.ag/swap/v1/quote";
 const JUPITER_SWAP = "https://lite-api.jup.ag/swap/v1/swap";
 const WSOL = "So11111111111111111111111111111111111111112";
 const SOL_DECIMALS = 9;
-const LT_WS_BASE = `ws://${location.host}/ws/live`;
+const LT_WS_BASE = `${WS_PROTO}//${location.host}/ws/live`;
 
 /* ── State ────────────────────────────────────────────────────────────── */
 
@@ -2950,6 +2951,9 @@ window.manualTrade = manualTrade;
 // open their WebSockets (and trigger resolve_input) at the exact same moment.
 let _ltConnectCount = 0;
 let _ltConnectResetTimer = null;
+// Consecutive failed re-attach cycles per mint — bounds the onclose probe
+// loop so a permanently-unreachable session can't re-attach forever.
+let _attachFailCounts = {};
 
 function startLiveTrader(mint, _delayOverride = null, opts = {}) {
   // opts.attach: re-attach to an already-running server-side session instead
@@ -3021,7 +3025,22 @@ function startLiveTrader(mint, _delayOverride = null, opts = {}) {
     const ws = new WebSocket(wsUrl);
     ctx.ws = ws;
 
-    ws.onopen = () => { addTraderEvent(ctx, "info", "Connected — warming up indicators…"); };
+    // If the backend hasn't answered the handshake within 25s (resolver
+    // contention, backend down), surface it instead of hanging forever on
+    // "Re-attaching to running session…".  Closing the socket triggers the
+    // onclose probe, which re-attaches cleanly once the backend is reachable.
+    ctx.wsOpenTimer = setTimeout(() => {
+      if (ctx.ws && ctx.ws.readyState === WebSocket.CONNECTING) {
+        addTraderEvent(ctx, "error", "Connection timed out — retrying…");
+        try { ctx.ws.close(); } catch (e) { /* ignore */ }
+      }
+    }, 25000);
+
+    ws.onopen = () => {
+      clearTimeout(ctx.wsOpenTimer);
+      delete _attachFailCounts[mint];
+      addTraderEvent(ctx, "info", "Connected — warming up indicators…");
+    };
 
     ws.onmessage = async (ev) => {
       let msg;
@@ -3188,6 +3207,7 @@ function startLiveTrader(mint, _delayOverride = null, opts = {}) {
 
     ws.onerror = () => { addTraderEvent(ctx, "error", "WebSocket error"); };
     ws.onclose = () => {
+      clearTimeout(ctx.wsOpenTimer);
       addTraderEvent(ctx, "info", "Disconnected");
       updateTraderCard(mint);
       // The backend session keeps running independently of this tab.  Unless
@@ -3206,7 +3226,19 @@ function startLiveTrader(mint, _delayOverride = null, opts = {}) {
                 : null;
               if (t) {
                 // Drop this card and re-attach fresh (rebuilds the chart from
-                // the session's recorded candles).
+                // the session's recorded candles).  Bound the loop: if the
+                // re-attach socket keeps failing (e.g. the resolver can't
+                // agree on the mint), give up after 3 cycles instead of
+                // re-attaching forever — the periodic status poll will
+                // surface the session again if it becomes attachable.
+                const fails = (_attachFailCounts[mint] || 0) + 1;
+                if (fails > 3) {
+                  delete _attachFailCounts[mint];
+                  addTraderEvent(ctx, "error", "Re-attach failed repeatedly — dropping viewer (auto-refresh will retry)");
+                  detachTraderCard(mint);
+                  return;
+                }
+                _attachFailCounts[mint] = fails;
                 detachTraderCard(mint);
                 startLiveTrader(t.mint, 0, {
                   attach: true,
@@ -3214,10 +3246,24 @@ function startLiveTrader(mint, _delayOverride = null, opts = {}) {
                   engineVersion: t.engine_version,
                 });
               } else {
+                delete _attachFailCounts[mint];
                 detachTraderCard(mint);
               }
             })
-            .catch(() => { });
+            .catch(() => {
+              // Backend unreachable — don't leave the card parked silently.
+              // After a few failed probes, drop it; the periodic status poll
+              // brings it back the moment the backend is reachable again.
+              const fails = (_attachFailCounts[mint] || 0) + 1;
+              if (fails > 3) {
+                delete _attachFailCounts[mint];
+                addTraderEvent(ctx, "error", "Backend unreachable — dropping viewer (will auto-reconnect)");
+                detachTraderCard(mint);
+                return;
+              }
+              _attachFailCounts[mint] = fails;
+              addTraderEvent(ctx, "error", "Backend unreachable — retrying…");
+            });
         }, 3000);
       }
     };
@@ -3381,6 +3427,17 @@ navTabs.forEach(tab => {
 // Sessions keep running with the tab closed — re-attach on first load too
 refreshLiveSessions();
 
+// Autofeed auto-starts sessions server-side without any browser action, so
+// periodically re-sync while the Live Trading tab is visible.  Without this
+// poll, a session created while the page is open stayed invisible until a
+// reload or tab switch.
+setInterval(() => {
+  if (document.hidden) return;
+  const livePage = document.getElementById("page-live-trading");
+  if (!livePage || !livePage.classList.contains("active")) return;
+  refreshLiveSessions();
+}, 5000);
+
 
 window.stopLiveTrader = stopLiveTrader;
 window.stopAllTraders = stopAllTraders;
@@ -3400,7 +3457,7 @@ window.stopAllTraders = stopAllTraders;
    refuse if no private key is set, by sending `connected: true` on enable.
    ══════════════════════════════════════════════════════════════════════════ */
 
-const AF_WS_BASE = `ws://${location.host}/ws/autofeed`;
+const AF_WS_BASE = `${WS_PROTO}//${location.host}/ws/autofeed`;
 
 /* ── DOM refs ────────────────────────────────────────────────────────── */
 const afToggle = $("af-toggle");
@@ -3458,6 +3515,10 @@ function afConnectWS() {
       afHandleStatus(msg.data || {});
     } else if (msg.type === "autofeed_candidate") {
       afHandleCandidate(msg.candidate || {});
+    } else if (msg.type === "session_started") {
+      // The backend auto-started a server-side session (it holds the private
+      // key).  Surface it as a viewer card — no browser key required.
+      refreshLiveSessions();
     } else if (msg.type === "ping") {
       try { afWS.send(JSON.stringify({ type: "pong" })); } catch { /* ignore */ }
     }
@@ -3529,8 +3590,17 @@ function afFeedToLiveTrader(cand) {
     return;
   }
   try {
-    console.info(`[AutoFeed] Feeding ${cand.mint} (${cand.symbol || "?"}) mcap=$${Math.round(cand.market_cap || 0)} into live trader…`);
-    startLiveTrader(cand.mint);
+    if (_privateKey) {
+      console.info(`[AutoFeed] Feeding ${cand.mint} (${cand.symbol || "?"}) mcap=$${Math.round(cand.market_cap || 0)} into live trader…`);
+      startLiveTrader(cand.mint);
+    } else {
+      // Backend holds the key and auto-started the session server-side —
+      // attach a viewer card instead of aborting (the old code required the
+      // browser key here, so server-side sessions stayed invisible).
+      console.info(`[AutoFeed] No browser key — surfacing server-side session for ${cand.mint} (${cand.symbol || "?"})`);
+      refreshLiveSessions();
+      setTimeout(refreshLiveSessions, 2000);
+    }
   } catch (e) {
     console.error("[AutoFeed] Failed to start live trader for", cand.mint, e);
   }
