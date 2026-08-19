@@ -1023,7 +1023,7 @@ class _LiveSession:
 
     def __init__(self, *, real_mint: str, token_name: str, token_symbol: str,
                  timeframe: str, trader: LiveTrader, token_info: Optional[dict],
-                 engine_version: int = 1):
+                 engine_version: int = 2):
         self.real_mint = real_mint
         self.token_name = token_name
         self.token_symbol = token_symbol
@@ -1531,7 +1531,7 @@ async def _get_or_create_live_session(
     slippage_bps: int = 1000,
     skip_sim: bool = True,
     engine_params: Optional[dict] = None,
-    engine_version: int = 1,
+    engine_version: int = 2,
     timeframe: str = "1s",
     token_name: str = "",
     token_symbol: str = "",
@@ -1821,7 +1821,7 @@ async def live_trading_ws(
     slippage_bps: int = Query(default=1000),
     skip_sim: bool = Query(default=True),
     params: str = Query(default="{}"),
-    engine_version: int = Query(default=1),
+    engine_version: int = Query(default=2),
 ):
     """Viewer/control socket for a live session.
 

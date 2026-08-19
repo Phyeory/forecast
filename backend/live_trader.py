@@ -289,7 +289,7 @@ class LiveTrader:
         # Skip on-chain simulation on the hot path (saves ~300 ms per swap).
         # Simulation is still run on explicit test buys if desired.
         skip_simulation: bool = True,
-        engine_version: int = 1,
+        engine_version: int = 2,
 
         # ── No-motion stop ───────────────────────────────────────────────
         # If the price has not moved for this many wall-clock seconds while

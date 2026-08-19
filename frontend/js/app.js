@@ -235,8 +235,10 @@ let engineParamsV2 = {
 /* Engine version: 1 = V1 (Physics), 2 = V2 (RBPF/UKF/KDE/Kramers) */
 let engineVersion = 1;
 
-/* Live-trader engine version — independent from the chart engine toggle */
-let ltEngineVersion = 1;
+/* Live-trader engine version — independent from the chart engine toggle.
+   Persisted across page loads; defaults to V2 (production engine) unless an
+   explicit "1" is stored. */
+let ltEngineVersion = localStorage.getItem("lt_engine_version") === "1" ? 1 : 2;
 
 /* Active params getter — returns the params for the current engine version */
 function getEngineParams() {
@@ -1556,6 +1558,7 @@ document.querySelectorAll("#settings-engine-toggle .engine-ver-btn").forEach(btn
 
 function setLtEngineVersion(v) {
   ltEngineVersion = v;
+  localStorage.setItem("lt_engine_version", String(v));
   const v1Btn = document.getElementById("lt-engine-v1");
   const v2Btn = document.getElementById("lt-engine-v2");
   if (v1Btn) v1Btn.classList.toggle("active", v === 1);
@@ -1565,6 +1568,10 @@ function setLtEngineVersion(v) {
 document.querySelectorAll("#lt-engine-toggle .engine-ver-btn").forEach(btn => {
   btn.addEventListener("click", () => setLtEngineVersion(parseInt(btn.dataset.ver, 10)));
 });
+
+// Restore the persisted live-trader engine version selection (default V2).
+// Re-applies the active classes so the toggle matches the stored value.
+setLtEngineVersion(ltEngineVersion);
 
 /* Re-render volume profiles when chart view changes */
 function setupChartRedraw() {
@@ -3245,6 +3252,12 @@ function refreshLiveSessions() {
         renderLtTradeTable(st.trades);
       }
       if (Array.isArray(st.traders)) {
+        // Sync the engine toggle from any running session — the server holds
+        // the ground-truth engine version for live sessions.  This keeps the
+        // toggle honest (e.g. after a page reload) so a NEW session spawned
+        // later inherits the engine actually running, not a stale default.
+        const runningEngine = st.traders.find(t => t.status === "running" && t.engine_version);
+        if (runningEngine) setLtEngineVersion(Number(runningEngine.engine_version));
         for (const t of st.traders) {
           if (t.status !== "running") continue;
           if (ltActiveTraders[t.mint]) continue;
