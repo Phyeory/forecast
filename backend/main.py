@@ -1741,6 +1741,24 @@ async def _autofeed_forward(cand: Candidate):
             )
             if created:
                 logger.info(f"[AutoFeed] Auto-started server-side session for ${cand.symbol} ({cand.mint[:8]}…)")
+                # Tell connected dashboards a session now exists so they can
+                # attach a viewer card WITHOUT needing the browser private key.
+                # Without this push the UI only discovered sessions by polling
+                # /api/live/status (page load / tab switch / WS close), so
+                # autofeed sessions stayed invisible while recording candles.
+                for q in list(_autofeed_clients):
+                    try:
+                        q.put_nowait({
+                            "type": "session_started",
+                            "mint": session.real_mint,
+                            "token_name": session.token_name,
+                            "token_symbol": session.token_symbol,
+                            "timeframe": session.timeframe,
+                            "engine_version": session.engine_version,
+                            "timestamp": time.time(),
+                        })
+                    except asyncio.QueueFull:
+                        pass
         except Exception as e:
             logger.error(f"[AutoFeed] Error auto-starting session for {cand.mint[:8]}…: {e}")
 
@@ -1944,14 +1962,31 @@ async def live_trading_ws(
 
     # Resolve the mint first so we can find an existing session regardless of
     # whether the caller passed a mint / pair address / symbol.
-    try:
-        async with _resolve_sem:
-            real_mint, token_info = await asyncio.wait_for(
-                resolve_input(mint), timeout=20.0
-            )
-    except asyncio.TimeoutError:
-        logger.warning(f"[LIVE] resolve_input timed out for {mint[:8]} — using raw mint")
-        real_mint, token_info = mint, None
+    # Fast path: re-attach to an existing session by its exact registry key
+    # WITHOUT hitting external resolvers.  The frontend always sends the key
+    # from /api/live/status on attach.  Without this, the handshake queued
+    # behind _resolve_sem (held by other sessions' warmups for up to 15s each)
+    # and could stall for minutes, leaving the UI stuck at
+    # "Re-attaching to running session…" with no data.
+    existing = _active_live_traders.get(mint)
+    if existing is not None and not existing.cancelled.is_set():
+        real_mint, token_info = existing.real_mint, existing.token_info
+    else:
+        try:
+            async with _resolve_sem:
+                real_mint, token_info = await asyncio.wait_for(
+                    resolve_input(mint), timeout=20.0
+                )
+        except asyncio.TimeoutError:
+            logger.warning(f"[LIVE] resolve_input timed out for {mint[:8]} — using raw mint")
+            real_mint, token_info = mint, None
+        except Exception as e:
+            # A flaky resolver (rate limit, network blip) must never kill the
+            # socket — that sent the frontend into an infinite re-attach loop
+            # ("Re-attaching to running session…" with no live data).  Fall back
+            # to the raw mint so an existing session keyed under it still attaches.
+            logger.warning(f"[LIVE] resolve_input failed for {mint[:8]} ({e}) — using raw mint")
+            real_mint, token_info = mint, None
 
     try:
         engine_params = json.loads(params)
