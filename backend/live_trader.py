@@ -280,7 +280,10 @@ class LiveTrader:
         self,
         token_mint: str,
         keypair: Keypair,
-        buy_size_sol: float = 0.01,
+        # No default: the buy size MUST come from the dashboard input field
+        # (via /ws/live query param or the /api/live/buy_size store).  A
+        # hard-coded size must never be traded.
+        buy_size_sol: float,
         slippage_bps: int = 1500,
         priority_fee_lamports: int = 100_000,
         min_market_cap_usd: float = 6_000.0,

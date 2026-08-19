@@ -2675,14 +2675,29 @@ ltConnectBtn.addEventListener("click", connectWallet);
 /* ── Get config values ───────────────────────────────────────────────── */
 
 function getLtConfig() {
+  // Buy size comes ONLY from the input field.  An empty/invalid field yields
+  // NaN — every consumer treats `buySize > 0` as the validity gate, and no
+  // fallback default exists anywhere (frontend or backend).
+  const buySizeRaw = parseFloat($("lt-buy-size").value);
   return {
-    buySize: parseFloat($("lt-buy-size").value) || 0.1,
+    buySize: buySizeRaw > 0 ? buySizeRaw : NaN,
     slippagePct: parseFloat($("lt-slippage").value) || 10,
     slippageBps: Math.round((parseFloat($("lt-slippage").value) || 10) * 100),
     priorityFeeSol: 0.0001,               // fixed: 0.0001 SOL per transaction
     priorityFeeLamports: 100000,          // fixed: 100,000 micro-lamports
     timeframe: $("lt-timeframe").value,
   };
+}
+
+/* Push the input-field buy size to the backend store (POST /api/live/buy_size).
+   This is how headless paths (autofeed server-side spawns) learn the size.
+   An invalid field is never pushed — the backend has no default to fall back
+   to, by design. */
+function pushLtBuySize() {
+  const v = parseFloat($("lt-buy-size").value);
+  if (!(v > 0)) return;
+  apiFetch("/api/live/buy_size", { method: "POST", body: JSON.stringify({ buy_size: v }) })
+    .catch(() => { /* backend unreachable — retried on next change/init */ });
 }
 
 /* ── Legacy swap handler removed (moves to backend) ───────────────── */
@@ -2959,9 +2974,9 @@ function startLiveTrader(mint, _delayOverride = null, opts = {}) {
   }
 
   const config = getLtConfig();
-  // Never let an empty/zero Buy Size input silently fall back to 0.1 SOL on
-  // session creation (the `|| 0.1` default in getLtConfig is only a URL
-  // well-formedness fallback) — fail loudly instead.
+  // Buy size comes ONLY from the input field — there is no fallback default
+  // in the frontend or the backend, so an invalid field must fail loudly
+  // instead of silently trading a hard-coded size.
   if (!attach && !(config.buySize > 0)) {
     return alert("Enter a valid Buy Size (SOL) > 0 in Trading Configuration before starting");
   }
@@ -2970,11 +2985,13 @@ function startLiveTrader(mint, _delayOverride = null, opts = {}) {
   // if the existing one ended between the status check and this connect.
   // The dashboard config IS still sent on attach: it is ignored when a real
   // session exists, but it guarantees that any session created from this
-  // connect inherits the dashboard's buy size / slippage / engine version
-  // instead of the backend's 0.1 SOL defaults.
+  // connect inherits the dashboard's buy size / slippage / engine version.
+  // The buy_size param is only included when the field holds a valid value —
+  // the backend refuses to create a session without one (no default).
+  const buySizeParam = config.buySize > 0 ? `&buy_size=${config.buySize}` : "";
   const wsUrl = attach
-    ? `${LT_WS_BASE}/${mint}?timeframe=${encodeURIComponent(opts.timeframe || config.timeframe)}&buy_size=${config.buySize}&slippage_bps=${config.slippageBps}&params=${paramsStr}&engine_version=${opts.engineVersion || ltEngineVersion}`
-    : `${LT_WS_BASE}/${mint}?timeframe=${config.timeframe}&private_key=${encodeURIComponent(_privateKey)}&buy_size=${config.buySize}&slippage_bps=${config.slippageBps}&params=${paramsStr}&engine_version=${ltEngineVersion}`;
+    ? `${LT_WS_BASE}/${mint}?timeframe=${encodeURIComponent(opts.timeframe || config.timeframe)}${buySizeParam}&slippage_bps=${config.slippageBps}&params=${paramsStr}&engine_version=${opts.engineVersion || ltEngineVersion}`
+    : `${LT_WS_BASE}/${mint}?timeframe=${config.timeframe}&private_key=${encodeURIComponent(_privateKey)}${buySizeParam}&slippage_bps=${config.slippageBps}&params=${paramsStr}&engine_version=${ltEngineVersion}`;
 
   // Register the card immediately so the UI shows "Connecting…" right away
   const ctx = {
@@ -3289,10 +3306,38 @@ ltAddBtn.addEventListener("click", () => {
 ltTokenInput.addEventListener("keydown", e => { if (e.key === "Enter") ltAddBtn.click(); });
 ltStopAllBtn.addEventListener("click", stopAllTraders);
 
-/* Config change listeners — hot-update all active traders */
+/* ── Trading Configuration persistence ─────────────────────────────────
+   Buy size / slippage / priority fee / timeframe survive page reloads,
+   like the engine version, wallet key, and autofeed switch.  The buy size
+   is the single source of truth for the live trader, so its persisted value
+   is also pushed to the backend store (POST /api/live/buy_size) at load and
+   on every change — headless paths (autofeed server-side spawns) read it
+   from there. */
+(function restoreLtConfig() {
+  const savedBuySize = parseFloat(localStorage.getItem("lt_buy_size"));
+  if (savedBuySize > 0) $("lt-buy-size").value = savedBuySize;
+  const savedSlippage = parseFloat(localStorage.getItem("lt_slippage"));
+  if (savedSlippage > 0) $("lt-slippage").value = savedSlippage;
+  const savedPrioFee = parseFloat(localStorage.getItem("lt_priority_fee"));
+  if (Number.isFinite(savedPrioFee) && savedPrioFee >= 0) $("lt-priority-fee").value = savedPrioFee;
+  const savedTf = localStorage.getItem("lt_timeframe");
+  if (savedTf && $("lt-timeframe").querySelector(`option[value="${savedTf}"]`)) {
+    $("lt-timeframe").value = savedTf;
+  }
+  // Sync the backend store with the (restored) field value.
+  pushLtBuySize();
+})();
+
+/* Config change listeners — persist, hot-update all active traders, and
+   keep the backend buy-size store in sync */
 ["lt-buy-size", "lt-slippage"].forEach(id => {
   $(id).addEventListener("change", () => {
     const config = getLtConfig();
+    // Persist the field values
+    if (config.buySize > 0) localStorage.setItem("lt_buy_size", String(config.buySize));
+    if (config.slippagePct > 0) localStorage.setItem("lt_slippage", String(config.slippagePct));
+    // Keep the backend store (autofeed spawns) in sync with the field
+    pushLtBuySize();
     for (const ctx of Object.values(ltActiveTraders)) {
       if (ctx.ws && ctx.ws.readyState === WebSocket.OPEN) {
         const msg = {
@@ -3301,12 +3346,19 @@ ltStopAllBtn.addEventListener("click", stopAllTraders);
           // priority_fee is fixed at 0.0001 SOL — not sent
         };
         // Only push a valid buy size — an empty/invalid input must never
-        // hot-set a running session to the 0.1 SOL fallback.
+        // hot-set a running session to a fallback size.
         if (config.buySize > 0) msg.buy_size = config.buySize;
         ctx.ws.send(JSON.stringify(msg));
       }
     }
   });
+});
+$("lt-priority-fee").addEventListener("change", () => {
+  const v = parseFloat($("lt-priority-fee").value);
+  if (Number.isFinite(v) && v >= 0) localStorage.setItem("lt_priority_fee", String(v));
+});
+$("lt-timeframe").addEventListener("change", () => {
+  localStorage.setItem("lt_timeframe", $("lt-timeframe").value);
 });
 
 // Page switch handler for live trading
@@ -3645,6 +3697,9 @@ afToggle.addEventListener("change", async () => {
         method: "POST",
         body: JSON.stringify(cfg),
       });
+      // Autofeed spawns sessions server-side — make sure the backend store
+      // holds the input field's buy size before it starts.
+      pushLtBuySize();
       await apiFetch("/api/autofeed/start", { method: "POST", body: "{}" });
       afSettingsWrap.style.display = "block";
       afConnectWS();
@@ -3694,6 +3749,9 @@ afTestPollBtn.addEventListener("click", async () => {
       method: "POST",
       body: JSON.stringify(afReadForm()),
     });
+    // A test poll can forward a candidate → server-side spawn; sync the
+    // buy-size store first so it uses the input field's value.
+    pushLtBuySize();
     await apiFetch("/api/autofeed/start", { method: "POST", body: "{}" });
     await new Promise(r => setTimeout(r, 2500));   // allow 1 poll cycle
     await apiFetch("/api/autofeed/stop", { method: "POST" });
@@ -3724,6 +3782,8 @@ async function afRestoreState() {
             method: "POST",
             body: JSON.stringify(cfg),
           });
+          // Ensure autofeed's server-side spawns use the input field's size
+          pushLtBuySize();
           await apiFetch("/api/autofeed/start", { method: "POST", body: "{}" });
         } catch (err) {
           console.warn("[AutoFeed] Failed to auto-start backend autofeed", err);

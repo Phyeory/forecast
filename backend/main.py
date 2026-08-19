@@ -96,6 +96,52 @@ def _load_backend_private_key() -> str:
     return ""
 
 
+# ── Live buy size: single-source-of-truth store ────────────────────────────
+# The dashboard's "Buy Size (SOL)" input field is the ONLY source of the live
+# buy size.  The frontend pushes its value here (POST /api/live/buy_size);
+# every session-creation path (WS connect, autofeed server-side spawn) reads
+# it from this store.  There is deliberately NO default — creation without a
+# user-supplied size is refused instead of guessing one.
+LIVE_SETTINGS_PATH = Path(__file__).parent / "data" / "live_settings.json"
+
+
+def _save_live_buy_size(size: float):
+    try:
+        LIVE_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LIVE_SETTINGS_PATH.write_text(
+            json.dumps({"buy_size": size}), encoding="utf-8"
+        )
+    except Exception as e:
+        logger.warning(f"[LIVE] Failed to persist buy size to disk: {e}")
+
+
+def _load_live_buy_size() -> Optional[float]:
+    try:
+        if LIVE_SETTINGS_PATH.exists():
+            data = json.loads(LIVE_SETTINGS_PATH.read_text(encoding="utf-8"))
+            size = float(data.get("buy_size", 0.0))
+            if size > 0:
+                return size
+    except Exception as e:
+        logger.warning(f"[LIVE] Failed to read persistent buy size file: {e}")
+    return None
+
+
+def _get_live_buy_size() -> Optional[float]:
+    """Current user-supplied buy size (in-memory first, disk fallback).
+
+    Returns None when the dashboard has never pushed a valid value — callers
+    must treat that as 'refuse to trade', never as 'use a default'."""
+    size = getattr(app.state, "lt_buy_size", None)
+    if size is None or not isinstance(size, (int, float)) or size <= 0:
+        size = _load_live_buy_size()
+        if size is not None:
+            app.state.lt_buy_size = size
+    if isinstance(size, (int, float)) and size > 0:
+        return float(size)
+    return None
+
+
 @app.on_event("startup")
 async def startup_load_live_key():
     pk = _load_backend_private_key()
@@ -1527,7 +1573,7 @@ async def _get_or_create_live_session(
     *,
     real_mint: str,
     private_key: str = "",
-    buy_size: float = 0.1,
+    buy_size: Optional[float] = None,
     slippage_bps: int = 1000,
     skip_sim: bool = True,
     engine_params: Optional[dict] = None,
@@ -1541,6 +1587,9 @@ async def _get_or_create_live_session(
 
     Returns (session, created_flag). If no session exists and no valid private
     key is provided or stored in backend memory, returns (None, False).
+    ``buy_size`` has NO default: creating a session without an explicit,
+    user-supplied size (> 0, sourced from the dashboard input field) is
+    refused — a hard-coded size must never be traded.
     """
     async with _live_session_lock:
         session = _active_live_traders.get(real_mint)
@@ -1550,13 +1599,22 @@ async def _get_or_create_live_session(
         # ── Attach-only guard — never spawn a new session at defaults ─────
         # Re-attaching viewers (page reload, tab sleep, /api/live/status
         # re-probe) never pass a private key.  Without this guard, the
-        # stored-key fallback below silently CREATED a new session with the
-        # endpoint defaults (buy_size=0.1, slippage_bps=1000, engine V1)
-        # whenever the intended session had ended between the status probe
-        # and this connect — the "live trades always enter 0.1 SOL" bug.
-        # Creating a session therefore requires an explicit key from the
-        # caller; a bare attach can only ever attach.
+        # stored-key fallback below silently CREATED a new session at
+        # endpoint defaults whenever the intended session had ended between
+        # the status probe and this connect — the "live trades always enter
+        # a hard-coded size" bug.  Creating a session therefore requires an
+        # explicit key from the caller; a bare attach can only ever attach.
         if not private_key:
+            return None, False
+
+        # Buy size must come from the dashboard input field (pushed through
+        # the WS query param or the /api/live/buy_size store for autofeed).
+        # No fallback default exists or ever may exist here.
+        if buy_size is None or buy_size <= 0:
+            logger.warning(
+                f"[LIVE] Refusing to create session for {real_mint[:8]}… — "
+                f"no valid buy_size supplied from the dashboard input field"
+            )
             return None, False
 
         # Fallback to server-side stored private key if none passed in call
@@ -1659,13 +1717,24 @@ async def _autofeed_forward(cand: Candidate):
             pass
     logger.info(f"[AutoFeed] Forward ${cand.symbol} to {pushed}/{n_clients} WS clients")
 
-    # If backend has a private key, auto-spawn live trader session server-side
+    # If backend has a private key, auto-spawn live trader session server-side.
+    # Buy size comes exclusively from the dashboard input field (pushed via
+    # POST /api/live/buy_size).  Without a pushed size we skip the spawn —
+    # connected dashboards still create the session themselves through
+    # /ws/live/{mint} carrying the field value in the query string.
     pk = getattr(app.state, "lt_private_key", "") or _load_backend_private_key()
-    if pk:
+    af_buy_size = _get_live_buy_size()
+    if pk and af_buy_size is None:
+        logger.warning(
+            "[AutoFeed] No buy size pushed from the dashboard input field "
+            "(POST /api/live/buy_size) — skipping server-side session spawn"
+        )
+    if pk and af_buy_size is not None:
         try:
             session, created = await _get_or_create_live_session(
                 real_mint=cand.mint,
                 private_key=pk,
+                buy_size=af_buy_size,
                 token_name=cand.name or "",
                 token_symbol=cand.symbol or "",
                 timeframe="1s",
@@ -1777,6 +1846,42 @@ async def live_set_private_key(body: dict = Body(...)):
     })
 
 
+@app.post("/api/live/buy_size")
+async def live_set_buy_size(body: dict = Body(...)):
+    """Push the dashboard's Live Trader "Buy Size (SOL)" input value.
+
+    This is the ONLY way the backend learns the live buy size — there is no
+    default anywhere.  The value is persisted, used by autofeed's server-side
+    session spawns, and hot-applied to every running live session so the
+    input field always stays authoritative.
+    """
+    try:
+        size = float(body.get("buy_size"))
+    except (TypeError, ValueError):
+        return JSONResponse(
+            {"error": "buy_size must be a positive number of SOL"}, status_code=400
+        )
+    if not size > 0:
+        return JSONResponse(
+            {"error": "buy_size must be > 0"}, status_code=400
+        )
+
+    app.state.lt_buy_size = size
+    _save_live_buy_size(size)
+
+    # Keep every running session in sync with the field.
+    updated = 0
+    for session in list(_active_live_traders.values()):
+        trader = getattr(session, "trader", None)
+        if trader is not None:
+            trader.buy_size_sol = size
+            updated += 1
+
+    logger.info(f"[LIVE] Buy size set from dashboard input field: {size} SOL "
+                f"({updated} active session(s) synced)")
+    return JSONResponse({"status": "updated", "buy_size": size, "sessions_synced": updated})
+
+
 async def _autofeed_ws_handler(websocket: WebSocket):
     """Core autofeed WS logic — callable from both the dedicated route and the
     /ws/{mint} wildcard delegation."""
@@ -1817,7 +1922,7 @@ async def live_trading_ws(
     mint: str,
     timeframe: str = Query(default="1s"),
     private_key: str = Query(default=""),
-    buy_size: float = Query(default=0.1),
+    buy_size: Optional[float] = Query(default=None),
     slippage_bps: int = Query(default=1000),
     skip_sim: bool = Query(default=True),
     params: str = Query(default="{}"),
@@ -1866,7 +1971,13 @@ async def live_trading_ws(
     )
 
     if session is None:
-        await websocket.close(code=4001, reason="Private key required")
+        # Creation was refused: no key (attach-only guard) or no valid
+        # buy_size from the dashboard input field.  There is no default.
+        await websocket.close(
+            code=4001,
+            reason="Session requires a private key and a valid buy_size "
+                   "from the dashboard input field",
+        )
         return
 
     # ── Attach as a viewer ─────────────────────────────────────────────────
@@ -1960,7 +2071,14 @@ async def live_trading_ws(
 
                 if msg_type == "update_config":
                     if "buy_size" in msg:
-                        session.trader.buy_size_sol = float(msg["buy_size"])
+                        # Only a valid dashboard-supplied size is applied —
+                        # never a fallback default.
+                        try:
+                            v = float(msg["buy_size"])
+                        except (TypeError, ValueError):
+                            v = 0.0
+                        if v > 0:
+                            session.trader.buy_size_sol = v
                     if "slippage_bps" in msg:
                         session.trader.slippage_bps = int(msg["slippage_bps"])
                     # priority_fee is fixed at 100_000 micro-lamports (0.0001 SOL) — ignored
