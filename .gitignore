@@ -7,6 +7,8 @@ backend/data/backtest_data.db-shm
 backend/data/backtest_data.db-wal
 
 
+paper
+
 # Python bytecode/cache and testing cache files
 __pycache__/
 *.py[cod]
