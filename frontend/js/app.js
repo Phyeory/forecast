@@ -2385,6 +2385,24 @@ async function _renderBacktestChart(ctx, bt) {
       btMarkers.push({ time: c.time, position: "aboveBar", color: CANDLE_DOWN, shape: "circle", text: `EXIT @ ${formatMcap(c.open)}` });
     }
   }
+  // Batch runs (Run All / Last Night / Last 12h) persist no backtest_candles
+  // rows, so the recording-candle fallback has no trade_action — build
+  // markers from the always-present trades array instead.
+  if (!btMarkers.length && bt.trades && bt.trades.length) {
+    const toMcap = (p) => {
+      if (!p || p <= 0 || isNaN(p)) return 0;
+      if (formattedData.baseMcap && formattedData.basePrice) return formattedData.baseMcap * (p / formattedData.basePrice);
+      return p;
+    };
+    for (const t of bt.trades) {
+      if (t.entry_time) {
+        btMarkers.push({ time: t.entry_time, position: "belowBar", color: CANDLE_UP, shape: "arrowUp", text: `BUY @ ${formatMcap(toMcap(t.entry_price))}` });
+      }
+      if (t.exit_time) {
+        btMarkers.push({ time: t.exit_time, position: "aboveBar", color: CANDLE_DOWN, shape: "circle", text: `EXIT @ ${formatMcap(toMcap(t.exit_price))}` });
+      }
+    }
+  }
   if (btMarkers.length) cs2.setMarkers(btMarkers.sort((a, b) => a.time - b.time));
 
   btChart.timeScale().fitContent();
