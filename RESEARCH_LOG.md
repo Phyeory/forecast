@@ -34,6 +34,7 @@ recorded here.  No undocumented changes are permitted.
 | 04        | iter04_subset30 | 16 | 93.75% | +0.610 | 150.02 | ACCEPTED — bayesian exit-only logic |
 | 04b       | iter04_random100 | 14 | 100% | +0.274 | inf | iter04 confirmed, 5/100 tokens traded (low trade freq) |
 | 04c       | iter04_sub50b   | 62 | 82.3% | +0.768 | 7.96 | iter04 confirmed on a DIFFERENT random 50 subset |
+| 52        | iter52_dynamic_adapt | 625 | 70.1% | +1.406 | 1.29 | **REJECTED** — dynamic market adaptation layer (conf+pup scaling) cost -0.782 SOL vs baseline on 274 matched recordings |
 | 09        | iter09_signflip | partial | 3.1% rec1843 | negative (1 rec) | n/a | REJECTED — spec-literal sign alone on empty ρ caused 457× overtrading |
 | 13        | iter13_anchor_rho | 11/11 | 29.2% | -0.090 (subset vs +0.042 iter08) | n/a | REJECTED — ρ anchored to lag-komedi pattern ⇒ k_down=1e6 churn on every uptrend |
 | 14        | iter14_dt_fix / iter14_ig | 7/20 + 2/2 | 0% / 3.4% | 0.000 / -1.889 | n/a | REJECTED — dt=0.25 (iter14-A) silenced all kramers entries on 7/7 worst-20 records; IG catalyst (iter14-B) churned 519 trades on rec349 alone |
@@ -6532,4 +6533,54 @@ The best performing config (`thr=0.25`) was submitted to the **exact iter48 left
 ### 5. Final Decision & Production Configuration
 
 **ACCEPTED.** Production defaults are updated to `v2_evr_skip_sell_conc_min = 0.25` and `v2_evr_skip_conc_window = 60` in both `backend/strategy_engineV2.py` and `frontend/js/app.js`.
+
+
+## Iter 52 — Dynamic Market-Condition Parameter Adaptation System (TOTAL REJECT — Reverted to HEAD)
+
+**Date:** 2026-08-20  
+**Status:** **TOTAL REJECT** (All code modifications reverted to HEAD; canonical baseline unchanged)
+
+### 1. Objective & Hypothesis
+Designed, implemented, and benchmarked a dynamic, causal, lookahead-free market-condition adaptation layer for `StrategyEngineV2`. The hypothesis was that token-local rolling market quality $q_t \in [0, 1]$ (derived from candle extremes and returns over a trailing window) could adaptively modify entry gates ($C_{\text{high}}, P_{\text{up}}$), decision prediction horizons ($\tau$), or Kelly allocations ($n^*, \mathcal{E}^*$) during weak market regimes (low pump heights, deep drawdowns) to shield capital during drawdown periods while remaining aggressive in trending regimes.
+
+Continuous Causal Score $q_t = q_{\text{pump}} \cdot q_{\text{dd}} \in [0, 1]$ computed over trailing `v2_regime_window_seconds`:
+- $q_{\text{pump}} = \text{clamp01}\left(\frac{\text{median}(h_k/c_k - 1)}{\text{v2\_regime\_pump\_floor}}\right)$
+- $q_{\text{dd}} = \text{clamp01}\left(1.0 - \frac{\text{median}(1 - l_k/c_k)}{\text{v2\_regime\_dd\_max}}\right)$
+
+Dynamic Adaptation Rules:
+- **Rule A (Dynamic Entry Gate):** Linear elevation of entry thresholds as $q_t \to 0$:
+  $C_{\text{eff}} = C_{\text{high}} + (1 - q_t) \cdot \Delta_{C}$
+  $P_{\text{up, eff}} = P_{\text{up, min}} + (1 - q_t) \cdot \Delta_{P_{\text{up}}}$
+- **Rule B (Dynamic Kramers Horizon):** Linear contraction of prediction horizon:
+  $\tau_{\text{eff}} = \max\left(\lfloor \tau_{\text{max}} \cdot (1 - (1 - q_t) \cdot f_\tau) \rfloor, 5\right)$
+- **Rule C (Dynamic Kelly Allocation):** Proportional reduction of optimal position size:
+  $n^*_{\text{eff}} = n^* \cdot (1 - (1 - q_t) \cdot f_{\text{Kelly}})$
+
+### 2. Pre-Registration & Diagnostic Autopsy
+1. **Pre-registration AUC Analysis**: Calculated cross-token market-wide condition metrics across 300s, 1800s, and 7200s windows (`iter52_prereg.py`). Resulting AUCs for trade-outcome separation ranged strictly between 0.467 and 0.548 (non-separative), proving that market-wide condition indicators prior to entry do not separate winning trades from catastrophic losing trades.
+2. **Sensitivity & Multi-Parameter Co-Adaptation Matrix**: Tested ultra-mild to aggressive sensitivities and coupled entry/exit parameter shifts across balanced cohorts:
+   - Ultra-mild ($\Delta_C=0.01, \Delta_{P_{\text{up}}}=0.01$): Near-zero filtering, identical to baseline.
+   - Mild to aggressive ($\Delta_C \ge 0.02, \Delta_{P_{\text{up}}} \ge 0.02$): Net negative PnL progression (-0.0055 to -0.0156 SOL).
+   - Co-adapting with tighter stops (`no_long_offside_pct=30%`): Win rate collapsed from 66.7% to 33.3% (-0.0502 SOL) due to false exits on normal pullbacks.
+
+### 3. Full-Cohort Matched Comparison & Statistical Tests
+Evaluated candidate Rule A against `iter52_baseline` across 274 matched recordings:
+
+| Batch | Matched Recs | Total Trades | Win Rate | Total PnL (SOL) | Improved | Regressed | Unchanged | Wilcoxon $p$ | Verdict |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Baseline (`iter52_baseline`)** | 274 | 778 | 70.6% | **+2.1880** | — | — | — | — | Baseline |
+| **Candidate (`iter52_dynamic_adapt`)** | 274 | 625 | 70.1% | **+1.4064** | 53 (19.3%) | 75 (27.4%) | 146 (53.3%) | 0.9481 | **TOTAL REJECT** |
+
+- **Net PnL Delta**: **-0.7816 SOL**
+- **Token Improvement Breadth**: 19.3% (53/274, far below $\ge 50.0\%$ required)
+- **Wilcoxon One-Sided Test**: $p = 0.9481$ (Failed, $p \ge 0.05$)
+
+### 4. Structural Inseparability Proof & Root Cause
+1. **Asymmetric Tail Truncation**: Memecoin explosive breakout runs ($+50\%$ to $+500\%$) frequently begin from low-volatility, low-momentum consolidation bases where $q_t \to 0$. Tightening entry criteria during weak regimes suppresses these high-skew winners far more than it saves on bleeding losers.
+2. **Coupled DAG Dynamics**: Shifting entry thresholds forces entries higher up the candle, which breaks the downstream calibration of `gain_retrace` and `kelly_flat`, inducing premature whipsaw exits.
+3. **Replacement-Entry Traps**: Blocking early entries does not prevent capital allocation; freed capital enters subsequent noisy flickers at inferior prices.
+
+### 5. Final Action
+**TOTAL REJECT**. All code changes in `backend/strategy_engineV2.py` and `frontend/js/app.js` have been reverted to HEAD. The production codebase remains 100% byte-exact to origin/main HEAD with all tests passing (18/18 OK).
+
 
