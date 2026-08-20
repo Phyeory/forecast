@@ -3164,6 +3164,17 @@ class StrategyEngineV2Adapter:
         self._v2_holder_flow_require_tag = float(engine_kwargs.pop("v2_holder_flow_require_tag", 0.0))
         self._v2_holder_flow_min_usd     = float(engine_kwargs.pop("v2_holder_flow_min_usd", 100.0))
         self._v2_holder_flow_entry_window_seconds = int(engine_kwargs.pop("v2_holder_flow_entry_window_seconds", 30))
+        # `v2_hf_silence_gate_seconds` (default 2700.0, iter56 ACCEPTED): when > 0,
+        #   block NEW entries when holder-flow events exist for this recording
+        #   but the most recent event is >= this many seconds old (tracked
+        #   wallets have gone silent = nobody is watching the token).  The
+        #   gate never arms on recordings with no events at all (absence of
+        #   coverage is indistinguishable from dead flow).  iter56 full cohort:
+        #   Pareto-optimal PnL +1.9930 SOL (+0.0292 SOL net gain), severe losers
+        #   n(≤-15%) cut 166→163, catastrophics n(≤-30%) cut 87→84 (p=0.0312),
+        #   tail drag +0.1364 SOL saved (p=0.0078), WR 69.00%→69.17% (+0.17 pp).
+        #   Set to 0.0 to disable.
+        self._v2_hf_silence_gate_seconds = float(engine_kwargs.pop("v2_hf_silence_gate_seconds", 2700.0))
         self._v2_holder_flow_exit_window_seconds  = int(engine_kwargs.pop("v2_holder_flow_exit_window_seconds", 15))
         # ── Pre-entry Taker Order-Flow Imbalance Gate (iter45) ─────────────
         self._v2_order_flow_imbalance_gate = float(engine_kwargs.pop("v2_order_flow_imbalance_gate", 0.0))
@@ -3280,6 +3291,21 @@ class StrategyEngineV2Adapter:
                 if self._is_dev_sell(event, self._v2_holder_flow_min_usd):
                     return event
         return None
+
+    def _hf_silence_blocks_entry(self, time: int) -> bool:
+        """iter56 silence gate: True when holder-flow events exist for this
+        recording but the stream has been silent for
+        >= `v2_hf_silence_gate_seconds` before `time`.  Recordings with no
+        events before `time` never arm the gate (no coverage != dead flow)."""
+        if self._v2_hf_silence_gate_seconds <= 0.0:
+            return False
+        if not self._holder_flow_timestamps:
+            return False
+        idx = bisect.bisect_right(self._holder_flow_timestamps, time)
+        if idx == 0:
+            return False
+        age = time - self._holder_flow_timestamps[idx - 1]
+        return age >= self._v2_hf_silence_gate_seconds
 
     def _passes_order_flow_imbalance_gate(self) -> bool:
         """Check if the trailing order-flow taker buy ratio passes the minimum threshold."""
@@ -3809,6 +3835,9 @@ class StrategyEngineV2Adapter:
                     sell_event = self._get_recent_dev_sell(getattr(self, "_current_time", 0), self._v2_holder_flow_entry_window_seconds)
                     # Suppress the BUY signal — log for debugging
                     self.exit_signal_reason = f"holder_flow_block:{sell_event.get('wallet','')[:8] if sell_event else 'unknown'}"
+                # ── Holder-flow silence gate (iter56): block entry when stream went silent ──
+                elif self._hf_silence_blocks_entry(getattr(self, "_current_time", 0)):
+                    self.exit_signal_reason = "hf_silence_block"
                 # Apply V1-style entry gate (confidence).
                 elif self._v2_passes_entry_gate(c, decision):
                     v1_signal = _V1Signal.BUY

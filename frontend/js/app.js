@@ -231,6 +231,9 @@ let engineParamsV2 = {
   // triage permanently for that trade.  0.25 = ACCEPTED best config (thr=0.25).
   v2_evr_skip_sell_conc_min: 0.25,  // veto when maxsec sell share > this (0 = OFF)
   v2_evr_skip_conc_window:  60,    // trailing window (s) for the share
+  // iter56: holder-flow silence gate.  Block entry when tracked wallets have
+  // been silent for >= this many seconds (2700.0 = ACCEPTED default; 0 = OFF).
+  v2_hf_silence_gate_seconds: 2700.0,
 };
 
 /* Engine version: 1 = V1 (Physics), 2 = V2 (RBPF/UKF/KDE/Kramers) */
