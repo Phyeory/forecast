@@ -92,7 +92,7 @@ GMGN_RAINDOW   = os.environ.get("GMGN_CLI_RAW",  "--raw")  # always pass --raw
 
 DEFAULT_POLL_SECONDS              = 60.0
 # Spec: feed pump.fun migrated tokens above 15k mcap.
-DEFAULT_MIN_MCAP_USD              = 15_000.0
+DEFAULT_MIN_MCAP_USD              = 30_000.0
 DEFAULT_MAX_MCAP_USD              = 10_000_000.0   # OP: allow up to $10M
 DEFAULT_MIN_LIQUIDITY_USD         = 5_000.0        # GMGN pass-tier > $50k; we ease to broaden
 DEFAULT_MIN_HOLDERS               = 50             # organic metabolic mass
