@@ -35,6 +35,7 @@ recorded here.  No undocumented changes are permitted.
 | 04b       | iter04_random100 | 14 | 100% | +0.274 | inf | iter04 confirmed, 5/100 tokens traded (low trade freq) |
 | 04c       | iter04_sub50b   | 62 | 82.3% | +0.768 | 7.96 | iter04 confirmed on a DIFFERENT random 50 subset |
 | 52        | iter52_dynamic_adapt | 625 | 70.1% | +1.406 | 1.29 | **REJECTED** — dynamic market adaptation layer (conf+pup scaling) cost -0.782 SOL vs baseline on 274 matched recordings |
+| 55        | iter55_sodt/wccb | 882-896 | 65.0-66.8% | +1.518-+1.625 | 1.15-1.25 | **REJECTED (both)** — SODT stagnant-timeout exit uniformly negative across the full 4×4 grid (ΔPnL -0.34…-0.50 SOL, ≤-15% tail +14…+41 trades in 16/16 combos; 44% of fires cut recovering trades); WCCB session breaker provably never fires (max per-session loss streak = 3 < 4). Defaults stay OFF |
 | 09        | iter09_signflip | partial | 3.1% rec1843 | negative (1 rec) | n/a | REJECTED — spec-literal sign alone on empty ρ caused 457× overtrading |
 | 13        | iter13_anchor_rho | 11/11 | 29.2% | -0.090 (subset vs +0.042 iter08) | n/a | REJECTED — ρ anchored to lag-komedi pattern ⇒ k_down=1e6 churn on every uptrend |
 | 14        | iter14_dt_fix / iter14_ig | 7/20 + 2/2 | 0% / 3.4% | 0.000 / -1.889 | n/a | REJECTED — dt=0.25 (iter14-A) silenced all kramers entries on 7/7 worst-20 records; IG catalyst (iter14-B) churned 519 trades on rec349 alone |
@@ -6660,4 +6661,162 @@ Swept across $\gamma_{\text{spread}} \in \{0.5, 1.0, 2.0, 3.0\}$ and minimum siz
 - Baseline parity is 100% preserved. All futures and unit tests pass.
 
 
+---
+
+## Iter 54 — Date-Segmented Multi-Cohort Backtest & Negative PnL Pattern Analysis
+
+**Date**: 2026-08-20  
+**Focus**: Date-Segmented Backtesting & Negative PnL Cohort Autopsy across 23 Recording Dates (1,394 Completed Recordings, 871 Executed Trades)  
+**Status**: **ANALYTICAL & DIAGNOSTIC STUDY (Completed)**; Full report saved to `DATE_SEGMENTED_BACKTEST_REPORT.md` and dataset results cached at `backend/analysis/date_segmented_results.json`.
+
+### 1. Objective & Methodology
+Conducted a systematic date-segmented backtesting sweep across the entire production historical dataset in `price_data.db` (2026-07-27 to 2026-08-20). The goal was to:
+1. Benchmark the canonical production `StrategyEngineV2` (with EVR triage + sell-concentration veto, 1-bar execution delay, 4-state intra-candle expansion, and `recording_ended` force-close) across every individual recording date batch.
+2. Separate positive PnL days from negative PnL days.
+3. Extract and isolate the common shared patterns, market conditions, exit dynamics, and failure modes responsible for days that end in negative PnL.
+
+### 2. Full Date-Segmented Results Table
+
+| Date | Recordings | Total Trades | Win Rate (%) | Total PnL (SOL) | Gross Profit (SOL) | Gross Loss (SOL) | Profit Factor | Gain Retrace (%) | Kelly Flat (%) | Rec Ended (%) | Mean Pump (%) | One-Pump Wonder (%) | Slow Bleed (%) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **2026-07-27** | 96 | 39 | 82.1% | **+0.4365** | +0.5788 | -0.1423 | 4.07 | 66.7% | 5.1% | 2.6% | 115.8% | 53.1% | 12.5% |
+| **2026-07-28** | 109 | 64 | 78.1% | **+0.2809** | +0.7100 | -0.4290 | 1.65 | 75.0% | 7.8% | 3.1% | 196.4% | 52.3% | 19.3% |
+| **2026-07-29** | 90 | 67 | 74.6% | **+0.0590** | +0.5042 | -0.4452 | 1.13 | 58.2% | 10.4% | 4.5% | 135.4% | 37.8% | 23.3% |
+| **2026-07-30** | 94 | 63 | 71.4% | **-0.0840** | +0.4018 | -0.4859 | 0.83 | 74.6% | 3.2% | 11.1% | 136.8% | 54.3% | 12.8% |
+| **2026-07-31** | 19 | 5 | 60.0% | **+0.0026** | +0.0215 | -0.0189 | 1.14 | 80.0% | 0.0% | 20.0% | 65.7% | 26.3% | 10.5% |
+| **2026-08-01** | 32 | 24 | 70.8% | **+0.0679** | +0.2040 | -0.1361 | 1.50 | 62.5% | 8.3% | 8.3% | 75.5% | 21.9% | 18.8% |
+| **2026-08-02** | 36 | 17 | 88.2% | **+0.0294** | +0.0814 | -0.0520 | 1.56 | 76.5% | 5.9% | 0.0% | 84.2% | 33.3% | 8.3% |
+| **2026-08-03** | 82 | 82 | 73.2% | **+0.2346** | +0.8996 | -0.6650 | 1.35 | 57.3% | 8.5% | 9.8% | 156.4% | 57.3% | 20.7% |
+| **2026-08-05** | 48 | 37 | 64.9% | **-0.0374** | +0.3267 | -0.3642 | 0.90 | 54.1% | 13.5% | 5.4% | 133.9% | 43.8% | 14.6% |
+| **2026-08-06** | 18 | 20 | 80.0% | **+0.1312** | +0.2917 | -0.1605 | 1.82 | 65.0% | 10.0% | 10.0% | 223.6% | 27.8% | 22.2% |
+| **2026-08-07** | 39 | 22 | 72.7% | **-0.0454** | +0.1400 | -0.1853 | 0.76 | 59.1% | 4.5% | 13.6% | 78.4% | 38.5% | 12.8% |
+| **2026-08-08** | 58 | 25 | 84.0% | **+0.2783** | +0.3296 | -0.0512 | 6.43 | 44.0% | 0.0% | 8.0% | 88.3% | 31.0% | 24.1% |
+| **2026-08-09** | 34 | 13 | 61.5% | **-0.0202** | +0.0882 | -0.1084 | 0.81 | 38.5% | 0.0% | 15.4% | 163.9% | 35.3% | 20.6% |
+| **2026-08-10** | 139 | 65 | 69.2% | **+0.4433** | +0.7208 | -0.2777 | 2.60 | 50.8% | 4.6% | 1.5% | 138.7% | 38.8% | 20.1% |
+| **2026-08-11** | 64 | 25 | 60.0% | **+0.0945** | +0.2227 | -0.1283 | 1.74 | 40.0% | 4.0% | 12.0% | 144.2% | 40.6% | 10.9% |
+| **2026-08-12** | 50 | 63 | 66.7% | **+0.2728** | +0.8222 | -0.5493 | 1.49 | 54.0% | 7.9% | 9.5% | 185.7% | 62.0% | 8.0% |
+| **2026-08-13** | 10 | 1 | 0.0% | **-0.0178** | +0.0000 | -0.0178 | 0.00 | 0.0% | 0.0% | 100.0% | 19.1% | 0.0% | 30.0% |
+| **2026-08-14** | 59 | 44 | 54.5% | **-0.1432** | +0.2472 | -0.3904 | 0.63 | 52.3% | 13.6% | 6.8% | 84.0% | 35.6% | 13.6% |
+| **2026-08-15** | 81 | 61 | 68.9% | **+0.1438** | +0.5361 | -0.3923 | 1.37 | 54.1% | 1.6% | 6.6% | 150.2% | 38.3% | 11.1% |
+| **2026-08-16** | 65 | 45 | 57.8% | **-0.0087** | +0.3117 | -0.3204 | 0.97 | 55.6% | 4.4% | 8.9% | 126.8% | 56.9% | 15.4% |
+| **2026-08-18** | 60 | 35 | 68.6% | **+0.1691** | +0.3888 | -0.2198 | 1.77 | 45.7% | 5.7% | 8.6% | 75.4% | 36.7% | 18.3% |
+| **2026-08-19** | 92 | 48 | 47.9% | **-0.2930** | +0.2785 | -0.5714 | 0.49 | 41.7% | 10.4% | 8.3% | 109.3% | 42.4% | 17.4% |
+| **2026-08-20** | 19 | 6 | 50.0% | **-0.0304** | +0.0159 | -0.0463 | 0.34 | 50.0% | 0.0% | 16.7% | 31.2% | 26.3% | 36.8% |
+| **TOTAL** | **1394** | **871** | **68.3%** | **+1.9638** | **+7.7946** | **-5.8308** | **1.54** | **57.2%** | **6.8%** | **7.5%** | **118.2%** | **38.7%** | **17.5%** |
+
+### 3. Statistical Comparison: Positive vs Negative Days
+- **14 Positive Days**: Total PnL **+2.6439 SOL** (Mean: **+0.1888 SOL/day**), Win Rate: **73.17%**, Profit Factor: **2.12**.
+- **9 Negative Days**: Total PnL **-0.6801 SOL** (Mean: **-0.0756 SOL/day**), Win Rate: **60.57%** (day-average 53.42%), Profit Factor: **0.64**.
+
+| Metric | Positive Days (14) | Negative Days (9) | Delta | MWU $p$-value | Significance |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Win Rate (%) | 73.17% (± 8.22%) | 53.42% (± 20.57%) | -19.75 pp | **0.0050** | Significant ($p < 0.01$) |
+| Profit Factor | 2.12 (± 1.40) | 0.64 (± 0.29) | -1.48 | **0.0001** | Significant ($p < 0.001$) |
+| Gain Retrace Exit Share (%) | 59.27% (± 11.93%) | 47.30% (± 19.37%) | -11.96 pp | 0.1227 | Directional Drop |
+| Recording Ended Exit Share (%) | 7.46% (± 4.92%) | 20.69% (± 28.27%) | **+13.23 pp** | **0.0677** | Marginal Trend ($p < 0.10$) |
+| Kramers Down Exit Share (%) | 3.45% (± 1.98%) | 2.21% (± 3.40%) | -1.24 pp | **0.0789** | Marginal Trend ($p < 0.10$) |
+| Mean Pump Height (%) | 131.10% (± 47.67%) | 98.17% (± 46.38%) | -32.93 pp | 0.1756 | Subdued Breakouts |
+| Mean Loser Hold Duration | 899.5 s (± 701.8 s) | 1,476.1 s (± 1,701.9 s) | **+576.6 s (+64%)** | 0.6366 | Lingering Offside Drift |
+
+### 4. Trade-Level Payoff & Distribution Mechanics
+Analyzing all 871 individual trades (592 on Positive Days vs 279 on Negative Days):
+1. **Asymmetric Win Payoff Compression**:
+   - Average winner size dropped by **-26.8%** from **+0.01462 SOL** on positive days to **+0.01070 SOL** on negative days.
+   - Average loss size remained invariant at **-0.02294 SOL** vs **-0.02263 SOL**.
+   - Win/Loss Payoff Ratio compressed from **0.637** to **0.473**, raising the required breakeven win rate from 61.08% to 67.90% (which negative days failed to achieve at 60.57%).
+2. **Tail Drag Overweighting**:
+   - Severe losses ($\le -15\%$) and catastrophic dumps ($\le -30\%$) comprised 24.0% of trades on negative days (vs 16.8% on positive days).
+   - Tail losses $\le -15\%$ generated **-2.2520 SOL (94.8% of all gross losing PnL)** on negative days, overpowering the +1.8091 SOL earned by winning trades.
+
+### 5. The Four Shared Patterns of Negative PnL Days
+1. **Gain-Retrace Yield Collapse**: Explosive runner trades (+50% to +300%) fail to materialize; breakouts truncate early, reducing total gross winner yield by 63% on negative days.
+2. **Elevated `recording_ended` Truncation**: Lingering offside positions that fail to trigger volatility stops get force-closed at recording end (-27% avg loss), generating 20.7% of daily exits.
+3. **Offside Duration Dilation**: Losing trades linger **+64.1% longer** (1,476 s vs 899 s) before exiting.
+4. **Bimodal Market Regime Pathology**:
+   - *Type A (Parabolic Dump Traps)*: Tokens pump hard (>120%), entice high-confidence entry, then dump >65% into `kelly_flat` stops (e.g. 2026-07-30, 2026-08-05, 2026-08-16, 2026-08-19).
+   - *Type B (Low-Vol Grind / Chop)*: Breakouts fizzle (<80% pump height, >50% consolidation/bleed), lingering into `recording_ended` force-closes (e.g. 2026-08-07, 2026-08-09, 2026-08-13, 2026-08-14, 2026-08-20).
+
+### 6. Architectural Conclusion
+- Strategy engine defaults remain confirmed optimal with **+1.9638 SOL net profitability** across all 23 recording cohorts.
+- Pre-entry filtering remains bounded by prior negative results (winners and losers share identical pre-entry distributions).
+- Future alpha investigations should prioritize **post-entry holding duration limits** (e.g. dynamic offside decay for trades held $>15$ minutes without upward momentum) to mitigate `recording_ended` truncation drag.
+
+
+## Iter 55 — In-Position Stagnant Timeout (SODT) & Session Catastrophic Circuit Breaker (WCCB): BOTH REJECTED (rigorous negative result; mechanisms shipped Default-OFF)
+
+**Date**: 2026-08-20  
+**Focus**: Post-entry holding-duration limits targeting the iter54 stagnant-bleed left tail (`recording_ended` / deep `kelly_flat` drag) and systemic-collapse-day loss clusters  
+**Status**: **SODT REJECTED** (uniformly negative across the full pre-registered 4×4 grid); **WCCB REJECTED for non-engagement** (per-session breaker provably never fires at any swept limit); production defaults remain **OFF** (byte-identical to iter54 HEAD).  
+**Files modified**: `backend/strategy_engineV2.py` (SODT exit #9 + params), `backend/forward_tester.py` + `backend/live_trader.py` (WCCB session breaker, parity-mirrored), `frontend/js/app.js` (param mirror), `backend/analysis/test_sodt_wccb.py` (10 unit tests), `backend/analysis/iter55_sweep.py`, `backend/analysis/iter55_tail_test.py`.
+
+### 1. Hypotheses (from the iter54 autopsy)
+
+**Plan A — SODT (Stagnant Offside Duration Timeout)**: High-momentum winners confirm rapidly (median 113 s to the +10% `gain_retrace` arm). A trade that has STILL not confirmed +5% peak gain after $T_{\text{stagnant}}$ seconds AND is offside by ≥ $P_{\text{offside}}$ is dead money that inevitably exits via `recording_ended` (-27% avg) or deep `kelly_flat` (-45% avg). Cutting it early should cap the loss at -10…-15%.
+
+**Plan B — WCCB (Wide Session Catastrophic Circuit Breaker)**: Normal days absorb 1–3 pullback scratches before catching runners; ≥5 consecutive losses marks a systemic collapse day (e.g. 2026-08-19, -0.293 SOL). Halting new entries after the streak avoids deep drawdown days without clipping recovery runners.
+
+### 2. Implementation (Default-OFF, parity-preserving)
+
+- **SODT** — engine exit #9 in `_check_exit_v2` (lowest priority in the chain): fires `stagnant_timeout_exit` when `v2_sodt_enable>0` AND trade age ≥ `v2_sodt_timeout_seconds` (default 900) AND `_peak_price < entry·(1+v2_sodt_confirm_gain_pct/100)` (never confirmed — monotone, same convention as iter48 EVR) AND `c ≤ entry·(1-v2_sodt_offside_min_pct/100)`. Entry clock `_sodt_entry_time` anchors at the fill tick (`_current_time` at `notify_trade_opened`) and resets in `notify_trade_closed()`.
+- **WCCB** — `ForwardTester` / `LiveTrader` execution-layer param `v2_session_cb_max_consecutive_losses` (popped from `engine_kwargs`, never reaches the engines): increments `_consecutive_losses` on every closed trade with `pnl_sol ≤ 0`, resets on `pnl_sol > 0`; a tripped breaker suppresses the queueing/execution of every NEW engine BUY signal for the remainder of the session (manual force-buys remain allowed live). 100% pipeline parity between the two paths.
+- **Verification**: `test_sodt_wccb.py` 10/10 (incl. SODT-disabled byte-identity vs a no-iter55-params engine); `test_futures.py` 18/18; `test_evr.py` 6/6; empirical byte-identity on 10 real recordings re-run with defaults (incl. 13- and 14-trade recordings) — all trade sequences identical to the iter54 baseline.
+
+### 3. SODT Full Grid — 16/16 Combos Negative
+
+Baseline: 871 trades, 69.0% WR, **+1.9638 SOL**, tail≤-15%: 166 trades (-5.5905 SOL), kelly_flat 59 (-2.6291), `recording_ended` 65 (-1.3365). Sweep ran only the recordings that could diverge (any baseline trade ≥ T seconds: 129/113/100/83 recordings for T=600/720/900/1200); the rest merge in byte-identical (iter50 convention). `p_pnl` = one-sided Wilcoxon “greater” on per-recording ΔPnL (all ≈ 1.0 ⇒ candidate significantly WORSE).
+
+| T (s) | P (%) | trades | WR% | PnL (SOL) | ΔPnL | n≤-15% | Δn | kelly_flat PnL | rec_ended PnL | SODT fires | p_pnl |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 600 | 8 | 896 | 65.0 | +1.5778 | -0.3860 | 181 | +15 | -1.9583 | -1.1349 | 75 | 0.985 |
+| 600 | 10 | 896 | 65.2 | +1.5538 | -0.4100 | 184 | +18 | -1.9583 | -1.1349 | 72 | 0.990 |
+| 600 | 12 | 896 | 65.4 | +1.5527 | -0.4111 | 189 | +23 | -1.9583 | -1.1316 | 70 | 0.985 |
+| 600 | 15 | 896 | 65.7 | +1.5178 | -0.4460 | 207 | +41 | -1.9583 | -1.1316 | 67 | 0.994 |
+| 720 | 8 | 892 | 65.4 | +1.5931 | -0.3707 | 180 | +14 | -1.9611 | -1.1527 | 68 | 0.992 |
+| 720 | 10 | 891 | 65.4 | +1.5241 | -0.4397 | 183 | +17 | -2.0015 | -1.1527 | 65 | 0.999 |
+| 720 | 12 | 891 | 65.7 | +1.5313 | -0.4325 | 186 | +20 | -2.0015 | -1.1494 | 63 | 0.997 |
+| 720 | 15 | 891 | 66.2 | +1.5693 | -0.3945 | 202 | +36 | -2.0015 | -1.1494 | 58 | 0.996 |
+| 900 | 8 | 888 | 65.7 | +1.4980 | -0.4658 | 182 | +16 | -2.1395 | -1.1527 | 59 | 1.000 |
+| **900** | **10** | **888** | **66.0** | **+1.5185** | **-0.4453** | **183** | **+17** | **-2.1395** | **-1.1527** | **56** | **0.999** |
+| 900 | 12 | 888 | 66.2 | +1.5210 | -0.4428 | 187 | +21 | -2.1395 | -1.1494 | 54 | 0.999 |
+| 900 | 15 | 888 | 66.3 | +1.4645 | -0.4993 | 200 | +34 | -2.1395 | -1.1494 | 53 | 1.000 |
+| 1200 | 8 | 883 | 66.1 | +1.5753 | -0.3885 | 183 | +17 | -2.1804 | -1.1756 | 51 | 0.997 |
+| 1200 | 10 | 883 | 66.1 | +1.5528 | -0.4110 | 184 | +18 | -2.1804 | -1.1756 | 51 | 0.998 |
+| 1200 | 12 | 883 | 66.5 | +1.5973 | -0.3665 | 186 | +20 | -2.1804 | -1.1723 | 48 | 0.997 |
+| **1200** | **15** | **882** | **66.8** | **+1.6257** | **-0.3381** | **194** | **+28** | **-2.1804** | **-1.1723** | **45** | **0.995** |
+
+### 4. Statistical Verdict (spec default T=900/P=10 and best-case T=1200/P=15)
+
+Full iter45/48/50 tail battery (`iter55_tail_test.py`; Wilcoxon one-sided + 10k bootstrap on per-recording diffs, n=357 traded):
+
+| Metric (T=900/P=10) | Baseline | Candidate | Δ | Wilcoxon p (impr.) | CI95 (impr.) |
+|---|---:|---:|---:|---:|---:|
+| Whole per-recording PnL | +1.9638 | +1.5185 | **-0.4453** | 0.9994 (**worse**) | [-0.00203, -0.00050] strictly neg |
+| n(≤-15%) severe losers | 166 | 183 | **+17** | 0.9997 (worse) | [-0.076, -0.022] strictly neg |
+| kelly_flat PnL | -2.6291 | -2.1395 | **+0.4896** | **0.0005** ✓ | [+0.0006, +0.0022] pos |
+| recording_ended PnL | -1.3365 | -1.1527 | **+0.1837** | **0.0039** ✓ | [+0.0002, +0.0009] pos |
+| McNemar (token W/L pivot) | — | — | W→L=10, L→W=2 | **0.0386** (worse) | — |
+| Negative-days PnL | -0.6801 | -0.7822 | **-0.1021** | — | — (target mode NOT improved) |
+
+The T=1200/P=15 conservative corner additionally shows the deep tail ≤-30% count 87→79 (p=0.019) and tail≤-30% PnL +0.384 SOL (p=0.002) — the mechanism genuinely exterminates catastrophic bleeds — but the mild tail ≤-15% REGRESSES significantly (166→194, p=1.0, CI strictly negative), whole-PnL Δ=-0.338 (p_two=0.011, CI strictly negative, 11 improved / 24 regressed), and negative days worsen by -0.113 SOL. Temporal stability: both split-halves show the mild-tail worsening (p=0.99 / 0.92). **Every acceptance gate fails; the task-specified tail metric at ≤-15% regresses in 16/16 combos.**
+
+### 5. Mechanism Autopsy — why the stagnant-bleed cut backfires
+
+Matched-trade analysis (t600/p8; t900/p10 and t1200/p15 identical in structure):
+
+- **SODT fires land deep, not at the nominal floor**: 75 fires, mean exit PnL **-17.2%** (min -55%) — by the time the age threshold elapses the bleed has already passed the -8…-15% floor, so the “early cap” is illusory.
+- **44% of fires destroy recovering trades**: the fired trades’ baseline exits were `breakeven_scratch` (20) + `gain_retrace` (13) = 33/75 trades that RECOVERED after the timeout moment, vs only 26 genuine bleeds (`kelly_flat` 16, `recording_ended` 10). The direct matched-trade effect is **-0.356 SOL** (winner/scratch destruction outweighs bleed savings).
+- **Replacement-entry churn**: freeing the engine 15–20 min early admits 26 re-entry trades (57.7% WR, -0.026 SOL) and — combined with the SODT exits themselves landing inside the ≤-15% band — floods the mild tail (+15…+41 additional ≤-15% trades per combo).
+- **Net**: ΔPnL = -0.34…-0.50 SOL across the entire grid. This is the iter17b/iter05 replacement-entry dynamic plus the iter47/49 inseparability result restated in time-domain form: slow grinders that recover and stagnant bleeds that die are NOT separable by (duration, offside-depth, unconfirmed-peak) at ANY swept threshold.
+
+### 6. WCCB — Non-Engagement at Session Granularity
+
+- Per-recording (per-session) consecutive-loss streaks in the baseline: max = **3** (distribution: streak-1: 158, streak-2: 25, streak-3: 8 recordings). **No session ever books 4 consecutive losses**, so the breaker at N ∈ {4,5,6} cannot fire — verified empirically by re-running the 8 highest-streak recordings at N=4: trade sequences **byte-identical** to baseline.
+- The ≥5-loss clusters the hypothesis describes are **day-scoped across recordings**, not session-scoped: a day-level counterfactual mask (halt all new entries for the rest of a calendar day after N consecutive losses across that day’s trades, ordered by entry time) trips on exactly **1 day at N=5 — 2026-08-19**, blocking 39 trades worth **-0.211 SOL** (a saving). But N=4 trips on 4 days and blocks 153 trades worth **+0.294 SOL** (destroys recovery runners on normal days), and the day-scoped breaker is **not implementable** under the per-session LiveTrader/backtest parity architecture anyway. With n=1 tripping day at the hypothesis-favourable limit, accepting the day-level variant would be pure overfit to the 2026-08-19 outlier.
+
+### 7. Verdict & Production State
+
+- **SODT: REJECTED.** Uniformly negative whole-PnL (16/16 combos, Wilcoxon p_two ≤ 0.011 in the spec-default and best-case configs, bootstrap CIs strictly negative), mild-tail ≤-15% regression in 16/16 combos, negative-day PnL worsens, McNemar W→L dominance (10 vs 2, p=0.039). The deep-tail extermination it does achieve (kelly_flat +0.45…+0.49 SOL, rec_ended +0.16…+0.18 SOL, ≤-30% count -8, all p<0.01) does not pay for the winner/scratch destruction and churn it causes — a strictly dominated trade against the existing pure-Bayesian exit stack.
+- **WCCB: REJECTED (non-engagement).** The parity-implementable per-session semantics never trips at N ∈ {4,5,6} on this cohort; the day-scoped variant that would trip is un-implementable live, trips once at N=5 (n=1, overfit), and is net-negative at N=4.
+- **Production defaults remain OFF** (`v2_sodt_enable=0.0`, `v2_session_cb_max_consecutive_losses=0` in `strategy_engineV2.py`, `forward_tester.py`, `live_trader.py`, `app.js`) — spot/backtest/live behaviour is byte-identical to iter54 HEAD. Both mechanisms remain available as Default-OFF knobs for future hypotheses (e.g. SODT gated on additional flow evidence, or a WCCB wired to a future cross-session coordinator).
+- **Lesson**: duration-based dead-money cuts are the time-domain restatement of the iter28/49 inseparability theorem — post-entry time, offside depth and confirmation status carry no information the Bayesian exits don’t already price. The only statistically real effect (deep-tail compression) is exactly the one EVR already delivers at lower cost (iter48: kelly_flat +1.142 SOL, p<0.0001, with a whole-cohort PnL wash) — the marginal SODT layer on top of EVR strictly destroys value.
 
