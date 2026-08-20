@@ -699,6 +699,10 @@ future agent must therefore:
 > **iter50 EVR Loss-Reclassification Gap: Sell-Concentration Veto & Mild-Tail Extermination — ACCEPTED (production default updated to thr = 0.25).**
 > Microstructure autopsy discovered false positives (scratches) are bursty single-second whale-sweeps (`maxsec_sell_share_60` AUC 0.686) vs true positives' (bleeds) distributed multi-second selling. Setting permanent per-trade veto `v2_evr_skip_sell_conc_min = 0.25` yields **statistically significant mild/offside tail loss extermination** ($p = 0.0001$ on $-10\%$ to $-20\%$ loss counts, 15 offside trades cut, bootstrap CI $[+0.0260, +0.0747]$ strictly positive). Win rate increases from 70.24% to **71.45% (+1.21 pp)** and total PnL reaches **+1.7951 SOL (+0.0420 SOL net improvement)**. Production parameter defaults updated in `strategy_engineV2.py` and `app.js` (`v2_evr_skip_sell_conc_min = 0.25`, `v2_evr_skip_conc_window = 60`). `test_futures.py` 18/18.
 > See RESEARCH_LOG.md Iter 50.
+>
+> **iter52 Dynamic Market-Condition Adaptation System — REJECTED (no production engine change).**
+> Evaluated a causal, lookahead-free market-condition adaptation layer ($q_t = q_{\text{pump}} \cdot q_{\text{dd}} \in [0, 1]$) designed to dynamically scale entry confidence ($C_{\text{high}}$), passage probability ($P_{\text{up}}$), prediction horizon ($\tau$), or Kelly position size ($n^*$) during weak market regimes (low pump heights, deep drawdowns). Full-cohort matched comparison across 181 recordings: Baseline +2.1838 SOL (615 trades, 71.5% WR) vs Candidate +1.2540 SOL (487 trades, 70.2% WR) — **$\Delta$ = -0.9298 SOL, Wilcoxon $p = 0.9853$, token improvement breadth 22.7% (41/181)**. Restricting entries during weak market regimes suppressed profitable recovery trades and parabolic breakout runners far more than it saved on bleeding losers (re-confirming the structural regime inseparability bounds of iter34A and iter40). System remains default-OFF (`v2_regime_adapt_enable = 0.0`) in `strategy_engineV2.py` for 100% byte-exact baseline parity.
+> See RESEARCH_LOG.md Iter 52.
 ---
 
 ## Guidelines for Engine Developers & AI Agents
