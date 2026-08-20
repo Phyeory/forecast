@@ -6584,3 +6584,80 @@ Evaluated candidate Rule A against `iter52_baseline` across 274 matched recordin
 **TOTAL REJECT**. All code changes in `backend/strategy_engineV2.py` and `frontend/js/app.js` have been reverted to HEAD. The production codebase remains 100% byte-exact to origin/main HEAD with all tests passing (18/18 OK).
 
 
+---
+
+## Iteration 53 — Execution-Adaptive Dynamic Position Sizing (REJECTED / Parity Preserved Default-OFF)
+
+**Date**: 2026-08-20  
+**Focus**: ForwardTester & LiveTrader Execution-Adaptive Sizing Layer ($S_{\text{exec}} = S_{\text{base}} \times m_{\text{spread}} \times m_{\text{slip}}$)  
+**Status**: **REJECTED (No Alpha Gain, Symmetrical Dilation)**; strictly additive code committed with `v2_dynamic_sizing_enable = 0.0` default-OFF for 100% byte parity.
+
+### 1. Hypothesis & Mathematical Formulation
+Iter 33b observed that Kelly optimal sizing ($n^*$) in the V2 engine core was detached from executed transaction size (`buy_size_sol`). In wide-spread or high-slippage market regimes, allocating fixed size (0.1 SOL) causes elevated execution drag and left-tail damage on illiquid pools.
+
+**Formulation**:
+- **Spread Multiplier**:
+  $$m_{\text{spread}} = \max\left(0.1, 1.0 - \gamma_{\text{spread}} \cdot \frac{\text{high} - \text{low}}{\text{close}}\right)$$
+- **Slippage / Impact Multiplier**:
+  $$m_{\text{slip}} = \max\left(0.1, 1.0 - \gamma_{\text{slip}} \cdot \text{Slippage}_{\text{est}}\right)$$
+- **Execution Multiplier**:
+  $$m_{\text{exec}} = \max(0.1, \min(1.0, m_{\text{spread}} \cdot m_{\text{slip}}))$$
+- **Effective Executed Position Size**:
+  $$S_{\text{exec}} = \max\left(S_{\text{min}}, \min(S_{\text{base}}, S_{\text{base}} \cdot m_{\text{exec}})\right)$$
+
+Configuration Parameters:
+- `"v2_dynamic_sizing_enable": 0.0` (1.0 = ON, 0.0 = OFF default for 100% byte parity)
+- `"v2_sizing_spread_gamma": 2.0`
+- `"v2_sizing_slip_gamma": 0.0`
+- `"v2_sizing_min_size_sol": 0.01`
+
+### 2. Architecture & Pipeline Parity
+1. **`ForwardTester` & `LiveTrader` Unification**:
+   - Both pipelines implement `compute_effective_buy_size(sig_h, sig_l, sig_c)` using identical candle extreme metrics stashed at State 1 of the fill bar.
+   - PnL accounting, token division (`size_sol / exec_price`), fee deduction, and `recording_ended` force-close handle dynamic sizing without balance leakage.
+2. **Regression & Parity Test Suite**:
+   - `backend/test_dynamic_sizing.py` (9 unit tests) verifies:
+     - 100% byte identity and trade equality when `v2_dynamic_sizing_enable == 0.0`.
+     - Exact mathematical penalty scaling across spread, slippage, and floor bounds.
+     - Identical output across `ForwardTester` and `LiveTrader`.
+     - Accurate account balance progression across winners, losers, and `recording_ended` force-closes.
+   - `backend/test_futures.py`: 18/18 tests pass.
+
+### 3. Quantitative Sweeps & Statistical Evaluation
+
+Swept across $\gamma_{\text{spread}} \in \{0.5, 1.0, 2.0, 3.0\}$ and minimum size bounds:
+
+#### Cohort A (Winning Regime Sample, 23 Trades):
+| Configuration | Trades | Win Rate | Total PnL (SOL) | Profit Factor | Avg Winner Size | Avg Cata Size | Paired $\Delta$ PnL | Wilcoxon $p_{\text{pos}}$ | Breadth |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Baseline (OFF)** | 23 | 86.96% | **+0.1661** | 4.05 | 0.1000 SOL | 0.1000 SOL | — | — | — |
+| **$\gamma_{\text{spread}} = 0.5$** | 23 | 86.96% | +0.1628 | 4.01 | 0.0977 SOL | 0.0990 SOL | -0.0033 SOL | 0.9969 | 15.4% (2/13) |
+| **$\gamma_{\text{spread}} = 1.0$** | 23 | 86.96% | +0.1595 | 3.97 | 0.0954 SOL | 0.0981 SOL | -0.0066 SOL | 0.9969 | 15.4% (2/13) |
+| **$\gamma_{\text{spread}} = 2.0$** | 23 | 86.96% | +0.1530 | 3.89 | 0.0907 SOL | 0.0961 SOL | -0.0131 SOL | 0.9969 | 15.4% (2/13) |
+| **$\gamma_{\text{spread}} = 3.0$** | 23 | 86.96% | +0.1464 | 3.81 | 0.0861 SOL | 0.0942 SOL | -0.0197 SOL | 0.9969 | 15.4% (2/13) |
+
+#### Cohort B (Offside / Loss Drag Sample, 78 Trades):
+| Configuration | Trades | Win Rate | Total PnL (SOL) | Profit Factor | Avg Winner Size | Avg Cata Size | Paired $\Delta$ PnL | Wilcoxon $p_{\text{pos}}$ | 95% Bootstrap CI | Breadth |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Baseline (OFF)** | 78 | 57.69% | -0.3178 | 0.65 | 0.1000 SOL | 0.1000 SOL | — | — | — | — |
+| **$\gamma_{\text{spread}} = 0.5$** | 78 | 57.69% | -0.3147 | 0.65 | 0.0976 SOL | 0.0985 SOL | +0.0031 SOL | 0.7214 | [-0.000044, +0.000078] | 38.5% (15/39) |
+| **$\gamma_{\text{spread}} = 1.0$** | 78 | 57.69% | -0.3116 | 0.65 | 0.0952 SOL | 0.0970 SOL | +0.0061 SOL | 0.7214 | [-0.000088, +0.000156] | 38.5% (15/39) |
+| **$\gamma_{\text{spread}} = 2.0$** | 78 | 57.69% | -0.3055 | 0.64 | 0.0904 SOL | 0.0939 SOL | +0.0122 SOL | 0.7214 | [-0.000177, +0.000312] | 38.5% (15/39) |
+
+### 4. Empirical Mechanism & Inseparability Analysis
+1. **Symmetrical Variance Dilation**:
+   High-momentum memecoin breakouts inherently occur on expanding candles with relative spreads $(\text{high}-\text{low})/\text{close}$ between 3% and 10%. As a result, $m_{\text{spread}}$ penalizes and down-scales clean winning entries (average winner size drops from 0.1000 SOL to 0.0904 SOL) by nearly the exact same fraction as losing entries (average catastrophic size drops from 0.1000 SOL to 0.0939 SOL).
+2. **Net Expectancy Drag**:
+   Because the strategy's overall win rate on clean breakouts is >70%, shrinking position sizes across high-spread candles sacrifices more gross winner PnL in positive regimes than it saves on slow-bleed losses in negative regimes.
+3. **Statistical Decision Gate**:
+   - Wilcoxon signed-rank test fails ($p = 0.7214 > 0.05$).
+   - Bootstrap 95% CI $[-0.000177, +0.000312]$ spans zero.
+   - Token improvement breadth (38.5%) falls short of the $\ge 50\%$ majority threshold.
+
+### 5. Final Decision & Production State
+- **REJECTED as an active strategy enhancement**.
+- The execution-adaptive position sizing layer is maintained in `forward_tester.py`, `live_trader.py`, `strategy_engineV2.py`, and `frontend/js/app.js` with default **`v2_dynamic_sizing_enable = 0.0` (OFF)**.
+- Baseline parity is 100% preserved. All futures and unit tests pass.
+
+
+
