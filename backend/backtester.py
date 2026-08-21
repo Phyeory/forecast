@@ -38,6 +38,7 @@ Performance optimisation:
 from __future__ import annotations
 from typing import Optional
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import functools
 import os
 import json
 import re
@@ -65,6 +66,26 @@ _RESULTS_DIR = os.environ.get(
     "BACKTEST_RESULTS_DIR",
     os.path.join(os.path.dirname(__file__), "backtest_results"),
 )
+
+# iter57: global regime cache (built by backend/fetch_global_regime.py).
+# Loaded once per worker process — the file is a few KB of {date: Q} rows.
+_GLOBAL_REGIME_CACHE_PATH = os.path.join(
+    os.path.dirname(__file__), "data", "global_regime_cache.json")
+
+
+@functools.lru_cache(maxsize=1)
+def _load_global_regime_map() -> dict:
+    """Return {date_str: Q} from the iter57 global regime cache.
+
+    Empty dict when the cache is absent — the engine then behaves
+    byte-identically to the pre-iter57 baseline (LEFT JOIN semantics).
+    """
+    try:
+        with open(_GLOBAL_REGIME_CACHE_PATH) as f:
+            data = json.load(f)
+        return {str(k): float(v) for k, v in (data.get("q_by_date") or {}).items()}
+    except Exception:
+        return {}
 
 
 _pool: ProcessPoolExecutor | None = None
@@ -284,6 +305,11 @@ def run_backtest(
     # Load holder-flow events for this recording (dev/insider wallet trades)
     holder_flow_events = get_holder_flow(recording_id)
 
+    # iter57: global regime map {date: Q} — one small JSON loaded per
+    # worker process (lru_cache), joined by candle.time → UTC date inside
+    # the engine.  Absent cache file ⇒ empty map ⇒ byte-identical baseline.
+    global_regime_map = _load_global_regime_map()
+
     if engine_params is None:
         engine_params = {}
 
@@ -299,6 +325,7 @@ def run_backtest(
         engine_kwargs=engine_params,
         engine_version=engine_version,
         holder_flow_events=holder_flow_events,
+        global_regime_map=global_regime_map,
         market_type=market_type,
         leverage=leverage,
         funding_rate_per_interval=funding_rate_per_interval,

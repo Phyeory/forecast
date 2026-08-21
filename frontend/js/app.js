@@ -234,6 +234,16 @@ let engineParamsV2 = {
   // iter56: holder-flow silence gate.  Block entry when tracked wallets have
   // been silent for >= this many seconds (2700.0 = ACCEPTED default; 0 = OFF).
   v2_hf_silence_gate_seconds: 2700.0,
+  // iter57: global regime adaptation.  Adapts the gain_retrace give-back to
+  // the causal regime score Q(t) (backtester: global_regime_cache.json join;
+  // live: 60s poller).  ACCEPTED 2026-08-21 (production default ON; the
+  // thr=0.6/adapt=0.3 best sweep cell: ΔPnL +0.199 SOL, Wilcoxon p=2.2e-7).
+  // Set v2_regime_enable=0.0 to restore byte-identical iter56 behaviour.
+  // See backend/analysis/iter57_diagnosis.md.
+  v2_regime_enable:          1.0,   // 1.0 = ON (production), 0.0 = OFF (parity)
+  v2_regime_q_threshold:     0.6,   // adaptation arms below this Q
+  v2_regime_give_frac_adapt: 0.3,   // max give-back reduction at Q→0
+  v2_regime_give_frac_min:   0.30,  // floor on the effective give-back
 };
 
 /* Engine version: 1 = V1 (Physics), 2 = V2 (RBPF/UKF/KDE/Kramers) */
