@@ -6864,3 +6864,91 @@ Matched-trade analysis (t600/p8; t900/p10 and t1200/p15 identical in structure):
 - **Implementation**: Added `v2_hf_silence_gate_seconds` to `StrategyEngineV2` and `app.js` (default `2700.0 = ON`). Gate arms only when prior events exist before entry time (never on unmonitored recordings).
 
 
+
+## Iter 58 — Live-vs-Backtest Pipeline Parity: Entry-Reference Reconstruction, Mid-Candle Interleaved Notify & Pending-Signal Persistence (PARITY FIX — no strategy change; engine byte-identical)
+
+**Problem.** Live sessions systematically diverged from backtests of their own
+auto-recordings: the backtester placed fewer trades with higher win-rate/PnL,
+trades on both sides mostly agreed but each side produced entries the other
+never would. Three independent root causes were identified and fixed in
+`live_trader.py` + `main.py` (no engine changes; `strategy_engineV2.py`
+untouched).
+
+### Root cause 1 — Engine entry reference price mismatch (dominant)
+The backtester notifies `engine.notify_trade_opened(exec_price)` where
+`exec_price = fill price × (1 + slippage)`, and its fill point is **Step 1 of
+the next `ft.update()` call** — i.e. for a signal emitted at intra-candle
+state $k<4$, state $k+1$ of the SAME candle (mid-candle fill), and for $k=4$
+State 1 of the next candle (its open).  Live notified
+`prev["c"]` (signal-candle close).  Every V2 exit threshold (EVR offside −20%,
+gain-retrace confirm +10%, kelly_flat offside, breakeven scratch, stop floors)
+references `engine.entry_price`, so a ~1–2% reference skew shifted every
+threshold crossing by seconds-to-minutes — chaotically flipping exit reasons
+and re-entry windows (observed on rec2750: live `evr_triage` @ −27.75% vs
+backtest `kelly_flat` @ −44.81% on the same entry).
+
+**Fix.** Live now reconstructs the exact backtest fill price at signal time:
+the 4-state OHLC table of the completed candle is deterministic, so for a
+state-$k$ signal the state-$(k+1)$ row is fed through
+`ForwardTester._intrabar_price(·, _fill_fraction())` × slip
+(`engine_entry_slippage_pct`, default 1.0 = backtest default); state-4 signals
+use the next candle's first tick (= recorded open) via the new
+`boundary_open_price` parameter that `main.py` passes from the incoming trade.
+
+### Root cause 2 — Pending signals silently dropped at candle boundaries
+`_process_completed_candle` unconditionally cleared `_pending_buy/_exit` at
+every boundary. Any signal whose swap could not be dispatched on its detection
+boundary (another swap in flight ~1–6 s, buy TX settling ≤75 s) was permanently
+lost — live held positions the backtest had already exited. The ForwardTester
+never discards a queued signal.
+
+**Fix.** Signals are now ARMED UNTIL EXECUTED: `_try_execute_pending()` runs
+at Step 0 of every boundary (retry) and right after detection (fast path);
+blocked signals stay armed and dispatch on a later boundary. Exits are held
+while `_is_buy_pending()` (never sell into an unresolved buy), deduped when a
+sell is already dispatched (`status=="closing"`/`tx_hash_sell`), and dropped
+only when the position is genuinely gone. The immediate holder-flow exit path
+in `main.py` now also sets `status="closing"` so it can never double-fire.
+
+### Root cause 3 — Stale candle buffer from same-price tick skip
+`main.py` skipped `live_trader.update()` whenever the close price was
+unchanged from the previous tick (`continue`). The final same-price trade(s)
+of a candle then never reached the live buffer, so the engine expanded a
+candle missing volume / buy-sell split that the auto-recording HAD stored —
+live evolved on different data than any later backtest of the same recording.
+On active pump tokens this is extremely common.
+
+**Fix.** `update()` is now called on EVERY tick; only the WebSocket broadcast
+is throttled.
+
+### Mid-candle interleaved notify (completes root cause 1)
+Because the backtester flips `engine.in_position` BETWEEN sub-states (fill at
+state $k{+}1$), the remaining sub-states run with flipped position context and
+can emit further signals (e.g. same-candle re-entry BUY after a mid-candle
+exit) that the old post-hoc live expansion suppressed. `_process_completed_candle`
+now notifies the engine synchronously at the exact backtest fill point inside
+the expansion (`engine_exec=True`; historical warmup passes `False` and keeps
+its previous inert semantics).
+
+### Validation
+- Lockstep harness (`backend/analysis/lockstep_diff.py`,
+  `batch_parity.py`): recording replayed through both pipelines tick-for-tick.
+  **60/60 recordings ENGINE-IDENTICAL across every candle** (bar_count,
+  regime, direction, confidence, m_hat/p_hat, ATR, EMAs, RBPF particle-mean
+  x/µ all bit-equal); only ≤1-candle position-bookkeeping transients around
+  exits while sells settle (15 across 60 recordings, execution-latency
+  reality).
+- Trade-sequence equality on recs {2750, 2899, 2933, 2935}: identical entry
+  timestamps + reasons (±1 s cosmetic from signal-vs-fill candle ts).
+- Regression suite `backend/test_live_parity.py` (8 tests): blocked-exit
+  persistence, stale-exit drop, re-entry-window arming, state-4 boundary-open
+  reference, mid-candle intrabar reconstruction, warmup inertness, synthetic
+  market lockstep. 8/8 pass. `test_futures.py` 18/18 pass (spot parity).
+- Deep `core.__dict__` recursive diff (incl. `_mu_arr`, KDE landscape, RNG
+  stream position): bit-identical after arbitrary prefixes of recs 2750/2899.
+
+**Residual known gaps (execution reality, not pipeline bugs):** real swap
+latency delays settlement-relative re-entry by the sell duration; buy failures
+roll back to flat with a 120 s re-entry block (backtests never fail fills);
+mcap-floor emergency sells have no backtest counterpart. All are intentional
+execution-layer behaviours explicitly out of scope ("n+1 delay = tx simulation").

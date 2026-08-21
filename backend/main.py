@@ -1193,6 +1193,13 @@ class _LiveSession:
                                 live_trader._pending_exit = True
                                 live_trader._pending_exit_reason = exit_reason
                                 live_trader._pending_buy = False
+                                # Mark closing BEFORE dispatching so the
+                                # pending-signal retry in LiveTrader.update()
+                                # sees status="closing" and never double-fires
+                                # this exit (single-close invariant).
+                                if live_trader.current_trade is not None:
+                                    live_trader.current_trade.status = "closing"
+                                    live_trader.current_trade.exit_reason = exit_reason
                                 live_trader.engine.notify_trade_closed()
                                 # Fire off the sell swap immediately in the background
                                 asyncio.create_task(live_trader.execute_sell(exit_reason))
@@ -1291,10 +1298,14 @@ class _LiveSession:
                         candle_dict.get("market_cap_usd", 0.0),
                     )
 
-                    if last_sent_price is not None and current_price == last_sent_price and not is_new:
-                        continue
-                    last_sent_price = current_price
-
+                    # ALWAYS feed the tick to the live trader — update()
+                    # buffers the accumulating candle and processes completed
+                    # candles at boundaries.  Skipping "unchanged price" ticks
+                    # used to leave the buffer stale (missing the final
+                    # same-price trade's volume / buy-sell split), so the
+                    # engine evolved on different candle data than what the
+                    # auto-recording stored — permanently desynchronising live
+                    # signals from any later backtest of that recording.
                     strategy_result = live_trader.update(
                         time_val=candle_dict["time"],
                         o=candle_dict["open"], h=candle_dict["high"],
@@ -1305,8 +1316,18 @@ class _LiveSession:
                         is_new=is_new,
                         market_cap_usd=candle_dict.get("market_cap_usd", 0.0),
                         pool_sol=candle_dict.get("pool_sol", 0.0),
+                        boundary_open_price=float(trade.get("price") or 0.0),
                     )
                     self.last_strategy_result = strategy_result
+
+                    # Broadcast throttling only (UI spam guard) — never skip
+                    # the engine update above.
+                    _unchanged = (
+                        last_sent_price is not None
+                        and current_price == last_sent_price
+                        and not is_new
+                    )
+                    last_sent_price = current_price
 
                     trade_payload = None if is_synthetic else {
                         "price": trade["price"],
@@ -1316,15 +1337,16 @@ class _LiveSession:
                         "tx_hash": trade["tx_hash"],
                     }
 
-                    self.broadcast({
-                        "type": "candle",
-                        "candle": candle_dict,
-                        "is_new": is_new,
-                        "market_cap_sol": trade.get("market_cap_sol", 0),
-                        "market_cap_usd": trade.get("market_cap_usd", 0),
-                        "trade": trade_payload,
-                        "strategy": strategy_result,
-                    })
+                    if not _unchanged:
+                        self.broadcast({
+                            "type": "candle",
+                            "candle": candle_dict,
+                            "is_new": is_new,
+                            "market_cap_sol": trade.get("market_cap_sol", 0),
+                            "market_cap_usd": trade.get("market_cap_usd", 0),
+                            "trade": trade_payload,
+                            "strategy": strategy_result,
+                        })
 
                     # ── Market-cap safety floor check ─────────────────────────
                     # update_market_cap() blocks until any emergency sell has
