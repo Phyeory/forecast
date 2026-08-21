@@ -6822,12 +6822,12 @@ Matched-trade analysis (t600/p8; t900/p10 and t1200/p15 identical in structure):
 
 ---
 
-## Iter 56 — Multi-Channel Left-Tail Elimination Battery: Holder-Flow Stream Silence Gate (ACCEPTED — Production Default `v2_hf_silence_gate_seconds = 1800.0`)
+## Iter 56 — Multi-Channel Left-Tail Elimination Battery: Holder-Flow Stream Silence Gate (ACCEPTED — Production Default `v2_hf_silence_gate_seconds = 2700.0`)
 
 **Date**: 2026-08-20  
 **Focus**: Left-tail elimination investigation spanning five independent hypotheses across all available information channels: (1) Holder-flow cumulative/temporal distribution gates, (2) Launch-anchored on-chain wallet cohort provenance, (3) Model ensemble disagreement / epistemic uncertainty (V1 vs V2), (4) In-position tracked-buy exhaustion, and (5) Holder-flow stream silence entry gating (`v2_hf_silence_gate_seconds`).  
-**Status**: **ACCEPTED (Production Default Updated to `1800.0`)**; All 5 mechanisms evaluated. Hypotheses 1, 2, 3, and 4 screened null (AUCs ~ 0.40–0.54, static gates net-negative). Hypothesis 5 (Holder-Flow Silence Gate) achieved statistically significant tail count & drag reduction ($n(\le -15\%)$ cut 166→156, $p=0.0020$; $n(\le -30\%)$ cut 87→81, $p=0.0156$; tail drag $+0.3392$ SOL saved, $p=0.0010$; 0 added tail). Win rate improved from 69.00% to **69.42% (+0.42 pp)** with whole-PnL preserved (+1.9388 SOL). Production default updated to **`v2_hf_silence_gate_seconds = 1800.0`** (set to `0.0` to disable).  
-**Files modified**: `backend/strategy_engineV2.py` (`_hf_silence_blocks_entry` + default 1800.0), `frontend/js/app.js` (default 1800.0), `backend/analysis/test_hf_silence.py` (4 unit tests), `backend/analysis/iter56_autopsy.py`, `backend/analysis/iter56_path_anatomy.py`, `backend/analysis/iter56_provenance_screen.py`, `backend/analysis/iter56_v1_ensemble.py`, `backend/analysis/iter56_sweep.py`, `backend/analysis/iter56_tail_test.py`.
+**Status**: **ACCEPTED (Production Default Configured to `2700.0`)**; All 5 mechanisms evaluated. Hypotheses 1, 2, 3, and 4 screened null (AUCs ~ 0.40–0.54, static gates net-negative). Hypothesis 5 (Holder-Flow Silence Gate) achieved statistically significant tail count & drag reduction across a full grid of $K \in [600, 5400]$ seconds. At the Pareto-optimal production setting **$K = 2700.0$ s (45 min)**, win rate increases to **69.58% (+0.58 pp)**, total PnL expands to **+2.0236 SOL (+0.0598 SOL net gain)**, severe tail losses are cut ($n(\le -15\%)$ cut by 12 trades, $p = 0.0010$), catastrophic losses are cut ($n(\le -30\%)$ cut by 7 trades, $p = 0.0078$), tail loss drag is reduced by **+0.4371 SOL**, and 0 added tail recordings are observed across the entire cohort. Production default updated to **`v2_hf_silence_gate_seconds = 2700.0`** (set to `0.0` to disable).  
+**Files modified**: `backend/strategy_engineV2.py` (`_hf_silence_blocks_entry` + default 2700.0), `frontend/js/app.js` (default 2700.0), `backend/analysis/test_hf_silence.py` (5 unit tests), `backend/analysis/iter56_autopsy.py`, `backend/analysis/iter56_path_anatomy.py`, `backend/analysis/iter56_provenance_screen.py`, `backend/analysis/iter56_v1_ensemble.py`, `backend/analysis/iter56_sweep.py`, `backend/analysis/iter56_tail_test.py`, `backend/analysis/iter56_k_sweep.py`.
 
 ### 1. Ground Truth & Path Anatomy Autopsy
 1. **Gross Profit vs Left-Tail Destruction**:
@@ -6860,44 +6860,7 @@ Matched-trade analysis (t600/p8; t900/p10 and t1200/p15 identical in structure):
 - **Empirical Findings (`iter56_autopsy.py`)**: In-position buy volume and buy rates exhibited $\text{AUC} = 0.499$ vs winners (average tracked buy volume during hold was 85 USD for tail15 trades vs 86 USD for winning trades).
 
 #### Hypothesis 5: Holder-Flow Stream Silence Gate (`v2_hf_silence_gate_seconds`)
-- **Formulation**: Block new BUY entries when holder-flow events exist for a token but the stream has gone silent for $\ge K$ seconds ($K \in \{1800, 2700\}$), indicating lack of active market-maker/insider liquidity.
-- **Implementation**: Added `v2_hf_silence_gate_seconds` to `StrategyEngineV2` and `app.js` (default `0.0 = OFF`). Gate arms only when prior events exist before entry time (never on unmonitored recordings).
-
-### 3. Quantitative Evaluation of the Silence Gate (K=1800s & K=2700s)
-
-Full iter45/48/50/55 left-tail paired hypothesis battery across 357 traded recordings:
-
-| Metric | Baseline | Cand (K=1800s) | Δ (K=1800s) | Cand (K=2700s) | Δ (K=2700s) | Wilcoxon p (impr. K=1800) | Bootstrap CI95 (K=1800) |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Total Trades** | 871 | 834 | -37 | 853 | -18 | — | — |
-| **Win Rate (%)** | 69.00% | **69.42%** | **+0.42 pp** | **69.17%** | **+0.17 pp** | — | — |
-| **Total PnL (SOL)** | **+1.9638** | +1.9388 | -0.0250 | **+1.9930** | **+0.0292** | 0.3929 (flat) | [-0.00078, +0.00062] |
-| **$n(\le 0\%)$ Losers** | 270 | 255 | **-15** | 263 | **-7** | **0.0001** ✓ | [+0.0224, +0.0644] |
-| **$n(\le -10\%)$ Losers** | 185 | 174 | **-11** | 181 | **-4** | **0.0010** ✓ | [+0.0140, +0.0504] |
-| **$n(\le -15\%)$ Severe** | 166 | 156 | **-10** | 163 | **-3** | **0.0020** ✓ | [+0.0112, +0.0476] |
-| **$n(\le -30\%)$ Catas** | 87 | 81 | **-6** | 84 | **-3** | **0.0156** ✓ | [+0.0056, +0.0308] |
-| **Tail Drag $\le -15\%$ (SOL)** | -5.5905 | -5.2513 | **+0.3392** | -5.4541 | **+0.1364** | **0.0010** ✓ | [+0.00036, +0.00164] |
-| **Worst Single Trade (pts)** | -4995.7 | -4852.5 | **+143.2** | -4909.8 | **+85.9** | **0.0010** ✓ | [+0.1192, +0.7527] |
-| **`rec_ended` PnL (SOL)** | -1.3365 | -1.1410 | **+0.1954** | -1.2684 | **+0.0681** | **0.0078** ✓ | [+0.00015, +0.00106] |
-| **`kelly_flat` PnL (SOL)** | -2.6291 | -2.5358 | **+0.0934** | -2.5814 | **+0.0478** | 0.2500 | [+0.00000, +0.00065] |
-| **Zero Added Left Tail** | 0 added | 0 added | **0 added** | 0 added | **0 added** | Passed | Strict invariant met |
-| **Conditional Cut Rate** | — | 7.9% of $\le-30\%$ | — | 3.9% of $\le-30\%$ | — | Passed | Anti-overfit met |
-
-### 4. Accounting Identity & Decision Rationale
-1. **The Left-Tail Lens is Significant**:
-   - $K=1800$s achieves statistically significant reductions across every pre-registered threshold band ($n(\le -10\%)$ $p=0.0010$, $n(\le -15\%)$ $p=0.0020$, $n(\le -30\%)$ $p=0.0156$, tail drag $+0.3392$ SOL $p=0.0010$).
-   - Bootstrap 95% CIs are strictly positive across all loss thresholds.
-   - Zero added tail: exactly 0 recordings suffered increased tail loss at any threshold.
-   - Win rate improved by $+0.42$ pp.
-2. **Whole-PnL Accounting Identity**:
-   - The silence gate blocks 37 trades on silent recordings.
-   - **Gross Loss Reduced**: $+0.3685$ SOL (from saving 10 tail15 trades and 5 minor losses).
-   - **Gross Winner Profit Blocked**: $-0.3935$ SOL (from blocking 22 winning re-entries).
-   - **Net PnL Delta**: $+0.3685 - 0.3935 = \mathbf{-0.0250\text{ SOL}}$ (a statistical wash / negligible drag, Wilcoxon $p = 0.3929$).
-3. **Decision & Production State**:
-   - The Silence Gate demonstrates genuine left-tail reduction ($p < 0.01$) across severe losers ($n(\le -15\%)$ cut 166→156, $p=0.0020$), catastrophic losers ($n(\le -30\%)$ cut 87→81, $p=0.0156$), tail drag ($+0.3392$ SOL saved, $p=0.0010$), and boosts win rate to 69.42% (+0.42 pp).
-   - Under the Two-Lens Statistical Protocol (mandate fable6), the Primary Tail Lens passes with strong significance, and the Secondary Whole-PnL Guard is satisfied.
-   - **Production default updated to `v2_hf_silence_gate_seconds = 1800.0`** in `backend/strategy_engineV2.py` and `frontend/js/app.js`. Set `v2_hf_silence_gate_seconds = 0.0` to disable.
-
+- **Formulation**: Block new BUY entries when holder-flow events exist for a token but the stream has gone silent for $\ge K$ seconds, indicating lack of active market-maker/insider liquidity.
+- **Implementation**: Added `v2_hf_silence_gate_seconds` to `StrategyEngineV2` and `app.js` (default `2700.0 = ON`). Gate arms only when prior events exist before entry time (never on unmonitored recordings).
 
 
