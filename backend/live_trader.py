@@ -297,7 +297,12 @@ class LiveTrader:
         # ── No-motion stop ───────────────────────────────────────────────
         # If the price has not moved for this many wall-clock seconds while
         # a position is open, force-close it.  Set to 0 to disable.
-        no_motion_stop_seconds: float = 300.0,
+        # Parity: backtester has no no-motion stop; live must replicate the
+        # backtester exactly, so default to 0 (disabled).  The 300s idle
+        # stop was forking recordings that the backtester later replayed as
+        # having 2-3 extra trades after the live session had already shut
+        # down.  Re-enable via an explicit dashboard param if needed.
+        no_motion_stop_seconds: float = 0.0,
     ):
         if engine_kwargs is None:
             engine_kwargs = {}
