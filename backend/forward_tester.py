@@ -161,6 +161,12 @@ class ForwardTester:
         engine_version: int = 1,
         holder_flow_events: Optional[list[dict]] = None,
         holder_flow_latency_seconds: float = 0.0,
+        # ── iter57: global regime map {"YYYY-MM-DD" (UTC): Q}.  Loaded by
+        # the pipeline layer (backtester from the global_regime cache;
+        # live via main.py poller) and injected into the V2 engine before
+        # the candle loop — parity with set_holder_flow_events.  None /
+        # empty keeps byte-identical baseline behaviour.
+        global_regime_map: Optional[dict] = None,
         # ── Futures mode (option A, additive). market_type="spot" (default)
         # keeps byte-identical spot behaviour; "futures" enables leveraged
         # margin accounting via FuturesAccount. ───────────────────────────
@@ -243,6 +249,11 @@ class ForwardTester:
                     shifted.append(ev)
                 holder_flow_events = shifted
             self.engine.set_holder_flow_events(holder_flow_events)
+
+        # iter57: inject the global regime map when the pipeline supplied one.
+        # V1 engines have no regime surface (hasattr guard preserves parity).
+        if global_regime_map and hasattr(self.engine, "set_global_regime_map"):
+            self.engine.set_global_regime_map(global_regime_map)
 
         self.stats = ForwardTestStats(
             starting_balance=starting_balance,

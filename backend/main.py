@@ -1170,6 +1170,8 @@ class _LiveSession:
         _hf_stop = asyncio.Event()
         # Track how many events we've already pushed into the engine (append-only)
         _hf_pushed = {"n": 0}
+        # iter57: global regime refresh task (Q(t) for the V2 regime controller)
+        _regime_task = None
 
         async def _holder_flow_pump():
             """Background task that pushes new holder-flow events into the engine
@@ -1226,6 +1228,39 @@ class _LiveSession:
                     pass  # V1 engine has no holder-flow surface
             _hf_pushed["n"] = len(_existing_hf)
             _hf_pump_task = asyncio.ensure_future(_holder_flow_pump())
+
+            # ── iter57: global regime Q(t) pre-load + live refresh ──────────
+            # Parity with the backtester join (candle.time → UTC date →
+            # global_regime_cache.json): pre-load the cached history, then a
+            # 60s poller recomputes TODAY's Q from the persisted trade history
+            # (fetch_global_regime.compute_live_q — identical lag-3 math) and
+            # appends it.  The engine ignores the map unless
+            # v2_regime_enable > 0, so this is a no-op when the controller
+            # is OFF (default).
+            try:
+                import fetch_global_regime as _fgr
+                if hasattr(live_trader.engine, "set_global_regime_map"):
+                    _qmap = await asyncio.to_thread(_fgr.load_cache)
+                    if _qmap:
+                        live_trader.engine.set_global_regime_map(_qmap)
+
+                    async def _regime_refresh():
+                        import datetime as _dt_r
+                        while not _hf_stop.is_set():
+                            try:
+                                _q = await asyncio.to_thread(_fgr.compute_live_q)
+                                if _q is not None:
+                                    _today = _dt_r.datetime.now(
+                                        _dt_r.timezone.utc).strftime("%Y-%m-%d")
+                                    live_trader.engine.append_global_regime(_today, _q)
+                            except Exception:
+                                pass
+                            await asyncio.sleep(60.0)
+
+                    if float(getattr(live_trader.engine, "_v2_regime_enable", 0.0)) > 0.0:
+                        _regime_task = asyncio.ensure_future(_regime_refresh())
+            except Exception:
+                pass  # regime feed is strictly additive — never break a session
 
             # ── Historical warm-up (seeds the recording + the engine) ────────
             try:
@@ -1413,6 +1448,13 @@ class _LiveSession:
                 _hf_pump_task.cancel()
                 try:
                     await _hf_pump_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            # iter57: stop the global regime refresher
+            if _regime_task is not None:
+                _regime_task.cancel()
+                try:
+                    await _regime_task
                 except (asyncio.CancelledError, Exception):
                     pass
 

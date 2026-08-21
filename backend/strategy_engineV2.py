@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import math
 import bisect
+import datetime as _datetime
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -231,6 +232,22 @@ DEFAULT_CONFIG = {
     # LOO Δ +0.1375 SOL.  Default: 0.25 (ACCEPTED iter50 best config).
     "v2_evr_skip_sell_conc_min": 0.25,   # veto when maxsec sell share > this (0 = OFF)
     "v2_evr_skip_conc_window":  60,     # trailing window (s) for the share
+    # ── iter57 global regime adaptation (see RESEARCH_LOG.md Iter 57 and
+    # backend/analysis/iter57_diagnosis.md).  Adapts the gain_retrace
+    # give-back fraction to the causal global regime score Q(t) loaded via
+    # set_global_regime_map() (backtester: join candle.time → UTC date →
+    # backend/data/global_regime_cache.json; live: main.py poller).  Low Q
+    # (truncating / grind regime) tightens the profit-lock floor so armed
+    # winners bank earlier before mean-reverting; high Q keeps the
+    # validated loose trail.  Entries are NEVER touched (iter52 lesson).
+    # ACCEPTED 2026-08-21 by explicit user decision (production default ON;
+    # paired gates: ΔPnL +0.199 SOL, Wilcoxon p=2.2e-7, bootstrap CI
+    # [+0.00015, +0.00097]; breadth gate overridden — see Iter 57 entry).
+    # Set v2_regime_enable=0.0 to restore byte-identical iter56 behaviour.
+    "v2_regime_enable":           1.0,   # 1.0 = ON (production), 0.0 = OFF (parity)
+    "v2_regime_q_threshold":      0.6,   # adaptation arms below this Q
+    "v2_regime_give_frac_adapt":  0.3,   # max give-back reduction at Q→0
+    "v2_regime_give_frac_min":    0.30,  # floor on the effective give-back
 }
 
 
@@ -2924,6 +2941,18 @@ class StrategyEngineV2Adapter:
         # later kramers/tp_v2 exits while limiting the modest-winner→scratch
         # conversion that erodes win rate at looser trails.
         self._gain_retrace_give_frac = float(engine_kwargs.pop("gain_retrace_give_frac", 0.5))
+        # ── iter57: global regime adaptation knobs. ──
+        # Q(t) is injected via set_global_regime_map() / append_global_regime();
+        # when the map is empty the effective give-back is exactly
+        # `_gain_retrace_give_frac` (byte-identical to iter56 — the pipeline
+        # supplies no map on the futures path and none in the unit tests).
+        # Production defaults = the iter57 ACCEPTED best sweep cell
+        # (thr=0.6, adapt=0.3): ΔPnL +0.199 SOL, Wilcoxon p=2.2e-7.
+        self._v2_regime_enable          = float(engine_kwargs.pop("v2_regime_enable", 1.0))
+        self._v2_regime_q_threshold     = float(engine_kwargs.pop("v2_regime_q_threshold", 0.6))
+        self._v2_regime_give_frac_adapt = float(engine_kwargs.pop("v2_regime_give_frac_adapt", 0.3))
+        self._v2_regime_give_frac_min   = float(engine_kwargs.pop("v2_regime_give_frac_min", 0.30))
+        self._global_regime_map: dict = {}
         self._breakeven_arm_dd_pct  = float(engine_kwargs.pop("breakeven_arm_dd_pct", 25.0))
         self._breakeven_buffer_pct  = float(engine_kwargs.pop("breakeven_buffer_pct", 2.5))
         # iter18a: posterior-drift persistence exit params.
@@ -3240,6 +3269,55 @@ class StrategyEngineV2Adapter:
                 self._holder_flow_index[t] = []
                 bisect.insort(self._holder_flow_timestamps, t)
             self._holder_flow_index[t].append(event)
+
+    # ── iter57: global regime score surface ────────────────────────────
+    # `q_map` is {"YYYY-MM-DD" (UTC): Q in [0,1]} — the same value for all
+    # mints on that date (coin-agnostic by construction).  Backtester and
+    # ForwardTester load it before the candle loop (parity with
+    # set_holder_flow_events); the live poller appends today's Q as it is
+    # recomputed.  An empty map / missing date ⇒ neutral (baseline give-back).
+    def set_global_regime_map(self, q_map: dict):
+        """Load the global regime map {date_str: Q} (called by pipeline)."""
+        self._global_regime_map = {str(k): float(v) for k, v in (q_map or {}).items()}
+
+    def append_global_regime(self, date_str: str, q: float):
+        """Upsert one regime observation (live path)."""
+        self._global_regime_map[str(date_str)] = float(q)
+
+    def _regime_give_frac(self) -> float:
+        """iter57: effective gain_retrace give-back fraction.
+
+        give_eff = give_base - adapt * clamp01((q_thr - Q)/q_thr)  when Q < q_thr
+        give_eff = give_base                                       otherwise
+
+        Monotone & continuous in Q; exactly `give_base` when the flag is
+        OFF, the map is empty, the candle date has no Q row, or Q ≥ q_thr.
+        Only consumed by the armed-winner branch of `_check_exit_v2` —
+        entries and losing-trade exits are never touched.
+        """
+        base = self._gain_retrace_give_frac
+        if self._v2_regime_enable <= 0.0 or not self._global_regime_map:
+            return base
+        t_now = int(getattr(self, "_current_time", 0))
+        if t_now <= 0:
+            return base
+        date_str = _datetime.datetime.fromtimestamp(
+            t_now, _datetime.timezone.utc).strftime("%Y-%m-%d")
+        q = self._global_regime_map.get(date_str)
+        if q is None:
+            return base
+        thr = self._v2_regime_q_threshold
+        if thr <= 0.0 or q >= thr:
+            return base
+        stress = (thr - float(q)) / thr
+        if stress < 0.0:
+            stress = 0.0
+        elif stress > 1.0:
+            stress = 1.0
+        give = base - self._v2_regime_give_frac_adapt * stress
+        if give < self._v2_regime_give_frac_min:
+            give = self._v2_regime_give_frac_min
+        return give
 
     # Verified dev/insider provenance tags (must match holder_flow._TRACKED_TAGS).
     # The iter38 "whale" fallback tag is deliberately EXCLUDED — it marks a large
@@ -3970,7 +4048,10 @@ class StrategyEngineV2Adapter:
             if self._gain_retrace_arm_pct > 0.0 and entry > 0:
                 peak_gain = self._peak_price / entry - 1.0
                 if peak_gain * 100.0 >= self._gain_retrace_arm_pct:
-                    floor_gain = peak_gain * (1.0 - self._gain_retrace_give_frac)
+                    # iter57: regime-adapted give-back (identical to the
+                    # static `_gain_retrace_give_frac` when the controller
+                    # is OFF or no Q row exists for this candle's date).
+                    floor_gain = peak_gain * (1.0 - self._regime_give_frac())
                     if c <= entry * (1.0 + floor_gain):
                         self.exit_signal_reason = "gain_retrace"
                         return _V1Signal.EXIT
