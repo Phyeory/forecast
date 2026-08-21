@@ -496,6 +496,86 @@ async def stop_stale_scanner():
         t.cancel()
 
 
+# ── iter57: global harvest-regime cache maintenance (auto-refresh) ─────────
+# Keeps backend/data/global_regime_cache.json current with zero manual
+# steps: at startup and daily at 00:05 UTC it (1) backtests any recordings
+# not yet measured — pinned to the UN-ADAPTED engine (v2_regime_enable=0.0)
+# so Q always tracks the market through the same fixed instrument the
+# iter57 validation used, with no adaptation feedback loop — and (2) merges
+# the exit mix into the cache accumulators and rebuilds Q through today's
+# live frontier (atomic write).  Running live sessions pick the new map up
+# via the _global_regime_pump mtime check.  Kill switch: env
+# ITER57_REGIME_AUTOREFRESH=0.
+REGIME_AUTOREFRESH = os.environ.get("ITER57_REGIME_AUTOREFRESH", "1") != "0"
+
+
+def _regime_cache_refresh_once() -> dict:
+    import sqlite3
+    import fetch_global_regime as fgr
+    cache = fgr.load_cache()
+    measured = set(cache.get("measured_rec_ids") or [])
+    conn = sqlite3.connect(str(data_store.PRICE_DB))
+    try:
+        rows = conn.execute(
+            "SELECT id FROM recordings WHERE status = 'completed'").fetchall()
+    finally:
+        conn.close()
+    new_ids = sorted(i for (i,) in rows if i not in measured)
+
+    new_per_date: dict = {}
+    if new_ids:
+        label = f"regime_auto_{int(time.time())}"
+        results = run_backtest_batch(
+            engine_version=2,
+            engine_params={"v2_regime_enable": 0.0},   # measurement semantics
+            max_workers=2,                              # gentle vs live trading
+            batch_id=label,
+            recording_ids=new_ids,
+        )
+        errors = sum(1 for r in results if "error" in r)
+        if errors:
+            logger.warning(f"[REGIME] measurement batch '{label}': "
+                           f"{errors}/{len(results)} recordings errored")
+        new_per_date = fgr.gr_share_from_batch(label)
+
+    out = fgr.merge_refresh(new_per_date, new_ids,
+                            source=f"auto-maintenance (+{len(new_ids)} recs)")
+    logger.info(f"[REGIME] cache refreshed: {len(out['q_by_date'])} Q dates, "
+                f"frontier {out['provenance'].get('live_frontier')}, "
+                f"{len(new_ids)} new recordings measured")
+    return out
+
+
+async def _regime_cache_maintenance_loop():
+    import datetime as _dt_gr
+    while True:
+        try:
+            await asyncio.to_thread(_regime_cache_refresh_once)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("[REGIME] cache maintenance failed")
+        now = _dt_gr.datetime.now(_dt_gr.timezone.utc)
+        nxt = (now + _dt_gr.timedelta(days=1)).replace(
+            hour=0, minute=5, second=0, microsecond=0)
+        await asyncio.sleep(max(60.0, (nxt - now).total_seconds()))
+
+
+@app.on_event("startup")
+async def start_regime_cache_maintenance():
+    if not REGIME_AUTOREFRESH:
+        logger.info("[REGIME] auto-refresh disabled (ITER57_REGIME_AUTOREFRESH=0)")
+        return
+    app.state._regime_maint_task = asyncio.create_task(_regime_cache_maintenance_loop())
+
+
+@app.on_event("shutdown")
+async def stop_regime_cache_maintenance():
+    t = getattr(app.state, "_regime_maint_task", None)
+    if t:
+        t.cancel()
+
+
 @app.delete("/api/recordings/{recording_id}")
 async def delete_recording_endpoint(recording_id: int):
     data_store.delete_recording(recording_id)
