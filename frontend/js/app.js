@@ -234,6 +234,19 @@ let engineParamsV2 = {
   // iter56: holder-flow silence gate.  Block entry when tracked wallets have
   // been silent for >= this many seconds (2700.0 = ACCEPTED default; 0 = OFF).
   v2_hf_silence_gate_seconds: 2700.0,
+
+  // iter57: global harvest-regime give-back adaptation.  Q(t) = the strategy's
+  // own realised gain_retrace exit share over the trailing 3 trading days
+  // (causal, coin-agnostic; backend/data/global_regime_cache.json).  When
+  // Q < q_threshold the gain_retrace trail tightens for ARMED winners only:
+  // give_eff = 0.5 − adapt·clamp01((thr−Q)/thr), floored at give_frac_min.
+  // Entries are NOT touched (iter52 rejection).  Production default 1.0 = ON
+  // (iter57 ACCEPTED by explicit user decision 2026-08-22; set 0.0 to restore
+  // pre-iter57 behaviour).  See RESEARCH_LOG.md Iter 57.
+  v2_regime_enable:          1.0,   // 1.0 = ON (production default); 0.0 = OFF
+  v2_regime_q_threshold:     0.6,   // regime score below which trail tightens
+  v2_regime_give_frac_adapt: 0.3,   // max give-back tightening at Q = 0
+  v2_regime_give_frac_min:   0.30,  // floor on the tightened give-back
 };
 
 /* Engine version: 1 = V1 (Physics), 2 = V2 (RBPF/UKF/KDE/Kramers) */
