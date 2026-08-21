@@ -231,6 +231,25 @@ DEFAULT_CONFIG = {
     # LOO Δ +0.1375 SOL.  Default: 0.25 (ACCEPTED iter50 best config).
     "v2_evr_skip_sell_conc_min": 0.25,   # veto when maxsec sell share > this (0 = OFF)
     "v2_evr_skip_conc_window":  60,     # trailing window (s) for the share
+    # ── Global harvest-regime give-back adaptation (iter57) ──────────────
+    # Q(t) = causal market-regime score in [0,1]: the strategy's own realised
+    # gain_retrace exit share over the trailing 3 trading days (strictly
+    # prior dates), normalised clamp01((gr − 0.35)/(0.70 − 0.35)).  Q is
+    # coin-agnostic (identical for every mint on a date), loaded from
+    # backend/data/global_regime_cache.json (q_by_date) — see
+    # backend/fetch_global_regime.py.  When Q < q_threshold the gain_retrace
+    # profit-lock trail TIGHTENS for already-armed winners only:
+    #   give_eff = give_base − adapt · clamp01((thr − Q)/thr),
+    # floored at give_frac_min.  Losers / un-armed trades are untouched and
+    # entry gates are NOT modified (the iter52 rejection).  Missing Q →
+    # neutral base.  Production default 1.0 = ON (iter57 ACCEPTED by explicit
+    # user decision 2026-08-22 overriding the bootstrap-CI / whole-cohort
+    # breadth criteria — Wilcoxon p=6.1e-06, engaged breadth 81%, monotone
+    # sweep; set to 0.0 to restore byte-exact pre-iter57 behaviour).
+    "v2_regime_enable": 1.0,           # 1.0 = ON (production default); 0.0 = OFF
+    "v2_regime_q_threshold": 0.6,      # regime score below which trail tightens
+    "v2_regime_give_frac_adapt": 0.3,  # max give-back tightening at Q = 0
+    "v2_regime_give_frac_min": 0.30,   # floor on the tightened give-back
 }
 
 
@@ -3205,6 +3224,25 @@ class StrategyEngineV2Adapter:
         self._v2_evr_skip_conc_window   = int(engine_kwargs.pop("v2_evr_skip_conc_window", 60))
         self._evr_entry_time: int = 0
         self._evr_conc_vetoed: bool = False
+        # ── Global harvest-regime give-back adaptation (iter57) ───────────
+        # Strictly additive.  When enabled AND the causal global regime score
+        # Q(today) is known and < q_threshold, the gain_retrace profit-lock
+        # trail tightens for already-armed winners only (see DEFAULT_CONFIG
+        # note + RESEARCH_LOG.md Iter 57).  Production default 1.0 = ON
+        # (explicit user decision 2026-08-22); pass 0.0 to restore byte-exact
+        # pre-iter57 behaviour.  Futures engines are hard-disabled: the regime
+        # cache measures the 1s memecoin spot harvest regime and must never
+        # modulate the macro-bar perp layer.
+        self._v2_regime_enable         = float(engine_kwargs.pop("v2_regime_enable", 1.0))
+        self._v2_regime_q_threshold    = float(engine_kwargs.pop("v2_regime_q_threshold", 0.6))
+        self._v2_regime_give_frac_adapt = float(engine_kwargs.pop("v2_regime_give_frac_adapt", 0.3))
+        self._v2_regime_give_frac_min  = float(engine_kwargs.pop("v2_regime_give_frac_min", 0.30))
+        if self._is_futures_engine:
+            self._v2_regime_enable = 0.0
+        self._global_regime_map: dict[str, float] = {}
+        self._global_regime_cache_warned = False
+        if self._v2_regime_enable > 0.0:
+            self._load_global_regime_cache()
         # ── Market-cap bound trade block ────────────────────────────────────
         # Block all BUY entries when the USD market cap is below mcap_low_usd
         # or above mcap_high_usd.  Both default to 0 = deactivated.
@@ -3306,6 +3344,71 @@ class StrategyEngineV2Adapter:
             return False
         age = time - self._holder_flow_timestamps[idx - 1]
         return age >= self._v2_hf_silence_gate_seconds
+
+    # ── Global harvest-regime adaptation (iter57) ──────────────────────────
+
+    def _load_global_regime_cache(self) -> None:
+        """Load the causal per-date regime score map {date: Q} from
+        backend/data/global_regime_cache.json (built by
+        backend/fetch_global_regime.py).  Missing/corrupt file → empty map,
+        which keeps the adaptation neutral (base give_frac)."""
+        try:
+            import json as _json57
+            import os as _os57
+            path = _os57.path.join(_os57.path.dirname(_os57.path.abspath(__file__)),
+                                   "data", "global_regime_cache.json")
+            with open(path) as f:
+                cache = _json57.load(f)
+            qmap = cache.get("q_by_date") or {}
+            self._global_regime_map = {str(k): float(v) for k, v in qmap.items()}
+        except Exception as exc:  # missing file / bad JSON → neutral
+            if not self._global_regime_cache_warned:
+                self._global_regime_cache_warned = True
+                print(f"[v2_regime] global_regime_cache.json unavailable "
+                      f"({exc}); adaptation neutral")
+            self._global_regime_map = {}
+
+    def set_global_regime_map(self, qmap: dict) -> None:
+        """Live path: inject/refresh the per-date regime map (mirrors
+        set_holder_flow_events).  Values are fully determined by data
+        strictly prior to each date, so backtest and live converge on the
+        same cache."""
+        if qmap:
+            self._global_regime_map = {str(k): float(v) for k, v in qmap.items()}
+
+    def _regime_give_frac(self) -> float:
+        """Effective gain_retrace give-back fraction for the CURRENT bar.
+
+        Returns the base `gain_retrace_give_frac` unless the iter57 regime
+        controller is enabled, the causal global regime score for today is
+        known, and Q < q_threshold — in which case the trail tightens
+        linearly in (thr − Q)/thr, floored at `v2_regime_give_frac_min`.
+        Deterministic and lookahead-free: Q(date) is built only from the
+        trailing-3-trading-day exit mix strictly before that date."""
+        base = self._gain_retrace_give_frac
+        if self._v2_regime_enable <= 0.0 or not self._global_regime_map:
+            return base
+        try:
+            import datetime as _dt57
+            day = _dt57.datetime.fromtimestamp(
+                int(getattr(self, "_current_time", 0)),
+                tz=_dt57.timezone.utc).strftime("%Y-%m-%d")
+        except Exception:
+            return base
+        q = self._global_regime_map.get(day)
+        if q is None or q >= self._v2_regime_q_threshold:
+            return base
+        thr = self._v2_regime_q_threshold
+        if thr <= 0.0:
+            return base
+        tight = (thr - q) / thr
+        if tight < 0.0:
+            tight = 0.0
+        elif tight > 1.0:
+            tight = 1.0
+        floor = min(self._v2_regime_give_frac_min, base)
+        return max(base - self._v2_regime_give_frac_adapt * tight, floor)
+
 
     def _passes_order_flow_imbalance_gate(self) -> bool:
         """Check if the trailing order-flow taker buy ratio passes the minimum threshold."""
@@ -3970,7 +4073,9 @@ class StrategyEngineV2Adapter:
             if self._gain_retrace_arm_pct > 0.0 and entry > 0:
                 peak_gain = self._peak_price / entry - 1.0
                 if peak_gain * 100.0 >= self._gain_retrace_arm_pct:
-                    floor_gain = peak_gain * (1.0 - self._gain_retrace_give_frac)
+                    # iter57: give-back tightens under a weak global harvest
+                    # regime (Q < threshold) — neutral base when disabled.
+                    floor_gain = peak_gain * (1.0 - self._regime_give_frac())
                     if c <= entry * (1.0 + floor_gain):
                         self.exit_signal_reason = "gain_retrace"
                         return _V1Signal.EXIT

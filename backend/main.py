@@ -1168,6 +1168,8 @@ class _LiveSession:
         holder_monitor = None
         _hf_pump_task = None
         _hf_stop = asyncio.Event()
+        _gr_pump_task = None   # iter57 global-regime cache pump
+        _gr_stop = asyncio.Event()
         # Track how many events we've already pushed into the engine (append-only)
         _hf_pushed = {"n": 0}
 
@@ -1219,6 +1221,39 @@ class _LiveSession:
                     pass  # V1 engine has no holder-flow surface
             _hf_pushed["n"] = len(_existing_hf)
             _hf_pump_task = asyncio.ensure_future(_holder_flow_pump())
+
+            # ── Global harvest-regime pump (iter57) ─────────────────────────
+            # The engine self-loads backend/data/global_regime_cache.json at
+            # construction (same file the backtester uses); this light pump
+            # keeps a long-running live session in sync when the cache is
+            # refreshed (fetch_global_regime.py) or the session crosses a
+            # UTC midnight.  Q(date) is fully determined by data strictly
+            # prior to the date, so backtest and live converge identically.
+            _gr_state = {"mtime": 0.0}
+
+            async def _global_regime_pump():
+                import json as _json_gr
+                import os as _os_gr
+                cache_path = _os_gr.path.join(
+                    _os_gr.path.dirname(_os_gr.path.abspath(__file__)),
+                    "data", "global_regime_cache.json")
+                while not _gr_stop.is_set():
+                    try:
+                        if _os_gr.path.exists(cache_path):
+                            mtime = _os_gr.path.getmtime(cache_path)
+                            if mtime != _gr_state["mtime"]:
+                                with open(cache_path) as f:
+                                    qmap = (_json_gr.load(f) or {}).get("q_by_date") or {}
+                                _gr_state["mtime"] = mtime
+                                if qmap:
+                                    live_trader.engine.set_global_regime_map(qmap)
+                    except AttributeError:
+                        pass  # V1 engine has no regime surface
+                    except Exception:
+                        pass
+                    await asyncio.sleep(60.0)
+
+            _gr_pump_task = asyncio.ensure_future(_global_regime_pump())
 
             # ── Historical warm-up (seeds the recording + the engine) ────────
             try:
@@ -1391,6 +1426,15 @@ class _LiveSession:
                 _hf_pump_task.cancel()
                 try:
                     await _hf_pump_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            # Stop the global-regime pump (iter57)
+            _gr_stop.set()
+            if _gr_pump_task is not None:
+                _gr_pump_task.cancel()
+                try:
+                    await _gr_pump_task
                 except (asyncio.CancelledError, Exception):
                     pass
 

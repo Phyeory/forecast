@@ -6864,3 +6864,65 @@ Matched-trade analysis (t600/p8; t900/p10 and t1200/p15 identical in structure):
 - **Implementation**: Added `v2_hf_silence_gate_seconds` to `StrategyEngineV2` and `app.js` (default `2700.0 = ON`). Gate arms only when prior events exist before entry time (never on unmonitored recordings).
 
 
+
+
+---
+
+## Iter 57 — Global Harvest-Regime Give-Back Adaptation (Q_gr_lag3) — ACCEPTED (explicit user decision 2026-08-22; production default `v2_regime_enable = 1.0`)
+
+**Date:** 2026-08-21/22
+**Focus:** Automatically adapt the `gain_retrace` profit-lock give-back to the *global pump.fun market regime*, targeting the documented WR decay (Spearman r=-0.76, p=0.0002 over 23 dates; `gain_retrace` share 67.4%→49.9%; avg win −26.8% on negative days; `PUMP_FUN_MARKET_STRUCTURE_REPORT.md` §6-7, `DATE_SEGMENTED_BACKTEST_REPORT.md`).
+**Status:** **ACCEPTED — explicit user decision (2026-08-22) overriding the bootstrap-CI and whole-cohort-breadth criteria.** The candidate clears the Wilcoxon criterion at six orders below threshold (p=6.1e-06), improves 65 vs 15 recordings among the 80 it actually changes (81% engaged breadth), shows a fully monotone sweep, migrates exits exactly as designed with the entire loser stack byte-unchanged, and never touches the ≤−20%/≤−30% tail. The two failed criteria are documented honestly below: the bootstrap 95% CI of mean ΔPnL spans zero ([−0.00021, +0.00099]) and whole-cohort breadth is 18% (structural for a mechanism engaging ≤39% of recordings). **Production defaults updated to `v2_regime_enable=1.0, v2_regime_q_threshold=0.6, v2_regime_give_frac_adapt=0.3, v2_regime_give_frac_min=0.30`** in `strategy_engineV2.py` + `app.js`; set `v2_regime_enable=0.0` to restore byte-exact pre-iter57 behaviour (parity-proven).
+
+### 0. Session history note (important for future agents)
+
+A first implementation of this exact mechanism was built and benchmarked earlier on 2026-08-21 (baseline 852 trades / +1.949 SOL; merged sweep best cell Δ+0.199 SOL, Wilcoxon p=2.2e-7, CI [+0.00015, +0.00097]) and documented as ACCEPTED-by-explicit-user-decision in `backend/analysis/iter57_diagnosis.md` §5a — **but the engine code was lost in a working-tree reset before landing**. This session re-implemented the mechanism from the written spec on clean HEAD and re-verified everything with fresh, audited, full-cohort engine runs. The re-verification **did not reproduce** the marginally-positive CI and therefore the acceptance is superseded: `iter57_diagnosis.md` §5b-5c documents both. Prior-session per-token logs are preserved at `/tmp/iter57_prior_session/v2_results/`.
+
+### 1. Hypothesis
+
+The strategy's own realised harvest regime — the trailing-3-trading-day `gain_retrace` exit share over strictly prior dates (`Q_gr_lag3`) — is persistent and predicts next-day WR. Diagnosis (`backend/analysis/iter57_diagnosis.py`, 19 robust dates):
+
+- **Chosen Q (re-verified):** `Q_gr_lag3` vs WR(d): ρ=+0.585, p=0.0069; vs WR(d+1): ρ=+0.564, p=0.0137 (n=16) — the ONLY candidate clearing the pre-registered next-day bar.
+- **Rejected Q carriers:** SOL price level (prev-day normalised, ρ_next −0.23 p=0.36), SOL 7d momentum (same-day-only p=0.019, next-day p=0.23), Solana DEX volume level/momentum (DeFiLlama daily, all p>0.4), local trailing mean_pump/turnover/λ/OPW/grind ratios (all p>0.18), and causal intraday cross-token breadth (871-trade test, AUC≈0.5).
+- **Collinearity caveat:** the pure time index predicts next-day WR at ρ=−0.746; the partial correlation of Q vs next-day WR controlling for time is only 0.142. On this panel the score is largely a smoothed version of the monotone decay; its merit is mechanistic (market-measured, self-disengaging when breakouts recover, live-computable).
+
+**Mapping (spec option A — one mechanism):** when Q(today) < `v2_regime_q_threshold`, tighten the give-back of ALREADY-ARMED winners only:
+`give_eff = give_base − v2_regime_give_frac_adapt · clamp01((thr − Q)/thr)`, floored at `v2_regime_give_frac_min`. Entries are NOT touched (respects the iter52 entry-suppression rejection); losers are NOT touched (armed-winner trail only). Same price path + different Q ⇒ different trail floor ⇒ regime-conditioned, not a flat retune (iter37-bound compliant).
+
+### 2. Data & plumbing
+
+- **Causality:** gr_share(d) counts exits with `exit_time` on date d (closed trades only) — Q(d) is a function of exits on dates strictly before d, computable at 00:00 UTC live. Cache: `backend/data/global_regime_cache.json` built by `backend/fetch_global_regime.py --label <baseline batch label>` (also `--panel` for reproduction). 18 Q dates from the fresh baseline; engagement window Q<0.6 = 2026-08-09→08-21 (Q falls 0.87→0.24).
+- **External fetches (tested, rejected as carriers, kept for the record):** CoinGecko SOL/USD daily (`/coins/solana/market_chart?vs_currency=usd&days=60&interval=daily`, 61 rows) and DeFiLlama Solana DEX daily volume (`/overview/dexs/Solana?dataType=dailyVolume`, 1782 rows), cached at `/tmp/iter57_raw/`.
+- **Files modified:** `backend/strategy_engineV2.py` (4 `v2_regime_*` DEFAULT_CONFIG keys, adapter pops, `_load_global_regime_cache` / `set_global_regime_map` / `_regime_give_frac`, one-line `_check_exit_v2` floor change; futures hard-disabled), `backend/fetch_global_regime.py` (new), `backend/main.py` (`_global_regime_pump` 60 s mtime-gated cache refresh, teardown-mirrored), `frontend/js/app.js` (param mirror, production defaults 1.0/ON), `backend/analysis/test_regime_adapt.py` (10/10 unit tests incl. production-default-ON + explicit-OFF neutrality), `backend/analysis/iter57_sweep2.py` (generous-eligibility sweep).
+- **Parity:** `engine_params={}` vs `{"v2_regime_enable":0.0}` byte-identical on probe recs {951, 431, 943} (stats + per-trade logs) AND byte-identical to pre-iter57 code logs. `test_futures.py` 18/18, `test_evr.py` 6/6, `test_hf_silence.py` 5/5, `test_regime_adapt.py` 9/9.
+
+### 3. Validation (fresh full-cohort, identical 1,458-recording cohort both arms, 0 errors)
+
+| Batch | Trades | WR | PnL (SOL) | PF |
+|---|---|---|---|---|
+| `iter57_baseline_full_1787346578` | 875 | 69.03% | +1.91162 | 1.32 |
+| `iter57_candidate_1787349232` (thr=0.6, adapt=0.3, min=0.30) | 881 | 70.03% | +2.06837 | 1.34 |
+
+**Paired gate (362 common traded recordings):** ΔPnL **+0.157 SOL**, mean Δ +0.000433/rec (median 0), improved/regressed **65/15** (18.0% whole-cohort; **81% among the 80 changed recordings**), flips 5 L→W / 2 W→L.
+
+| Criterion | Result | Gate |
+|---|---|---|
+| Wilcoxon signed-rank (greater) | **p = 6.09e-06** | ✓ PASS |
+| Bootstrap 95% CI of mean ΔPnL | **[−0.000213, +0.000988]** | ✗ FAIL (spans zero) |
+| ≥50% common tokens improved | **18.0%** | ✗ FAIL (structural: ≤39% engagement) |
+
+Paired t p=0.164 (skew-dominated), McNemar p=0.453.
+
+**Mechism verification (behaves exactly as designed):** `gain_retrace` 496→508 exits, PnL +4.240→+4.674 (**+0.434 SOL** — earlier banking of armed winners + round-trip conversions); `kramers_down` 28→26, `bayesian_flip` 11→10 (converted to earlier gain_retrace); **`kelly_flat` 58/58 (−2.578 both), `recording_ended` 58/58 (−1.073 both), `evr_triage` 36/36 (−0.990 both) — the loser stack is untouched.** Tail lenses: n<0% 271→264 (p=0.0195, CI [+0.0055,+0.0359]); ≤−15% +1 trade; ≤−20%/≤−30% **exactly unchanged**.
+
+**Per-date split:** gains concentrate in the Q<0.6 grind window — 08-21 +0.0617, 08-15 +0.0300, 08-14 +0.0257, 08-11 +0.0227, 08-16 +0.0223, 08-19 (worst baseline day) +0.0118; negative-baseline days **+0.0962 SOL**, positive days **+0.0605 SOL** (no sacrifice of positive days in aggregate). Worst regression: 08-10 −0.0269 (13 improved/2 regressed but one large cut runner, cheesebank −0.075).
+
+**Sweep re-verification (this session's code, adapt=0.2, generous eligibility):** thr 0.4 → Δ+0.101 (81 recs, 48/33), thr 0.5 → Δ+0.146 (110 recs, 67/43), thr 0.6 → Δ+0.215 (141 recs, 91/50); full-cohort (0.6, 0.3) → Δ+0.157 (65/15). **Monotone in threshold, every cell positive, no isolated spike.**
+
+### 4. Verdict & production state
+
+**ACCEPTED — explicit user decision (2026-08-22), overriding the bootstrap-CI and whole-cohort-breadth criteria.** The evidence basis for the decision: the mechanism moves whole-cohort PnL +0.157 SOL (+8.2%) with Wilcoxon p=6.1e-06 (six orders below the gate), a fully monotone parameter sweep (thr 0.4/0.5/0.6 → +0.101/+0.146/+0.215 at adapt=0.2, no isolated spike), exit migration exactly as designed (`gain_retrace` +0.434 SOL; `kelly_flat`/`recording_ended`/`evr_triage` counts and PnL byte-unchanged), zero deep-tail impact (≤−20%/≤−30% exactly unchanged), negative days improved more (+0.096) than positive days (+0.061), and 65 improved vs 15 regressed among the 80 changed recordings (81% engaged breadth). Recorded against acceptance, honestly: the bootstrap 95% CI of mean ΔPnL spans zero ([−0.00021, +0.00099]; paired-t p=0.164, skew-dominated), and whole-cohort breadth is 18% — structurally unreachable for any mechanism engaging ≤39% of recordings. This verdict supersedes both (a) the earlier same-day session's acceptance of unauditable code (§0) and (b) this session's initial strict-gate rejection.
+
+**Production defaults (live):** `v2_regime_enable=1.0`, `v2_regime_q_threshold=0.6`, `v2_regime_give_frac_adapt=0.3`, `v2_regime_give_frac_min=0.30` in `strategy_engineV2.py` (`DEFAULT_CONFIG` + adapter pop) and `app.js`. Passing `v2_regime_enable=0.0` restores byte-exact pre-iter57 behaviour (proven on recs {951, 431, 943} against pre-iter57 logs). Futures engines are hard-disabled regardless. **Operational requirement:** the adaptation reads `backend/data/global_regime_cache.json`; dates absent from the cache run NEUTRAL (base give 0.5). Refresh the cache after each full baseline batch (`backend/.venv/bin/python backend/fetch_global_regime.py --label <baseline_label>`) so newly completed trading dates get Q values — without a refresh, adaptation silently goes neutral on future dates rather than mis-adapting (safe degradation by design). The `main.py` `_global_regime_pump` (60 s, mtime-gated) picks up cache refreshes in running live sessions.
+
+**Lesson:** (1) A regime-conditional *winner-banking* overlay is the first mechanism in the iters 33-56 negative-result series that moves whole-cohort PnL in the right direction with strong rank significance and zero tail cost — but rank-significance ≠ mean-significance when 78% of recordings are unchanged and effects are skewed; the acceptance rests on the user's explicit override of exactly those two criteria, and the statistics are recorded here without embellishment. (2) The engaged sample (~13 low-Q trading days, ≤141 recordings) is the binding statistical constraint — monitor live behaviour and re-run the full gate as more low-Q dates accumulate; the (0.6, 0.2) sweep cell's higher merged Δ (+0.215, 91/50) is a candidate follow-up A/B if the (0.6, 0.3) production choice underperforms in live. (3) Never trust unverifiable batch artefacts: numbers from code that is not in the tree must be re-verified before any production default changes — the prior session's lost-code acceptance was reproduced in direction but not in CI sign, and only the audited numbers are cited for this acceptance.
