@@ -6923,6 +6923,47 @@ Paired t p=0.164 (skew-dominated), McNemar p=0.453.
 
 **ACCEPTED — explicit user decision (2026-08-22), overriding the bootstrap-CI and whole-cohort-breadth criteria.** The evidence basis for the decision: the mechanism moves whole-cohort PnL +0.157 SOL (+8.2%) with Wilcoxon p=6.1e-06 (six orders below the gate), a fully monotone parameter sweep (thr 0.4/0.5/0.6 → +0.101/+0.146/+0.215 at adapt=0.2, no isolated spike), exit migration exactly as designed (`gain_retrace` +0.434 SOL; `kelly_flat`/`recording_ended`/`evr_triage` counts and PnL byte-unchanged), zero deep-tail impact (≤−20%/≤−30% exactly unchanged), negative days improved more (+0.096) than positive days (+0.061), and 65 improved vs 15 regressed among the 80 changed recordings (81% engaged breadth). Recorded against acceptance, honestly: the bootstrap 95% CI of mean ΔPnL spans zero ([−0.00021, +0.00099]; paired-t p=0.164, skew-dominated), and whole-cohort breadth is 18% — structurally unreachable for any mechanism engaging ≤39% of recordings. This verdict supersedes both (a) the earlier same-day session's acceptance of unauditable code (§0) and (b) this session's initial strict-gate rejection.
 
-**Production defaults (live):** `v2_regime_enable=1.0`, `v2_regime_q_threshold=0.6`, `v2_regime_give_frac_adapt=0.3`, `v2_regime_give_frac_min=0.30` in `strategy_engineV2.py` (`DEFAULT_CONFIG` + adapter pop) and `app.js`. Passing `v2_regime_enable=0.0` restores byte-exact pre-iter57 behaviour (proven on recs {951, 431, 943} against pre-iter57 logs). Futures engines are hard-disabled regardless. **Operational requirement:** the adaptation reads `backend/data/global_regime_cache.json`; dates absent from the cache run NEUTRAL (base give 0.5). Refresh the cache after each full baseline batch (`backend/.venv/bin/python backend/fetch_global_regime.py --label <baseline_label>`) so newly completed trading dates get Q values — without a refresh, adaptation silently goes neutral on future dates rather than mis-adapting (safe degradation by design). The `main.py` `_global_regime_pump` (60 s, mtime-gated) picks up cache refreshes in running live sessions.
+**Production defaults (live):** `v2_regime_enable=1.0`, `v2_regime_q_threshold=0.6`, `v2_regime_give_frac_adapt=0.3`, `v2_regime_give_frac_min=0.30` in `strategy_engineV2.py` (`DEFAULT_CONFIG` + adapter pop) and `app.js`. Passing `v2_regime_enable=0.0` restores byte-exact pre-iter57 behaviour (proven on recs {951, 431, 943} against pre-iter57 logs). Futures engines are hard-disabled regardless. **Operational requirement:** the adaptation reads `backend/data/global_regime_cache.json`; dates absent from the cache run NEUTRAL (base give 0.5). Refresh the cache after each full baseline batch (`backend/.venv/bin/python backend/fetch_global_regime.py --label <baseline_label>`) so newly completed trading dates get Q values — the builder also projects the ONE causal frontier day (day after the last qualified trading date, the day a live session trades on), so a refreshed cache makes the next day's live session adaptive immediately. Beyond the frontier, dates absent from the cache run NEUTRAL at the base give 0.5 rather than mis-adapting (safe degradation by design — no stale-Q fallback, since extending a possibly-recovered regime is the dangerous direction). The `main.py` `_global_regime_pump` (60 s, mtime-gated) picks up cache refreshes in running live sessions.
+
+### 5. Look-ahead audit & automated cache maintenance (2026-08-22 addendum)
+
+**Look-ahead audit — the decision path is clean.** At any engine tick on date
+d, the only external input is Q(d), a function of trade exits timestamped
+strictly before d (3 most recent qualified trading dates; "today" never
+qualifies because its exits are still accruing). Verified structurally at
+every layer: the backtest map (exit-date grouping), the live frontier
+projection (window fully closed by 00:00 UTC), the engine lookup (current
+candle time → date → Q), and the byte-identity of OFF runs (no hidden state
+channel). No future candle, future trade, or same-day exit mix enters any
+decision. What the mechanism DOES carry (documented, distinct from
+look-ahead): (1) in-sample config selection — (thr, adapt) chosen by sweep
+on the same cohort (mitigated by the monotone, all-positive sweep table);
+(2) in-sample normalisation constants 0.35/0.70 (frozen, not per-day
+fitted); (3) on this 19-date sample Q is largely collinear with the
+calendar decay (partial ρ vs time index 0.14) — the disengage-on-recovery
+property is a mechanism argument not yet demonstrated on a recovered
+regime (none occurred in-sample); (4) measurement feedback — if Q were
+rebuilt from ADAPTED trades, the exit mix would shift toward gain_retrace
+and Q would rise (a stabilising but semantically drifting feedback); the
+automation below pins measurement to the un-adapted engine.
+
+**Automated cache maintenance (live is now zero-touch).** `main.py` runs a
+`_regime_cache_maintenance_loop` (startup + daily 00:05 UTC,
+`ITER57_REGIME_AUTOREFRESH=0` to disable) that: (1) finds recordings not
+yet in the cache's `measured_rec_ids` and backtests ONLY those, in-process,
+pinned to `v2_regime_enable=0.0` measurement semantics (2 workers, gentle
+vs live trading); (2) merges their exits into per-date accumulators
+persisted in the cache and rebuilds Q through today's live frontier
+(atomic tmp+rename write). The forward region is calendar-continuous: while
+no new trading dates close, Q stays frozen at the last measured regime
+(correct causal projection — "no new evidence ⇒ regime unchanged"), and
+each newly qualified date shifts the window automatically. The existing
+`_global_regime_pump` (60 s, mtime-gated) pushes refreshed maps into
+running live sessions. Cache layout + builder:
+`backend/fetch_global_regime.py` (CLI kept for manual rebuilds; atomic
+writes; `merge_refresh()` is the automation entry point). Unit tests:
+`backend/analysis/test_global_regime_cache.py` (5/5 — historical sparsity,
+window causality, frontier continuity/freezing, today-never-qualifies,
+incremental atomic merge).
 
 **Lesson:** (1) A regime-conditional *winner-banking* overlay is the first mechanism in the iters 33-56 negative-result series that moves whole-cohort PnL in the right direction with strong rank significance and zero tail cost — but rank-significance ≠ mean-significance when 78% of recordings are unchanged and effects are skewed; the acceptance rests on the user's explicit override of exactly those two criteria, and the statistics are recorded here without embellishment. (2) The engaged sample (~13 low-Q trading days, ≤141 recordings) is the binding statistical constraint — monitor live behaviour and re-run the full gate as more low-Q dates accumulate; the (0.6, 0.2) sweep cell's higher merged Δ (+0.215, 91/50) is a candidate follow-up A/B if the (0.6, 0.3) production choice underperforms in live. (3) Never trust unverifiable batch artefacts: numbers from code that is not in the tree must be re-verified before any production default changes — the prior session's lost-code acceptance was reproduced in direction but not in CI sign, and only the audited numbers are cited for this acceptance.
