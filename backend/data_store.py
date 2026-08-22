@@ -234,6 +234,24 @@ def get_holder_flow(recording_id: int, start_time: Optional[int] = None, end_tim
     return [dict(r) for r in rows]
 
 
+def get_holder_flow_since(recording_id: int, after_id: int, limit: int = 500) -> list[dict]:
+    """Fetch holder-flow events with id > after_id (id-cursor incremental read).
+
+    Used by the live session's holder-flow pump: the monitor persists every
+    discovered event to this table at discovery time, so an id-cursor read
+    returns exactly the events the backtester will later replay — a lossless
+    delivery source that cannot drop events the way a count-diff over the
+    monitor's 60s-trimmed in-memory list can.
+    """
+    conn = _get_price_read_conn()
+    rows = conn.execute(
+        "SELECT * FROM holder_flow WHERE recording_id = ? AND id > ? ORDER BY id ASC LIMIT ?",
+        (recording_id, after_id, limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def get_holder_flow_for_window(recording_id: int, center_time: int, window_seconds: int) -> list[dict]:
     """Fetch holder-flow events within ±window_seconds of a center time."""
     return get_holder_flow(recording_id, center_time - window_seconds, center_time + window_seconds)

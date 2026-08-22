@@ -303,6 +303,14 @@ class LiveTrader:
         # having 2-3 extra trades after the live session had already shut
         # down.  Re-enable via an explicit dashboard param if needed.
         no_motion_stop_seconds: float = 0.0,
+
+        # ── Pending-signal staleness bound (iter57 parity fix) ────────────
+        # A BUY signal that cannot execute at its candle boundary (previous
+        # sell still settling, swap in flight, …) stays pending and retries
+        # — mirroring the backtester, which never drops a queued signal.
+        # To avoid entering on a very stale decision, the retry window is
+        # capped at this many seconds from the moment the signal fired.
+        pending_signal_max_age_seconds: float = 15.0,
     ):
         if engine_kwargs is None:
             engine_kwargs = {}
@@ -352,6 +360,18 @@ class LiveTrader:
         self.no_motion_stop_seconds: float = no_motion_stop_seconds
         self._last_motion_ts: float = 0.0       # wall-clock timestamp of last price change
         self._last_motion_price: float = 0.0    # close price at that moment
+
+        # ── Pending-signal bookkeeping (iter57 parity fix) ────────────────
+        # Signals retry until executed (or aged out for buys); timestamps
+        # track staleness for the retry cap.
+        self.pending_signal_max_age_seconds: float = pending_signal_max_age_seconds
+        self._pending_buy_ts: float = 0.0
+        # Set while update_historical_candle() replays warm-up candles so the
+        # pending executor can never launch a real swap during warm-up.
+        self._warming_up: bool = False
+        # Last executed action surfaced to update()'s return payload.
+        self._last_trade_action: Optional[str] = None
+        self._last_swap_request: Optional[dict] = None
 
         self.stats = LiveTraderStats()
         self.current_trade: Optional[LiveTrade] = None
@@ -2861,109 +2881,148 @@ class LiveTrader:
 
     # ── Intra-candle 4-state expansion (matches ForwardTester exactly) ──────
 
-    def _process_completed_candle(self, t: int, o: float, h: float,
-                                   l: float, c: float, vol: float,
-                                   buy_vol: float = 0.0,
-                                   sell_vol: float = 0.0,
-                                   market_cap_usd: float = 0.0,
-                                   pool_sol: float = 0.0) -> dict:
+    # Engine-anchor fill model — mirrors ForwardTester._fill_fraction() with
+    # the run_backtest defaults (fixed 0.0001 SOL fees, slippage 1 %).  The
+    # engine's exit thresholds (tp_v2 / gain_retrace / breakeven / EVR
+    # offside) anchor on notify_trade_opened(price); anchoring live at the
+    # SAME simulated intrabar fill the backtester uses makes every exit
+    # decision fire on the identical price basis (iter57 parity fix).  The
+    # real on-chain fill is recorded separately on the trade at confirmation.
+    _ENGINE_FILL_REF_FEE: float = 0.0001
+    _ENGINE_FILL_REF_SIZE: float = 0.1
+    engine_fill_slippage_pct: float = 1.0
+
+    def _engine_fill_fraction(self) -> float:
+        import math
+        total_fee = max(self.priority_fee_lamports / 1e9, 1e-12)
+        base_delay = self._ENGINE_FILL_REF_FEE / (self._ENGINE_FILL_REF_FEE + total_fee)
+        size_penalty = 1.0 + math.log10(max(1.0, self.buy_size_sol / self._ENGINE_FILL_REF_SIZE))
+        slippage_factor = 1.0 + self.engine_fill_slippage_pct / 100.0
+        return max(0.02, min(0.98, base_delay * size_penalty * slippage_factor))
+
+    @staticmethod
+    def _engine_intrabar_price(o: float, h: float, l: float, c: float, frac: float) -> float:
+        """Identical to ForwardTester._intrabar_price (bull/bear path split at
+        thirds)."""
+        bullish = c >= o
+        if bullish:
+            p0, p1, p2, p3 = o, h, l, c
+        else:
+            p0, p1, p2, p3 = o, l, h, c
+        if frac <= 1 / 3:
+            return p0 + (p1 - p0) * (frac * 3)
+        elif frac <= 2 / 3:
+            return p1 + (p2 - p1) * ((frac - 1 / 3) * 3)
+        else:
+            return p2 + (p3 - p2) * ((frac - 2 / 3) * 3)
+
+    def _execute_pending_signals(self, t: int, so: float, sh: float,
+                                 sl: float, sc: float) -> None:
+        """Consume pending BUY/EXIT signals — mirrors ForwardTester.update() Step 1.
+
+        Called before EACH intra-candle engine.update() state (so
+        engine.notify_trade_opened/closed lands at the same intra-candle slot
+        as the backtester's _open_long/_close_long, with the same simulated
+        intrabar fill anchor), at the "state 1 of candle N+1" slot (the
+        boundary tick, whose open is the fill basis), and whenever a blocking
+        swap settles (sell confirmed / buy failed) so re-entry signals are
+        not lost.
+
+        Retry semantics: a signal that cannot execute yet (swap in flight,
+        previous sell still settling, buy-failure re-entry block) STAYS
+        pending and is retried on the next call.  The backtester never drops
+        a queued signal — previously live silently cleared pending flags at
+        the next candle's Step 1, losing every re-entry that arrived while
+        the previous sell was still confirming (typically 1-5 s).  BUY
+        retries expire after `pending_signal_max_age_seconds`; EXIT retries
+        never expire (exits are risk-reducing).
         """
-        Mirror ForwardTester.update() exactly — called once per completed candle.
+        if self._warming_up:
+            return
 
-        Step 1 (before any engine.update() call): clear pending signal flags.
-                The engine was already notified (notify_trade_opened/closed)
-                at the moment the signal was detected in update(), matching
-                the backtester's synchronous _open_long/_close_long → notify
-                pattern.  If a buy fails, _fail_buy_flat() rolls back with
-                notify_trade_closed().
+        now = time.time()
 
-        Step 2: expand this candle into 4 intra-candle sub-states and call
-                engine.update() on each — identical to the backtester loop.
-                Uses _build_full_result=False for all 4 states, matching the
-                backtester's fast path.
-
-        Step 3: detect any new signal from the 4-state expansion and store it
-                as a pending signal for the NEXT candle (same as ForwardTester
-                setting _pending_buy / _pending_exit).
-
-        Returns the engine result from the final sub-state (state 4).
-        """
-        # ── Step 1: clear pending signal flags BEFORE first engine.update() ──
-        # The engine was already notified (notify_trade_opened/closed) at the
-        # moment the signal was detected in update(), matching the backtester's
-        # synchronous _open_long/_close_long → notify pattern.  Here we only
-        # need to clear the pending flags so they don't fire again.
         if self._pending_buy:
-            self._pending_buy = False
-            self._pending_buy_reason = ""
+            if self.current_trade is None and not self._swap_in_flight \
+                    and not self._is_buy_pending() \
+                    and now >= self._buy_failed_until \
+                    and not self.mcap_stop_triggered \
+                    and not self.no_motion_stop_triggered:
+                if now - self._pending_buy_ts > self.pending_signal_max_age_seconds:
+                    logger.info(
+                        f"[SIGNAL EXPIRY] Dropping stale BUY signal "
+                        f"(age {now - self._pending_buy_ts:.1f}s > "
+                        f"{self.pending_signal_max_age_seconds:.0f}s) — never placed"
+                    )
+                    self._pending_buy = False
+                    self._pending_buy_reason = ""
+                else:
+                    buy_reason = self._pending_buy_reason
+                    # Engine anchor: the SAME simulated fill the backtester
+                    # would register for this execution state.
+                    fill = self._engine_intrabar_price(
+                        so, sh, sl, sc, self._engine_fill_fraction()
+                    ) * (1.0 + self.engine_fill_slippage_pct / 100.0)
+                    trade = LiveTrade(
+                        token_mint=self.token_mint,
+                        entry_time=t,
+                        entry_price=sc,
+                        size_sol=self.buy_size_sol,
+                        size_tokens=0,
+                        entry_reason=buy_reason,
+                        status="pending",
+                    )
+                    self.current_trade = trade
+                    self._last_trade_action = "buy"
+                    self._last_motion_ts = now  # reset no-motion clock at position open
+                    # If the buy later fails on-chain, _fail_buy_flat() rolls
+                    # back with notify_trade_closed().
+                    self.engine.notify_trade_opened(fill, Direction.UP)
+                    self._pending_buy = False
+                    self._pending_buy_reason = ""
 
-        if self._pending_exit:
+                    asyncio.ensure_future(self.execute_buy(buy_reason))
+
+                    self._last_swap_request = {
+                        "action": "buy",
+                        "token": self.token_mint,
+                        "amount_sol": self.buy_size_sol,
+                        "reason": buy_reason,
+                        "price": sc,
+                    }
+
+        elif self._pending_exit and self.current_trade is not None \
+                and not self._swap_in_flight:
+            exit_reason = self._pending_exit_reason
+            self.current_trade.status = "closing"
+            self.current_trade.exit_reason = exit_reason
+            self._last_trade_action = "exit"
+            # Notify the engine IMMEDIATELY that the position is closed —
+            # this matches the backtester where _close_long() calls
+            # notify_trade_closed() synchronously at Step 1 of the candle.
+            self.engine.notify_trade_closed()
             self._pending_exit = False
             self._pending_exit_reason = ""
 
-        # Guard: clear stale pending flags
-        if self._pending_buy and self.current_trade is None:
-            self._pending_buy = False
-        if self._pending_exit and self.current_trade is not None:
-            self._pending_exit = False
+            asyncio.ensure_future(self.execute_sell(exit_reason))
 
-        # ── Step 2: 4-state expansion ─────────────────────────────────────────
-        bullish = c >= o
-        if bullish:
-            mid_first, mid_second = h, l
-        else:
-            mid_first, mid_second = l, h
+            self._last_swap_request = {
+                "action": "sell",
+                "token": self.token_mint,
+                "reason": exit_reason,
+                "price": sc,
+            }
 
-        final_signal = None
-        final_regime = None
-
-        # State 1: open tick
-        result = self.engine.update(t, o, o, o, o, 0.0, _build_full_result=False)
-        sig = result.get("signal", "none")
-        if sig not in (Signal.NONE.value, "none"):
-            final_signal = sig
-            final_regime = result.get("regime")
-
-        # State 2: first extreme
-        h2 = max(o, mid_first)
-        l2 = min(o, mid_first)
-        result = self.engine.update(t, o, h2, l2, mid_first, 0.0, _build_full_result=False)
-        sig = result.get("signal", "none")
-        if sig not in (Signal.NONE.value, "none") and final_signal is None:
-            final_signal = sig
-            final_regime = result.get("regime")
-
-        # State 3: both extremes
-        result = self.engine.update(t, o, h, l, mid_second, 0.0, _build_full_result=False)
-        sig = result.get("signal", "none")
-        if sig not in (Signal.NONE.value, "none") and final_signal is None:
-            final_signal = sig
-            final_regime = result.get("regime")
-
-        # State 4: close tick — buy/sell split lands here
-        result = self.engine.update(t, o, h, l, c, vol,
-                                    buy_volume=buy_vol, sell_volume=sell_vol,
-                                    pool_sol=pool_sol,
-                                    market_cap_usd=market_cap_usd,
-                                    _build_full_result=False)
-        sig = result.get("signal", "none")
-        if sig not in (Signal.NONE.value, "none") and final_signal is None:
-            final_signal = sig
-            final_regime = result.get("regime")
-
-        # Propagate earliest signal into the final result dict
-        if final_signal is not None:
-            result["signal"] = final_signal
-            if final_regime is not None:
-                result["regime"] = final_regime
-
-        # ── Step 3: queue signal for next candle (pending model) ──────────────
-        # (The backtester queues then executes at the next candle's open sub-state.
-        #  We queue here; the live swap is launched immediately below in update().)
+    def _queue_signal_from_state(self, result: dict) -> None:
+        """Mirror ForwardTester.update() Step 3 — runs after EVERY intra-candle
+        state, so a signal from state k executes at state k+1 exactly like
+        the backtester (previously live only queued after the full 4-state
+        loop, pushing every execution to the next candle boundary)."""
         detected_signal = result.get("signal", "none")
         detected_regime = result.get("regime", "")
 
-        if detected_signal == Signal.BUY.value and self.current_trade is None and not self._pending_buy:
+        if detected_signal == Signal.BUY.value and self.current_trade is None \
+                and not self._pending_buy:
             if time.time() < self._buy_failed_until:
                 # A previous buy failed — NO further automatic buys until the
                 # re-entry block window elapses.  A failed buy is never
@@ -2977,9 +3036,12 @@ class LiveTrader:
                         f"[BUY BLOCK] BUY signal suppressed — re-entry block "
                         f"active for another {remaining:.0f}s (after failed buy)"
                     )
+                self._pending_buy = False
+                self._pending_buy_reason = ""
             else:
                 self._pending_buy = True
                 self._pending_buy_reason = f"buy_{detected_regime}"
+                self._pending_buy_ts = time.time()
                 self._pending_exit = False
 
         elif detected_signal == Signal.EXIT.value and self.current_trade is not None:
@@ -2997,6 +3059,127 @@ class LiveTrader:
             self._pending_exit = True
             self._pending_exit_reason = reason
             self._pending_buy = False
+
+    def _drain_pending_signals(self) -> None:
+        """Retry pending signals after a swap settled (sell confirmed / buy
+        failed) so a re-entry queued in the meantime fires immediately
+        instead of waiting for the next candle boundary."""
+        cd = self._current_accumulating
+        if cd is not None:
+            t, c = int(cd.get("t", 0)), cd.get("c", self._last_price)
+        else:
+            t, c = int(time.time()), self._last_price
+        try:
+            self._execute_pending_signals(t, c, c, c, c)
+        except Exception as e:
+            logger.debug(f"[DRAIN] pending-signal retry error: {e}")
+
+    async def _drain_after_settle(self) -> None:
+        """Wait for swap bookkeeping to clear, then retry pending signals.
+
+        confirm_sell() runs inside execute_sell's try block — the
+        ``_swap_in_flight`` flag is only released in the enclosing finally,
+        so the drain must first wait for it before a queued re-entry BUY can
+        pass its execution guards."""
+        for _ in range(20):  # up to ~5 s
+            if not self._swap_in_flight:
+                break
+            await asyncio.sleep(0.25)
+        self._drain_pending_signals()
+
+    def _process_completed_candle(self, t: int, o: float, h: float,
+                                   l: float, c: float, vol: float,
+                                   buy_vol: float = 0.0,
+                                   sell_vol: float = 0.0,
+                                   market_cap_usd: float = 0.0,
+                                   pool_sol: float = 0.0) -> dict:
+        """
+        Mirror ForwardTester.update() exactly — called once per completed
+        candle, once per intra-candle state:
+
+          Step 1  execute pending signal (engine notify + swap launch)
+          Step 2  engine.update() on the state
+          Step 3  queue any signal the state produced
+
+        A signal from state k of candle N therefore executes at state k+1 of
+        candle N — identical to the backtester.  A signal from state 4 is
+        executed by update() at the boundary tick with the NEW candle's open
+        (the backtester's "state 1 of candle N+1" slot).
+
+        Un-executable signals stay pending and retry (see
+        _execute_pending_signals) instead of being cleared.
+
+        Returns the engine result from the final sub-state (state 4) with
+        the earliest signal of the candle propagated.
+        """
+        # ── 4-state expansion with per-state execute/update/queue ──────────
+        bullish = c >= o
+        if bullish:
+            mid_first, mid_second = h, l
+        else:
+            mid_first, mid_second = l, h
+
+        final_signal = None
+        final_regime = None
+        final_reason = ""
+
+        # State 1: open tick
+        self._execute_pending_signals(t, o, o, o, o)
+        result = self.engine.update(t, o, o, o, o, 0.0, _build_full_result=False)
+        self._queue_signal_from_state(result)
+        sig = result.get("signal", "none")
+        if sig not in (Signal.NONE.value, "none"):
+            final_signal = sig
+            final_regime = result.get("regime")
+            final_reason = result.get("exit_reason", "")
+
+        # State 2: first extreme
+        h2 = max(o, mid_first)
+        l2 = min(o, mid_first)
+        self._execute_pending_signals(t, o, h2, l2, mid_first)
+        result = self.engine.update(t, o, h2, l2, mid_first, 0.0, _build_full_result=False)
+        self._queue_signal_from_state(result)
+        sig = result.get("signal", "none")
+        if sig not in (Signal.NONE.value, "none") and final_signal is None:
+            final_signal = sig
+            final_regime = result.get("regime")
+            final_reason = result.get("exit_reason", "")
+
+        # State 3: both extremes
+        self._execute_pending_signals(t, o, h, l, mid_second)
+        result = self.engine.update(t, o, h, l, mid_second, 0.0, _build_full_result=False)
+        self._queue_signal_from_state(result)
+        sig = result.get("signal", "none")
+        if sig not in (Signal.NONE.value, "none") and final_signal is None:
+            final_signal = sig
+            final_regime = result.get("regime")
+            final_reason = result.get("exit_reason", "")
+
+        # State 4: close tick — buy/sell split lands here
+        self._execute_pending_signals(t, o, h, l, c)
+        result = self.engine.update(t, o, h, l, c, vol,
+                                    buy_volume=buy_vol, sell_volume=sell_vol,
+                                    pool_sol=pool_sol,
+                                    market_cap_usd=market_cap_usd,
+                                    _build_full_result=False)
+        self._queue_signal_from_state(result)
+        sig = result.get("signal", "none")
+        if sig not in (Signal.NONE.value, "none") and final_signal is None:
+            final_signal = sig
+            final_regime = result.get("regime")
+            final_reason = result.get("exit_reason", "")
+
+        # Propagate earliest signal into the final result dict
+        if final_signal is not None:
+            result = dict(result)
+            result["signal"] = final_signal
+            if final_regime is not None:
+                result["regime"] = final_regime
+            result["exit_reason"] = final_reason
+
+        # NOTE: a signal queued at state 4 is NOT executed here — update()
+        # executes it at the boundary tick with the new candle's open, which
+        # is the backtester's "state 1 of candle N+1" fill slot.
 
         # ── No-motion stop ───────────────────────────────────────────────
         if self.no_motion_stop_seconds > 0:
@@ -3046,6 +3229,25 @@ class LiveTrader:
             return f"dev_sell_exit:{wallet_prefix}"
         return None
 
+    def immediate_holder_flow_exit(self, exit_reason: str):
+        """Fire the holder-flow immediate exit (iter41) as a consumed action.
+
+        Called by main.py's holder-flow pump when a dev/insider sell is
+        discovered while in position.  Marks the trade closing, notifies the
+        engine flat, consumes any pending signals and launches the sell —
+        so the retrying pending executor can never double-fire the exit."""
+        if not self.current_trade or self._swap_in_flight:
+            return
+        self.current_trade.status = "closing"
+        self.current_trade.exit_reason = exit_reason
+        self._pending_exit = False
+        self._pending_exit_reason = ""
+        self._pending_buy = False
+        self._pending_buy_reason = ""
+        self._last_trade_action = "exit"
+        self.engine.notify_trade_closed()
+        asyncio.ensure_future(self.execute_sell(exit_reason))
+
     # ── Strategy update loop ──────────────────────────────────────────────────
 
     def update_historical_candle(
@@ -3053,18 +3255,29 @@ class LiveTrader:
         time_val: int,
         o: float, h: float, l: float, c: float,
         volume: float = 0.0,
+        buy_volume: float = 0.0,
+        sell_volume: float = 0.0,
+        market_cap_usd: float = 0.0,
         pool_sol: float = 0.0,
     ) -> dict:
         """
         Warm up the engine with a historical candle using the same 4-state
-        expansion + pending model as the backtester.  No real swaps are executed.
+        expansion + pending model as the backtester.  No real swaps are
+        executed (the pending executor is guarded by `_warming_up`).
         Returns the strategy result dict for the candle.
         """
         self._last_price = c
-        result = self._process_completed_candle(time_val, o, h, l, c, volume,
-                                                 pool_sol=pool_sol)
+        self._warming_up = True
+        try:
+            result = self._process_completed_candle(
+                time_val, o, h, l, c, volume,
+                buy_vol=buy_volume, sell_vol=sell_volume,
+                market_cap_usd=market_cap_usd, pool_sol=pool_sol,
+            )
+        finally:
+            self._warming_up = False
         self._last_engine_result = result
-        
+
         # Clear pending signals during historical warmup to prevent stale
         # signals from triggering an immediate buy when live trades commence.
         self._pending_buy = False
@@ -3129,9 +3342,13 @@ class LiveTrader:
             prev = self._current_accumulating
 
             # _process_completed_candle mirrors ForwardTester.update() fully:
-            #   Step 1 — apply pending signal to engine (notify at open)
-            #   Step 2 — run 4 sub-states through engine.update()
-            #   Step 3 — queue newly detected signal as pending
+            #   per state — execute pending signal (notify at the same
+            #                intra-candle slot as the backtester), then
+            #                engine.update() on the state
+            #   after the loop — queue newly detected signal and execute it
+            #                (the backtester's "state 1 of candle N+1" slot)
+            # Live swaps fire inside that call — at the same wall-clock
+            # boundary moment the backtester would fill, with no N+1 bar wait.
             result = self._process_completed_candle(
                 prev["t"], prev["o"], prev["h"], prev["l"], prev["c"], prev["vol"],
                 buy_vol=prev.get("buy_vol", 0.0),
@@ -3141,65 +3358,19 @@ class LiveTrader:
             )
             self._last_engine_result = result
 
-            # ── Act on the signal detected in the 4-state expansion ───────────
-            # The pending flags were just SET by _process_completed_candle.
-            # We launch the live swap immediately (no N+1 bar wait), but the
-            # engine.notify_trade_opened/closed() will be called at the START
-            # of the NEXT candle's _process_completed_candle call.
+            # A signal queued at state 4 of the completed candle executes
+            # HERE — the backtester's "state 1 of candle N+1" slot.  This
+            # boundary tick IS the first tick of candle N+1, so its open is
+            # the fill basis the backtester would use.
+            self._execute_pending_signals(time_val, o, o, o, o)
 
-            if (self._pending_buy and self.current_trade is None
-                    and not self._swap_in_flight and not self._is_buy_pending()
-                    and time.time() >= self._buy_failed_until
-                    and not self.mcap_stop_triggered and not self.no_motion_stop_triggered):
-                buy_reason = self._pending_buy_reason
-                trade = LiveTrade(
-                    token_mint=self.token_mint,
-                    entry_time=prev["t"],
-                    entry_price=prev["c"],
-                    size_sol=self.buy_size_sol,
-                    size_tokens=0,
-                    entry_reason=buy_reason,
-                    status="pending",
-                )
-                self.current_trade = trade
-                opened_trade = trade
-                trade_action = "buy"
-                self._last_motion_ts = time.time()  # reset no-motion clock at position open
-                # Notify the engine IMMEDIATELY that a position is open — this
-                # matches the backtester where _open_long() calls
-                # notify_trade_opened() synchronously at Step 1 of the candle.
-                # If the buy later fails, _fail_buy_flat() rolls back with
-                # notify_trade_closed().
-                self.engine.notify_trade_opened(prev["c"], Direction.UP)
-
-                asyncio.ensure_future(self.execute_buy(buy_reason))
-
-                swap_request = {
-                    "action": "buy",
-                    "token": self.token_mint,
-                    "amount_sol": self.buy_size_sol,
-                    "reason": buy_reason,
-                    "price": prev["c"],
-                }
-
-            elif self._pending_exit and self.current_trade is not None and not self._swap_in_flight:
-                exit_reason = self._pending_exit_reason
-                self.current_trade.status = "closing"
-                self.current_trade.exit_reason = exit_reason
-                trade_action = "exit"
-                # Notify the engine IMMEDIATELY that the position is closed —
-                # this matches the backtester where _close_long() calls
-                # notify_trade_closed() synchronously at Step 1 of the candle.
-                self.engine.notify_trade_closed()
-
-                asyncio.ensure_future(self.execute_sell(exit_reason))
-
-                swap_request = {
-                    "action": "sell",
-                    "token": self.token_mint,
-                    "reason": exit_reason,
-                    "price": prev["c"],
-                }
+            # Surface whatever the pending executor did for the UI payload.
+            trade_action = self._last_trade_action
+            swap_request = self._last_swap_request
+            if trade_action == "buy":
+                opened_trade = self.current_trade
+            self._last_trade_action = None
+            self._last_swap_request = None
 
         # ── Always buffer the current tick ────────────────────────────────────
         self._current_accumulating = {
@@ -3345,6 +3516,17 @@ class LiveTrader:
             # re-allow orphan adoption so the next bag is never invisible.
             self._adopted_bag = False
         self.engine.notify_trade_closed()
+        # iter57 parity: the position is gone — any lingering pending EXIT is
+        # consumed (whatever closed the trade replaced it), and a pending BUY
+        # (re-entry queued while this sell was settling) retries immediately
+        # instead of waiting for the next candle boundary, matching the
+        # backtester which never defers a queued signal.
+        self._pending_exit = False
+        self._pending_exit_reason = ""
+        try:
+            asyncio.ensure_future(self._drain_after_settle())
+        except RuntimeError:
+            pass  # no running loop (unit tests) — next boundary will drain
         logger.info(f"Trade closed: PnL={trade.pnl_sol:+.6f} SOL ({trade.pnl_pct:+.2f}%)")
         self._journal_event(
             "trade_closed", trade=trade,
