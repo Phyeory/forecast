@@ -1166,10 +1166,18 @@ class _LiveSession:
         # Shared process-wide monitor — one GMGN poller regardless of how many
         # sessions are active (iter36 rate-limit fix).
         holder_monitor = None
+        # Track holder-flow events already pushed into the engine.  iter57
+        # parity fix: delivery is by DB row id (lossless), NOT by counting the
+        # monitor's in-memory list.  The monitor trims `recent_events` to a
+        # 60 s window, so a count-based diff desynchronises the moment an
+        # event ages out — every event landing below the stale high-water mark
+        # was silently never delivered to the engine (empirically only 8–25 %
+        # of events reached it).  The DB rows are persisted at discovery time
+        # and are exactly what the backtester later replays, so an id-cursor
+        # read makes the live engine's event stream identical to backtest.
         _hf_pump_task = None
         _hf_stop = asyncio.Event()
-        # Track how many events we've already pushed into the engine (append-only)
-        _hf_pushed = {"n": 0}
+        _hf_last_id = {"id": 0}
 
         async def _holder_flow_pump():
             """Background task that pushes new holder-flow events into the engine
@@ -1180,24 +1188,19 @@ class _LiveSession:
             on-chain timestamp)."""
             while not _hf_stop.is_set():
                 try:
-                    _hf_events = holder_monitor.get_events_as_dicts(real_mint)
-                    if len(_hf_events) > _hf_pushed["n"]:
-                        _new = _hf_events[_hf_pushed["n"]:]
-                        _hf_pushed["n"] = len(_hf_events)
-                        try:
-                            live_trader.engine.append_holder_flow_events(_new)
-                            # Immediately check if this triggers an immediate dev_sell_exit
-                            exit_reason = live_trader.check_immediate_holder_flow_exit()
-                            if exit_reason:
-                                logger.info(f"[HOLDER FLOW] Immediate exit triggered: {exit_reason}")
-                                live_trader._pending_exit = True
-                                live_trader._pending_exit_reason = exit_reason
-                                live_trader._pending_buy = False
-                                live_trader.engine.notify_trade_closed()
-                                # Fire off the sell swap immediately in the background
-                                asyncio.create_task(live_trader.execute_sell(exit_reason))
-                        except AttributeError:
-                            pass  # V1 engine has no holder-flow surface
+                    if rec_id is not None:
+                        _new = data_store.get_holder_flow_since(rec_id, _hf_last_id["id"])
+                        if _new:
+                            _hf_last_id["id"] = _new[-1]["id"]
+                            try:
+                                live_trader.engine.append_holder_flow_events(_new)
+                                # Immediately check if this triggers an immediate dev_sell_exit
+                                exit_reason = live_trader.check_immediate_holder_flow_exit()
+                                if exit_reason:
+                                    logger.info(f"[HOLDER FLOW] Immediate exit triggered: {exit_reason}")
+                                    live_trader.immediate_holder_flow_exit(exit_reason)
+                            except AttributeError:
+                                pass  # V1 engine has no holder-flow surface
                 except Exception:
                     pass
                 await asyncio.sleep(1.0)
@@ -1210,14 +1213,18 @@ class _LiveSession:
             # recording (e.g. from a prior session on the same token, or events
             # the monitor captured before the session started).  This matches
             # the backtester which calls set_holder_flow_events() with the full
-            # event list before the candle loop starts.
+            # event list before the candle loop starts.  The pump's id cursor
+            # starts after the newest pre-loaded row so nothing is delivered
+            # twice.  (max id, NOT the last row by time — a late-discovered
+            # event can carry an earlier chain time than an already-loaded
+            # row and would otherwise be re-delivered by the pump.)
             _existing_hf = data_store.get_holder_flow(rec_id)
             if _existing_hf:
                 try:
                     live_trader.engine.set_holder_flow_events(_existing_hf)
                 except AttributeError:
                     pass  # V1 engine has no holder-flow surface
-            _hf_pushed["n"] = len(_existing_hf)
+            _hf_last_id["id"] = max((r["id"] for r in _existing_hf), default=0)
             _hf_pump_task = asyncio.ensure_future(_holder_flow_pump())
 
             # ── Historical warm-up (seeds the recording + the engine) ────────
@@ -1240,6 +1247,9 @@ class _LiveSession:
                         o=candle["open"], h=candle["high"],
                         l=candle["low"], c=candle["close"],
                         volume=candle.get("volume", 0),
+                        buy_volume=candle.get("buy_volume", 0.0),
+                        sell_volume=candle.get("sell_volume", 0.0),
+                        market_cap_usd=candle.get("market_cap_usd", 0.0),
                         pool_sol=candle.get("pool_sol", 0.0),
                     )
                     strategy_results.append(result)
@@ -1291,10 +1301,17 @@ class _LiveSession:
                         candle_dict.get("market_cap_usd", 0.0),
                     )
 
-                    if last_sent_price is not None and current_price == last_sent_price and not is_new:
-                        continue
-                    last_sent_price = current_price
-
+                    # ── Engine feed (iter57 parity fix) ──────────────────────
+                    # live_trader.update() MUST run on EVERY tick, including
+                    # same-price ticks.  The update call refreshes the
+                    # accumulating-candle buffer (volume / buy / sell split /
+                    # mcap / pool_sol); skipping same-price ticks left the
+                    # buffer holding a stale snapshot, so the completed candle
+                    # was expanded into engine states with understated volume
+                    # while the recorded candle (persisted below on every
+                    # tick) carried the full volume the backtester replays.
+                    # Only the *UI broadcast* is throttled to price changes
+                    # and candle boundaries.
                     strategy_result = live_trader.update(
                         time_val=candle_dict["time"],
                         o=candle_dict["open"], h=candle_dict["high"],
@@ -1316,15 +1333,18 @@ class _LiveSession:
                         "tx_hash": trade["tx_hash"],
                     }
 
-                    self.broadcast({
-                        "type": "candle",
-                        "candle": candle_dict,
-                        "is_new": is_new,
-                        "market_cap_sol": trade.get("market_cap_sol", 0),
-                        "market_cap_usd": trade.get("market_cap_usd", 0),
-                        "trade": trade_payload,
-                        "strategy": strategy_result,
-                    })
+                    if (last_sent_price is None or current_price != last_sent_price
+                            or is_new):
+                        self.broadcast({
+                            "type": "candle",
+                            "candle": candle_dict,
+                            "is_new": is_new,
+                            "market_cap_sol": trade.get("market_cap_sol", 0),
+                            "market_cap_usd": trade.get("market_cap_usd", 0),
+                            "trade": trade_payload,
+                            "strategy": strategy_result,
+                        })
+                    last_sent_price = current_price
 
                     # ── Market-cap safety floor check ─────────────────────────
                     # update_market_cap() blocks until any emergency sell has
