@@ -1259,8 +1259,9 @@ class _LiveSession:
         _hf_stop = asyncio.Event()
         _gr_pump_task = None   # iter57 global-regime cache pump
         _gr_stop = asyncio.Event()
-        # Track how many events we've already pushed into the engine (append-only)
-        _hf_pushed = {"n": 0}
+        # iter57 parity fix: holder-flow delivery cursor is the last DB row id
+        # pushed into the engine (lossless, matches backtest replay exactly).
+        _hf_last_id = {"id": 0}
 
         async def _holder_flow_pump():
             """Background task that pushes new holder-flow events into the engine
