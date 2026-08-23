@@ -248,8 +248,25 @@ DEFAULT_CONFIG = {
     # sweep; set to 0.0 to restore byte-exact pre-iter57 behaviour).
     "v2_regime_enable": 1.0,           # 1.0 = ON (production default); 0.0 = OFF
     "v2_regime_q_threshold": 0.6,      # regime score below which trail tightens
-    "v2_regime_give_frac_adapt": 0.3,  # max give-back tightening at Q = 0
+    # iter58 sweep completion: adapt=0.2 is the grid maximum (concave both
+    # axes; 0.1→+0.134, 0.2→+0.215, 0.3→+0.157, 0.4→+0.055 at thr=0.6) AND
+    # the full-cohort run clears the STRICT gate outright (Δ+0.215 SOL,
+    # Wilcoxon p=3.05e-06, bootstrap CI [+0.00026,+0.00095] strictly
+    # positive, paired-t p=0.001, 55/12 improved/regressed) — unlike
+    # adapt=0.3 which required the user's CI override.
+    "v2_regime_give_frac_adapt": 0.2,  # max give-back tightening at Q = 0
     "v2_regime_give_frac_min": 0.30,   # floor on the tightened give-back
+    # ── iter61 regime participation floor (PRODUCTION default 0.25) ──────
+    # Fleet-level capital-allocation policy on the same causal Q(date):
+    # when Q(today) is known and < this floor, block ALL new entries for
+    # the day (open positions still exit normally).  Enabled as the
+    # production default by explicit user decision 2026-08-23 (RESEARCH_LOG
+    # .md Iter 61): zero in-sample cost (full-cohort 828 trades / 70.0% WR
+    # / +2.179 SOL vs 880 / 69.8% / +2.127), engages only in the most
+    # extreme regime states, auto-disengages on recovery; statistically
+    # unevaluable at n=1 blocked day — insurance, not a validated edge.
+    # Set 0.0 to never block (restores byte-exact pre-iter61 behaviour).
+    "v2_regime_participation_floor": 0.25,
 }
 
 
@@ -3235,13 +3252,22 @@ class StrategyEngineV2Adapter:
         # modulate the macro-bar perp layer.
         self._v2_regime_enable         = float(engine_kwargs.pop("v2_regime_enable", 1.0))
         self._v2_regime_q_threshold    = float(engine_kwargs.pop("v2_regime_q_threshold", 0.6))
-        self._v2_regime_give_frac_adapt = float(engine_kwargs.pop("v2_regime_give_frac_adapt", 0.3))
+        self._v2_regime_give_frac_adapt = float(engine_kwargs.pop("v2_regime_give_frac_adapt", 0.2))
         self._v2_regime_give_frac_min  = float(engine_kwargs.pop("v2_regime_give_frac_min", 0.30))
+        # ── iter61 regime participation floor (PRODUCTION default 0.25) ──
+        # See the DEFAULT_CONFIG iter61 note.  (The iter58 entry/kelly/arm
+        # battery and the iter59 SDE-conditioning scaffolding were REJECTED
+        # and their code reverted 2026-08-23 — findings preserved in
+        # RESEARCH_LOG.md Iters 58-59.)
+        self._v2_regime_participation_floor = float(
+            engine_kwargs.pop("v2_regime_participation_floor", 0.25))
         if self._is_futures_engine:
             self._v2_regime_enable = 0.0
+            self._v2_regime_participation_floor = 0.0
         self._global_regime_map: dict[str, float] = {}
         self._global_regime_cache_warned = False
-        if self._v2_regime_enable > 0.0:
+        if (self._v2_regime_enable > 0.0
+                or self._v2_regime_participation_floor > 0.0):
             self._load_global_regime_cache()
         # ── Market-cap bound trade block ────────────────────────────────────
         # Block all BUY entries when the USD market cap is below mcap_low_usd
@@ -3376,6 +3402,56 @@ class StrategyEngineV2Adapter:
         if qmap:
             self._global_regime_map = {str(k): float(v) for k, v in qmap.items()}
 
+    def _regime_q_today(self):
+        """Causal global regime score Q for the current candle's UTC date,
+        or None when unknown (no map loaded / date missing / time unset)."""
+        if not self._global_regime_map:
+            return None
+        try:
+            import datetime as _dt57
+            day = _dt57.datetime.fromtimestamp(
+                int(getattr(self, "_current_time", 0)),
+                tz=_dt57.timezone.utc).strftime("%Y-%m-%d")
+        except Exception:
+            return None
+        q = self._global_regime_map.get(day)
+        return None if q is None else float(q)
+
+    def _regime_participation_blocked(self) -> bool:
+        """iter61: regime participation floor — block NEW entries when the
+        causal Q(today) is known and below `v2_regime_participation_floor`
+        (0.0 = never blocks).  Open positions still exit normally.  This is
+        a fleet-level capital-allocation policy (user objective: consistent
+        traded-day WR + positive expectancy by standing aside in grind
+        regimes), not a PnL-gated optimum — see RESEARCH_LOG.md Iter 61."""
+        if self._v2_regime_participation_floor <= 0.0:
+            return False
+        q = self._regime_q_today()
+        return q is not None and q < self._v2_regime_participation_floor
+
+    def _regime_tight(self) -> float:
+        """Regime tightness t ∈ [0,1] for the iter57 give-back adaptation:
+        0 = neutral (controller disabled / no cache / date missing /
+        Q ≥ q_threshold / thr ≤ 0), 1 at Q = 0, linear in (thr−Q)/thr in
+        between.  Deterministic and lookahead-free: Q(date) is built only
+        from the trailing-3-trading-day exit mix strictly before that date."""
+        if not self._global_regime_map:
+            return 0.0
+        if self._v2_regime_enable <= 0.0:
+            return 0.0
+        q = self._regime_q_today()
+        if q is None:
+            return 0.0
+        thr = self._v2_regime_q_threshold
+        if thr <= 0.0 or q >= thr:
+            return 0.0
+        tight = (thr - q) / thr
+        if tight < 0.0:
+            return 0.0
+        if tight > 1.0:
+            return 1.0
+        return tight
+
     def _regime_give_frac(self) -> float:
         """Effective gain_retrace give-back fraction for the CURRENT bar.
 
@@ -3386,28 +3462,11 @@ class StrategyEngineV2Adapter:
         Deterministic and lookahead-free: Q(date) is built only from the
         trailing-3-trading-day exit mix strictly before that date."""
         base = self._gain_retrace_give_frac
-        if self._v2_regime_enable <= 0.0 or not self._global_regime_map:
+        if self._v2_regime_enable <= 0.0:
             return base
-        try:
-            import datetime as _dt57
-            day = _dt57.datetime.fromtimestamp(
-                int(getattr(self, "_current_time", 0)),
-                tz=_dt57.timezone.utc).strftime("%Y-%m-%d")
-        except Exception:
-            return base
-        q = self._global_regime_map.get(day)
-        if q is None or q >= self._v2_regime_q_threshold:
-            return base
-        thr = self._v2_regime_q_threshold
-        if thr <= 0.0:
-            return base
-        tight = (thr - q) / thr
-        if tight < 0.0:
-            tight = 0.0
-        elif tight > 1.0:
-            tight = 1.0
         floor = min(self._v2_regime_give_frac_min, base)
-        return max(base - self._v2_regime_give_frac_adapt * tight, floor)
+        return max(base - self._v2_regime_give_frac_adapt * self._regime_tight(),
+                   floor)
 
 
     def _passes_order_flow_imbalance_gate(self) -> bool:
@@ -3929,7 +3988,14 @@ class StrategyEngineV2Adapter:
                         _mcap_blocked = True
                     if self._mcap_high_usd > 0.0 and _mcap > self._mcap_high_usd:
                         _mcap_blocked = True
-                if _mcap_blocked:
+                # ── Regime participation floor (iter61): stand aside when the
+                # causal global regime score for today is below the floor.
+                # Checked FIRST among the blocks — it is a fleet-level
+                # allocation policy, not a per-trade quality gate.  Open
+                # positions exit normally.
+                if self._regime_participation_blocked():
+                    self.exit_signal_reason = "regime_participation_block"
+                elif _mcap_blocked:
                     self.exit_signal_reason = "mcap_bound_block"
                 # ── Holder-flow entry gate (iter36): block entry on recent dev sell ──
                 elif self._v2_holder_flow_entry_block > 0.0 and self._has_recent_dev_sell(
