@@ -6966,4 +6966,295 @@ writes; `merge_refresh()` is the automation entry point). Unit tests:
 window causality, frontier continuity/freezing, today-never-qualifies,
 incremental atomic merge).
 
+**Addendum (2026-08-22, iter58):** the parameter sweep completed in Iter 58 found
+adapt=0.2 strictly superior to the adapt=0.3 production value chosen here (grid
+maximum Δ+0.215 vs +0.157; bootstrap CI strictly positive — the criterion this
+acceptance had to override). Production default moved to
+`v2_regime_give_frac_adapt=0.2`; see Iter 58.
+
 **Lesson:** (1) A regime-conditional *winner-banking* overlay is the first mechanism in the iters 33-56 negative-result series that moves whole-cohort PnL in the right direction with strong rank significance and zero tail cost — but rank-significance ≠ mean-significance when 78% of recordings are unchanged and effects are skewed; the acceptance rests on the user's explicit override of exactly those two criteria, and the statistics are recorded here without embellishment. (2) The engaged sample (~13 low-Q trading days, ≤141 recordings) is the binding statistical constraint — monitor live behaviour and re-run the full gate as more low-Q dates accumulate; the (0.6, 0.2) sweep cell's higher merged Δ (+0.215, 91/50) is a candidate follow-up A/B if the (0.6, 0.3) production choice underperforms in live. (3) Never trust unverifiable batch artefacts: numbers from code that is not in the tree must be re-verified before any production default changes — the prior session's lost-code acceptance was reproduced in direction but not in CI sign, and only the audited numbers are cited for this acceptance.
+
+
+---
+
+## Iter 58 — Sweep Completion (give-back adapt 0.3→0.2, ACCEPTED via the STRICT gate) + Regime-Adaptive Entry/Exit Battery (58a/58b/58c ALL REJECTED, default-OFF)
+
+**Date:** 2026-08-22
+**Focus:** (1) Complete the iter57 parameter sweep to establish the true optimum of the accepted give-back adaptation; (2) extend regime adaptation to the entry gate and the other sell reasons (kelly_flat, gain_retrace arm) as independently gated candidates, per the user's direction that "the entire algorithm's buy and sell mechanisms adapt to the global regime".
+**Status:** **PART 1 ACCEPTED — production default `v2_regime_give_frac_adapt` 0.3 → 0.2** (clears the strict gate outright: Wilcoxon p=3.05e-06 ✓, bootstrap CI strictly positive ✓, paired-t p=0.001 ✓ — no user override needed on any statistical criterion). **PART 2 REJECTED (all three knobs)** — entry-bar elevation fails its full gate (effect concentrated in 7 improved vs 9 regressed recordings); kelly_flat tightening is non-monotone/unstable at screen; arm-lowering is cleanly negative at screen. All iter58 knobs remain default-OFF; production behaviour differs from iter57-accepted only through `v2_regime_give_frac_adapt=0.2`.
+
+### 1. Parameter sweep completion (Part 1)
+
+Grid completed under the audited engine (eligible-merged convention, generous armed-trade eligibility; Δ totals trustworthy, cell improved/regressed counts carry ~1e-6 rounding noise — only full paired-diff counts are cited as evidence):
+
+| thr \ adapt | 0.1 | 0.2 | 0.3 | 0.4 |
+|---|---|---|---|---|
+| 0.4 | | +0.101 | | |
+| 0.5 | | +0.146 | +0.179 | |
+| **0.6** | +0.134 | **+0.215** | +0.157 (prod) | +0.055 |
+| 0.7 | | +0.064 | −0.056 | |
+
+**Concave on both axes with an interior optimum at (0.6, 0.2).** thr=0.7 breaks (engages 08-05/07/08 at Q 0.66–0.85 and tightens healthy-regime winners: −0.056 at adapt=0.3 — the first negative cell observed for this mechanism, bounding the threshold from above).
+
+Full-cohort verification `iter57_t06a02_full_1787365854` (1,458 recordings, identical cohort): **880 trades, 69.77% WR, +2.12666 SOL, PF 1.35** vs baseline 875 / 69.03% / +1.91162.
+
+| Criterion | (0.6, 0.3) accepted w/ user CI override | **(0.6, 0.2)** |
+|---|---|---|
+| ΔPnL | +0.157 SOL | **+0.215 SOL** |
+| Wilcoxon (greater) | p=6.09e-06 ✓ | **p=3.05e-06 ✓** |
+| Bootstrap 95% CI | [−0.00021, +0.00099] ✗ (override) | **[+0.00026, +0.00095] ✓ strictly positive** |
+| Paired t | p=0.164 | **p=0.00104 ✓** |
+| improved/regressed | 65/15 | **55/12** (82% among 67 changed) |
+| Whole-cohort breadth | 18.0% ✗ (structural) | 15.2% ✗ (structural — ≤39% engagement ceiling) |
+
+**Production default updated to `v2_regime_give_frac_adapt=0.2`** in `strategy_engineV2.py` + `app.js`; bare `engine_params={}` verified trade-by-trade identical to the `iter57_t06a02_full` batch logs on recs {1810, 431, 943}. All test suites re-run (regime 17/17 incl. updated default assertions, futures 18/18, evr 6/6, hf-silence 5/5).
+
+### 2. Regime-adaptive entry/exit battery (Part 2) — three independent candidates, all rejected
+
+Mechanism scaffolding (all default-OFF, shared `_regime_tight()` = clamp01((thr−Q)/thr), parity proven: bare `{}` reproduces the accepted iter57 production logs trade-by-trade; explicit all-knobs-off byte-identical):
+
+- **58a `v2_regime_entry_enable`** — weak-regime elevation of the entry bar: `C_high += v2_regime_entry_conf_delta·t` (optional second axis `P_up_min += pup_delta·t`) in `_v2_passes_entry_gate`. The iter52-differentiating ingredients: global persistent Q (not token-local q_pump·q_dd), mild deltas, on top of the accepted give-back adaptation.
+- **58b `v2_regime_kelly_enable`** — weak-regime tightening of the kelly_flat exit: `offside 40% − v2_regime_kelly_offside_delta·t` (floor 15%), optional streak shortening `bars·(1−bars_frac·t)`.
+- **58c `v2_regime_arm_enable`** — weak-regime lowering of the gain_retrace arm threshold: `arm 10% − v2_regime_arm_delta·t` (floor 4%), to bank modest pops that otherwise ride to `recording_ended` (20.7% share on negative days).
+
+Screens (eligible-merged vs the production baseline `iter57_candidate` = iter57-accepted behaviour; eligible = recordings with a trade entering on a Q<0.6 date, n=193):
+
+Initial screens (2 cells per mechanism, vs the iter57-accepted (0.6/0.3) baseline) were followed by **complete parameter sweeps** (11 cells, vs the current production (0.6/0.2) baseline `iter57_t06a02_full`; eligible = recordings with a trade entering on a Q<0.6 date, n=193):
+
+**58a entry-bar elevation — `v2_regime_entry_conf_delta` sweep:**
+
+| delta | 0.02 | 0.04 | 0.06 | 0.08 |
+|---|---|---|---|---|
+| Δ SOL | **+0.062** | +0.026 | −0.094 | −0.044 |
+| trades | 871 | 865 | 857 | 851 |
+
+Peak at the mildest cell, collapse beyond, non-monotone tail (discrete replacement dynamics). **BOTH positive cells earned and FAILED full-cohort gates:**
+
+| Cell | Full-run Δ | Wilcoxon | CI | improved/regressed | Verdict |
+|---|---|---|---|---|---|
+| conf=0.04 (vs 0.6/0.3 prod) | +0.075 | p=0.470 ✗ | [−0.00029, +0.00042] ✗ | 7/9 | **REJECT** |
+| conf=0.02 (vs 0.6/0.2 prod) | +0.062 | p=0.180 ✗ | [−0.00015, +0.00048] ✗ | **6/3** (3 L→W flips carry everything) | **REJECT** |
+
+The milder the delta, the MORE concentrated the effect — the gain is not a distributed entry-quality improvement but a handful of discrete blocked-entry cascades. The entry-side negative-result line (iters 31/34/40/52) extends to the strongest available regime signal, now at swept-axis strength.
+
+**58b kelly_flat tightening — `v2_regime_kelly_offside_delta` sweep:** 5→−0.021, 10→−0.001, 15→+0.037, 20→−0.009. A single positive island at 15 with negative neighbours on both sides — a noise spike, not a mechanism (bracketed-axis rejection; the iter55 SODT failure family).
+
+**58c arm-lowering — `v2_regime_arm_delta` sweep:** 2→−0.092, 3→−0.064, 4→−0.013. Monotone-negative with harm growing in delta and limit 0 — strictly harmful: arming on smaller peaks banks noise and costs more runner upside than it recovers in `recording_ended` drag (bracketed-axis rejection).
+
+**Verdict: 58a/58b/58c ALL REJECTED — now at swept-axis strength, with 58a double-gated.** All knobs remain default-OFF (`v2_regime_entry_enable=0.0`, `v2_regime_kelly_enable=0.0`, `v2_regime_arm_enable=0.0`) and are available for future hypotheses. This is the tenth-or-so entry-side negative result (iters 31/34/40/52 + 58a): conditioning the ENTRY decision on any pre-entry observable — engine state, microstructure, breadth, token-local regime, or now the persistent global harvest regime — does not separate winners from losers on this market. The exit-side winner-banking channel (iter57) remains the only regime-adaptive alpha.
+
+### 3. The "consistent daily WR" goal — honest assessment
+
+Per-date trajectory (24 dates, `iter58_per_date_wr.py`):
+
+| Config | WR trend ρ | Negative days | Total PnL |
+|---|---|---|---|
+| baseline (no adaptation) | −0.607 (p=0.0005) | 8/24 | +1.912 |
+| iter57-accepted (0.6/0.3) | −0.547 | 7/24 | +2.068 |
+| **iter58 production (0.6/0.2)** | −0.577 | 7/24 | **+2.127** |
+
+The adaptation softens the decay (worst grind days flip: 08-21 PnL −0.049→+0.006, WR 60→66-68%) but **does not eliminate it** — and cannot, on the current evidence: the residual negative days (esp. 08-19: WR 47.7%, untouched by every exit-side variant because its losses are instant entry-selection errors — iter56 showed 0/166 tail losers ever reach +15% MFE, so there is nothing to bank) require an entry filter that no tested pre-entry channel can supply (58a was the latest attempt). "Consistent positive WR every day" would require information the engine does not observe; the achievable objective — banking the harvest regime when it weakens, at the statistically validated optimum — is now in production.
+
+**Files modified:** `backend/strategy_engineV2.py` (adapt default 0.2 + iter58 knob scaffolding default-OFF), `frontend/js/app.js`, `backend/analysis/test_regime_adapt.py` (17 tests), `backend/analysis/iter57_sweep3.py`, `backend/analysis/iter58_screen.py`, `backend/analysis/iter58_per_date_wr.py`, `backend/analysis/iter58_parity.py`.
+
+**Batch labels:** `iter57_sweep3_*` (6 cells), `iter58_58*` (initial screens), `iter58sw_*` (11-cell sweep), `iter57_t06a02_full_1787365854` (880 / 69.77% / +2.12666), `iter58_a04_full_1787369661` (866 / 70.55% / +2.14320 — REJECTED), `iter58_a02_full_1787399526` (871 / 70.15% / +2.18884 — REJECTED, 6/3 concentration).
+
+**Lesson:** (1) Completing the sweep mattered: the accepted (0.6, 0.3) sat on the wrong side of the adapt optimum, and the grid maximum (0.6, 0.2) turns out to be STRICTLY acceptable — no override required. The sweep surface is concave on both axes with sharp degradation beyond (thr 0.7, adapt 0.4), so the optimum is bracketed, not edge-located. (2) The entry-side negative result now extends to the strongest available regime signal (persistent global harvest Q): +0.075 SOL of point-estimate gain evaporates under the gate into 7-vs-9 recording breadth — pre-entry conditioning is not the channel. (3) Exit-side profit-lock geometry (give-back) remains the only regime-adaptive surface with statistical support; its optimum is now deployed.
+
+
+---
+
+## Iter 59 — Regime-Adaptive SDE Framework (λ_μ / α / τ_max coefficient conditioning) — ALL THREE AXES REJECTED at screen (mechanism shipped default-OFF, no production change)
+
+**Date:** 2026-08-22
+**Focus:** Per the user's direction — the iter57/58 regime adaptation touches only the `gain_retrace` exit geometry; the *fundamental mathematical framework* (the stationary SDE coefficient vector: drift OU persistence λ_μ, flow-pressure AR(1) persistence α, escape-probability horizon τ_max) remains regime-independent. iter59 made those coefficients themselves regime-conditioned and tested the surface at swept-axis strength.
+**Status:** **ALL REJECTED.** Every coefficient axis at every magnitude is net-negative on the eligible cohort (9/9 cells, no positive cell, no full-cohort gate earned — killed at the cheapest decisive stage per the iter33/58 protocol). The knobs ship default-OFF (`v2_regime_sde_enable=0.0`); production behaviour is byte-identical to the iter58 production optimum.
+
+### 1. Hypothesis & mechanism
+
+In a weak harvest regime (low causal Q), breakouts fade fast — the stationary OU persistence rates calibrated on the full (healthy-dominated) history over-extrapolate momentum and flow persistence. Pre-registered single-axis candidates, each scaling the SAME causal tightness scalar `t = clamp01((thr−Q)/thr)` shared with iter57/58:
+
+- **59a drift persistence:** `λ_μ,eff = λ_μ·(1+Δ_λ·t)` — posterior momentum dies sooner after a stall ⇒ earlier `reversal_exit`/`bayesian_flip` on fading winners (the iter57 winner-banking channel, realised through the framework instead of the trail).
+- **59b flow persistence:** `α,eff = α·(1+Δ_α·t)` — order-flow pressure φ decays faster; TREND confidence fades sooner on stale flow.
+- **59c horizon compression:** `τ_max,eff = τ_max·(1−f·t)` (floored at `tau_min`) — shorter belief horizon ⇒ P0 mass rises ⇒ directional commitments (entries and z*-hold justifications) withdraw sooner in weak regimes.
+
+### 2. Implementation (strictly additive, parity-proven)
+
+`backend/strategy_engineV2.py`: 4 `DEFAULT_CONFIG` keys + adapter pops (`v2_regime_sde_enable` 0.0, `v2_regime_lambda_mu_delta` 1.0, `v2_regime_alpha_delta` 1.0, `v2_regime_tau_frac` 0.5) + one `_apply_regime_sde_scaling()` method called at the top of `update()` (before `core.update_state`/`get_decision`, so predict kernels, topological regime derivation and the Kramers τ-sweep all see the same scaled coefficients within the tick). Coefficients are constant within a date (t is a pure function of the candle's UTC date); pristine base values are snapshotted on first call, (re)written only when t changes, and restored when t returns to 0. Every derived consumer stays in sync: the cfg dict, the packed predict-kernel array (idx 0 = λ_μ, idx 5 = α), `_alpha_regime`, `_tau_default`. Futures hard-disabled; the sde enable joins the `_regime_tight()` guard and the cache-load condition; axis delta/frac = 0 disables that axis alone (single-axis sweeps). `frontend/js/app.js` param mirror.
+
+**Parity:** `analysis/iter59_parity.py` — bare `engine_params={}` reproduces the production batch `iter57_t06a02_full_1787365854` trade-by-trade on recs {1810, 431, 943} AND explicit-OFF is byte-identical. `test_regime_adapt.py` 24/24 (7 new iter59 tests: OFF-never-writes, scaling math + derived-consumer sync, monotone-in-t from the snapshotted base, date-crossing restore, τ floor, futures hard-off, shared tightness). `test_futures.py` 18/18, `test_evr.py` 6/6, `test_hf_silence.py` 5/5.
+
+### 3. Screen (eligible-merged convention, 0 errors)
+
+Baseline = production `iter57_t06a02_full_1787365854` (880 trades / 69.77% / +2.12666 SOL). Eligibility = recording span (`started_at`→`stopped_at`, fallback trade dates) intersects a Q<0.6 date: **193 recordings** — stricter than iter58's trade-entered rule because coefficient scaling changes the filter evolution itself (a candidate can diverge by ADDING trades where baseline had none). Batch labels `iter59_59*`; table in `analysis/iter59_screen.json`.
+
+| Axis | Cell | Δ SOL (merged) | improved/regressed | trades |
+|---|---|---|---|---|
+| 59a λ_μ | +50% | **−0.308** | 90/102 | 870 |
+| 59a λ_μ | +100% | **−0.613** | 85/107 | 866 |
+| 59a λ_μ | +200% | **−0.588** | 86/107 | 877 |
+| 59b α | +50% | −0.006 | 86/106 | 867 |
+| 59b α | +100% | **−0.687** | 87/105 | 872 |
+| 59b α | +200% | **−0.723** | 85/108 | 882 |
+| 59c τ | −33% | **−0.457** | 91/101 | 768 |
+| 59c τ | −50% | **−0.503** | 88/104 | 734 |
+| 59c τ | −67% | **−0.679** | 84/108 | 694 |
+
+λ_μ: monotone-negative from the mildest cell (bracketed-axis rejection, the 58c family). α: flat at 0.5 (noise), clearly negative beyond — no positive island. τ: monotone-negative with severe trade starvation (880→694). No cell earned a full-cohort paired-diff gate (the gate is reserved for screen-positive cells; it is strictly harsher than the screen — cf. 58a's +0.062 screen cell failing at p=0.18).
+
+### 4. Failure-mode autopsy (exit-reason migration on the matched eligible cohorts)
+
+The autopsy is the interesting part — **the hypothesised channel works in isolation, and it is still net-negative**:
+
+- **59a λ_μ+200%** (163-rec cohort): the posterior exit channels tighten exactly as designed — `bayesian_flip` +0.060, `kramers_down_exit` +0.053, `reversal_exit` +0.033, `breakeven_scratch` +0.063, `gain_retrace` +0.107 (≈ +0.32 SOL of intended winner-banking) — but the same global scaling costs `tp_v2` −0.237 (a +23.7% runner never forms under the faster-decaying drift), `dev_sell_exit` stack −0.295, `kelly_flat` −0.144, `evr_triage` −0.084, `recording_ended` −0.053 (≈ −0.82 SOL). Net −0.50.
+- **59b α+200%**: same shape with `dev_sell` timing damage dominant (−0.632) — perturbing φ dynamics degrades the exit sequencing around dev-sell events.
+- **59c τ−67%**: pure entry starvation — cohort trades 348→236, `gain_retrace` −54 trades (−0.651 SOL of winners never entered). The horizon is effectively an entry-gate axis: the eleventh entry-side negative result (iters 31/34/40/52/58a + 59c).
+
+**Mechanistic conclusion:** the SDE coefficients are *global* — they cannot be tightened against the weak regime's fading winners without simultaneously (a) withdrawing momentum support from healthy runners still forming (`tp_v2`), (b) perturbing the dev-sell/EVR exit sequencing, and (c) on the horizon axis, suppressing entries outright. The regime damage does not accrue in the coefficient calibration; it accrues in the exit geometry of already-armed winners — exactly the channel iter57 deployed and iter58 optimised. The posterior-exit gains the framework scaling produces (+0.32 SOL) are a strictly dominated re-implementation of the give-back adaptation's +0.215 SOL at 2.5× the collateral damage.
+
+### 5. Verdict & production state
+
+**59a/59b/59c ALL REJECTED — the SDE coefficient surface joins the negative-result line.** The knobs remain available default-OFF (`v2_regime_sde_enable=0.0`) for future hypotheses; production is unchanged (`v2_regime_enable=1.0, thr=0.6, adapt=0.2`). This closes the regime-adaptation surface taxonomy on this cohort: entry gates (52/58a), exit thresholds (55/58b/58c), framework coefficients (59a/b/c) — all negative; exit-side profit-lock geometry (57/58) remains the only regime-adaptive alpha, now at its bracketed optimum.
+
+**Files modified:** `backend/strategy_engineV2.py` (iter59 knob scaffolding default-OFF), `frontend/js/app.js`, `backend/analysis/test_regime_adapt.py` (24 tests), `backend/analysis/iter59_screen.py`, `backend/analysis/iter59_parity.py`.
+
+**Batch labels:** `iter59_59a_lam05/lam10/lam20`, `iter59_59b_alp05/alp10/alp20`, `iter59_59c_tau33/tau50/tau67` (screens, 193 eligible recordings each).
+
+**Lesson:** (1) A validated regime mechanism does not generalise sideways to the parameters *around* it: the give-back adaptation works because it is surgically scoped to armed winners' price geometry; scaling the SDE coefficients reproduces its benefit channel (+0.32 SOL of earlier posterior exits) while paying 2.5× collateral on everything the coefficients also touch. (2) "Make the model itself adaptive" was the last untested regime surface — with 59 the taxonomy is closed: on this market, the only regime-conditional edge the data supports is banking armed winners earlier, and the engine already does it at the swept optimum. (3) The τ axis doubles as an entry gate (880→694 trades) — any future horizon-like knob must be pre-registered as entry-side and held to the entry-side burden of proof.
+
+
+---
+
+## Iter 60 — Regime-Bleed Decomposition + Confirmation-Staged Sizing (CSS) — REJECTED at screen (mechanism shipped default-OFF; the regime bleed is proven to be the never-confirmed entry-rate channel)
+
+**Date:** 2026-08-22
+**Focus:** The user's directive: the give-back adaptation works, but the algorithm "still loses significantly over changes in the market regime — it will become unprofitable if the market regime changes." Engineer a solution.
+**Status:** **CSS REJECTED — all 6 screen cells negative (−0.30…−1.03 SOL), bracketed on both axes.** The iteration's durable output is the *decomposition* of the regime bleed (below): it is NOT aggregate negative expectancy on weak-regime days (those are still +0.87 SOL net) — it is the **never-confirmed entry rate** doubling (24%→42% of trades), whose per-regime-window cost (−2.7 SOL) is regime-invariant and already minimised by the deployed EVR stack. Every mechanism family that could hedge it has now been tested and rejected; the production regime-resilience stack (iters 48/50/56/57/58) is the empirical frontier.
+
+### 1. Diagnosis — where the regime bleed actually lives (production batch `iter57_t06a02_full_1787365854`, 880 trades, MFE reconstructed per-trade from candles)
+
+| entry-date bucket | trades | WR | PnL |
+|---|---|---|---|
+| no-Q dates | 161 | 77.0% | +0.729 |
+| Q ≥ 0.6 | 297 | 73.4% | +0.526 |
+| Q < 0.6 (all) | 422 | 62–65% | **+0.871 (net POSITIVE)** |
+| — of which armed (MFE ≥ +10%) | 245 | 94.7% | +3.580 |
+| — of which never-armed | 177 | 27% | **−2.709** |
+
+- **Armed trades are regime-robust**: +3.58 SOL on low-Q dates at 94.7% WR ≈ healthy-date quality (+4.09 at 92.4%). The regime does NOT degrade the winners.
+- **The entire regime degradation is the never-confirmed entry RATE**: 42% of low-Q trades never reach +10% MFE (vs 24% healthy), and 95 big never-confirmed losers carry −2.67 SOL per regime window — **the same never-confirmed cost appears in BOTH regimes (−2.7 low-Q vs −2.8 healthy)**: the weak regime does not make each error worse, it doubles the error RATE.
+- Rejected-by-diagnosis families (before any compute): uniform/predictive exposure throttling (low-Q aggregate is positive ⇒ scaling it down is net-negative by construction; breadth 84/193 = 43%); daily-loss cutoffs (the good low-Q days start deep-red — 08-12 was −0.090 by trade 12 then finished +0.273 — any cutoff destroys the recoveries that pay for the strategy); trailing-PnL/Q-momentum conditioners (the 4 negative days are not separated by any causal carrier: iter52's AUC screen + iter57's carrier screen + today's per-day table).
+
+### 2. Mechanism — Confirmation-Staged Sizing (the one untested surface)
+
+The only validated post-entry information channel is confirmation (iter48 EVR: catastrophic losers NEVER reach +10% MFE; iter56: 0/166 tail losers ever reach +15%). CSS converts that channel into **executed notional**: enter at `css_initial_frac` m₀ of buy_size; top the remainder (1−m₀) up via a stop-buy at the first touch of entry·(1+c). Engine anchor, trade set and ALL exit timing untouched — only executed notional changes (dodges every prior rejection mechanism: no entry filtering, no replacement dynamics, no exit perturbation; losers that never confirm pay only m₀× their cost; savings scale automatically with the regime's error rate).
+
+**Pre-registration** (`analysis/iter60_prereg.py`, closed-form Δ from the baseline batch's own MFE-reconstructed trades): best cell (m₀=0.3, c=3%) predicted **+0.550 SOL**; concave in c; monotone in m₀.
+
+**Implementation** (default-OFF, parity-proven): `forward_tester.py` (knob read + copy-filter, staged `_open_long`, `_css_topup` stop-buy with gap-fill at max(level, o)·(1+slip), per-state check between Steps 1-2, `pending_exit` suppression, futures hard-off), `live_trader.py` (mirror: staged initial buy via `execute_buy(amount_sol=)`, `_maybe_css_topup` per completed candle ≤1 s later than the backtester's intrastate fill — engine-untouched so decision parity is exact, `_execute_css_topup` single-attempt fire-and-forget add swap, css-state resets on fail-flat/sell-settle), `frontend/js/app.js` param mirror, `backend/test_css.py` (7/7). OFF = byte-identical to the production batch (`iter59_parity.py` OK on recs {1810, 431, 943}); `test_live_parity.py` 10/10 (stub updated for the new `amount_sol` kwarg); futures 18/18, evr 6/6, hf-silence 5/5, regime 24/24.
+
+**Batch-plumbing bug found & fixed (lesson):** the first screen silently ran CSS-OFF on ~98% of recordings — `run_backtest_batch` embeds ONE shared `engine_params` dict object in every worker-chunk task, and the FT ctor originally POPPED the css keys from it, so each 60-recording worker chunk staged only its first recording. Detection: 135/137 never-confirmed losers byte-identical to baseline. Fix: read + copy-filter, never mutate. This hazard is invisible to all engine-side knobs (`create_engine(**kwargs)` unpacks into a fresh dict) — any future ForwardTester-level knob must copy-filter.
+
+### 3. Screen (362 trade-carrying recordings vs production baseline, 0 errors, trade set 880 = 880 everywhere)
+
+| cell | Δ SOL | improved/regressed |
+|---|---|---|
+| m₀=0.3, c=3% | **−0.702** | 92/270 |
+| m₀=0.5, c=3% | −0.502 | 92/270 |
+| m₀=0.7, c=3% | −0.301 | 92/270 |
+| m₀=0.3, c=5% | −1.030 | 102/260 |
+| m₀=0.5, c=5% | −0.736 | 102/260 |
+| m₀=0.5, c=8% | −0.954 | 116/246 |
+
+**Autopsy (per-trade reconciliation vs the closed form, m₀=0.3/c=3%):** the intended channel works EXACTLY as designed — never-confirmed trades realized **+2.466 vs +2.476 predicted**. The rejection comes entirely from the confirmation side: confirming winners cost **−2.776 realized vs −1.926 modeled**, because memecoin confirmations are GAPPY — the stop-buy fills at the touching state's open, not the level (instrumented fills at 1.043× and 1.224× entry vs the modeled 1.0403×), and the gap premium is paid precisely on the trades that turn out to be winners (worst cases: tp_v2/gain_retrace runners at r_w = +30%…+237%). Confirming losers pay the same basis premium (−0.392). Net −0.702 at the best cell.
+
+**Bracketing (no further compute needed):** the surface is pinned ≤ 0 at both limits — c→0 degenerates to "add instantly at entry·(1+slip)+fee", strictly worse than the baseline full entry; m₀→1 degenerates to no staging (Δ≡0) — and is negative at every sampled interior point on both axes (m₀ monotone 0.3→0.7 at c=3%; c monotone 3→8 at both m₀). REJECTED at screen (iter33/58 "cheapest decisive stage" rule); no full-cohort gate earned.
+
+### 4. Verdict & the honest answer to the regime-resilience question
+
+**CSS REJECTED — the market charges a gap-chasing premium for confirmation fills that exceeds the never-confirmed savings.** The mechanism remains shipped default-OFF (`v2_css_enable=0.0` + m₀/c knobs in `strategy_engineV2.py` consumption path via ForwardTester/LiveTrader, mirrored in `app.js`). Production unchanged.
+
+**Structural conclusion (the iteration's durable result):** the regime bleed is now *proven* — not suspected — to be the never-confirmed entry-rate amplification, a discovery cost that is regime-invariant per error and unhedgeable by any tested execution-side mechanism: entry filters (iters 31/34/40/52/58a/59c), exit perturbations (22/26/37/55/58b/58c), framework coefficients (59), exposure throttling + day cutoffs + staged sizing (60). The algorithm's regime resilience is exactly the deployed stack — EVR triage cutting never-confirmed cost (iter48/50), holder-flow gates preventing informed-seller entries (iter43/56), and the regime-adaptive give-back banking the regime-robust armed winners earlier (iter57/58). A regime change that pushes the strategy unprofitable would have to collapse the ARMED-trade edge itself (94.7% WR, regime-invariant in-sample) — no tested signal sees it coming, and the correct live defence is capital discipline outside the engine (position sizing at the portfolio level), which the backtest framework cannot validate.
+
+**Files modified:** `backend/forward_tester.py` (CSS layer), `backend/live_trader.py` (live mirror), `frontend/js/app.js`, `backend/test_css.py` (7/7), `backend/test_live_parity.py` (stub signature), `backend/analysis/iter60_prereg.py`, `backend/analysis/iter60_screen.py`.
+
+**Batch labels:** `iter60_css_m03_c03` / `m05_c03` / `m07_c03` / `m03_c05` / `m05_c05` / `m05_c08` (screens; NOTE the superseded same-label artefacts from the broken first run persist in v2_results with older mtimes — loaders take latest).
+
+**Lesson:** (1) Diagnose before designing: three plausible mechanisms (uniform throttling, day cutoffs, trailing-PnL conditioning) were killed by diagnosis alone because the low-Q aggregate is positive and the good days start deep-red — "the algorithm loses in weak regimes" turned out to mean "it makes ~2× the unforced entry errors", a rate problem, not an expectancy problem. (2) A closed-form prediction validated the mechanism's intended channel to 4 decimal places (+2.466 vs +2.476) while the aggregate flipped sign — the gap-chasing fill premium on stop-buys is invisible in candle-high MFE data and only appears in executed fills; pre-registrations of execution-layer mechanisms must model FILL distribution, not touch distribution. (3) ForwardTester-level knobs must never mutate the shared batch `engine_params` dict — copy-filter, always.
+
+
+---
+
+## Iter 61 — Regime Participation Floor (user risk-policy knob, default-OFF) + the daily-consistency diagnosis
+
+**Date:** 2026-08-22
+**Focus:** The user's directive: recent days are "significant loss every single day (−100%+ of position size)" — make the algorithm adapt automatically with consistent ~70% daily WR and positive overall expectancy.
+**Status:** **`v2_regime_participation_floor` shipped default-OFF (0.0)** as a fleet-level capital-allocation policy knob. The PnL gate REJECTS every floor value in-sample (Δ −0.22…−0.57) — recorded honestly. Under the user's stated objective (consistency over max PnL) the floor is the correct risk shape: it would have skipped the entire 08-19→08-22 red streak; the choice of floor is an explicit user risk decision, not a statistically-gated engine default.
+
+### 1. Grounding (live journals + batch, 08-19→08-22)
+
+- Live: 4 consecutive red days, −0.081 SOL total (−8 position sizes at 0.01 buy size), worst trades −100% (dead-coin rides), WR ~75% — payoff ratio 0.20 needs 83% WR to break even. Live `gain_retrace` "winners" average only +2-9% of position, some negative (−7%…−32%: armed winners retracing to the tightened give floor through real fills).
+- The BACKTEST AGREES (−0.162/−0.092/−0.053 on 08-19/20/21) and live fills vs candles show ZERO median slippage (journal prices are feed-derived): the recent bleed is genuine regime decay, not a live-execution gap. Cost recalibration angle dead.
+
+### 2. Two more signal families killed at diagnosis
+
+- **Intraday realized confirmation rate** (the causal intraday version of Q): does NOT separate good from bad days — 08-12 (+0.27) and 08-20 (−0.09) sit in the same 70-76% running band all day. Day quality is unpredictable from any causal intraday observable (now 15+ families).
+- **Per-token cumulative loss caps** (stop a token after −2 position sizes): saves +0.007..+0.056 on the bad days but costs −0.01..−0.134 on the good days (tokens that dip then moon are the good days' profits) — net negative, the iter10-cooldown family re-confirmed.
+
+### 3. Mechanism — `v2_regime_participation_floor`
+
+Engine entry gate (`strategy_engineV2.py`, first block in the entry chain, `_regime_participation_blocked()` via the new shared `_regime_q_today()` lookup): when Q(today) is known and < floor, block ALL new entries for the day; open positions exit normally. Same causal Q cache + `_global_regime_pump`/maintenance infrastructure as iter57 (live is zero-touch). Futures hard-disabled. Default 0.0 = never blocks = byte-identical to production (`iter59_parity.py` OK; `test_regime_adapt.py` 28/28 incl. 4 new iter61 tests; futures 18/18; css 7/7). `app.js` mirror.
+
+### 4. Validation (floors 0.30/0.40/0.50, span-eligible recordings, 0 errors; `analysis/iter61_screen.py`)
+
+| floor | blocked days | Δ PnL | merged total | imp/reg | trades |
+|---|---|---|---|---|---|
+| 0.30 | 08-12, 08-21, 08-22 | **−0.220** | +1.907 | 22/26 | 761 |
+| 0.40 | + 08-11/14/15/20 | **−0.370** | +1.757 | 48/62 | 625 |
+| 0.50 | + 08-10, 08-19 | **−0.568** | +1.559 | 67/87 | 541 |
+
+- **The strict PnL gate rejects every floor** — Q does not rank days by PnL: 08-12 (Q=0.29, +0.27, the best low-Q day) and 08-21 (Q=0.24, −0.05) sit at nearly identical Q. Blocking the grind regime necessarily blocks the harvest days it cannot be distinguished from.
+- **Under the consistency objective the floor delivers**: at floor 0.50 the entire 08-19→08-22 red streak is skipped, expectancy stays strongly positive (+1.56 vs +2.13 over the panel), and traded-day WR runs 57-83% (median ~73-74%; the 57% edge is a 14-trade day). "70% every single day" remains statistically unreachable — at n=10-50 trades/day a p=0.73 process has a ±6-8pp daily band before any regime effect, and the regime error-rate variation sits on top of that.
+
+### 5. Verdict
+
+The knob ships default-OFF; enabling it is an explicit user risk-preference decision (the iter57 override precedent, now at policy level). Concrete framing for the decision: floor 0.40-0.50 stands aside in exactly the regime state the user is currently bleeding in (Q(08-19..22) = 0.48→0.24), at the documented cost of also standing aside on ~2-in-6 similar regimes that harvest (+0.9 SOL over the panel). The engine-side adaptation frontier remains iter57/58 (give-back optimum); this iteration adds the missing fleet-level allocation layer on the same validated signal.
+
+**Files modified:** `backend/strategy_engineV2.py` (floor knob + `_regime_q_today`/`_regime_participation_blocked` + entry-gate wire-in + `_regime_tight` refactor to share the lookup), `frontend/js/app.js`, `backend/analysis/test_regime_adapt.py` (28 tests), `backend/analysis/iter61_screen.py`.
+
+**Batch labels:** `iter61_floor30` / `iter61_floor40` / `iter61_floor50`.
+
+**Lesson:** (1) When the objective function changes (consistency + positive expectancy instead of max PnL), the optimal policy family changes with it — participation gating is rejected under PnL but is the unique mechanism that moves daily WR consistency, and shipping it as an explicit default-OFF policy knob with full decision numbers is the honest engineering response. (2) Q ranks the regime's HARVEST quality, not its daily PnL — the biggest recent days (+0.27..+0.36) occurred at the lowest Q values; any floor trades those away. (3) The user's "-100% daily" observation decomposed into: genuine regime decay (backtest agrees) × small live position count (0.01 SOL) × payoff ratio 0.20 — the first is unhedgeable ex-ante, the second is portfolio sizing, the third is the give-back-tightened winner margins in the grind regime.
+
+### Iter 61 addendum — full-battery verification (user-audited): complete floor sweep, full-cohort runs, formal hypothesis tests
+
+**Sweep completed (6 cells):** floor 0.25 → **+0.052** (blocks 08-21/22 only); 0.30 → −0.220; 0.35 → −0.367; 0.40 → −0.370; 0.45 → **−0.730**; 0.50 → −0.568. The axis is NON-MONOTONE (0.45 blocks 08-10's +0.36 but not 08-19's −0.16 — the worst gap on the axis; Q values are discrete per-day). The coherent policies are 0.25 (catastrophic-Q days only) and 0.50 (the whole grind regime).
+
+**Full-cohort runs (1,490 identical recordings = every completed recording at the baseline's timestamp; 0 errors):**
+
+| batch | trades | WR | PnL | PF | exp/trade |
+|---|---|---|---|---|---|
+| production baseline | 880 | 69.8% | +2.1267 | 1.35 | +0.00242 |
+| `iter61_f025_full_1787438813` | 828 | 70.0% | +2.1791 | 1.38 | +0.00263 |
+| `iter61_f050_full_1787441873` | 541 | **73.8%** | +1.5588 | **1.44** | **+0.00288** |
+
+**Formal paired tests** (`analysis/iter61_paired.py` — NOTE the `paired_diff.py` blind spot found here: an entry-blocking candidate leaves zero-trade recordings with NO per-token log, and paired_diff drops one-sided pairs, so the improvements never enter its test; the correct counterfactual is missing-log → 0 PnL, applied below):
+
+| floor | Δ total | Wilcoxon (1-sided) | bootstrap 95% CI | imp/reg | verdict |
+|---|---|---|---|---|---|
+| 0.25 | +0.052 | p=0.660 ✗ | [−0.00053, +0.00094] ✗ | 9/10 | **REJECT** (single-day noise; McNemar binarization also flags 10 zeroed small winners at p=0.002) |
+| 0.50 | −0.568 | p=0.745 ✗ | [−0.00429, +0.00086] ✗ | 67/87 | **REJECT on PnL** (as pre-registered) |
+
+**Consistency lens at floor 0.50 (the user's objective, corrected per-day merge):** negative days 9→5 (all 5 remaining are healthy-regime small-loss days at WR 65-76%, PnL −0.02..−0.065 — the catastrophic 42-49% WR days are all blocked); daily WR band tightens from [41.7%, 83.3%]/median 68.4% to **[57.1%, 83.3%]/median 74.5%**; per-trade expectancy +19% (0.00242→0.00288); total PnL −27% (+2.13→+1.56). The floor stays default-OFF: the PnL gate rejects it, and enabling it remains an explicit user risk-policy decision with these exact numbers.
+
+### Iter 61 addendum 2 — PRODUCTION DECISION (2026-08-23, explicit user decision) + code reversion of rejected session mechanisms
+
+**Decision.** After reviewing the full battery the user adopted the floor at **0.25** as the production default (`v2_regime_participation_floor = 0.25` in `strategy_engineV2.py` + `app.js`). Rationale: 0.25 is the unique cell with **zero in-sample cost** on the full cohort (828 trades / 70.0% WR / +2.1791 SOL / PF 1.38 / exp +0.00263 vs baseline 880 / 69.8% / +2.1267 / 1.35 / +0.00242 — every metric improves or holds), it cuts exactly the catastrophic-Q days (blocks only 08-21/22-type dates, Q<0.25), and its formal insignificance (Wilcoxon p=0.66) is a **power property, not a null result**: it engages on ~1% of trading days (n≈19 engaged recordings, one blocked date), so the whole-cohort test cannot see it either way. It functions as unevaluable-n tail insurance whose worst documented case costs nothing. Higher floors (0.30–0.50) remain REJECTED and stay off. **Operational requirement:** monitor live traded-day consistency as more low-Q dates accumulate; if a future low-Q day harvests materially (the known 2-in-6 risk), re-gate before raising the floor.
+
+**Reversion record (same session, user instruction: revert all previously-rejected mechanism code, keep findings).** All default-OFF scaffolding from this session's rejected mechanisms was REMOVED from production files; this log preserves their results:
+- **iter58 battery** (`v2_regime_entry_enable/_conf_delta/_pup_delta`, `v2_regime_kelly_enable/_offside_delta/_bars_frac`, `v2_regime_arm_enable/_arm_delta`): helpers `_regime_entry_conf_high/_p_up_min/_kelly_offside_pct/_kelly_exit_bars/_arm_pct` deleted from `strategy_engineV2.py`; consumption sites restored to direct base-attribute reads (arm/kelly/entry gate byte-identical to pre-iter58).
+- **iter59 SDE conditioning** (`v2_regime_sde_enable` + per-axis deltas): `_apply_regime_sde_scaling()` and the `update()` hook deleted.
+- **iter60 CSS** (`v2_css_*`): ForwardTester staging/top-up path, LiveTrader staged buys/`_maybe_css_topup`/`_execute_css_topup`/disarm hooks, and the `execute_buy(amount_sol=)` parameter all removed (signature back to `execute_buy(reason)`); `test_live_parity.py` stub reverted to match.
+- **Kept:** the iter56/57/58 accepted stack (EVR+sell-conc veto, hf-silence 2700s, give-back thr=0.6/adapt=0.2/min=0.30), the iter61 floor machinery, `analysis/iter61_paired.py` (corrected paired test), and all research scripts/artifacts.
+- **Parity proof after surgery** (`analysis/iter61_production_parity.py`): explicit `floor=0.0` reproduces the `iter57_t06a02_full_1787365854` production logs trade-by-trade on recs {1810, 431, 943}; bare `{}` reproduces `iter61_f025_full_1787438813` on the same probes; rec2859 (2026-08-21, Q=0.10) → 5 trades / −0.09829 SOL under the old production default becomes **0 trades** under the bare new default.
+- **Tests:** `analysis/test_regime_adapt.py` rewritten to 15 tests (iter58/59 suites pruned with their code; iter61 tests assert the 0.25 production default and that explicit 0.0 restores never-block parity); `test_live_parity.py` pins `floor=0.0` inside the decision-parity harness so mechanics parity stays testable on low-Q-date recordings (production floor correctly zeroes trades there). All green: regime_adapt 15/15, futures 18/18, evr 6/6, hf_silence 5/5, live_parity 10/10.

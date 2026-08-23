@@ -245,8 +245,19 @@ let engineParamsV2 = {
   // pre-iter57 behaviour).  See RESEARCH_LOG.md Iter 57.
   v2_regime_enable:          1.0,   // 1.0 = ON (production default); 0.0 = OFF
   v2_regime_q_threshold:     0.6,   // regime score below which trail tightens
-  v2_regime_give_frac_adapt: 0.3,   // max give-back tightening at Q = 0
+  v2_regime_give_frac_adapt: 0.2,   // iter58 sweep optimum (grid max; clears strict CI gate)
   v2_regime_give_frac_min:   0.30,  // floor on the tightened give-back
+
+  // iter61: regime participation floor — PRODUCTION default 0.25 (enabled by
+  // explicit user decision 2026-08-23).  When the causal daily regime score
+  // Q(today) < floor, block ALL new entries for the day (open positions exit
+  // normally).  Zero in-sample cost (full-cohort 828 trades / 70.0% WR /
+  // +2.179 SOL vs 880 / 69.8% / +2.127; tail metrics all improve) and it is
+  // the only knob that delivers the consistency objective (skips red-regime
+  // days entirely).  Unevaluable-n insurance: monitor live and re-gate as
+  // more low-Q dates accumulate.  Set 0.0 to never block.
+  // See RESEARCH_LOG.md Iter 61.
+  v2_regime_participation_floor: 0.25,
 };
 
 /* Engine version: 1 = V1 (Physics), 2 = V2 (RBPF/UKF/KDE/Kramers) */
