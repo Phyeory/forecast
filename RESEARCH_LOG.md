@@ -7258,3 +7258,65 @@ The knob ships default-OFF; enabling it is an explicit user risk-preference deci
 - **Kept:** the iter56/57/58 accepted stack (EVR+sell-conc veto, hf-silence 2700s, give-back thr=0.6/adapt=0.2/min=0.30), the iter61 floor machinery, `analysis/iter61_paired.py` (corrected paired test), and all research scripts/artifacts.
 - **Parity proof after surgery** (`analysis/iter61_production_parity.py`): explicit `floor=0.0` reproduces the `iter57_t06a02_full_1787365854` production logs trade-by-trade on recs {1810, 431, 943}; bare `{}` reproduces `iter61_f025_full_1787438813` on the same probes; rec2859 (2026-08-21, Q=0.10) → 5 trades / −0.09829 SOL under the old production default becomes **0 trades** under the bare new default.
 - **Tests:** `analysis/test_regime_adapt.py` rewritten to 15 tests (iter58/59 suites pruned with their code; iter61 tests assert the 0.25 production default and that explicit 0.0 restores never-block parity); `test_live_parity.py` pins `floor=0.0` inside the decision-parity harness so mechanics parity stays testable on low-Q-date recordings (production floor correctly zeroes trades there). All green: regime_adapt 15/15, futures 18/18, evr 6/6, hf_silence 5/5, live_parity 10/10.
+
+---
+
+## Iter 62 — Production Ablation: Holder-Flow Entry Gate / Dev-Sell Exit + Regime Layers DISABLED (user working-tree change) — date-segmented backtest verdict: **NET-NEGATIVE, the disabled layers were protective**; live-vs-backtest divergence documented
+
+**Date:** 2026-08-23
+**Focus:** The user turned off the holder-flow entry gate/exit and both regime layers in the working tree after observing the live trader "performing significantly better", then requested a re-run of the day-segmented backtest under the ablated configuration plus a report.
+**Status:** **Ablation REJECTED by the backtest** — paired per-date comparison vs the same-morning all-layers-ON run shows Δ = **−0.7366 SOL** on 25 identical-cohort dates, Wilcoxon p = 0.0535, bootstrap 95% CI [−0.0596, −0.0022] **strictly negative**, breadth 5/25 improved. The four knobs REMAIN OFF in the working tree as an explicit user policy decision (iter57-style override precedent, opposite direction); the engine source is otherwise byte-identical. Re-gate criteria recorded below.
+
+### 1. The change (uncommitted working tree, verified effective)
+
+| knob | was | now | layer |
+|---|---|---|---|
+| `v2_holder_flow_entry_block` | 1.0 | **0.0** | iter43 entry gate (30 s dev/insider-sell block) |
+| `v2_holder_flow_exit_enable` | 1.0 | **0.0** | iter43 immediate dev-sell exit |
+| `v2_regime_enable` | 1.0 | **0.0** | iter57/58 regime-adaptive `gain_retrace` give-back |
+| `v2_regime_participation_floor` | 0.25 | **0** | iter61 fleet participation floor |
+
+Adapter pop-defaults edited directly (`strategy_engineV2.py`) + `app.js` mirrors; smoke-tested effective at construction. **Retained ON:** EVR triage + sell-concentration veto (iter48/50), HF stream silence gate 2700 s (iter56). Core SDE/KDE/Kramers machinery untouched → per-date deltas isolate exactly the four layers.
+
+### 2. Test protocol
+
+New runner `backend/analysis/run_date_segmented_backtests_v3.py` (V2 script + fresh paths + auto-appended **Section 7 paired-ablation comparison** when the V2 cache exists): full re-run across ALL completed recordings grouped by UTC date under the ablated defaults. Cohorts: 26 dates / 1,557 recordings / 985 trades. The comparator (`date_segmented_results_v2.json`, generated ~12 h earlier under all-layers-ON defaults) covers 25 dates with **byte-identical recording cohorts on every shared date** (verified programmatically); 2026-08-23 (+0.2748 SOL, 11 trades, PF 4.45) is new and excluded from pairing. Artifacts: `DATE_SEGMENTED_BACKTEST_REPORT_V3.md`, `date_segmented_results_v3.json`, batch prefix `date3_`.
+
+### 3. Results
+
+Headline: V3 total **+1.4403 SOL** (985 trades, WR 71.78%, PF 1.19) vs V2 +1.9021 SOL (912 trades, 69.63%, PF 1.30). On the 25 paired dates: **+1.1655 vs +1.9021 → Δ −0.7366 SOL**, trades 912→974, day-mean WR 66.8%→70.9% (WR rises because losers churn more), avg loss −23.10%→−27.56%, payoff 0.566→0.467.
+
+| statistic | value |
+|---|---|
+| mean daily ΔPnL | **−0.0295 SOL** |
+| Wilcoxon signed-rank (two-sided) | p = 0.0535 |
+| bootstrap 95% CI of mean daily Δ (10k) | **[−0.0596, −0.0022] strictly negative** |
+| days improved / regressed / byte-identical | 5 / 10 / 10 |
+| tail trades ≤ −15% | **+29** |
+| kelly_flat PnL delta (sum) | **−1.132 SOL** |
+| recording_ended PnL delta (sum) | −0.241 SOL |
+
+Worst regressions: 08-12 **−0.220**, 08-19 **−0.196**, 08-10 −0.136, 08-15 −0.106, 08-08 −0.099, 08-21 −0.082. Improvements: 08-16 +0.089, 08-20 +0.079, 08-22 +0.034, 08-18 +0.036, 08-13 +0.016. Dates 07-27→08-06 are **byte-identical** (zero `dev_sell_exit` fires there — confirms the diff isolates the ablated layers).
+
+### 4. Mechanism autopsy — where the money went
+
+1. **`dev_sell_exit` was a profitable SAVE, not just a loss-trimmer.** Under V2 it carried net-positive PnL on 08-08 (+0.073), 08-10 (+0.165), 08-11 (+0.114), 08-12 (+0.084), 08-18 (+0.122): exiting at the insider dump locked in gains before further decline. With it off, those positions ride on into `kelly_flat`/`recording_ended` or round-trip into the tail (ΔTail +29 trades concentrated on exactly these dates).
+2. **The iter43 entry gate was silently filtering bad entries**; without it trade count rises 912→974 and the extra entries skew to losers (WR up, expectancy down).
+3. **Regime give-back**: its removal hurt most on grind-regime dates (08-12/08-15/08-19) where tightened armed-winner trails had been banking winners before give-back.
+4. **Participation floor**: near-zero backtest effect by construction (~1% engagement; rec2859-type day re-trades −0.098 inside the 08-21 regression).
+
+### 5. Why live disagrees with the backtest (hypotheses, untested)
+
+- **Holder-flow delivery latency**: the backtest replays events at exact on-chain timestamps; live GMGN polling adds discovery latency, so live dev-sell exits fill seconds late with worse fills — degrading precisely the layer that looks best in replay. Testable via `forward_tester.holder_flow_latency_seconds` (iter39 hook).
+- **Sample size**: the live impression spans ~4 trading days overlapping the worst regime decay window; the paired test above spans 25 dates.
+- The HF **silence gate remains ON** — if live delivery degrades, its stale-data behavior differs from replay.
+
+### 6. Verdict & standing decision
+
+The evidence says the four disabled layers were net-protective over the full dataset; the simplified stack is NOT a free improvement. Per the user's explicit instruction the knobs stay **OFF in the working tree** (documented user risk-policy override; nothing committed). Re-gate criteria: (a) run the latency-injected backtest — if the dev-sell edge survives ≥5 s injected latency, restore the layers; (b) alternatively split the difference — restore only `v2_holder_flow_exit_enable` (the largest single contributor) while keeping gates/regime off; (c) if live stays better without the layers for ≥2 more weeks of recordings, re-run this comparison on the enlarged cohort before concluding. Do NOT treat the V3 numbers as a new baseline — `iter61_f025_full_1787438813` / the V2 cache remain the production reference cohort.
+
+**Files/artifacts:** `backend/analysis/run_date_segmented_backtests_v3.py`, `DATE_SEGMENTED_BACKTEST_REPORT_V3.md`, `backend/analysis/date_segmented_results_v3.json`; modified (user, uncommitted): `backend/strategy_engineV2.py`, `frontend/js/app.js`, `frontend/index.html`.
+
+**Batch labels:** `date3_<YYYYMMDD>_*` (26 batches).
+
+**Lesson:** (1) A "feels better live" simplification must still clear the paired-diff bar — here the ablation fails it with a strictly negative CI, and the exit-reason attribution pinpoints WHY (profitable saves vanished into tails). (2) Byte-identical early-date segments are the cheapest possible sanity check that an ablation touched only what it claims. (3) When live and backtest disagree about a *latency-sensitive* mechanism, suspect delivery latency first — the replay assumes perfect information arrival that the live path does not have.

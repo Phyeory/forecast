@@ -243,7 +243,7 @@ let engineParamsV2 = {
   // Entries are NOT touched (iter52 rejection).  Production default 1.0 = ON
   // (iter57 ACCEPTED by explicit user decision 2026-08-22; set 0.0 to restore
   // pre-iter57 behaviour).  See RESEARCH_LOG.md Iter 57.
-  v2_regime_enable:          1.0,   // 1.0 = ON (production default); 0.0 = OFF
+  v2_regime_enable:          0.0,   // 1.0 = ON (production default); 0.0 = OFF
   v2_regime_q_threshold:     0.6,   // regime score below which trail tightens
   v2_regime_give_frac_adapt: 0.2,   // iter58 sweep optimum (grid max; clears strict CI gate)
   v2_regime_give_frac_min:   0.30,  // floor on the tightened give-back
@@ -257,7 +257,7 @@ let engineParamsV2 = {
   // days entirely).  Unevaluable-n insurance: monitor live and re-gate as
   // more low-Q dates accumulate.  Set 0.0 to never block.
   // See RESEARCH_LOG.md Iter 61.
-  v2_regime_participation_floor: 0.25,
+  v2_regime_participation_floor: 0,
 };
 
 /* Engine version: 1 = V1 (Physics), 2 = V2 (RBPF/UKF/KDE/Kramers) */
