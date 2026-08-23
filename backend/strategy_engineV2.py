@@ -266,7 +266,7 @@ DEFAULT_CONFIG = {
     # extreme regime states, auto-disengages on recovery; statistically
     # unevaluable at n=1 blocked day — insurance, not a validated edge.
     # Set 0.0 to never block (restores byte-exact pre-iter61 behaviour).
-    "v2_regime_participation_floor": 0.25,
+    "v2_regime_participation_floor": 0,
 }
 
 
@@ -3195,8 +3195,8 @@ class StrategyEngineV2Adapter:
         #   When no holder_flow events are loaded, `_has_recent_dev_sell`
         #   always returns False, so behaviour is byte-identical to the
         #   pre-iter36 engine (parity-safe on recordings without holder_flow).
-        self._v2_holder_flow_entry_block = float(engine_kwargs.pop("v2_holder_flow_entry_block", 1.0))
-        self._v2_holder_flow_exit_enable = float(engine_kwargs.pop("v2_holder_flow_exit_enable", 1.0))
+        self._v2_holder_flow_entry_block = float(engine_kwargs.pop("v2_holder_flow_entry_block", 0.0))
+        self._v2_holder_flow_exit_enable = float(engine_kwargs.pop("v2_holder_flow_exit_enable", 0.0))
         self._v2_holder_flow_require_tag = float(engine_kwargs.pop("v2_holder_flow_require_tag", 0.0))
         self._v2_holder_flow_min_usd     = float(engine_kwargs.pop("v2_holder_flow_min_usd", 100.0))
         self._v2_holder_flow_entry_window_seconds = int(engine_kwargs.pop("v2_holder_flow_entry_window_seconds", 30))
@@ -3250,7 +3250,7 @@ class StrategyEngineV2Adapter:
         # pre-iter57 behaviour.  Futures engines are hard-disabled: the regime
         # cache measures the 1s memecoin spot harvest regime and must never
         # modulate the macro-bar perp layer.
-        self._v2_regime_enable         = float(engine_kwargs.pop("v2_regime_enable", 1.0))
+        self._v2_regime_enable         = float(engine_kwargs.pop("v2_regime_enable", 0.0))
         self._v2_regime_q_threshold    = float(engine_kwargs.pop("v2_regime_q_threshold", 0.6))
         self._v2_regime_give_frac_adapt = float(engine_kwargs.pop("v2_regime_give_frac_adapt", 0.2))
         self._v2_regime_give_frac_min  = float(engine_kwargs.pop("v2_regime_give_frac_min", 0.30))
@@ -3260,7 +3260,7 @@ class StrategyEngineV2Adapter:
         # and their code reverted 2026-08-23 — findings preserved in
         # RESEARCH_LOG.md Iters 58-59.)
         self._v2_regime_participation_floor = float(
-            engine_kwargs.pop("v2_regime_participation_floor", 0.25))
+            engine_kwargs.pop("v2_regime_participation_floor", 0))
         if self._is_futures_engine:
             self._v2_regime_enable = 0.0
             self._v2_regime_participation_floor = 0.0
