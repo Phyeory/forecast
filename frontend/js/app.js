@@ -235,29 +235,26 @@ let engineParamsV2 = {
   // been silent for >= this many seconds (2700.0 = ACCEPTED default; 0 = OFF).
   v2_hf_silence_gate_seconds: 2700.0,
 
-  // iter57: global harvest-regime give-back adaptation.  Q(t) = the strategy's
-  // own realised gain_retrace exit share over the trailing 3 trading days
-  // (causal, coin-agnostic; backend/data/global_regime_cache.json).  When
-  // Q < q_threshold the gain_retrace trail tightens for ARMED winners only:
-  // give_eff = 0.5 − adapt·clamp01((thr−Q)/thr), floored at give_frac_min.
-  // Entries are NOT touched (iter52 rejection).  Production default 1.0 = ON
-  // (iter57 ACCEPTED by explicit user decision 2026-08-22; set 0.0 to restore
-  // pre-iter57 behaviour).  See RESEARCH_LOG.md Iter 57.
-  v2_regime_enable:          0.0,   // 1.0 = ON (production default); 0.0 = OFF
-  v2_regime_q_threshold:     0.6,   // regime score below which trail tightens
-  v2_regime_give_frac_adapt: 0.2,   // iter58 sweep optimum (grid max; clears strict CI gate)
-  v2_regime_give_frac_min:   0.30,  // floor on the tightened give-back
-
-  // iter61: regime participation floor — PRODUCTION default 0.25 (enabled by
-  // explicit user decision 2026-08-23).  When the causal daily regime score
-  // Q(today) < floor, block ALL new entries for the day (open positions exit
-  // normally).  Zero in-sample cost (full-cohort 828 trades / 70.0% WR /
-  // +2.179 SOL vs 880 / 69.8% / +2.127; tail metrics all improve) and it is
-  // the only knob that delivers the consistency objective (skips red-regime
-  // days entirely).  Unevaluable-n insurance: monitor live and re-gate as
-  // more low-Q dates accumulate.  Set 0.0 to never block.
-  // See RESEARCH_LOG.md Iter 61.
-  v2_regime_participation_floor: 0,
+  // iter63/64: stationary Kramers rate-split early-harvest exit
+  // ("rate_split_flip"), REGIME-GATED (iter64 — replaces the removed
+  // iter57/58 give-back adaptation and the iter61 participation floor,
+  // removed by explicit user decision 2026-08-24).  While armed (peak ≥
+  // entry·(1+arm)), fires when the stationary escape-rate split
+  // s = k_down/(k_up+k_down) ≥ theta for `persist` consecutive 4-state
+  // ticks.  iter63 full-cohort (rsb12t55): Δ +0.3633 SOL (+25.2%),
+  // Wilcoxon p=2e-05, breadth 74.5%, harvested class +3.246 SOL with
+  // worst trade 0.0%.  The regime gate restricts firing to weak-regime
+  // days (causal Q(today) < q_max; date-segmented: +0.263 SOL over weak
+  // days vs +0.010 on strong days).  See RESEARCH_LOG.md Iters 63/64.
+  v2_rate_split_enable:         0.0,   // 1.0 = ON; 0.0 = OFF (byte-parity)
+  v2_rate_split_regime_gate:    1.0,   // 1.0 = weak-regime-days only
+  v2_rate_split_q_max:          0.6,   // Q(today) >= this → normal day → inert
+  v2_rate_split_unknown_q_enable: 1.0, // unknown/missing Q dates → ON
+  v2_rate_split_arm_pct:       10.0,   // arm profit-lock trigger at +10% peak
+  v2_rate_split_offside_pct:    0.0,   // offside scope REJECTED by CF/screen (0)
+  v2_rate_split_theta:          0.55,  // sustained stationary-split threshold
+  v2_rate_split_persist:          12,  // consecutive 4-state ticks (≈3 s)
+  v2_rate_split_min_peak_age_ticks: 0, // runner-immunity veto REJECTED (0 = off)
 };
 
 /* Engine version: 1 = V1 (Physics), 2 = V2 (RBPF/UKF/KDE/Kramers) */

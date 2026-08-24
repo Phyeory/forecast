@@ -497,15 +497,16 @@ async def stop_stale_scanner():
 
 
 # ── iter57: global harvest-regime cache maintenance (auto-refresh) ─────────
-# Keeps backend/data/global_regime_cache.json current with zero manual
-# steps: at startup and daily at 00:05 UTC it (1) backtests any recordings
-# not yet measured — pinned to the UN-ADAPTED engine (v2_regime_enable=0.0)
-# so Q always tracks the market through the same fixed instrument the
-# iter57 validation used, with no adaptation feedback loop — and (2) merges
-# the exit mix into the cache accumulators and rebuilds Q through today's
-# live frontier (atomic write).  Running live sessions pick the new map up
-# via the _global_regime_pump mtime check.  Kill switch: env
-# ITER57_REGIME_AUTOREFRESH=0.
+    # Keeps backend/data/global_regime_cache.json current with zero manual
+    # steps: at startup and daily at 00:05 UTC it (1) backtests any recordings
+    # not yet measured — pinned to the UN-TRIGGERED engine
+    # (v2_rate_split_enable=0.0) so Q always tracks the market through the
+    # same fixed instrument (gain_retrace exit share under base exit
+    # semantics), with no mechanism feedback loop — and (2) merges
+    # the exit mix into the cache accumulators and rebuilds Q through today's
+    # live frontier (atomic write).  Running live sessions pick the new map up
+    # via the _global_regime_pump mtime check.  Kill switch: env
+    # ITER57_REGIME_AUTOREFRESH=0.
 REGIME_AUTOREFRESH = os.environ.get("ITER57_REGIME_AUTOREFRESH", "1") != "0"
 
 
@@ -527,7 +528,7 @@ def _regime_cache_refresh_once() -> dict:
         label = f"regime_auto_{int(time.time())}"
         results = run_backtest_batch(
             engine_version=2,
-            engine_params={"v2_regime_enable": 0.0},   # measurement semantics
+            engine_params={"v2_rate_split_enable": 0.0},   # measurement semantics
             max_workers=2,                              # gentle vs live trading
             batch_id=label,
             recording_ids=new_ids,
