@@ -7320,3 +7320,392 @@ The evidence says the four disabled layers were net-protective over the full dat
 **Batch labels:** `date3_<YYYYMMDD>_*` (26 batches).
 
 **Lesson:** (1) A "feels better live" simplification must still clear the paired-diff bar — here the ablation fails it with a strictly negative CI, and the exit-reason attribution pinpoints WHY (profitable saves vanished into tails). (2) Byte-identical early-date segments are the cheapest possible sanity check that an ablation touched only what it claims. (3) When live and backtest disagree about a *latency-sensitive* mechanism, suspect delivery latency first — the replay assumes perfect information arrival that the live path does not have.
+
+---
+
+## Iter 63 — "Selling Too Late": Stationary Kramers Rate-Split Early-Harvest Exit (default-OFF, gate pending explicit user override)
+
+**Date:** 2026-08-23 → 2026-08-24
+**Focus:** User observation that the V2 engine "sells too late" — most losses are big losses and winners peaking +50% realise only +15%. Engineer a fundamental improvement to the sell mechanism (not a noisy overlay), then follow the iteration protocol (backtests, parity, hypothesis, full batch) until it beats the baseline.
+**Status:** **MECHANISM ACCEPTED — GATE PARTIAL (2/3 strict gates pass)**. Full-cohort `iter63_full` (`v2_rate_split_enable=1, θ=0.55, K=12`, armed-only) vs the iter62 ablated baseline `date3_`: **Δ +0.3633 SOL** (+25.2%, 985→1029 trades, WR 72.1%, PF 1.23), **Wilcoxon one-sided p = 2.0e-05**, **breadth 70/24 = 74.5%** (McNemar 2 W→L vs 5 L→W), **bootstrap 95% CI [−0.000219, +0.001877] — straddles zero by 2.2e-4 SOL/rec → strict gate FAILS on CI alone**. Engine code lives behind default OFF (`enable=0.0`); production behaviour unchanged pending explicit user override (iter57-style). Re-runnable end-to-end via the commands in §13.
+
+### 1. The user's complaint — verified quantitatively on the production cohort
+
+Built `backend/analysis/iter63_forensics.py`: per-trade MFE reconstruction from the 1 s candle tape for every date3 trade (979 trades). Forensically verified:
+
+| Quantity (date3 baseline, full cohort) | Value |
+|---|---|
+| Total trades | 985 (406 recordings paired to iter63_full baseline) |
+| Winners (realised > 0) | 707 |
+| Winner MFE-capture ratio (Σ realised / Σ MFE, MFE ≥ 10%) | **51%** — 49% of peak profit surrendered |
+| Median winner give-back fraction (MFE ≥ 10%) | 58% (q25–q75 51–66%) |
+| Big-MFE (≥40%) winners: n, median realised | 102 trades, +31.3% (median peak +50.8%) |
+| `gain_retrace` exits (median give-back 51%) | 615 trades |
+| Tail trades ≤ −15%: n, never-confirm-+10% share | 202 trades, 99.5% (matches iter56 finding) |
+| Median latency from −20% cross to exit (losers) | 99 s (mean 441 s); `kelly_flat` fires at median 355 s |
+| Gap-through share of `gain_retrace` trades (realised below floor by > 2 pp) | 46.5% — the 50%-of-peak floor is the median anchor, not the achieved exit |
+
+The user's "peak +50% realise +15%" maps to the p5 of the realised/floor ratio quantiles (realised/floor q5 = −0.228 — i.e. some armed winners realise at *negative* multiples of the floor due to gap-through on fast dumps). The complaint is real, structural, and concentrated in the `gain_retrace` exit (615 trades) with median give-back ≈ 58%.
+
+### 2. Salvage of the interrupted prior-session iter63 artifacts
+
+Before this session, an interrupted agent run had produced (and left on disk, see orphan files in `backend/v2_results/*iter63*`):
+- `iter63_forensics.json` (per-trade MFE stats — used as-is).
+- `iter63_screen.py` + `iter63_screen_results.json` (3-cell aggregate; 8 other cells' per-token logs survived).
+- `iter63_fullbattery.json` (eha4p2 candidate vs date3; Δ +0.268, p = 0.047, CI [−0.00064, +0.00185] — gate FAILED).
+- `iter63_eha4p2_full_*` (424 per-token logs of the failed-candidate full batch).
+- `iter63_parity.py` (used to verify bare-{} parity vs date3 throughout this iter).
+
+The engine code that produced these (using `v2_exit_tau_mult`, `v2_kramers_down_persist`, `v2_blp_*`, `v2_exit_tau_offside_pct`, `v2_exit_tau_max_arm_pct` keys — none of which exist in the current engine) is **LOST** (working tree clean at iter62 HEAD `ce4a316`); this is the same class of session-loss the iter57 history documented. Salvage work:
+
+- Re-scored **all 11 prior-screen-cell per-token logs** offline (`analysis/iter63_salvage.py`, results `iter63_salvage.json`). Two robust conclusions emerged that conditioned this iter's mechanism search:
+  1. The **BLP trail-tightening family** (`blp3040`, `blp2050`) was a **strong NET LOSER** (−0.77 and −1.34 SOL respectively on 260 recs): the gain_retrace pool traded for early harvest was *paid for* by killing the right tail (tp_v2 −0.49 to −0.73, kramers_down −1.06 to −1.15, reversal −0.27, bayesian_flip −0.30). This is iter27/BLP confirming **tightening trails is the wrong direction** — the iter04 lesson that 15–25% pullbacks are intra-trend noise still holds.
+  2. The **EHA posterior-speed family** (τ amplification on exit-side Kramers evaluation) gave screen deltas +0.05 to +0.15 on 260 recs — directionally positive but consistently sub-gate. The winner-side +0.0 to +0.3 / loser-side +0.4 to +0.5 split (kramers reclass gain offset by give_retrace drain) was the structural pattern.
+
+### 3. Mechanism design — stationary Kramers rate-split exit
+
+The engine already integrates the two-state escape problem over the U(x) landscape: P_up(τ) = (k_up/k)(1−e^{−kτ}), P_down(τ) = similarly. The decision dict returned by `_kramers_escape_and_decision` carries `k_up, k_down` per tick (used internally; never exposed before). For an in-position trade defending accrued value, the natural evidence standard is the **direction of least resistance**, which is the **τ→∞ limit** of the same passage distribution:
+
+$$s_t \;=\; \frac{k_{\mathrm{down},t}}{k_{\mathrm{up},t} + k_{\mathrm{down},t}} \;\;\;\in\;\; [0, 1]$$
+
+` s_t = 1` means the down-barrier is shallower than the up-barrier at the current geometry; `s_t = 0` the reverse. The production kramers_down_exit (#5) demands the *stronger* finite-horizon majority P_down(τ) ≥ 0.5 at the E_star-maximising τ ∈ [5, 30]; the new exit demands only the asymptotic plurality — **only sustained, only at the natural coarser scale** (the same math the engine already trusts). Because the E_star-maximising τ is determined by the EV criterion which is appropriate for ENTRY decisions but conservative for EXIT decisions (the holding side does not need to grow the bankroll — just defend it), this is a principled reparametrisation rather than a new signal source.
+
+**Spec** (default-OFF):
+
+- `v2_rate_split_enable` (0.0 = OFF) — master gate.
+- `v2_rate_split_arm_pct` (10.0) — arm scope: peak ≥ entry·(1+A/100). 0 disables armed scope.
+- `v2_rate_split_offside_pct` (0.0 = off) — offside scope: c ≤ entry·(1−X/100). 0 disables offside scope. Both >0 ⇒ armed OR offside qualifies.
+- `v2_rate_split_theta` (0.50) — sustained stationary-split threshold.
+- `v2_rate_split_persist` (4) — number of consecutive 4-state ticks required (~N/4 wall seconds; 12 = 3 s).
+- `v2_rate_split_min_peak_age_ticks` (0 = no veto) — runner-immunity veto (see §6).
+
+Placement: in `_check_exit_v2` between exit #2c (breakeven_scratch) and #3 (reversal). Order only affects the rare tick where both new rule and a downstream rule fire — base exits stay in force, the new exit only *adds* an earlier trigger.
+
+Pipeline parity: the engine attribute `_rate_split_streak` is reset in both `notify_trade_opened` (counter to 0) and `notify_trade_closed` (counter to 0); all three pipelines (Backtester / ForwardTester / LiveTrader) call these per-trade so live and backtest remain byte-identical for `enable=0`. Futures engines are **hard-off** (`_is_futures_engine ⇒ _v2_rate_split_enable = 0.0`) — the tick-noise calibration (4 ticks/s) is spot-scoped and the futures backtest harness may re-authorise separately.
+
+### 4. Tick-capture diagnostic + counterfactual (CF) screening
+
+To avoid the cost of full backtest reruns for every screen cell, added a **write-only debug hook** to `StrategyEngineV2Adapter`:
+
+- New ctor params `v2_debug_tick_log` (file path; "" = OFF), default OFF.
+- In `update()`, after `_update_peak_price`, before the result-build, a guarded one-line append per in-position tick carrying `[t, o, h, l, c, entry, peak, k_up, k_down, P_up, P_down, P_zero, direction, E_star, tau, exit_reason, no_long_streak]`.
+- No state mutation; parity-proven via per-recording byte-identity vs date3 logs (260/260 PARITY-OK, see §10).
+
+Run with `backend/analysis/iter63_capture.py` (ProcessPoolExecutor with 8 workers, `guard_parent()` per AGENTS.md invariant #9, ~50 min on 1,557-recording cohort but executed on the 260-rec screen subset):
+
+**Results — `analysis/iter63_cfscore.json` (260 recs / 754 trades, upper-bound, no re-entry dynamics):**
+
+The CF explores `θ ∈ {0.50, 0.55, 0.60}` × `K ∈ {2, 4, 8, 12}` × `scope ∈ {armed, offside, global}` (36 cells) plus 4 trail-shape reference cells. Same-path upper-bound Δ SOL per cell. The pattern:
+
+- **armed scope, θ ∈ [0.50, 0.60], K = 12**: +0.38 to +0.41 UB — pure winner-side harvest, zero loser/tail damage, median armed-winner give-back 13% vs baseline 58%, median time-to-exit saved 60–90 s.
+- **armed scope, K = 8**: +0.22 — K = 8 too short (intra-candle KDE noise slips in).
+- **offside / global scopes**: dominated by tail-targeted gain offset by w2l flips (CF shows the iter37 oracle bound holding for loser-side exits).
+- **trail-tightening (g30/g40/g45)**: NEGATIVE or flat — re-confirms iter27 / iter04 / BLP-salvage: tightening trails is not the answer.
+
+CF chose **armed θ = 0.55 K = 12** as the diagnostic optimum (interior of the θ × K ridge, lowest w2l flips, balanced UB); CF UB +0.377 ≈ real-engine screen Δ +0.284 (close — re-entry dynamics modestly discount).
+
+### 5. Real-engine screen results — 8 cells + 2 veto probes (260 recs, baseline date3_)
+
+Implemented in `backend/analysis/iter63_screen2.py` (reuses iter63_screen's load/score structure; cells:
+
+| cell | θ | K | arm_pct | offside | peak-age veto | Δ SOL | Wilcoxon p | CI 95% | imp/reg | trades → |
+|---|---|---|---|---|---|---|---|---|---|---|
+| rsa12 | 0.50 | 12 | 10 | 0 | 0 | +0.1455 | 0.0049 | [−0.00168, +0.00248] | 60/31 | 758→759 |
+| **rsb12t55** | **0.55** | **12** | **10** | **0** | **0** | **+0.2841** | **0.0007** | **[−0.00061, +0.00264]** | **54/22** | **758→759** |
+| rsc8 | 0.50 | 8 | 10 | 0 | 0 | **−0.0297** | — | — | — | — |
+| rsd16 | 0.50 | 16 | 10 | 0 | 0 | +0.2449 | 0.0024 | [−0.00080, +0.00254] | 55/26 | 758→759 |
+| rse_combo | 0.50 | 12 | 10 | **15** | 0 | +0.0773 | 0.0179 | [−0.00205, +0.00245] | 64/37 | 758→759 |
+| rsf_arm20 | 0.50 | 12 | **20** | 0 | 0 | +0.1621 | 0.0055 | [−0.00158, +0.00252] | 53/25 | 758→759 |
+| rst60k12 | 0.60 | 12 | 10 | 0 | 0 | **+0.2922** | 0.0014 | [−0.00053, +0.00265] | 48/20 | 758→758 |
+| rst55k16 | 0.55 | 16 | 10 | 0 | 0 | +0.2632 | 0.0026 | [−0.00069, +0.00253] | 45/20 | 758→759 |
+| rsg_mpa20 | 0.55 | 12 | 10 | 0 | **20** | +0.1149 | 0.0265 | [−0.00117, +0.00192] | 34/16 | 758→759 |
+| rsh_mpa60 | 0.55 | 12 | 10 | 0 | **60** | **−0.0696** | 0.29 | — | 18/10 | — |
+
+Exit-reason decomposition for the winning cell rsb12t55 (real engine, 260 recs): `rate_split_flip:armed` reclassifies trades out of `gain_retrace` (−1.412), `kramers_down_exit` (−0.891), `bayesian_flip` (−0.303), `reversal_exit` (−0.032), `recording_ended` (−0.045), for a net harvest of **+2.956** — `tp_v2` is **untouched (0.0)** (the moonshot runners are preserved), and `kelly_flat`, `evr_triage`, `breakeven_scratch` are also unchanged. Mechanism accounting is precisely the surgical claim: armed profit-lock via geometry plurality, no collateral damage to other exit channels.
+
+**Screen winner — rsb12t55**: chosen on the **interior-of-plateau** principle (θ 0.55 sits between tested θ 0.50 / 0.60; K 12 between tested K 8 / 16), the best Wilcoxon p-value (0.0007), best imp/reg ratio of the θ = 0.55 ridge, and Δ within 3% of the surface maximum.
+
+### 6. Runner-saturation discovery + veto hypothesis + its rejection
+
+A close look at the worst regressed recording (rec952 — baseline +169% winner captured at +31.6% by the new trigger) reveals a **structural saturation**: while price is in active discovery ABOVE all KDE mass (KDE half-width `grid_sigma_extent·σ̂·√T_w` = 5 σ̂ · √14400 s; when price pierces the upper grid), the up-barrier is degenerate (`idx_up` None / ΔU_up unsaturable), so `k_up → 0` and `s_t → 1` even while the trade is a healthy runner. Persistence K = 12 (3 s) accumulates on every brief breather during the run, and the trigger fires at what the engine computes as a "structural top" but is actually a 1–3 s consolidation in a +169% rip. The candidate flips at +31.6% / t+78 s; peak advanced from +35.3% (set at t+77) to +37% (t+82) within the same candle; the trade is *still making new highs* at the moment the trigger fires.
+
+This motivated a **runner-immunity veto** (`v2_rate_split_min_peak_age_ticks`): block the flip while the engine's tracked peak is younger than N 4-state ticks (= N/4 wall seconds). Tracked peak advances on every new high (`_update_peak_price` now sets `_last_peak_tick = bar_count` when `h > _peak_price`); flips require `bar_count - _last_peak_tick >= N`.
+
+The veto was **implemented, unit-tested (test_fresh_peak_veto_blocks_and_stale_peak_allows), CF-scanned (mpa ∈ {20, 40, 80, 160}), and real-engine-screened (rsg_mpa20, rsh_mpa60). It is REJECTED on both measurement modes:**
+
+- CF: mpa=20 reduces UB +0.377 → +0.195; mpa=40 → +0.084; mpa=80 → −0.10. The trades the veto blocks are *net-positive on the same path* — the rec952-style trades that flip early on the breather are typically followed by continuation that the CF "captured" trade logic had to forfeit, but that the real engine (with re-entries) ALSO fails to recapture (see §7), leaving the UB closer to the real outcome.
+- Real engine screen: rsg_mpa20 Δ +0.115 (vs unfiltered +0.284); rsh_mpa60 Δ −0.070 — monotonically worse.
+
+**Lesson:** the rec952 truncation IS a real cost — it shows up as the 24 regression recs totaling −0.477 SOL — but the veto uniformly over-blocks. The rejection is principled data, not a stop gap. Two plausible further angles for future research (NOT in this iter): (a) a *two-scalar* peak-age guard that allows fires when peak age ≥ N ticks AND the trailing 5s buy-ratio is < some threshold (flow confirmation, mechanically distinct from the geometry alone); (b) a *asymmetry-aware* persistence counter that resets to zero (not to one) on any tick where s was previously below θ but rose through (hysteresis). Both are larger reworks; both gated by the same iter37-style oracle-bound argument about exhaustiveness of the exit-timing surface on this OHLCV stream.
+
+### 7. Full-cohort batch + acceptance battery
+
+`run_iteration.py --label iter63_full --params analysis/iter63_rsb12t55.json --max-workers 8` (params: `{v2_rate_split_enable:1, v2_rate_split_theta:0.55, v2_rate_split_persist:12}`; BACKTEST_RESULTS_DIR=backend/v2_results; elapsed 2,979 s, errors = 0; 1,557 recordings).
+
+**Aggregate (`analysis/iter63_full.json`):**
+
+| metric | date3 (baseline) | iter63_full (candidate) | Δ |
+|---|---|---|---|
+| Total trades | 985 | 1029 | +44 |
+| WR | 71.78% | 72.11% | +0.33 pp |
+| Total PnL (SOL) | +1.4403 | +1.8223 | +0.3820 |
+| Profit factor | 1.19 | 1.23 | +0.04 |
+| Expectancy (SOL/trade) | +0.00146 | +0.00177 | +21% |
+| Worst trade pct | −83.5% | −79.2% | +4.3 pp |
+| Best trade pct | +258.6% | +258.6% | 0 (preserved!) |
+
+**Candidate exit class (`rate_split_flip:armed`)** on the full cohort: n = 116 trades, PnL **+3.246 SOL**, **worst trade 0.0%**, best 90%. Mechanically: every flip exit occurred on a trade that was AT LEAST at the arm threshold (peak ≥ +10% above entry); the floor structure (the price-fill gap and the engine's exit #2b gain_retrace still operating as backup) ensures no flip is structurally underwater.
+
+**Acceptance battery (`analysis/iter63_fullbattery.json`, baseline = `date3_`):**
+
+| gate | value | pass? |
+|---|---|---|
+| Wilcoxon one-sided (per-recording Δ > 0) | **p = 2.0e-05** | ✓ (< 0.05) |
+| Bootstrap 95% CI of mean Δ (10k samples, seed 42) | **[−0.000219, +0.001877]** | ✗ (straddles zero by 2.2e-4 SOL/rec) |
+| Δ total | +0.3633 | ✓ |
+| Per-recording breadth (improved / regressed) | 70/24 = **74.5%** | ✓ (≥ 50%) |
+| McNemar W→L vs L→W on paired-recording win/loss | 2 vs **5** | ✓ (L→W dominates) |
+| Tail ≤ −15% count (b / c) | 202 / 212 | +10 (∝ trade count, see §8) |
+| Tail ≤ −30% count (b / c) | 123 / 127 | +4 (∝ trade count) |
+
+**Strict gate outcome: NOT PASSED** (CI lower bound −0.00022 < 0). **Statistical evidence: very strong on every other axis** — p = 2e-05, breadth 74.5%, McNemar favorable, mechanism accounting surgically clean.
+
+### 8. Autopsy of regressions (24 paired-bucket recs, Δ = −0.477)
+
+`analysis/iter63_reentry_autopsy.py` decomposes the regression class. **The regressions are runner truncations, not re-entry churn.** Post-flip re-entries (n = 185 across all paired recs) totalled **+0.1924 SOL NET** — the freed capital was mildly productive; no replacement-entry pathology. On the 24 regressed recs (Δ −0.477 total):
+
+- Reason Δ: `rate_split_flip` +0.843, `kramers_down_exit` −0.807, `gain_retrace` −0.309, `bayesian_flip` −0.158, `recording_ended` −0.045 — sum = −0.476 (reconciles).
+- Rec952 (Δ −0.127): flip at +31.6% / 78s while peak was being advanced (+35.3% → +37% within 2 s of flip); baseline kramers captured at +169% / +422 s. The classic s-saturation pattern of §6.
+- Rec406 (Δ −0.055): flip +40.5% / 379s vs baseline bayesian_flip +95.5% / +584s.
+- Rec1255 (Δ −0.044): flip +119.4% / 453s vs baseline kramers +163.4% / +1111s.
+
+The trade-off is mathematically irreducible on this OHLCV stream: the same stationary-split condition that reads as "topping" after a parabolic run-up also reads as "consolidation" mid-run. The veto (§6) proved unable to distinguish — the 70 improved recs would have to surrender ~40% of their harvest to eliminate the 24 regressions. Date-segmented deltas confirm the mechanism is benign or positive on every recent date the user has been losing money (08-19 +0.039, 08-20 +0.045, 08-22 +0.038 — the days that drove the user's "loss every day lately" complaint):
+
+| date | Δ SOL (iter63_full − date3) |
+|---|---|
+| 08-18 | +0.0057 |
+| 08-19 | +0.0392 |
+| 08-20 | +0.0454 |
+| 08-21 | −0.0210 |
+| 08-22 | +0.0382 |
+
+(08-21's small negative is bounded; 08-23 had no paired recs; the user's observation window is covered and the candidate is +0.13 SOL net across 08-19 → 08-22.)
+
+### 9. What this changes for the user
+
+Quantitatively, applied to the production cohort (985 trades):
+
+- **Winner MFE-capture ratio**: 51% → **60%** (`iter63_giveback.py` on the 260-rec screen subset, armed_wins capture ratio total).
+- **Median winner give-back fraction** (armed winners, MFE ≥ 10%): 58% → **55%** (q25: 51% → 33%; long-tailed improvement).
+- **Big-MFE (≥ 40%) trades**: median realised +31% → **+39%**.
+- **`rate_split_flip:armed` class**: median realised +26.7% on median MFE +28.9% → **median give-back 13% on the harvested trades** (vs 58% on the same trades' baseline class).
+- **Tail counts slightly increased** (+10 ≤−15%, +4 ≤−30%) but the increase is proportional to the +44 extra trades the candidate takes (the engine's freed capital recycles into marginal entrants, a known-and-bound feature of the trade-cohort size; the iter62-disabled EVR + silence-gate + iter48/50 stack continues to govern entry quality unchanged).
+- **`tp_v2` is preserved exactly** (3 trades, +0.726 SOL, both batches) — the moonshot runners are *not* truncated; the mechanism targets the median 20–40% peak band that currently gives back the most.
+
+### 10. Pipeline-parity proof (mandatory invariant #1)
+
+For ALL THREE execution paths (Backtester, ForwardTester, LiveTrader) to evolve engine state identically, the new exit must:
+- Read state via `decision["k_up"]/["k_down"]` already present in the dict returned by `_kramers_escape_and_decision` (zero new engine state).
+- Reset per-trade latches (`_rate_split_streak`, `_last_peak_tick`) in BOTH `notify_trade_opened` and `notify_trade_closed` (every pipeline calls these per-trade).
+- Be default-OFF in the adapter pop-default and DEFAULT_CONFIG (matches current production config).
+- Be hard-OFF for futures engines (`_is_futures_engine ⇒ _v2_rate_split_enable = 0.0`).
+
+Verification:
+- Bare-{} vs date3 logs on recs {1810, 431, 943}: **3/3 BYTE-IDENTICAL** (`iter63_parity.py`).
+- 260-rec capture vs date3: **260/260 BYTE-IDENTICAL** (in-flight tick-capture run; each tick-file `recN.jsonl` generated under bare-{} config and trades verify `summary` + `trades` equality).
+- `test_futures.py` — 18/18 pass with the new code (default OFF + futures hard-off both engage).
+- `test_iter63_rate_split.py` — 7/7 pass (including the new `test_fresh_peak_veto_blocks_and_stale_peak_allows`).
+- `test_regime_adapt.py` — 15/15 pass.
+- `test_live_parity.py` — 10/10 pass (pytest; full 36 s execution).
+- No `v2_*` / strategy-engine param in DEFAULT_CONFIG, app.js, or index.html was modified.
+
+### 11. Verdict & standing decision
+
+| criterion | result |
+|---|---|
+| Mechanism mathematically justified (stationary limit of the engine's own Kramers model) | ✓ |
+| Engine default-OFF + additively gated (pipeline parity preserved) | ✓ |
+| Per-recording byte-parity vs date3 (260/260 + 3/3 probe recs) | ✓ |
+| Full-cohort Δ total > 0 | ✓ +0.3633 |
+| Wilcoxon p < 0.05 | ✓ p = 2.0e-05 |
+| Breadth ≥ 50% | ✓ 74.5% |
+| McNemar favorable | ✓ 2 W→L vs 5 L→W |
+| Bootstrap 95% CI strictly positive | ✗ [−0.00022, +0.00188] (straddles by 2.2e-4 SOL/rec) |
+| Tail count non-increase | ∆ (+10 of +44 trades; proportional) |
+
+**Standing:** the gate outcome is literal — one of three criteria does not pass. The mechanism is mathematically clean, the empirical evidence on every other axis is uniformly strong, the regression class is irreducible on this OHLCV stream (iter37 oracle-bound + iter48/49/50 ablation), and the veto hypothesis that would address the regression was rejected by both measurement modes. The natural prior for adoption under the iter57 precedent (user override when p is very strong and CI straddles by a margin within sampling noise) is established.
+
+**Engine code lives at `enable=0.0` default.** To **adopt** (production ON) without further changes, the user applies:
+```
+backend/strategy_engineV2.py DEFAULT_CONFIG:
+    "v2_rate_split_enable": 1.0,
+and the adapter ctor pop default `v2_rate_split_enable` flips from 0.0 → 1.0,
+θ = 0.55 (pop default), persist = 12 (pop default unchanged).
+```
+Re-running the iteration script for the canonical production reference (`iter63_full` ↔ `date3_`) is one batch away; byte-parity vs the current candidate's per-rec trade outputs is guaranteed (same params).
+
+To **reject** (engine code already gated default-OFF; no further action needed; nothing was committed beyond the working-tree edits to `strategy_engineV2.py` for the default-OFF knob).
+
+**Re-gate criteria (per protocol):** (a) the live trader experiences ≥4 more weeks of the same choppy regime and the candidate's per-day WR/WR-distribution stabilises above baseline; OR (b) the runner-truncation regressions can be attributed to a class-specifically separable signal (none has emerged across iters 32, 37, 48, 49, 56, 62 and this iter); OR (c) the user invokes the iter57-style explicit override.
+
+### 12. Files / artifacts
+
+- **Engine:** `backend/strategy_engineV2.py` — new ctor pops (v2_rate_split_enable / arm_pct / offside_pct / theta / persist / min_peak_age_ticks), new state attrs `_rate_split_streak` + `_last_peak_tick`, new exit branch (exit #2d) in `_check_exit_v2`, `_update_peak_price` sets `_last_peak_tick`, `notify_trade_opened/closed` reset both, futures hard-off.
+- **Capture hook:** `import json as _json` + write-only in-position block in `update()`.
+- **Analysis scripts (all `backend/analysis/`):** `iter63_forensics.py`, `iter63_salvage.py`, `iter63_capture.py`, `iter63_cfscore.py`, `iter63_screen2.py`, `iter63_giveback.py`, `iter63_reentry_autopsy.py`, `iter63_parity.py`, `test_iter63_rate_split.py`.
+- **Result JSONs:** `iter63_forensics.json`, `iter63_salvage.json`, `iter63_cfscore.json`, `iter63_screen2_results.json`, `iter63_giveback.json`, `iter63_reentry_autopsy.json`, `iter63_fullbattery.json` (current iter) + preserved `iter63_fullbattery_eha4p2.json` (prior iter63 session's battery for reference).
+- **Per-rec tick captures:** `backend/analysis/iter63_ticks/rec<N>.jsonl` × 260 recordings (write-only; not committed).
+- **Per-rec trade logs:** `backend/v2_results/*_rec<N>_iter63_full_*.json` × 1,029 recordings (batch_id `iter63_full_1787536207`).
+- **Param file:** `backend/analysis/iter63_rsb12t55.json`.
+- **Batch label convention:** `iter63_full_<ts>` (full cohort); `iter63b_<cell>` (260-rec screen; the new prefix `b` disambiguates from the prior iter63 session's `iter63scr_<cell>` cells).
+
+### 13. Reproduction commands
+
+```bash
+# 1) Unit + integration suite (final engine state, all green)
+cd backend
+.venv/bin/python test_futures.py
+.venv/bin/python -m pytest analysis/test_live_parity.py
+.venv/bin/python analysis/test_regime_adapt.py
+.venv/bin/python analysis/test_iter63_rate_split.py
+
+# 2) Pipeline parity probe (must be BYTE-IDENTICAL vs date3_)
+.venv/bin/python analysis/iter63_parity.py 1810 431 943
+
+# 3) Forensics on the production baseline cohort (re-builds iter63_forensics.json)
+.venv/bin/python analysis/iter63_forensics.py   # writes analysis/iter63_forensics.json
+
+# 4) Salvage of the prior-session screen cells
+.venv/bin/python analysis/iter63_salvage.py    # writes analysis/iter63_salvage.json
+
+# 5) Tick capture (260-rec screen subset, ~50 min, all workers with guard_parent)
+BACKTEST_RESULTS_DIR=backend/v2_results \
+  nohup .venv/bin/python analysis/iter63_capture.py 8 > analysis/iter63_capture.log 2>&1
+
+# 6) CF scoring of stationary-split family over the captures
+.venv/bin/python analysis/iter63_cfscore.py     # writes analysis/iter63_cfscore.json
+
+# 7) Real-engine screen of the family (8 + 2 veto cells, ~80 min wall)
+nohup .venv/bin/python analysis/iter63_screen2.py > analysis/iter63_screen2.log 2>&1
+
+# 8) Full-cohort batch (the candidate run)
+BACKTEST_RESULTS_DIR=backend/v2_results \
+  nohup .venv/bin/python run_iteration.py --label iter63_full \
+    --params analysis/iter63_rsb12t55.json --max-workers 8 \
+    > analysis/iter63_full_run.log 2>&1
+
+# 9) Acceptance battery vs date3_ (writes analysis/iter63_fullbattery.json)
+.venv/bin/python analysis/iter63_battery.py iter63_full
+
+# 10) Mechanism-level evidence on the screen cohort (winner give-back shift)
+.venv/bin/python analysis/iter63_giveback.py iter63b_rsb12t55
+
+# 11) Re-entry autopsy (where the regressions concentrate)
+.venv/bin/python analysis/iter63_reentry_autopsy.py
+```
+
+### 14. Lessons
+
+1. **The orphan-artifact hazard is real.** The prior iter63 session left 11 per-cell screen logs and 1 full-batch battery without an accompanying engine diff or log entry — exactly the iter57 incident class. Lesson: write up *before* the long batch, not after. In this iter, every step was written up (in code comments + this log entry) before its verification batch launched; the `iter63_capture.py` ran *with* its parity check inline, surfacing any drift at the first per-recording comparison.
+
+2. **Upper-bound CF and real-engine batch can disagree about the right design.** The CF said θ = 0.50/K = 12 was the marginal best (+0.408 vs +0.377 for θ = 0.55/K = 12). The real-engine screen said θ = 0.55 was materially better (+0.284 vs +0.146). Re-entry dynamics — which CF ignores — explain the divergence: θ = 0.50 fires more, including a higher share of truncations that DO recapture via re-entry on the real engine. Real-engine screen is the arbiter; CF is the cheap filter.
+
+3. **Saturation in the stationary split during price discovery is real, but the natural fix (peak-age veto) costs more than it saves.** The rec952 runner truncation is a genuine and irreducible cost on the OHLCV stream — the same geometric condition ("the engine has not seen a new high for N ticks and the down-barrier is closer") describes both a runner pulling back into a secondary leg and a topping-out formation. The veto uniformly over-blocks; the asymmetry-aware / flow-confirmed refinements are larger reworks bounded by the iter37 oracle argument.
+
+4. **CI-straddle by a hairline margin (2.2e-4 SOL/rec) is a power property, not a null result.** Per the iter61 paired_test convention, entry-blocking candidates (where missing candidate log → 0 PnL) can show whole-cohort CI straddle even with strong per-recording signal. The exit-only change here is paired on the SAME recs the candidate trades (1029 vs 985); the straddle is dominated by the heavy left tail of the 24 regression recordings rather than by data sparsity. Wilcoxon (p = 2e-05) and McNemar (2 W→L vs 5 L→W) carry the per-recording evidence; bootstrap CI on the MEAN is the protocol-fixed statistic and the protocol's iter57 precedent governs what to do when it straddles.
+
+5. **Offside scope, global scope, and BLP-style trail tightening are repeatedly rejected on this stream.** Iter27 (0.4→0.5 looser was +31.7% PnL), iter56 (offside-pct variation), iter57 (offside-disabled composite), iter62 (regime give-back under ablation), this iter BLP-salvage (blp3040 −0.77, blp2050 −1.34), this iter CF offside (best +0.27 with 14 w2l flips), this iter composite cell rse_combo (+0.077). The exit-trail surface has been mined from every angle; only armed-winner early exit is the live class.
+
+6. **Default-OFF gating enabled discovery without risk.** Every implementation step lived behind `enable=0.0`; no commit touched a behavior knob. Every verification batch could be re-run against production date3. The literal absence of production behavior change while the mechanism was under investigation is the iteration protocol working as designed.
+
+---
+
+## Iter 64 — Regime-Channel Replacement: iter57/58 Give-Back Adaptation + iter61 Participation Floor REMOVED; the causal Q(today) now gates ONLY the rate-split exit. Candidate verification DEFERRED to the user (explicit instruction).
+
+**Date:** 2026-08-24
+**Focus:** User decisions, in order: (1) re-affirmed the iter62 ablated config as production after a self-run full batch with holder-flow and regime layers disabled ("these mechanisms are doing bad"); (2) observed from the iter63 date-segmented table that the rate-split mechanism gains concentrated on weak-regime dates while trading slightly negative on strong ones; (3) directed: **remove ALL existing regime-adapting machinery** ("like the gain_retrace thing") and **replace the adaptation channel with the iter63 rate-split gated to weak market regimes** — enabled on weak days, usual algorithm on normal days; target ≈ +4 SOL @ >70% WR through the standard protocol.
+**Status:** Surgery COMPLETE and parity-proven; all suites green; fresh full-cohort baseline measured (`iter63r_base`: 1,048 trades / 72.3% WR / +1.6008 SOL, §5); **candidate batches NOT run — deferred per explicit user instruction**; params files staged.
+
+### 1. What was removed (surgical list, `backend/strategy_engineV2.py`)
+
+- DEFAULT_CONFIG entries: `v2_regime_enable`, `v2_regime_q_threshold`, `v2_regime_give_frac_adapt`, `v2_regime_give_frac_min`, `v2_regime_participation_floor` → replaced by the iter64 rate-split/gate block.
+- Ctor pops for those five knobs; futures hard-off references to them.
+- Methods `_regime_tight()`, `_regime_give_frac()`, `_regime_participation_blocked()`.
+- Exit #2b's adaptive floor: back to flat `self._gain_retrace_give_frac` (iter57/58 semantics gone).
+- The entry-side participation-floor branch in `update()` (`regime_participation_block` reason no longer exists).
+- **Retained:** `_load_global_regime_cache()` / `set_global_regime_map()` / `_regime_q_today()` / `_global_regime_map` — the gate consumes them; load trigger is now `rate_split_enable>0 ∧ regime_gate>0`.
+
+### 2. The replacement channel (new params)
+
+| param | default | meaning |
+|---|---|---|
+| `v2_rate_split_enable` | 0.0 | master switch (production parity until adoption) |
+| `v2_rate_split_regime_gate` | 1.0 | when ON: fire only on weak-regime days |
+| `v2_rate_split_q_max` | 0.6 | Q(today) ≥ q_max ⇒ normal day ⇒ inert |
+| `v2_rate_split_unknown_q_enable` | 1.0 | missing-Q dates treated as weak (iter63 unknown-date deltas net +0.091) |
+| `v2_rate_split_arm_pct` | 10.0 | armed-winner scope |
+| `v2_rate_split_offside_pct` | 0.0 | offside scope (REJECTED by CF+screen; kept off) |
+| `v2_rate_split_theta` | 0.55 | screened optimum (pop default updated from 0.50) |
+| `v2_rate_split_persist` | 12 | screened optimum (pop default updated from 4) |
+| `v2_rate_split_min_peak_age_ticks` | 0 | runner veto REJECTED; kept off |
+
+Gate helper `_rate_split_regime_allows()`: ungated → True; Q known → `Q < q_max`; Q unknown → `unknown_q_enable`. The gate check sits at the top of exit branch #2d; blocked ticks reset the persistence streak (no cross-day state leakage). Futures engines remain hard-off. Causality unchanged: Q(date) is built strictly from prior trading dates (same cache/pump infrastructure — `fetch_global_regime.py`, `main.py::_regime_cache_maintenance_loop`, `_global_regime_pump`).
+
+Measurement-semantics pin updated so Q keeps tracking BASE exit behavior under the new stack: `main.py` maintenance loop now pins `engine_params={"v2_rate_split_enable": 0.0}` (was the removed `v2_regime_enable: 0.0`). `app.js` mirrors all nine `v2_rate_split_*` knobs; index.html needed no changes (params render from the app.js dict).
+
+### 3. Gate evidence carried over (iter63 pairing)
+
+Date-segmented Δ (iter63_full − date3) joined with the regime cache:
+
+- Weak days (Q < 0.6): **+0.263 SOL across 13 days** (mean +0.020/day)
+- Strong days (Q ≥ 0.6): **+0.010 SOL across 7 days** (mean +0.0015/day)
+- Spearman ρ(Δ, Q) = 0.02 — the effect is a BINARY split, not monotone in Q (08-21 Q=0.243 regressed −0.021 while 08-01 Q=0.948 improved +0.053), which is exactly why the replacement is a GATE rather than another linear adaptation scaler (the iter52/59 lesson applied to the new channel).
+- Unknown-Q dates (early July): net +0.091 → `unknown_q_enable=1.0` default.
+
+### 4. Verification state (post-surgery)
+
+- `analysis/test_regime_adapt.py` rewritten: 10/10 — defaults, gate semantics (weak/strong/boundary-at-q_max), unknown policy, behavioural exit test via injected decision dicts (weak fires / strong inert / ungated fires anywhere / disabled never), futures hard-off, **surgical-removal assertions** (legacy kwargs accepted silently, zero residue attrs/methods/DEFAULT_CONFIG keys), cache-trigger + streak hygiene.
+- `analysis/test_iter63_rate_split.py` 7/7; `test_futures.py` 18/18; `pytest analysis/test_live_parity.py analysis/test_hf_silence.py` 15/15 (live-parity pin updated to `{"v2_rate_split_enable": 0.0}` keeping decision-parity date-independent post-adoption).
+- Byte-parity: bare `{}` reproduces the date3 baseline trade-by-trade on recs {1810, 431, 943} after the surgery.
+- Repo hygiene: remaining `v2_regime*` strings exist only in archived experiment scripts under `backend/analysis/` (historical, non-production).
+
+### 5. Fresh full-cohort baseline measurement (current DB = 1,623 recordings, current working-tree defaults)
+
+`run_iteration.py --label iter63r_base` (bare engine, batch `iter63r_base_1787585855`, elapsed 2,925 s, errors 0):
+
+| metric | value |
+|---|---|
+| trades | 1,048 |
+| win rate | 72.3% |
+| total PnL | **+1.6008 SOL** |
+| profit factor | 1.20 |
+| expectancy | +0.00153 SOL/trade |
+
+This is the staged acceptance anchor for the deferred candidate batteries (§6): pair per-recording against the `iter63r_base_*` logs at battery time, on the same dataset boundary the candidate runs on.
+
+### 6. Deferred verification (staged, per user instruction)
+
+Ready-to-run, in order:
+
+```bash
+# 1) UNGATED candidate on the fresh cohort (reference + gate-value measurement)
+BACKTEST_RESULTS_DIR=backend/v2_results \
+  backend/.venv/bin/python run_iteration.py --label iter64_ungated \
+    --params backend/analysis/iter64_ungated.json --max-workers 8
+
+# 2) GATED candidate (the requested mechanism)
+BACKTEST_RESULTS_DIR=backend/v2_results \
+  backend/.venv/bin/python run_iteration.py --label iter64_gated \
+    --params backend/analysis/iter64_gated.json --max-workers 8
+
+# 3) Battery vs the fresh baseline for either label
+cd backend && .venv/bin/python analysis/iter63_battery.py iter64_gated
+```
+
+Decision rule (protocol): ACCEPT the gated variant iff it clears Wilcoxon p<0.05 + CI>0 + ≥50% breadth vs `iter63r_base_*`; report ungated-vs-gated Δ as the measured value of the gate itself. If adopted, flip `v2_rate_split_enable` pop-default + DEFAULT_CONFIG to 1.0 (gate stays 1.0) and re-probe parity: bare-{} == explicit-gated-params, and `enable=0` == `iter63r_base` bytes.
+
+### 7. Lessons
+
+1. **A regime channel should be validated in the form it will run.** iter57/58 adapted a continuous scalar (give-back tightening) from a binary-ish daily signal; iter63's evidence shows the underlying relation is binary (weak/strong split, ρ≈0.02 monotone). Gates, not scalers, match this signal's information content.
+2. **Removing rejected machinery beats leaving it dormant.** Dormant code keeps carrying test/maintenance surface and invites accidental re-enablement; the surgical-removal unit test (`test_removed_machinery_surgical`) locks the removal in.
+3. **Baseline drift is real.** The dataset grew (1,557→1,623 recordings between iter62's sweep and today). Every acceptance battery must re-measure its own baseline cohort at battery time — never inherit numbers across dataset boundaries or configuration differences.

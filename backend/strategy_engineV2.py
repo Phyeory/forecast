@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import math
 import bisect
+import json as _json
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -231,42 +232,28 @@ DEFAULT_CONFIG = {
     # LOO Δ +0.1375 SOL.  Default: 0.25 (ACCEPTED iter50 best config).
     "v2_evr_skip_sell_conc_min": 0.25,   # veto when maxsec sell share > this (0 = OFF)
     "v2_evr_skip_conc_window":  60,     # trailing window (s) for the share
-    # ── Global harvest-regime give-back adaptation (iter57) ──────────────
-    # Q(t) = causal market-regime score in [0,1]: the strategy's own realised
-    # gain_retrace exit share over the trailing 3 trading days (strictly
-    # prior dates), normalised clamp01((gr − 0.35)/(0.70 − 0.35)).  Q is
-    # coin-agnostic (identical for every mint on a date), loaded from
-    # backend/data/global_regime_cache.json (q_by_date) — see
-    # backend/fetch_global_regime.py.  When Q < q_threshold the gain_retrace
-    # profit-lock trail TIGHTENS for already-armed winners only:
-    #   give_eff = give_base − adapt · clamp01((thr − Q)/thr),
-    # floored at give_frac_min.  Losers / un-armed trades are untouched and
-    # entry gates are NOT modified (the iter52 rejection).  Missing Q →
-    # neutral base.  Production default 1.0 = ON (iter57 ACCEPTED by explicit
-    # user decision 2026-08-22 overriding the bootstrap-CI / whole-cohort
-    # breadth criteria — Wilcoxon p=6.1e-06, engaged breadth 81%, monotone
-    # sweep; set to 0.0 to restore byte-exact pre-iter57 behaviour).
-    "v2_regime_enable": 1.0,           # 1.0 = ON (production default); 0.0 = OFF
-    "v2_regime_q_threshold": 0.6,      # regime score below which trail tightens
-    # iter58 sweep completion: adapt=0.2 is the grid maximum (concave both
-    # axes; 0.1→+0.134, 0.2→+0.215, 0.3→+0.157, 0.4→+0.055 at thr=0.6) AND
-    # the full-cohort run clears the STRICT gate outright (Δ+0.215 SOL,
-    # Wilcoxon p=3.05e-06, bootstrap CI [+0.00026,+0.00095] strictly
-    # positive, paired-t p=0.001, 55/12 improved/regressed) — unlike
-    # adapt=0.3 which required the user's CI override.
-    "v2_regime_give_frac_adapt": 0.2,  # max give-back tightening at Q = 0
-    "v2_regime_give_frac_min": 0.30,   # floor on the tightened give-back
-    # ── iter61 regime participation floor (PRODUCTION default 0.25) ──────
-    # Fleet-level capital-allocation policy on the same causal Q(date):
-    # when Q(today) is known and < this floor, block ALL new entries for
-    # the day (open positions still exit normally).  Enabled as the
-    # production default by explicit user decision 2026-08-23 (RESEARCH_LOG
-    # .md Iter 61): zero in-sample cost (full-cohort 828 trades / 70.0% WR
-    # / +2.179 SOL vs 880 / 69.8% / +2.127), engages only in the most
-    # extreme regime states, auto-disengages on recovery; statistically
-    # unevaluable at n=1 blocked day — insurance, not a validated edge.
-    # Set 0.0 to never block (restores byte-exact pre-iter61 behaviour).
-    "v2_regime_participation_floor": 0,
+    # ── iter64: regime-gated stationary Kramers rate-split exit ──────────
+    # REPLACES the iter57/58 give-back give_frac adaptation and the iter61
+    # participation floor (REMOVED 2026-08-24 by explicit user decision —
+    # measured on the post-iter62 ablated full-cohort baseline those layers
+    # were net-negative with the fresh dataset; findings preserved in
+    # RESEARCH_LOG.md Iters 57–63).  The causal daily regime score Q(today)
+    # (same cache, backend/fetch_global_regime.py, strictly-prior-dates
+    # construction) now gates ONLY the iter63 rate_split_flip early-harvest
+    # exit: it fires only on weak-regime days (Q < q_max) — on normal/strong
+    # regime days the trigger is inert (iter63 date-segmented evidence:
+    # +0.263 SOL over 13 weak days vs +0.010 over 7 strong days).
+    # Defaults: enable 0.0 = OFF (production parity) pending gate; when
+    # enabled, regime_gate 1.0 = weak-days-only semantics ON.
+    "v2_rate_split_enable": 0.0,          # 1.0 = ON
+    "v2_rate_split_regime_gate": 1.0,     # 1.0 = weak-regime-days only
+    "v2_rate_split_q_max": 0.6,           # Q(today) >= this → normal regime → inert
+    "v2_rate_split_unknown_q_enable": 1.0,  # missing/unknown Q dates → treat as ON
+    "v2_rate_split_arm_pct": 10.0,        # arm at +10% peak gain
+    "v2_rate_split_offside_pct": 0.0,     # offside scope exists but REJECTED (0 = off)
+    "v2_rate_split_theta": 0.55,          # sustained stationary-split threshold
+    "v2_rate_split_persist": 12,          # consecutive 4-state ticks (≈3 s)
+    "v2_rate_split_min_peak_age_ticks": 0,  # runner-immunity veto — REJECTED (0 = off)
 }
 
 
@@ -2960,6 +2947,13 @@ class StrategyEngineV2Adapter:
         # later kramers/tp_v2 exits while limiting the modest-winner→scratch
         # conversion that erodes win rate at looser trails.
         self._gain_retrace_give_frac = float(engine_kwargs.pop("gain_retrace_give_frac", 0.5))
+        # iter63 diagnostic — write-only per-tick posterior capture.  When set
+        # to a file path, every in-position tick appends one JSON line with
+        # the Kramers geometry (k_up/k_down), escape probabilities, and the
+        # decision snapshot.  Used ONLY by offline analysis harnesses
+        # (analysis/iter63_capture.py).  Default "" = OFF → zero state/flow
+        # change → byte-identical production behaviour (parity-proven).
+        self._v2_debug_tick_log = str(engine_kwargs.pop("v2_debug_tick_log", "") or "")
         self._breakeven_arm_dd_pct  = float(engine_kwargs.pop("breakeven_arm_dd_pct", 25.0))
         self._breakeven_buffer_pct  = float(engine_kwargs.pop("breakeven_buffer_pct", 2.5))
         # iter18a: posterior-drift persistence exit params.
@@ -3241,33 +3235,63 @@ class StrategyEngineV2Adapter:
         self._v2_evr_skip_conc_window   = int(engine_kwargs.pop("v2_evr_skip_conc_window", 60))
         self._evr_entry_time: int = 0
         self._evr_conc_vetoed: bool = False
-        # ── Global harvest-regime give-back adaptation (iter57) ───────────
-        # Strictly additive.  When enabled AND the causal global regime score
-        # Q(today) is known and < q_threshold, the gain_retrace profit-lock
-        # trail tightens for already-armed winners only (see DEFAULT_CONFIG
-        # note + RESEARCH_LOG.md Iter 57).  Production default 1.0 = ON
-        # (explicit user decision 2026-08-22); pass 0.0 to restore byte-exact
-        # pre-iter57 behaviour.  Futures engines are hard-disabled: the regime
-        # cache measures the 1s memecoin spot harvest regime and must never
-        # modulate the macro-bar perp layer.
-        self._v2_regime_enable         = float(engine_kwargs.pop("v2_regime_enable", 0.0))
-        self._v2_regime_q_threshold    = float(engine_kwargs.pop("v2_regime_q_threshold", 0.6))
-        self._v2_regime_give_frac_adapt = float(engine_kwargs.pop("v2_regime_give_frac_adapt", 0.2))
-        self._v2_regime_give_frac_min  = float(engine_kwargs.pop("v2_regime_give_frac_min", 0.30))
-        # ── iter61 regime participation floor (PRODUCTION default 0.25) ──
-        # See the DEFAULT_CONFIG iter61 note.  (The iter58 entry/kelly/arm
-        # battery and the iter59 SDE-conditioning scaffolding were REJECTED
-        # and their code reverted 2026-08-23 — findings preserved in
-        # RESEARCH_LOG.md Iters 58-59.)
-        self._v2_regime_participation_floor = float(
-            engine_kwargs.pop("v2_regime_participation_floor", 0))
+        # ── iter63/64: stationary Kramers rate-split early exit ─────────
+        # ("rate_split_flip").  The production kramers_down_exit (#5) asks
+        #   P_down(τ) = (k_d/k)(1−e^{−kτ}) ≥ 0.5
+        # at the E_star-maximising horizon τ ∈ [tau_min, tau_max] — a
+        # *speed* condition (escape must saturate within ~30 engine-bars).
+        # For a position defending value, the decision-relevant question
+        # is the DIRECTION of least resistance: the stationary first-
+        # passage split s = k_d/(k_u+k_d) — the τ→∞ limit of the same
+        # two-state CTMC the engine already integrates (no new signal,
+        # no overlay — the same barrier geometry read at its long-horizon
+        # limit).  Require s ≥ θ for K consecutive 4-state ticks as the
+        # temporal-coherence guard against single-tick KDE noise (the
+        # iter12 intra-candle vacillation pathology).
+        # Scopes (independent, OR-ed):
+        #   arm_pct  — armed winners only: peak ≥ entry·(1+A/100)  (0=off)
+        #   offside  — deep-offside only: c ≤ entry·(1−X/100)      (0=off)
+        # Default enable=0.0 = OFF → byte-exact production parity.
+        self._v2_rate_split_enable      = float(engine_kwargs.pop("v2_rate_split_enable", 0.0))
+        self._v2_rate_split_arm_pct     = float(engine_kwargs.pop("v2_rate_split_arm_pct", 10.0))
+        self._v2_rate_split_offside_pct = float(engine_kwargs.pop("v2_rate_split_offside_pct", 0.0))
+        self._v2_rate_split_theta       = float(engine_kwargs.pop("v2_rate_split_theta", 0.55))
+        self._v2_rate_split_persist     = int(engine_kwargs.pop("v2_rate_split_persist", 12))
+        # iter63 runner-immunity veto (REJECTED — see RESEARCH_LOG Iter63 §6):
+        # during ACTIVE price discovery the stationary split saturates
+        # (s → 1) on every breather — price is above all KDE mass so the
+        # down-barrier trivially dominates (rec952 trace: s pinned 1.000
+        # through a +169% run).  The veto requires the tracked peak to be
+        # ≥N ticks stale; screened net-negative (UB −0.18..−0.10, screen
+        # Δ+0.115/−0.070 vs unfiltered +0.284).  0 = no veto (default).
+        self._v2_rate_split_min_peak_age_ticks = int(engine_kwargs.pop(
+            "v2_rate_split_min_peak_age_ticks", 0))
+        # ── iter64 regime gate — replaces the iter57/58 give-back ──────
+        # adaptation and iter61 participation floor (removed 2026-08-24 by
+        # explicit user decision; see RESEARCH_LOG.md Iter 64).  When gated
+        # (default), the rate-split flip fires only on weak-regime days —
+        # causal Q(today) < q_max — because the iter63 date-segmented
+        # analysis found the mechanism's entire gain concentrated on weak
+        # days (+0.263 SOL / 13 weak days vs +0.010 / 7 strong days).  The Q
+        # infrastructure (causal cache + live pump) is retained; ONLY the
+        # consumption changed.  Unknown/missing Q dates default to ON
+        # (unknown days were net-positive +0.091 in the iter63 pairing).
+        self._v2_rate_split_regime_gate      = float(engine_kwargs.pop(
+            "v2_rate_split_regime_gate", 1.0))
+        self._v2_rate_split_q_max            = float(engine_kwargs.pop(
+            "v2_rate_split_q_max", 0.6))
+        self._v2_rate_split_unknown_q_enable = float(engine_kwargs.pop(
+            "v2_rate_split_unknown_q_enable", 1.0))
+        self._rate_split_streak = 0
+        self._last_peak_tick = 0
         if self._is_futures_engine:
-            self._v2_regime_enable = 0.0
-            self._v2_regime_participation_floor = 0.0
+            # spot-scoped tick-noise calibration (4 ticks/s); futures engines
+            # keep the existing kramers-persistence machinery instead.
+            self._v2_rate_split_enable = 0.0
         self._global_regime_map: dict[str, float] = {}
         self._global_regime_cache_warned = False
-        if (self._v2_regime_enable > 0.0
-                or self._v2_regime_participation_floor > 0.0):
+        if (self._v2_rate_split_enable > 0.0
+                and self._v2_rate_split_regime_gate > 0.0):
             self._load_global_regime_cache()
         # ── Market-cap bound trade block ────────────────────────────────────
         # Block all BUY entries when the USD market cap is below mcap_low_usd
@@ -3371,13 +3395,13 @@ class StrategyEngineV2Adapter:
         age = time - self._holder_flow_timestamps[idx - 1]
         return age >= self._v2_hf_silence_gate_seconds
 
-    # ── Global harvest-regime adaptation (iter57) ──────────────────────────
+    # ── Global regime cache (causal per-date Q map) ─────────────────────
 
     def _load_global_regime_cache(self) -> None:
         """Load the causal per-date regime score map {date: Q} from
         backend/data/global_regime_cache.json (built by
         backend/fetch_global_regime.py).  Missing/corrupt file → empty map,
-        which keeps the adaptation neutral (base give_frac)."""
+        which keeps the iter64 rate-split gate in its unknown-Q default."""
         try:
             import json as _json57
             import os as _os57
@@ -3387,11 +3411,11 @@ class StrategyEngineV2Adapter:
                 cache = _json57.load(f)
             qmap = cache.get("q_by_date") or {}
             self._global_regime_map = {str(k): float(v) for k, v in qmap.items()}
-        except Exception as exc:  # missing file / bad JSON → neutral
+        except Exception as exc:  # missing file / bad JSON → unknown-Q default
             if not self._global_regime_cache_warned:
                 self._global_regime_cache_warned = True
-                print(f"[v2_regime] global_regime_cache.json unavailable "
-                      f"({exc}); adaptation neutral")
+                print(f"[v2_rate_split] global_regime_cache.json unavailable "
+                      f"({exc}); rate-split gate uses unknown-Q default")
             self._global_regime_map = {}
 
     def set_global_regime_map(self, qmap: dict) -> None:
@@ -3417,57 +3441,17 @@ class StrategyEngineV2Adapter:
         q = self._global_regime_map.get(day)
         return None if q is None else float(q)
 
-    def _regime_participation_blocked(self) -> bool:
-        """iter61: regime participation floor — block NEW entries when the
-        causal Q(today) is known and below `v2_regime_participation_floor`
-        (0.0 = never blocks).  Open positions still exit normally.  This is
-        a fleet-level capital-allocation policy (user objective: consistent
-        traded-day WR + positive expectancy by standing aside in grind
-        regimes), not a PnL-gated optimum — see RESEARCH_LOG.md Iter 61."""
-        if self._v2_regime_participation_floor <= 0.0:
-            return False
-        q = self._regime_q_today()
-        return q is not None and q < self._v2_regime_participation_floor
-
-    def _regime_tight(self) -> float:
-        """Regime tightness t ∈ [0,1] for the iter57 give-back adaptation:
-        0 = neutral (controller disabled / no cache / date missing /
-        Q ≥ q_threshold / thr ≤ 0), 1 at Q = 0, linear in (thr−Q)/thr in
-        between.  Deterministic and lookahead-free: Q(date) is built only
-        from the trailing-3-trading-day exit mix strictly before that date."""
-        if not self._global_regime_map:
-            return 0.0
-        if self._v2_regime_enable <= 0.0:
-            return 0.0
+    def _rate_split_regime_allows(self) -> bool:
+        """iter64 replacement for the removed give-back adaptation / floor:
+        the rate-split flip fires only on weak-regime days.  Returns True
+        when the gate is off (backtest/live unchanged), when Q(today) is
+        unknown and unknown_q_enable is set, or when Q(today) < q_max."""
+        if self._v2_rate_split_regime_gate <= 0.0:
+            return True
         q = self._regime_q_today()
         if q is None:
-            return 0.0
-        thr = self._v2_regime_q_threshold
-        if thr <= 0.0 or q >= thr:
-            return 0.0
-        tight = (thr - q) / thr
-        if tight < 0.0:
-            return 0.0
-        if tight > 1.0:
-            return 1.0
-        return tight
-
-    def _regime_give_frac(self) -> float:
-        """Effective gain_retrace give-back fraction for the CURRENT bar.
-
-        Returns the base `gain_retrace_give_frac` unless the iter57 regime
-        controller is enabled, the causal global regime score for today is
-        known, and Q < q_threshold — in which case the trail tightens
-        linearly in (thr − Q)/thr, floored at `v2_regime_give_frac_min`.
-        Deterministic and lookahead-free: Q(date) is built only from the
-        trailing-3-trading-day exit mix strictly before that date."""
-        base = self._gain_retrace_give_frac
-        if self._v2_regime_enable <= 0.0:
-            return base
-        floor = min(self._v2_regime_give_frac_min, base)
-        return max(base - self._v2_regime_give_frac_adapt * self._regime_tight(),
-                   floor)
-
+            return self._v2_rate_split_unknown_q_enable > 0.0
+        return q < self._v2_rate_split_q_max
 
     def _passes_order_flow_imbalance_gate(self) -> bool:
         """Check if the trailing order-flow taker buy ratio passes the minimum threshold."""
@@ -3598,6 +3582,8 @@ class StrategyEngineV2Adapter:
         self._evr_entry_time = int(getattr(self, "_current_time", 0))
         # iter50: per-trade EVR concentration veto latch reset.
         self._evr_conc_vetoed = False
+        self._rate_split_streak = 0  # iter63: fresh evidence per trade
+        self._last_peak_tick = self.bar_count  # iter63: entry is the initial peak
         # Seed EMA from the current posterior mu so the window starts calibrated.
         _cur_mu = getattr(self, '_mu_post_ema', 0.0)  # keep current EMA value
         self._mu_post_neg_window.clear()
@@ -3612,12 +3598,15 @@ class StrategyEngineV2Adapter:
         self._mu_post_neg_window.clear()
         self._mu_post_neg_count = 0
         self._no_long_streak = 0  # iter21: reset on close
+        self._rate_split_streak = 0  # iter63: reset on close
 
     def _update_peak_price(self, h: float, l: float):
         if not self.in_position:
             return
         if self.position_direction == _V1Direction.UP:
             if h > self._peak_price:
+                if h > self._peak_price + 1e-12:
+                    self._last_peak_tick = self.bar_count  # iter63 veto clock
                 self._peak_price = h
         elif self.position_direction == _V1Direction.DOWN:
             if l < self._peak_price or self._peak_price == 0.0:
@@ -3988,14 +3977,9 @@ class StrategyEngineV2Adapter:
                         _mcap_blocked = True
                     if self._mcap_high_usd > 0.0 and _mcap > self._mcap_high_usd:
                         _mcap_blocked = True
-                # ── Regime participation floor (iter61): stand aside when the
-                # causal global regime score for today is below the floor.
-                # Checked FIRST among the blocks — it is a fleet-level
-                # allocation policy, not a per-trade quality gate.  Open
-                # positions exit normally.
-                if self._regime_participation_blocked():
-                    self.exit_signal_reason = "regime_participation_block"
-                elif _mcap_blocked:
+                # (iter61 regime participation floor REMOVED 2026-08-24 by
+                # explicit user decision — RESEARCH_LOG.md Iter 61/64.)
+                if _mcap_blocked:
                     self.exit_signal_reason = "mcap_bound_block"
                 # ── Holder-flow entry gate (iter36): block entry on recent dev sell ──
                 elif self._v2_holder_flow_entry_block > 0.0 and self._has_recent_dev_sell(
@@ -4017,6 +4001,34 @@ class StrategyEngineV2Adapter:
         # ── Update peak price AFTER exit checks (matches V1) ────────
         if self.in_position and v1_signal != _V1Signal.EXIT:
             self._update_peak_price(h, l)
+
+        # ── iter63 diagnostic capture (write-only; default OFF) ─────
+        # Appends one JSON line per in-position tick for offline
+        # exit-timing counterfactual analysis.  No state mutation; the
+        # `decision` dict already carries k_up/k_down/P± — we only READ.
+        if self._v2_debug_tick_log and self.in_position and decision is not None:
+            try:
+                _dku = float(decision.get("k_up", 0.0))
+                _dkd = float(decision.get("k_down", 0.0))
+                line = _json.dumps([
+                    int(time), round(float(o), 12), round(float(h), 12),
+                    round(float(l), 12), round(float(c), 12),
+                    round(float(self.entry_price or 0.0), 12),
+                    round(float(self._peak_price or 0.0), 12),
+                    round(_dku, 8), round(_dkd, 8),
+                    round(float(decision.get("P_up", 0.0)), 6),
+                    round(float(decision.get("P_down", 0.0)), 6),
+                    round(float(decision.get("P_zero", 0.0)), 6),
+                    int(decision.get("direction", 0)),
+                    round(float(decision.get("E_star", 0.0)), 6),
+                    round(float(decision.get("tau", 0.0)), 2),
+                    self.exit_signal_reason or "",
+                    int(self._no_long_streak),
+                ]) + "\n"
+                with open(self._v2_debug_tick_log, "a") as _dfh:
+                    _dfh.write(line)
+            except Exception:
+                pass  # diagnostics must never perturb trading behaviour
 
         # ── Build the result dict ───────────────────────────────────
         minimal = {
@@ -4139,9 +4151,9 @@ class StrategyEngineV2Adapter:
             if self._gain_retrace_arm_pct > 0.0 and entry > 0:
                 peak_gain = self._peak_price / entry - 1.0
                 if peak_gain * 100.0 >= self._gain_retrace_arm_pct:
-                    # iter57: give-back tightens under a weak global harvest
-                    # regime (Q < threshold) — neutral base when disabled.
-                    floor_gain = peak_gain * (1.0 - self._regime_give_frac())
+                    # iter64: iter57/58 regime give-back adaptation REMOVED
+                    # (user decision 2026-08-24) — flat base give-trac eback.
+                    floor_gain = peak_gain * (1.0 - self._gain_retrace_give_frac)
                     if c <= entry * (1.0 + floor_gain):
                         self.exit_signal_reason = "gain_retrace"
                         return _V1Signal.EXIT
@@ -4157,6 +4169,35 @@ class StrategyEngineV2Adapter:
                     self._be_armed = True
                 if self._be_armed and c >= entry * (1.0 + self._breakeven_buffer_pct / 100.0):
                     self.exit_signal_reason = "breakeven_scratch"
+                    return _V1Signal.EXIT
+            # 2d. iter63/64 stationary Kramers rate-split early exit.
+            #     iter64: GATED to weak-regime days only (Q(today) < q_max;
+            #     see the ctor comment) — the mechanism replaces the removed
+            #     iter57/58 give-back adaptation as THE regime channel.
+            if (self._v2_rate_split_enable > 0.0 and entry > 0
+                    and self._rate_split_regime_allows()):
+                _ku = float(decision.get("k_up", 0.0) or 0.0)
+                _kd = float(decision.get("k_down", 0.0) or 0.0)
+                _kt = _ku + _kd
+                _split = (_kd / _kt) if _kt > 0.0 else 0.0
+                _armed = (self._v2_rate_split_arm_pct > 0.0
+                          and self._peak_price >= entry * (1.0 + self._v2_rate_split_arm_pct / 100.0))
+                _offs  = (self._v2_rate_split_offside_pct > 0.0
+                          and c <= entry * (1.0 - self._v2_rate_split_offside_pct / 100.0))
+                # runner-immunity veto: block while the tracked peak is fresh
+                # (active price discovery saturates s ↑ 1 — see ctor note).
+                if (self._v2_rate_split_min_peak_age_ticks > 0
+                        and self.bar_count - self._last_peak_tick
+                            < self._v2_rate_split_min_peak_age_ticks):
+                    _armed = False
+                    _offs = False
+                if (_armed or _offs) and _split >= self._v2_rate_split_theta:
+                    self._rate_split_streak += 1
+                else:
+                    self._rate_split_streak = 0
+                if self._rate_split_streak >= self._v2_rate_split_persist:
+                    scope = "armed" if _armed else "off"
+                    self.exit_signal_reason = f"rate_split_flip:{scope}"
                     return _V1Signal.EXIT
             # 3. Reversal regime (spec §4 reversal label) with persistence guard.
             #    Mathematical basis: the V2 per-particle regime is derived from

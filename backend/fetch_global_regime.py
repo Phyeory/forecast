@@ -27,7 +27,8 @@ The cache is maintained two ways:
                  (full rebuild from a baseline batch's per-token logs);
   * automated  — `merge_refresh()` called by the main.py maintenance task,
                  which incrementally backtests NEW recordings (pinned to
-                 `v2_regime_enable=0.0` measurement semantics) and merges
+                 `v2_rate_split_enable=0.0` measurement semantics — iter64;
+                 formerly `v2_regime_enable=0.0`) and merges
                  their exits into the persisted per-date accumulators.
 
 Cache layout (backend/data/global_regime_cache.json):
