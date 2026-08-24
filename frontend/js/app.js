@@ -233,7 +233,7 @@ let engineParamsV2 = {
   v2_evr_skip_conc_window:  60,    // trailing window (s) for the share
   // iter56: holder-flow silence gate.  Block entry when tracked wallets have
   // been silent for >= this many seconds (2700.0 = ACCEPTED default; 0 = OFF).
-  v2_hf_silence_gate_seconds: 2700.0,
+  v2_hf_silence_gate_seconds: 0.0,
 
   // iter63/64: stationary Kramers rate-split early-harvest exit
   // ("rate_split_flip"), REGIME-GATED (iter64 — replaces the removed
