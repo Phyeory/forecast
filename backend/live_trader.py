@@ -20,6 +20,7 @@ import re
 import time
 import logging
 import json
+from contextvars import ContextVar
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
@@ -45,14 +46,24 @@ ATA_PROGRAM_ID        = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTN
 logger = logging.getLogger("live-trader")
 
 
+# Task-scoped pointer to the emitting session's SessionJournal.  Concurrent
+# sessions run in separate asyncio tasks; a single class attribute made every
+# new session hijack ALL sessions' console.log lines (the cross-contaminated
+# 2026-08-25 logs).  ContextVar lookup follows each task's context, so every
+# session's records stamp with its own journal.
+_active_journal: ContextVar[Optional[SessionJournal]] = ContextVar(
+    "_active_journal", default=None
+)
+
+
 class _SessionTagFilter(logging.Filter):
-    """Stamp every live-trader LogRecord with the emitting LiveTrader's
+    """Stamp every live-trader LogRecord with the emitting session's
     SessionJournal so each session's FileHandler only writes its own lines
     (see live_session_logger.SessionJournal)."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         if not hasattr(record, "_sid"):
-            record._sid = LiveTrader.current_journal
+            record._sid = _active_journal.get()
         return True
 
 
@@ -270,12 +281,6 @@ class LiveTrader:
       6. Result logged and state updated
     """
 
-    # Class-level pointer to the currently-active session journal.  The
-    # dashboard runs one live-trader session at a time per mint; the
-    # _SessionTagFilter on the "live-trader" logger stamps each record with
-    # this journal so every session's console.log only contains its own lines.
-    current_journal: Optional[SessionJournal] = None
-
     def __init__(
         self,
         token_mint: str,
@@ -337,7 +342,7 @@ class LiveTrader:
                 "skip_simulation": skip_simulation,
             },
         )
-        LiveTrader.current_journal = self.journal
+        self._journal_ctx_token = _active_journal.set(self.journal)
         logger.info(
             f"[SESSION] Logging to {self.journal.dir} "
             f"(console.log + trades.jsonl)"
@@ -548,6 +553,13 @@ class LiveTrader:
             self._blockhash_task = asyncio.ensure_future(self._blockhash_loop())
             logger.info("[CACHE] Blockhash task started")
 
+    def _bind_log_context(self):
+        """Re-anchor this session's journal in the CURRENT task context so
+        records emitted from a foreign task (REST handlers, teardown callers)
+        stamp with this session's console.log.  Tasks spawned by this session
+        inherit the context automatically."""
+        _active_journal.set(self.journal)
+
     async def close(self):
         """Stop the watchdog, cache tasks and close the HTTP session."""
         self._alive = False
@@ -571,9 +583,11 @@ class LiveTrader:
             "trade_count": len(self.trade_history),
             "log_dir": str(self.journal.dir),
         }
+        try:
+            _active_journal.reset(self._journal_ctx_token)
+        except (ValueError, LookupError):
+            pass  # cleanup ran from a different task context than __init__
         self.journal.close(summary)
-        if LiveTrader.current_journal is self.journal:
-            LiveTrader.current_journal = None
 
     # ── Session lifecycle ─────────────────────────────────────────────────────
 
@@ -781,6 +795,7 @@ class LiveTrader:
         mid-execution.  Then, if a position is STILL open, run the emergency
         sell path (which retries indefinitely until tokens leave the wallet).
         """
+        self._bind_log_context()
         if self._swap_in_flight:
             logger.info("[CLEANUP] Swap in flight — waiting up to 20s for it to finish")
             deadline = time.time() + 20.0
@@ -1014,7 +1029,7 @@ class LiveTrader:
         logger.warning(f"[CONFIRM TIMEOUT] sig={sig[:16]}… not confirmed within {timeout_s}s")
         return {"confirmed": False, "error": "timeout", "slot": None}
 
-    async def _get_signature_status(self, sig: str) -> Optional[dict]:
+    async def _get_signature_status(self, sig: str, search_history: bool = False) -> Optional[dict]:
         """Single non-blocking signature-status probe across the RPC fanout.
 
         Returns the raw status dict (``{"err", "confirmationStatus", "slot"}``)
@@ -1022,11 +1037,15 @@ class LiveTrader:
         yet.  Unlike ``_confirm_tx`` this performs ONE round of probes with no
         internal wait loop, so the buy-settle loop can interleave status probes
         with balance probes and blockheight checks at a fast cadence.
+
+        ``search_history=True`` asks RPCs to look beyond the recent-status
+        cache — needed when re-verifying an old buy signature long after it
+        landed (the recent cache evicts after ~minutes to hours).
         """
         payload = {
             "jsonrpc": "2.0", "id": 1,
             "method": "getSignatureStatuses",
-            "params": [[sig], {"searchTransactionHistory": False}],
+            "params": [[sig], {"searchTransactionHistory": search_history}],
         }
 
         def _extract(data: dict) -> Optional[dict]:
@@ -1036,6 +1055,28 @@ class LiveTrader:
 
         result = await self._rpc_fanout_first_wins(payload, timeout_s=1.2, result_fn=_extract)
         return result if isinstance(result, dict) else None
+
+    async def _buy_landed_on_chain(self) -> bool:
+        """True when the current trade's BUY transaction is confirmed on-chain
+        with no error.  A confirmed buy means the tokens MUST exist in the
+        wallet regardless of what token-balance reads currently return — the
+        balance fanout has observed multi-minute outages while
+        getSignatureStatuses kept answering.  Used to refuse "buy never
+        landed" reconciliation for positions that provably exist."""
+        if self.current_trade is None:
+            return False
+        sig = self.current_trade.tx_hash_buy
+        if not sig:
+            return False
+        try:
+            st = await self._get_signature_status(sig, search_history=True)
+        except Exception:
+            return False
+        return bool(
+            st is not None
+            and not st.get("err")
+            and st.get("confirmationStatus") in ("confirmed", "finalized")
+        )
 
     async def _fetch_tx_logs(self, sig: str):
         """Fetch and log the full transaction logs for a given signature."""
@@ -1223,6 +1264,7 @@ class LiveTrader:
 
             # ── Rebuild with the freshest cached blockhash if available ────
             last_valid_height: Optional[int] = None
+            fresh_bh: Optional[str] = None
             fresh = self._get_fresh_blockhash()
             if force_fresh_blockhash:
                 fetched = await self._fetch_latest_blockhash()
@@ -2274,6 +2316,12 @@ class LiveTrader:
                 f"[SELL] Authoritative balance: {token_balance} units (on-chain={fresh_bal > 0})"
             )
 
+            # 6024 probe-trim floor: blind 2% trims stop once the sell amount
+            # falls below 95% of the resolved balance — below that the
+            # authoritative clamp / verified-empty paths own the remainder
+            # (see the NONSIMULATION_ABORT_CODES handler inside the loop).
+            probe_floor = int(token_balance * 0.95)
+
             while True:  # grouped-retry — never give up while wallet still holds tokens
                 attempt_group += 1
                 fee = PRIORITY_FEE_ESCALATION[
@@ -2363,6 +2411,23 @@ class LiveTrader:
                                 token_balance = live_bal
                                 self._token_balance = live_bal
                                 self._cached_token_balance = live_bal
+                            elif live_bal <= 0 and token_balance > probe_floor:
+                                # Balance unreadable AND the full-amount sell
+                                # keeps failing 6024: Jupiter's quoted outAmount
+                                # exceeds what the buy actually delivered
+                                # (observed ~1.7–2% quote-vs-fill shortfall).
+                                # Trim 2% per failure so the loop converges
+                                # without any balance read; dust residue is
+                                # recovered by _verify_sell_settled / watchdog.
+                                trimmed = int(token_balance * 0.98)
+                                logger.warning(
+                                    f"[SELL AMOUNT PROBE] {label} error={tx_error}: "
+                                    f"balance unreadable — trimming sell amount "
+                                    f"{token_balance} → {trimmed} units"
+                                )
+                                token_balance = trimmed
+                                self._token_balance = trimmed
+                                self._cached_token_balance = trimmed
                         logger.warning(
                             f"[SELL FAILED {label}] TX not confirmed (err={tx_error}) — "
                             f"retrying immediately with fresh quote"
@@ -2499,10 +2564,35 @@ class LiveTrader:
                         )
                         return "verified_empty"
 
-                    # ── NO confirmed sell, NO proceeds: buy never landed ──────
-                    # Every attempt in this loop failed on-chain (or never
-                    # broadcast) and the wallet reads empty.  The 0.01 SOL for
-                    # this position never left the wallet — closing it with
+                    # ── NO confirmed sell, NO proceeds: buy never landed? ────
+                    if await self._buy_landed_on_chain():
+                        # The buy TX is confirmed on-chain, so the tokens MUST
+                        # exist — this is a balance-read outage, not a failed
+                        # buy.  Reconciling here orphaned live positions
+                        # ($DEGENERATE / $LOOM, 2026-08-25).  Keep the trade
+                        # open and fall through to another attempt group: the
+                        # 6024 probe-trim below converges on the real balance
+                        # without any read, and the first successful read
+                        # takes over the exact amount.
+                        logger.warning(
+                            "[SELL STALLED] Wallet reads empty but the buy TX is "
+                            "confirmed on-chain — treating as a balance-read "
+                            "outage, NOT a failed buy. Retrying."
+                        )
+                        self._journal_event(
+                            "sell_stalled_read_outage", reason=reason,
+                            last_sell_sig=self._last_sell_sig or None,
+                            attempt_group=attempt_group,
+                            token_balance=token_balance,
+                            trade=self.current_trade,
+                        )
+                        self._last_exit_signal_ts = time.time()
+                        continue
+
+                    # Buy genuinely never landed: every attempt in this loop
+                    # failed on-chain (or never broadcast), the wallet reads
+                    # empty, and there is no confirmed buy TX.  The 0.01 SOL
+                    # for this position never left the wallet — closing it with
                     # sol_received=0 would invent a -100% loss that never
                     # happened.  Reconcile as a FAILED BUY (flat, no PnL
                     # bookkeeping) and let the engine see "flat" again.
@@ -2702,6 +2792,20 @@ class LiveTrader:
                         proceeds = await self._measure_sell_proceeds()
 
                     if not confirmed_sell and (proceeds is None or proceeds <= 0):
+                        if await self._buy_landed_on_chain():
+                            # Balance unreadable but the buy TX is confirmed
+                            # on-chain — the tokens MUST exist.  Force the same
+                            # sell retry as the readable-balance branch above;
+                            # never reconcile a live position as a failed buy.
+                            logger.warning(
+                                f"[WATCHDOG] ⚠  {time_since_exit:.0f}s elapsed "
+                                f"since sell signal, balance unreadable but buy "
+                                f"TX confirmed on-chain — forcing sell retry."
+                            )
+                            self.current_trade.status = "closing"
+                            self.current_trade.exit_reason = "watchdog_retry"
+                            asyncio.ensure_future(self.execute_sell("watchdog_retry"))
+                            continue
                         logger.error(
                             "[WATCHDOG] Wallet reads empty but no sell confirmed "
                             "and no proceeds measured — buy never landed. "
@@ -3417,6 +3521,7 @@ class LiveTrader:
 
     async def force_buy(self) -> Optional[str]:
         """Manually trigger a test buy from the dashboard."""
+        self._bind_log_context()
         if self.current_trade is not None or self._is_buy_pending():
             logger.warning("[MANUAL BUY] Already in a trade (or buy pending) — ignoring")
             return None
@@ -3448,6 +3553,7 @@ class LiveTrader:
 
     async def force_sell(self) -> Optional[str]:
         """Manually trigger a test sell from the dashboard."""
+        self._bind_log_context()
         if self.current_trade is None:
             logger.warning("[MANUAL SELL] No position open — ignoring")
             return None

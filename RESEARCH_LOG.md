@@ -7624,7 +7624,7 @@ BACKTEST_RESULTS_DIR=backend/v2_results \
 
 **Date:** 2026-08-24
 **Focus:** User decisions, in order: (1) re-affirmed the iter62 ablated config as production after a self-run full batch with holder-flow and regime layers disabled ("these mechanisms are doing bad"); (2) observed from the iter63 date-segmented table that the rate-split mechanism gains concentrated on weak-regime dates while trading slightly negative on strong ones; (3) directed: **remove ALL existing regime-adapting machinery** ("like the gain_retrace thing") and **replace the adaptation channel with the iter63 rate-split gated to weak market regimes** — enabled on weak days, usual algorithm on normal days; target ≈ +4 SOL @ >70% WR through the standard protocol.
-**Status:** Surgery COMPLETE and parity-proven; all suites green; fresh full-cohort baseline measured (`iter63r_base`: 1,048 trades / 72.3% WR / +1.6008 SOL, §5); **candidate batches NOT run — deferred per explicit user instruction**; params files staged.
+**Status:** Surgery COMPLETE and parity-proven; all suites green; **verification EXECUTED (§6): user's candidate reproduced byte-exact (1,101/71.84%/+1.8596); 12-cell sweep finds the user's (θ=0.55, K=12, arm=10) at the local optimum; arm6 REJECTED at full batch (Δ−0.037); ungating the regime gate = the only positive direction (+0.155 paired, p=0.001, breadth 83%, McNemar 0/3, CI straddles by 4.8e-4).** Defaults pending user's gated-vs-ungated decision.
 
 ### 1. What was removed (surgical list, `backend/strategy_engineV2.py`)
 
@@ -7683,26 +7683,63 @@ Date-segmented Δ (iter63_full − date3) joined with the regime cache:
 
 This is the staged acceptance anchor for the deferred candidate batteries (§6): pair per-recording against the `iter63r_base_*` logs at battery time, on the same dataset boundary the candidate runs on.
 
-### 6. Deferred verification (staged, per user instruction)
+### 6. Verification — EXECUTED (2026-08-25): user's production candidate reproduced byte-exact, 12-cell screen, arm6 REJECTED at full batch, **ungating the regime gate is the only positive direction found**
 
-Ready-to-run, in order:
+**Baseline reproduction.** The user's production-candidate config was extracted from the `backtests` row of their UI run (batch `1787614267302`): gated rate-split ON (`enable=1, regime_gate=1, q_max=0.6, unknown_q_enable=1, arm=10, offside=0, theta=0.55, persist=12, mpa=0`) **plus `v2_hf_silence_gate_seconds=0`** (silence gate additionally OFF vs the iter62 tree state). Re-run via `run_iteration.py --label iter64_userbase --params analysis/iter64_userbase_params.json`: **1,101 trades / 71.84% WR / +1.8596 SOL** — byte-exact reproduction of the user's baseline.
 
-```bash
-# 1) UNGATED candidate on the fresh cohort (reference + gate-value measurement)
-BACKTEST_RESULTS_DIR=backend/v2_results \
-  backend/.venv/bin/python run_iteration.py --label iter64_ungated \
-    --params backend/analysis/iter64_ungated.json --max-workers 8
+(Hazard fixed during setup: `run_iteration.py --label iter64_userbase` overwrites `analysis/iter64_userbase.json` with the batch aggregate — colliding with the params file name and feeding garbage `engine_params` (aggregate stats + one param) into the first sweep launch. All iter64 params files are now named `*_params.json`.)
 
-# 2) GATED candidate (the requested mechanism)
-BACKTEST_RESULTS_DIR=backend/v2_results \
-  backend/.venv/bin/python run_iteration.py --label iter64_gated \
-    --params backend/analysis/iter64_gated.json --max-workers 8
+**Screen (260-rec subset, paired vs iter64_userbase logs, 12 cells, `analysis/iter64_screen.py`):**
 
-# 3) Battery vs the fresh baseline for either label
-cd backend && .venv/bin/python analysis/iter63_battery.py iter64_gated
-```
+| cell | Δ SOL | Wilcoxon p | imp/reg | trades | tail15 | verdict |
+|---|---|---|---|---|---|---|
+| th50 | +0.0004 | 0.74 | 10/17 | 777/777 | 182/182 | null |
+| th60 | +0.0099 | 0.21 | 10/5 | 777/776 | 182/182 | null |
+| th65 | −0.0382 | — | 11/11 | 777/776 | 182/182 | worse |
+| th70 | −0.0947 | — | 10/14 | 777/776 | 182/182 | worse |
+| k8 | −0.021 | — | 24/40 | 777/777 | 182/182 | worse |
+| k16 | −0.010 | 0.51 | 26/27 | 777/777 | 182/182 | ≈null |
+| k20 | −0.086 | — | 26/27 | 777/776 | 182/182 | worse |
+| arm6 | +0.0526 | 0.24 | 13/9 | 777/779 | 182/179 | weak+ (noise) |
+| arm15 | +0.0058 | 0.47 | 6/10 | 777/777 | 182/182 | null |
+| ungated | +0.0432 | **0.0115** | **19/5** | 777/777 | 182/182 | **positive** |
+| q70 | −0.0093 | 0.31 | 4/1 | 777/777 | 182/182 | worse |
+| unknownoff | −0.0285 | — | 6/11 | 777/777 | 182/182 | worse |
 
-Decision rule (protocol): ACCEPT the gated variant iff it clears Wilcoxon p<0.05 + CI>0 + ≥50% breadth vs `iter63r_base_*`; report ungated-vs-gated Δ as the measured value of the gate itself. If adopted, flip `v2_rate_split_enable` pop-default + DEFAULT_CONFIG to 1.0 (gate stays 1.0) and re-probe parity: bare-{} == explicit-gated-params, and `enable=0` == `iter63r_base` bytes.
+θ and K axes are peaked exactly at the user's chosen (0.55, 12) on all 7 perturbed directions — the batch-level config sits at a verified local optimum. The arm axis is non-monotone (+0.053/0/+0.006 at 6/10/15) — arm6's screen blip is consistent with noise.
+
+**Full-cohort batches** (`run_iteration.py`, current DB, 0 errors each):
+
+| label | trades | WR | PnL (SOL) | PF | battery Δ vs userbase | Wilcoxon p | CI 95% | imp/reg | McNemar W2L/L2W |
+|---|---|---|---|---|---|---|---|---|---|
+| `iter64_userbase` (baseline) | 1,101 | 71.8% | +1.8596 | 1.22 | — | — | — | — | — |
+| `iter64sw_arm6` (arm=6) | 1,111 | 71.7% | +1.9251 | 1.23 | **−0.0367 (paired)** | 0.72 | [−0.00062, +0.00047] | 19/21 | 2/2 |
+| `iter64sw_ungated` (gate OFF) | 1,108 | 71.8% | **+2.0739** | 1.24 | **+0.1551 (paired)** | **0.00101** | [−0.00048, +0.00110] | **25/5 (83%)** | **0/3** |
+
+**Verdicts per protocol:**
+- `arm6`: REJECTED at full batch (paired Δ negative; screen +0.053 was noise). 
+- `ungated` (`v2_rate_split_regime_gate: 0.0`): **+0.155 paired SOL, p = 0.001, breadth 83%, zero W→L regressions, tails flat (227→228 ≤−15%), mechanism accounting: rate_split_flip 2.59→3.64 (+1.05) from newly-enabled strong/unknown days, gain_retrace −0.43, kramers −0.36, kelly_flat −0.05, everything else byte-equal.** The bootstrap mean-CI straddles zero by 4.8e-4 SOL/rec — same power-limited signature as iter57/61 (gate decision = explicit user call per those precedents). The `iter64sw_arm6` headline total (+1.9251) exceeds the ungated headline on unpaired-regs (+0.10 of its PnL came from 5 recs with no baseline counterpart), a pairing-scope artifact only.
+
+**The gate that iter62-driven reasoning asked for measurably costs money on the current cohort** — the iter63 date-split signal (weak-day concentration) was real then, but strong-day engagement on the enlarged cohort is net-positive too: gating purely by day-level Q discards it. Documented, not adjudicated: defaults unchanged (gate=1.0) until the user chooses.
+
+The user target (+4 SOL / >70% WR full cohort) is **not reachable by rate-split parameter sweeps**: every direction from the production cell is measured null-or-worse except the gate removal (+2.07). A +4.0 total would need a new information channel, not exit-geometry tuning.
+
+### 7. ADOPTION (2026-08-25, explicit user decision)
+
+User directed the measured-best configuration into production defaults:
+
+| knob | old default | new default |
+|---|---|---|
+| `v2_rate_split_enable` | 0.0 (off) | **1.0 (ON)** |
+| `v2_rate_split_regime_gate` | 1.0 | **0.0 (ungated — measured better: §6 paired Δ+0.155, p=0.001, breadth 83%)** |
+| `v2_hf_silence_gate_seconds` | 2700.0 | **0.0 (matches the user's baseline profile)** |
+| `v2_rate_split_theta` / `persist` / `arm_pct` | (already 0.55 / 12 / 10) | unchanged |
+
+Changed surfaces, kept in sync: `strategy_engineV2.py` DEFAULT_CONFIG + ctor pop defaults, `frontend/js/app.js` mirrors. The ungated production config = exactly the `iter64sw_ungated` batch's params; byte-parity of the default flip is therefore not an assumption but a measured fact: **bare-{} ≡ explicit `iter64sw_ungated` params on probe recs 1810 (13/13 trades) and 431 (16/16 trades)**. Futures engines still hard-off via `_is_futures_engine`; `test_futures.py` 18/18 confirm untouched futures paths.
+
+Post-adoption suites: regime_adapt 10/10 (rewritten for the ON/ungated defaults), rate_split 7/7, futures 18/18, live_parity 10/10 pytest, hf_silence 5/5 (default assertion updated 2700→0.0). `test_live_parity.py`'s explicit `{"v2_rate_split_enable": 0.0}` pin keeps the decision-parity harness stable against future default flips.
+
+To restore the pre-adoption engine state in a run: `engine_params = {"v2_rate_split_enable": 0.0, "v2_hf_silence_gate_seconds": 2700.0}` (plus any gate keys). Historical baselines (`date3_`, `iter63r_base_*`, `iter64_userbase_*`) remain valid reference cohorts but bare-{} no longer reproduces them — that byte-exactness now tracks the adopted production config, by design.
 
 ### 7. Lessons
 

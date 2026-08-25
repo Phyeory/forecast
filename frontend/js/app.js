@@ -236,19 +236,17 @@ let engineParamsV2 = {
   v2_hf_silence_gate_seconds: 0.0,
 
   // iter63/64: stationary Kramers rate-split early-harvest exit
-  // ("rate_split_flip"), REGIME-GATED (iter64 — replaces the removed
-  // iter57/58 give-back adaptation and the iter61 participation floor,
-  // removed by explicit user decision 2026-08-24).  While armed (peak ≥
-  // entry·(1+arm)), fires when the stationary escape-rate split
-  // s = k_down/(k_up+k_down) ≥ theta for `persist` consecutive 4-state
-  // ticks.  iter63 full-cohort (rsb12t55): Δ +0.3633 SOL (+25.2%),
-  // Wilcoxon p=2e-05, breadth 74.5%, harvested class +3.246 SOL with
-  // worst trade 0.0%.  The regime gate restricts firing to weak-regime
-  // days (causal Q(today) < q_max; date-segmented: +0.263 SOL over weak
-  // days vs +0.010 on strong days).  See RESEARCH_LOG.md Iters 63/64.
-  v2_rate_split_enable:         0.0,   // 1.0 = ON; 0.0 = OFF (byte-parity)
-  v2_rate_split_regime_gate:    1.0,   // 1.0 = weak-regime-days only
-  v2_rate_split_q_max:          0.6,   // Q(today) >= this → normal day → inert
+  // ("rate_split_flip") — PRODUCTION ON (user decision 2026-08-25 after the
+  // iter64 sweep battery: θ=0.55/K=12/arm=10 verified local optimum on all 7
+  // perturbed directions; regime gate measured NET-NEGATIVE on the current
+  // cohort → gate OFF: full-cohort +2.0739 SOL / 71.8% WR / 1,108 trades vs
+  // gated +1.8596; paired Δ+0.155, Wilcoxon p=0.001, breadth 83%).  While
+  // armed (peak ≥ entry·(1+arm)), fires when the stationary escape-rate split
+  // s = k_down/(k_up+k_down) ≥ theta for `persist` consecutive 4-state ticks.
+  // See RESEARCH_LOG.md Iters 63/64.
+  v2_rate_split_enable:         1.0,   // 1.0 = ON (production default)
+  v2_rate_split_regime_gate:    0.0,   // 0.0 = OFF (measured better than gated)
+  v2_rate_split_q_max:          0.6,   // Q(today) >= this → normal day → inert when gated
   v2_rate_split_unknown_q_enable: 1.0, // unknown/missing Q dates → ON
   v2_rate_split_arm_pct:       10.0,   // arm profit-lock trigger at +10% peak
   v2_rate_split_offside_pct:    0.0,   // offside scope REJECTED by CF/screen (0)
