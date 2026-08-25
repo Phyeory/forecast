@@ -3186,8 +3186,8 @@ class StrategyEngineV2Adapter:
         #   When no holder_flow events are loaded, `_has_recent_dev_sell`
         #   always returns False, so behaviour is byte-identical to the
         #   pre-iter36 engine (parity-safe on recordings without holder_flow).
-        self._v2_holder_flow_entry_block = float(engine_kwargs.pop("v2_holder_flow_entry_block", 0.0))
-        self._v2_holder_flow_exit_enable = float(engine_kwargs.pop("v2_holder_flow_exit_enable", 0.0))
+        self._v2_holder_flow_entry_block = float(engine_kwargs.pop("v2_holder_flow_entry_block", 1.0))
+        self._v2_holder_flow_exit_enable = float(engine_kwargs.pop("v2_holder_flow_exit_enable", 1.0))
         self._v2_holder_flow_require_tag = float(engine_kwargs.pop("v2_holder_flow_require_tag", 0.0))
         self._v2_holder_flow_min_usd     = float(engine_kwargs.pop("v2_holder_flow_min_usd", 100.0))
         self._v2_holder_flow_entry_window_seconds = int(engine_kwargs.pop("v2_holder_flow_entry_window_seconds", 30))
