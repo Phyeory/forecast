@@ -232,21 +232,18 @@ DEFAULT_CONFIG = {
     # LOO Δ +0.1375 SOL.  Default: 0.25 (ACCEPTED iter50 best config).
     "v2_evr_skip_sell_conc_min": 0.25,   # veto when maxsec sell share > this (0 = OFF)
     "v2_evr_skip_conc_window":  60,     # trailing window (s) for the share
-    # ── iter64: regime-gated stationary Kramers rate-split exit ──────────
-    # REPLACES the iter57/58 give-back give_frac adaptation and the iter61
-    # participation floor (REMOVED 2026-08-24 by explicit user decision —
-    # measured on the post-iter62 ablated full-cohort baseline those layers
-    # were net-negative with the fresh dataset; findings preserved in
-    # RESEARCH_LOG.md Iters 57–63).  The causal daily regime score Q(today)
-    # (same cache, backend/fetch_global_regime.py, strictly-prior-dates
-    # construction) now gates ONLY the iter63 rate_split_flip early-harvest
-    # exit: it fires only on weak-regime days (Q < q_max) — on normal/strong
-    # regime days the trigger is inert (iter63 date-segmented evidence:
-    # +0.263 SOL over 13 weak days vs +0.010 over 7 strong days).
-    # Defaults: enable 0.0 = OFF (production parity) pending gate; when
-    # enabled, regime_gate 1.0 = weak-days-only semantics ON.
-    "v2_rate_split_enable": 0.0,          # 1.0 = ON
-    "v2_rate_split_regime_gate": 1.0,     # 1.0 = weak-regime-days only
+    # ── iter64: stationary Kramers rate-split exit (PRODUCTION ON) ──────
+    # REPLACES the iter57/58 give-back adaptation and the iter61
+    # participation floor (removed 2026-08-24 by explicit user decision).
+    # Sweep + full-cohort battery (2026-08-25, RESEARCH_LOG.md Iter 64 §6):
+    # θ=0.55 / K=12 / arm=10 verified as the local optimum on all seven
+    # perturbed directions; the regime gate was measured NET-NEGATIVE on the
+    # current cohort (ungated: +2.0739 SOL / 71.8% WR / 1,108 trades vs gated
+    # +1.8596; paired Δ+0.155, Wilcoxon p=0.001, breadth 83%) →
+    # v2_rate_split_regime_gate DEFAULT 0.0 = OFF (ungated), adopted by
+    # explicit user decision.  1.0 re-enables the weak-days-only gate.
+    "v2_rate_split_enable": 1.0,          # 1.0 = ON (production default)
+    "v2_rate_split_regime_gate": 0.0,     # 0.0 = OFF (measured better)
     "v2_rate_split_q_max": 0.6,           # Q(today) >= this → normal regime → inert
     "v2_rate_split_unknown_q_enable": 1.0,  # missing/unknown Q dates → treat as ON
     "v2_rate_split_arm_pct": 10.0,        # arm at +10% peak gain
@@ -3194,17 +3191,17 @@ class StrategyEngineV2Adapter:
         self._v2_holder_flow_require_tag = float(engine_kwargs.pop("v2_holder_flow_require_tag", 0.0))
         self._v2_holder_flow_min_usd     = float(engine_kwargs.pop("v2_holder_flow_min_usd", 100.0))
         self._v2_holder_flow_entry_window_seconds = int(engine_kwargs.pop("v2_holder_flow_entry_window_seconds", 30))
-        # `v2_hf_silence_gate_seconds` (default 2700.0, iter56 ACCEPTED): when > 0,
+        # `v2_hf_silence_gate_seconds` (iter56 ACCEPTED at 2700.0 on the 2026-08
+        # dataset; DEFAULT 0.0 = OFF since 2026-08-25 — the user's production
+        # baseline (their 1,623-rec full batch) and the iter64 sweep both ran
+        # with the gate disabled; production parity now tracks that state.
+        # Re-enable with an explicit >0 value).  When > 0,
         #   block NEW entries when holder-flow events exist for this recording
         #   but the most recent event is >= this many seconds old (tracked
         #   wallets have gone silent = nobody is watching the token).  The
         #   gate never arms on recordings with no events at all (absence of
-        #   coverage is indistinguishable from dead flow).  iter56 full cohort:
-        #   Pareto-optimal PnL +1.9930 SOL (+0.0292 SOL net gain), severe losers
-        #   n(≤-15%) cut 166→163, catastrophics n(≤-30%) cut 87→84 (p=0.0312),
-        #   tail drag +0.1364 SOL saved (p=0.0078), WR 69.00%→69.17% (+0.17 pp).
-        #   Set to 0.0 to disable.
-        self._v2_hf_silence_gate_seconds = float(engine_kwargs.pop("v2_hf_silence_gate_seconds", 2700.0))
+        #   coverage is indistinguishable from dead flow).
+        self._v2_hf_silence_gate_seconds = float(engine_kwargs.pop("v2_hf_silence_gate_seconds", 0.0))
         self._v2_holder_flow_exit_window_seconds  = int(engine_kwargs.pop("v2_holder_flow_exit_window_seconds", 15))
         # ── Pre-entry Taker Order-Flow Imbalance Gate (iter45) ─────────────
         self._v2_order_flow_imbalance_gate = float(engine_kwargs.pop("v2_order_flow_imbalance_gate", 0.0))
@@ -3251,8 +3248,8 @@ class StrategyEngineV2Adapter:
         # Scopes (independent, OR-ed):
         #   arm_pct  — armed winners only: peak ≥ entry·(1+A/100)  (0=off)
         #   offside  — deep-offside only: c ≤ entry·(1−X/100)      (0=off)
-        # Default enable=0.0 = OFF → byte-exact production parity.
-        self._v2_rate_split_enable      = float(engine_kwargs.pop("v2_rate_split_enable", 0.0))
+        # Default enable=1.0 = ON (production, post-iter64 adoption).
+        self._v2_rate_split_enable      = float(engine_kwargs.pop("v2_rate_split_enable", 1.0))
         self._v2_rate_split_arm_pct     = float(engine_kwargs.pop("v2_rate_split_arm_pct", 10.0))
         self._v2_rate_split_offside_pct = float(engine_kwargs.pop("v2_rate_split_offside_pct", 0.0))
         self._v2_rate_split_theta       = float(engine_kwargs.pop("v2_rate_split_theta", 0.55))
@@ -3277,7 +3274,7 @@ class StrategyEngineV2Adapter:
         # consumption changed.  Unknown/missing Q dates default to ON
         # (unknown days were net-positive +0.091 in the iter63 pairing).
         self._v2_rate_split_regime_gate      = float(engine_kwargs.pop(
-            "v2_rate_split_regime_gate", 1.0))
+            "v2_rate_split_regime_gate", 0.0))
         self._v2_rate_split_q_max            = float(engine_kwargs.pop(
             "v2_rate_split_q_max", 0.6))
         self._v2_rate_split_unknown_q_enable = float(engine_kwargs.pop(
