@@ -7705,6 +7705,8 @@ This is the staged acceptance anchor for the deferred candidate batteries (§6):
 | ungated | +0.0432 | **0.0115** | **19/5** | 777/777 | 182/182 | **positive** |
 | q70 | −0.0093 | 0.31 | 4/1 | 777/777 | 182/182 | worse |
 | unknownoff | −0.0285 | — | 6/11 | 777/777 | 182/182 | worse |
+| off15 (late add) | −0.0316 | 0.46 | 7/3 | 777/777 | 182/185 | worse — offside scope rejected again on the production config |
+| mpa20 (late add) | −0.1053 | 0.91 | 20/24 | 777/776 | 182/182 | worse — peak-age veto blocks −0.80 of net-positive harvests |
 
 θ and K axes are peaked exactly at the user's chosen (0.55, 12) on all 7 perturbed directions — the batch-level config sits at a verified local optimum. The arm axis is non-monotone (+0.053/0/+0.006 at 6/10/15) — arm6's screen blip is consistent with noise.
 
