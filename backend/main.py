@@ -1260,6 +1260,7 @@ class _LiveSession:
         _hf_stop = asyncio.Event()
         _gr_pump_task = None   # iter57 global-regime cache pump
         _gr_stop = asyncio.Event()
+        _nm_watch_task = None  # no-motion idle-session terminator
         # iter57 parity fix: holder-flow delivery cursor is the last DB row id
         # pushed into the engine (lossless, matches backtest replay exactly).
         _hf_last_id = {"id": 0}
@@ -1344,6 +1345,29 @@ class _LiveSession:
                     await asyncio.sleep(60.0)
 
             _gr_pump_task = asyncio.ensure_future(_global_regime_pump())
+
+            # ── No-motion idle-session terminator ───────────────────────────
+            # Companion to the in-stream check in _process_stream below: a
+            # coin whose trade feed has gone completely silent never yields
+            # another tick, so the stream-loop check would starve exactly
+            # when it is needed.  The LiveTrader watchdog (time-driven) sets
+            # no_motion_stop_triggered once the coin has had no price motion
+            # for no_motion_stop_seconds while fully idle; this 5s poller
+            # shuts the session down when it fires.  Identical to the mcap
+            # floor stop minus the emergency sell — teardown finalises the
+            # auto-recording via data_store.stop_recording().
+            async def _no_motion_watch():
+                while not self.cancelled.is_set():
+                    await asyncio.sleep(5.0)
+                    if live_trader.no_motion_stop_triggered:
+                        logger.warning(
+                            f"[LIVE] No-motion stop triggered for {real_mint[:8]}… — "
+                            f"session idle, shutting down"
+                        )
+                        self.stop("no_motion")
+                        return
+
+            _nm_watch_task = asyncio.ensure_future(_no_motion_watch())
 
             # ── Historical warm-up (seeds the recording + the engine) ────────
             try:
@@ -1538,6 +1562,14 @@ class _LiveSession:
                 _gr_pump_task.cancel()
                 try:
                     await _gr_pump_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            # Stop the no-motion watcher
+            if _nm_watch_task is not None:
+                _nm_watch_task.cancel()
+                try:
+                    await _nm_watch_task
                 except (asyncio.CancelledError, Exception):
                     pass
 
@@ -1803,6 +1835,11 @@ async def _get_or_create_live_session(
             engine_kwargs=engine_params or {},
             skip_simulation=skip_sim,
             engine_version=engine_version,
+            # User policy (2026-08-26): terminate motionless coins to free
+            # hardware.  Fires ONLY while fully idle (no position / pending
+            # signal / swap), so teardown never needs an emergency sell; the
+            # auto-recording is finalised by the normal session teardown.
+            no_motion_stop_seconds=60.0,
         )
         live_trader.start_watchdog()
 
