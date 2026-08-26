@@ -7748,3 +7748,138 @@ To restore the pre-adoption engine state in a run: `engine_params = {"v2_rate_sp
 1. **A regime channel should be validated in the form it will run.** iter57/58 adapted a continuous scalar (give-back tightening) from a binary-ish daily signal; iter63's evidence shows the underlying relation is binary (weak/strong split, ρ≈0.02 monotone). Gates, not scalers, match this signal's information content.
 2. **Removing rejected machinery beats leaving it dormant.** Dormant code keeps carrying test/maintenance surface and invites accidental re-enablement; the surgical-removal unit test (`test_removed_machinery_surgical`) locks the removal in.
 3. **Baseline drift is real.** The dataset grew (1,557→1,623 recordings between iter62's sweep and today). Every acceptance battery must re-measure its own baseline cohort at battery time — never inherit numbers across dataset boundaries or configuration differences.
+
+
+---
+
+## Iter 65 — Post-Peak Give-Back Forensics + Pool-Drain Early Exit (`pool_drain_exit`, default-OFF, screen pending)
+
+**Date:** 2026-08-25
+**Focus:** The "NEXT AGENT BRIEF" mission — eliminate a material part of the post-peak give-back and the catastrophic-loss left tail without sacrificing win rate. Executed the mandated STEP ZERO forensic decomposition first, then exploited a genuinely NEW observable axis that no prior iteration consumed: `pool_sol` (bonding-curve SOL liquidity depth), which is already plumbed into the engine every tick but never used by any logic.
+**Status:** Step Zero COMPLETE (§1). Separation CF COMPLETE (§2). Oracle CF COMPLETE (§3). Mechanism implemented default-OFF, unit-tested (9/9), all regression suites green, bare-{} parity PROVEN (§4–5). **Screen EXECUTED (§6): ALL 9 CELLS REJECTED — no survivor advanced to full batch; the axis stays default-OFF and dormant. No defaults changed.**
+
+### 0. Baseline reconciliation (read this before comparing to the brief)
+
+The brief references `backend/v2_results/`, `iter64_userbase_1787616977` and `iter64sw_ungated_1787631207` (+2.0739). **None of those exist in this tree.** The actual artifacts:
+
+- Per-token logs live in `backend/backtest_results/` under two batch IDs: `1787660685963` (`v2_hf_silence_gate_seconds=0.0`, 907 trades, 67.0% WR, **+1.9391 SOL** — matches the user's production profile) and `1787665311792` (hf_silence=2700, 987 trades, **+2.3426**).
+- Both carry `v2_rate_split_enable=1.0`, `v2_rate_split_regime_gate=0.0` — and **holder-flow gates RE-ENABLED** (working-tree commit `ec6e01e "re-enabled holder flow gates"`): `dev_sell_exit` fires in these batches (+0.32 SOL pre-peak). This contradicts the brief's "holder-flow REMOVED" table; the current production-equivalent stack includes holder-flow ON, and all iter65 pairing uses that stack.
+- Dataset generation moved again (1,702 recordings). Per protocol mandate #1, the acceptance baseline is **re-measured at battery time as `iter65_base`** (bare `{}`, parity-proven identical to the production param set) — the battery pairs against `iter65_base_*`, never against the absent iter64 labels.
+
+### 1. STEP ZERO — equity-curve anatomy of the give-back
+
+Source: `analysis/iter65_stepzero.py` → `iter65_stepzero_prod.json` (batch 1787660685963, 907 trades, 2026-07-27 → 2026-08-25).
+
+- Equity peaks at **+2.1918 SOL after trade 686 (exit 2026-08-18)**, then decays **−0.2527** over the final 220 trades (WR 69.3% pre-peak → 60.0% post-peak).
+- **The give-back is NOT (a) a handful of catastrophes and NOT (c) winner give-back.** It is (b)+(d): a broad late-cohort bleed concentrated 08-19 (−0.157), 08-20 (−0.145), 08-21 (−0.131), 08-22 (−0.117), dominated by loser-side exit reasons:
+
+| post-peak exit | n | PnL (SOL) | pre-peak PnL for comparison |
+|---|---|---|---|
+| kelly_flat | 16 | **−0.746** | −2.157 (48 trades) |
+| recording_ended | 18 | **−0.421** | −1.206 (55 trades) |
+| dev_sell_exit | 51 | −0.294 | +0.320 (67 trades) |
+| evr_triage | 5 | −0.144 | −0.706 (26 trades) |
+| rate_split_flip / tp_v2 / breakeven | — | positive | positive |
+
+- Hour-of-day shows **no exploitable concentration** (post-peak hourly PnL oscillates ±0.05 with n≤22; hour-1 is mildly negative in both segments but far below a causal-throttle threshold). This kills open direction #2 for this cohort.
+- The left tail is the structural problem: **tail ≤ −15% = 180 trades, −6.17 SOL, 0% WR**; within it kelly_flat −2.90 (64), recording_ended −1.63 (53), evr_triage −0.85 (31), dev_sell_exit −0.55 (23). kelly_flat median age 375 s — consistent with the brief's "fires long after the −20% crossing" diagnosis.
+- Trade-age decomposition: the 60–180 s bucket is the worst per-trade expectancy post-peak (−0.124 SOL / 60 trades, WR 56.7%) — exactly the **20–120 s early-bleed lane** between entry onset and EVR's 120 s minimum, which has no coverage (open direction #3).
+
+### 2. The new axis: `pool_sol` trajectory separates tail losers from winners
+
+`analysis/iter65_poolcf.py` → `iter65_poolcf_prod.json`. For every trade with pre-entry `pool_sol` coverage (591/907; 261 recs have no pool data), baseline depth = median of the 30 s before entry; features = depth drawdown vs baseline at each trade age.
+
+| group | n | dd60 median | cross −25% rate | median cross age |
+|---|---|---|---|---|
+| tail (≤ −15%) | 109 | **−9.1%** | **0.422** | 55 s |
+| mid-loss | 16 | −2.7% | 0.125 | 30 s |
+| small | 49 | −1.2% | 0.102 | 3 s |
+| win | 317 | **+0.9%** | **0.054** | 13 s |
+
+A ≥25% bonding-curve depth drain inside the first 2 minutes hits **42% of tail losers vs 5.4% of winners** (7.8× lift) — a genuinely new information source (on-chain liquidity removal = someone pulling the rug's SOL side), not an OHLCV re-derivation, so it passes the it37 oracle-bound criterion. This is also the it32 lesson applied correctly: pool k-jumps lead crashes, but `pool_sol` **is** available at and after entry, so a *post-entry drain* detector is causal.
+
+### 3. Oracle counterfactual (upper bound before engine costs)
+
+`analysis/iter65_draincf.py` → `iter65_draincf_prod.json`. "Exit at fire price" CF across drain-fraction × age-window cells:
+
+| cell | fires | on losers / winners | naive SOL saved | fires on tail ≤−15% | median fire age |
+|---|---|---|---|---|---|
+| df25 a10–180 | 58 | 43 / 15 | **+0.412** | 35 | 24 s |
+| df25 a10–300 | 63 | 48 / 15 | +0.388 | 40 | 30 s |
+| df30 a10–180 | 31 | 24 / 7 | +0.340 | 21 | 32 s |
+| df15 a10–180 | 118 | 77 / 41 | +0.423 | 59 | 16 s |
+
+df25/a10–180 chosen as the anchor cell (best save-per-fire ratio; shallow df15 cells fire on too many eventual winners). Caveat carried into the screen: naive CF overstates — real-engine fills pay costs and some fired trades would have recovered (the graveyard's replacement-entry lesson applies: freed capital re-enters). Only a real-engine batch can settle it.
+
+### 4. Mechanism — `pool_drain_exit` (default OFF)
+
+`strategy_engineV2.py`:
+
+| param | default | meaning |
+|---|---|---|
+| `v2_pool_drain_enable` | **0.0** | master switch (production parity until adoption) |
+| `v2_pool_drain_frac` | 0.25 | fire when depth ≤ base·(1−frac) |
+| `v2_pool_drain_age_min` | 10 | seconds after entry before arming |
+| `v2_pool_drain_age_max` | 180 | seconds after entry, window closes |
+| `v2_pool_drain_offside_pct` | 0.0 | optional price-offside requirement (0 = off) |
+| `v2_pool_drain_base_window` | 30 | pre-entry ticks used for the base median |
+
+Mechanics: a maxlen deque accumulates `pool_sol` **only while the mechanism is enabled** (so bare-{} state is byte-identical); `notify_trade_opened` anchors base = median(pre-entry window) and entry time; `notify_trade_closed` resets both (parity mandate #3: resets in BOTH notify hooks). Exit branch 7c sits after `evr_triage` and before the holder-flow exit; fires → `reason="pool_drain_exit"`. No baseline, no fire (recordings without pool coverage are untouched — 261 recs here). Futures engines hard-off. `frontend/js/app.js` mirrors all six knobs.
+
+### 5. Verification (all green at write time)
+
+- Unit tests `analysis/test_iter65_pool_drain.py`: **9/9** (default-off bare, fires in window, no-data inert, out-of-window inert, offside guard both ways, state reset across trades, base = median not last tick, futures hard-off).
+- Suites: `test_futures.py` 18/18, `pytest analysis/test_live_parity.py` 10/10, `analysis/test_regime_adapt.py` 10/10, `analysis/test_iter63_rate_split.py` 7/7, `analysis/test_hf_silence.py` 5/5.
+- **bare-{} parity probe** (`analysis/iter65_parity_probe.py`, protocol mandate #2): bare `{}` vs the explicit production param set on recs {1810, 431} → trade-for-trade identical (16/16 and 11/11). PASS.
+
+### 6. Validation pipeline — screen EXECUTED, all cells REJECTED
+
+Screen: `analysis/iter65_screen.py` — first re-measured `iter65_base` (bare {}) on the 260-rec stratified subset, then 9 cells. Results (`iter65_screen_results.json`):
+
+| cell | Δ PnL (SOL) | Wilcoxon p | boot CI95 | imp/reg | tail≤−15% b/c | trades b/c |
+|---|---|---|---|---|---|---|
+| pd15_120 | **−0.760** | 0.961 | [−0.0060, −0.0004] | 38/48 | 157/161 | 735/834 |
+| pd20_120 | −0.496 | 0.729 | [−0.0049, +0.0003] | 31/29 | 157/167 | 735/798 |
+| pd25_120 | −0.273 | 0.716 | [−0.0036, +0.0007] | 21/23 | 157/171 | 735/776 |
+| pd25_180 (CF anchor) | −0.214 | 0.475 | [−0.0033, +0.0008] | 21/21 | 157/171 | 735/772 |
+| pd25_300 | −0.232 | 0.544 | [−0.0034, +0.0007] | 22/23 | 157/172 | 735/773 |
+| pd30_180 | −0.207 | 0.393 | [−0.0033, +0.0008] | 14/13 | 157/161 | 735/754 |
+| pd40_300 | −0.175 | 0.213 | [−0.0029, +0.0006] | 5/4 | 157/157 | 735/740 |
+| pd25_180_off2 | +0.059 | 0.307 | [−0.0006, +0.0010] | 20/19 | 157/171 | 735/772 |
+| pd25_180_off5 | +0.073 | 0.250 | [−0.0005, +0.0011] | 19/19 | 157/171 | 735/772 |
+
+**No survivor** (gate = p<0.05 ∧ CI>0 ∧ breadth ≥50%; the two offside-guard cells at best have CIs straddling zero, p≈0.25–0.31, even imp/reg, and still +14 tail trades). No full batch, no battery.
+
+**Autopsy — why the +0.41 SOL oracle became −0.21 SOL:**
+
+1. Exit-reason deltas on pd25_180: `pool_drain_exit` itself books **−1.40 SOL**, partially offset by avoided bleed (+0.72 kelly_flat, +0.26 recording_ended, +0.18 evr_triage, +0.16 dev_sell_exit) → net −0.21. The drain fires *at the drain price* — the bleed has already happened — so it harvests losses, not prevents them; the oracle's "save" assumed exit-at-fire with zero adverse selection, but real fires cluster exactly where price is already down.
+2. **Replacement-entry bleed materialized exactly as the it37 graveyard warned**: trade count rose 735 → 740–834 across cells and tail≤−15% rose 157 → 161–172. Freed capital re-entered the same dying tokens (or fresh bad entries) and bled again — the drain signal marks *already-in-position* losers, not a pause in the flow of bad entries.
+3. The CF separation was real but *diagnostic, not predictive*: cross25 rate 42% vs 5.4% measures trades that eventually lost big — acting on it at the crossing price converts recoverable −5..−10% positions into locked losses (winners' median cross age 13 s shows even some winners drain early and refill).
+
+### 7. Lessons
+
+1. **Read the tree, not the brief.** The brief's baseline labels, results dir, and holder-flow state were all stale; 10 minutes of `ls`/`git log` avoided pairing against ghosts. Protocol mandate #1 exists precisely for this.
+2. **Unused-but-plumbed observables are cheap alpha candidates — but separation ≠ actionable.** `pool_sol` had been delivered to `engine.update()` since iter28 with zero consumers; a one-line grep surfaced the axis and the CF showed a 7.8× tail/winner separation. The screen then proved the signal is diagnostic-only: exiting on it books the bleed it meant to prevent, and freed capital re-bleeds. Next time, run a "fire-at-cross price vs eventual outcome" table (how many fired trades were recoverable) BEFORE implementing.
+3. **Step Zero killed two of the five open directions on contact.** Hour-of-day structure (direction #2) shows no concentration in this cohort; winner give-back (c) is not what decays the curve. The forensic pass cost ~10 minutes and prevented a week of hour-throttle experiments.
+4. **The screen did its job.** The full-batch + battery path would have cost ~2 h per cell × 9 for the same REJECTED verdict; the 260-rec screen delivered it in ~90 min total. Letting the data kill the idea cheaply is the deliverable here.
+
+### 8. Disposition
+
+- Code stays in-tree **default-OFF** (`v2_pool_drain_enable=0.0`): bare-{} parity proven, suites green, frontend mirrors present — zero cost dormant, reusable if an entry-side or sizing-side consumption of `pool_sol` is ever pursued (the exit-side consumption is now graveyard: **pool-drain early exit, REJECTED iter65, 9 cells, all CI-null-or-worse**).
+- **Graveyard addition (exit-side, new-information-source class):** post-entry bonding-curve SOL-depth drain exit — oracle +0.41 SOL CF → −0.21 SOL real-engine at best cell. Do NOT re-test without fixing BOTH failure modes: (i) fires must precede the bleed (predictive, not reactive — e.g. pre-entry drain trajectory as an entry veto), and (ii) the freed-capital re-bleed must be addressed (portfolio scope or entry-quality gate, not another exit).
+- **Open follow-ups ranked:** (1) entry-side pool-drain veto CF — **EXECUTED AND KILLED same-day (§9)**; (2) Kelly-`n_star` position sizing (direction #4, still untested end-to-end); (3) portfolio-level fleet-heat throttle (direction #1, untested class).
+
+### 9. Entry-side veto probe — predictive-null, axis closed (`analysis/iter65_entrycf.py`)
+
+The §8 rescue path required the depth trajectory to be *predictive at entry*. Strictly causal CF (base = median pool over [et−300, et−60]; features over [et−60, et]) on the same production batch:
+
+| group | n | pre_dd median | pre_dd ≤−10% rate | pre_dd ≤−25% rate |
+|---|---|---|---|---|
+| tail | 99 | −16.6% | 0.810 | 0.250 |
+| midloss | 16 | −11.8% | 0.625 | 0.250 |
+| small | 42 | −13.9% | 0.643 | 0.167 |
+| win | 290 | −16.1% | 0.755 | 0.259 |
+
+**Zero separation** — winners enter right into drains as often as tail losers do (≤−25% dip: 25.9% vs 25.0%; medians within 0.5pp). Engine entries happen on pump events that refill the curve; the pre-entry dip carries no label information. The entry-veto follow-up is dead without spending one engine run.
+
+**Net verdict on the `pool_sol` axis (iter65, closed):** the observable separates tail from winners *post-entry* (diagnostic) but not *pre-entry* (predictive-null). Under the engine's entry distribution, neither an exit (screen-REJECTED, §6) nor a veto (CF-null, §9) consumption is viable. The dormant default-OFF code stays in-tree as infrastructure, but the axis enters the graveyard for both consumption classes. Remaining ranked directions for the give-back mission: Kelly-`n_star` sizing, portfolio-level fleet heat.

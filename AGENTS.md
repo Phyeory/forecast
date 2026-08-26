@@ -250,6 +250,7 @@ Position exits fire on the first matching condition:
 7. **Bayesian Flip Exit (`bayesian_flip`)**: Engine decision direction flips away from long ($z^* \neq +1$) with positive Kelly utility $\mathcal{E}^* > 0$.
 8. **Sustained No-Long-Kelly (`kelly_flat`, iter21)**: direction ≠ +1 AND E* ≤ 0 sustained K=60 ticks AND ≥40% offside.
 9. **EVR Triage (`evr_triage`, iter48/50)**: unconfirmed + flow-invalidated + ≥20% offside after 120 s (with iter50 sell-concentration veto).
+10. **Pool-Drain Early Exit (`pool_drain_exit`, iter65, REJECTED — stays default-OFF/dormant)**: bonding-curve SOL depth (`pool_sol`, plumbed since iter28, first consumed here) falls ≥ `v2_pool_drain_frac` below its pre-entry median base within [`age_min`, `age_max`] s of entry. CF separation was strong (≥25% drain: 42% of tail losers vs 5.4% of winners) but the real-engine screen REJECTED all 9 cells (best Δ −0.175 SOL, CI-null; +0.41 SOL oracle → −0.21 SOL real: fires harvest losses at the drain price; freed capital re-enters and re-bleeds, tail≤−15% actually grew). Graveyard entry: do NOT re-test as an EXIT; a predictive (pre-entry) consumption or portfolio scope would be required. See RESEARCH_LOG.md Iter 65.
 
 ---
 
