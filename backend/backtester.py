@@ -258,6 +258,10 @@ def run_backtest(
     maintenance_margin_rate: float = 0.005,
     futures_taker_fee: float = 0.00045,
     futures_slippage_pct: Optional[float] = None,
+    # iter66: execution-level calibration — shifts simulated fill prices to
+    # the live-executable level (default 0.0 = exact legacy behaviour).
+    exec_offset_pct_buy: float = 0.0,
+    exec_offset_pct_sell: float = 0.0,
     persist_results: bool = True,
     persist_candles: bool = True,
 ) -> dict:
@@ -306,6 +310,8 @@ def run_backtest(
         maintenance_margin_rate=maintenance_margin_rate,
         futures_taker_fee=futures_taker_fee,
         futures_slippage_pct=futures_slippage_pct,
+        exec_offset_pct_buy=exec_offset_pct_buy,
+        exec_offset_pct_sell=exec_offset_pct_sell,
     )
 
     # Saving full candle series is useful for an interactive single backtest,

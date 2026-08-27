@@ -231,9 +231,24 @@ let engineParamsV2 = {
   // triage permanently for that trade.  0.25 = ACCEPTED best config (thr=0.25).
   v2_evr_skip_sell_conc_min: 0.25,  // veto when maxsec sell share > this (0 = OFF)
   v2_evr_skip_conc_window:  60,    // trailing window (s) for the share
+
+  // ── iter36/43/56/66: Holder-Flow & Dev Sell Monitoring ───────────────
+  // Realtime on-chain trade stream monitoring and dev-wallet tracking.
+  // v2_holder_flow_entry_block (1.0 = ON): block BUY entries if a dev or
+  // whale sell occurred within `v2_holder_flow_entry_window_seconds`.
+  // v2_holder_flow_exit_enable (1.0 = ON): fire immediate dev_sell_exit if
+  // a dev or whale sell occurs while in position (checked within exit window).
+  // v2_holder_flow_require_tag: 0.0 = any large sell ≥ min_usd qualifies
+  // (gate 1.0); 1.0 = require verified insider tag (dev/sniper/bundler/rat_trader).
+  v2_holder_flow_entry_block:          1.0,   // 1.0 = ON (production default), 0.0 = OFF
+  v2_holder_flow_exit_enable:          1.0,   // 1.0 = ON (production default), 0.0 = OFF
+  v2_holder_flow_require_tag:          0.0,   // 0.0 = all large sells (gate 1.0); 1.0 = verified tags only
+  v2_holder_flow_min_usd:            100.0,   // Min sell USD threshold to filter dust (default $100)
+  v2_holder_flow_entry_window_seconds:  30,   // Lookback window (s) before entry for dev/whale sell
+  v2_holder_flow_exit_window_seconds:   15,   // Lookback window (s) in-position for dev/whale sell exit
   // iter56: holder-flow silence gate.  Block entry when tracked wallets have
   // been silent for >= this many seconds (2700.0 = ACCEPTED default; 0 = OFF).
-  v2_hf_silence_gate_seconds: 0.0,
+  v2_hf_silence_gate_seconds:          0.0,
 
   // iter63/64: stationary Kramers rate-split early-harvest exit
   // ("rate_split_flip") — PRODUCTION ON (user decision 2026-08-25 after the
@@ -1443,25 +1458,59 @@ function renderSettings() {
     v2_order_flow_buy_ratio_min:  "Minimum required taker buy-volume ratio over the trailing window (Σbuy/(Σbuy+Σsell)) — lower = gate fires less often",
     v2_order_flow_window_seconds: "Trailing window (s) over which the taker buy-ratio is computed",
     v2_order_flow_volume_min_sol: "Window volume floor (SOL) — below this the gate passes (parity-safe on low-volume recordings)",
+    // iter48/50 EVR triage
+    v2_evr_enable:                "1.0 = enable post-entry taker-flow triage (EVR); exits unconfirmed, flow-invalidated offside positions",
+    v2_evr_confirm_pct:           "Gain confirmation threshold (% above entry); positions reaching this peak are immune to EVR",
+    v2_evr_eval_delay:            "Seconds after fill before EVR triage evaluation begins",
+    v2_evr_grace_seconds:         "One-shot evaluation window [delay, delay+grace); 0 = continuous evaluation after delay",
+    v2_evr_flow_window:           "Trailing taker-flow window in seconds for computing the post-entry buy ratio",
+    v2_evr_buy_ratio_max:         "Taker buy-ratio threshold — fire EVR triage when trailing buy-ratio falls below this value",
+    v2_evr_volume_min_sol:        "Minimum window volume in SOL required to evaluate EVR (guard for thin liquidity)",
+    v2_evr_require_offside:       "1.0 = fire EVR triage only when current price is below entry price",
+    v2_evr_offside_min_pct:       "Minimum drawdown % below entry required for EVR triage to fire",
+    v2_evr_skip_sell_conc_min:    "Veto EVR triage when max 1-second sell share exceeds this threshold (filters whale-sweep prints)",
+    v2_evr_skip_conc_window:      "Trailing window in seconds for computing single-second sell concentration share",
+    // iter36/43/56/66 holder-flow monitoring
+    v2_holder_flow_entry_block:          "1.0 = block BUY entries if a dev/insider/whale sell occurred within the entry window (0.0 = disabled)",
+    v2_holder_flow_exit_enable:          "1.0 = fire an immediate dev_sell_exit if a dev/insider/whale sell occurs while in position (0.0 = disabled)",
+    v2_holder_flow_require_tag:          "0.0 = any large sell ≥ min_usd qualifies (gate 1.0); 1.0 = require verified insider tag (dev/sniper/bundler/rat_trader)",
+    v2_holder_flow_min_usd:              "Minimum sell amount in USD to qualify as a significant sell (filters dust transactions)",
+    v2_holder_flow_entry_window_seconds: "Pre-entry lookback window in seconds to check for dev/insider sell activity",
+    v2_holder_flow_exit_window_seconds:  "In-position lookback window in seconds for dev/insider sell exit triggers",
+    v2_hf_silence_gate_seconds:          "Silence entry gate (s): block entry if tracked wallets have been silent for ≥ this many seconds (e.g. 2700 = 45m; 0 = disabled)",
+    // iter63/64 Kramers rate-split exit
+    v2_rate_split_enable:                "1.0 = enable stationary Kramers rate-split early-harvest exit (rate_split_flip)",
+    v2_rate_split_regime_gate:           "1.0 = gate rate-split exit to weak market regimes only (Q < q_max); 0.0 = always active",
+    v2_rate_split_q_max:                 "Global regime Q threshold below which weak regime is declared when regime gate is active",
+    v2_rate_split_unknown_q_enable:      "1.0 = keep rate-split active on dates with unknown or missing global regime Q",
+    v2_rate_split_arm_pct:               "Peak gain % required to arm the rate-split profit-lock trigger",
+    v2_rate_split_offside_pct:           "Offside threshold % (0.0 = disabled, profit-taking only)",
+    v2_rate_split_theta:                 "Sustained downward escape rate split threshold s = k_down / (k_up + k_down)",
+    v2_rate_split_persist:               "Required consecutive 4-state intra-candle ticks (≈ persist / 4 seconds) with split ≥ theta",
+    v2_rate_split_min_peak_age_ticks:    "Minimum ticks elapsed since peak price before firing (0 = disabled)",
   };
 
   // ── V2 section headers — label displayed above first key of each group ──
   const v2Sections = {
-    lambda_mu:             "🌊 Drift μ  (OU process)",
-    eta:                   "📉 Log-Variance h  (Heston-like OU)",
-    alpha:                 "⚡ Order-Flow Pressure φ  (AR-1)",
-    theta:                 "💧 Liquidity ℓ  (OU + Jump)",
-    lambda_0:              "📈 KDE  (Volume Profile Decay)",
-    kappa_J:               "💥 Jump Intensity",
-    s_0:                   "💸 Execution Cost Model",
-    regime_mu_star_scale:  "🎯 Regime Topology Tuning",
-    n_particles:           "⚙️ Structural / Meta Parameters",
-    stoploss_pct:          "🛡️ Risk Management (TP / SL)",
-    warmup:                "🔗 Confidence Gate  (V1 pass-through)",
-    confidence_high:       "🔗 Confidence Gate  (V1 pass-through)",
-    ema_fast:              "📀 EMA / ATR  (V1 indicator pass-through)",
-    max_entry_bar_count:   "⏰ Bar-Count Gates",
+    lambda_mu:                    "🌊 Drift μ  (OU process)",
+    eta:                          "📉 Log-Variance h  (Heston-like OU)",
+    alpha:                        "⚡ Order-Flow Pressure φ  (AR-1)",
+    theta:                        "💧 Liquidity ℓ  (OU + Jump)",
+    lambda_0:                     "📈 KDE  (Volume Profile Decay)",
+    kappa_J:                      "💥 Jump Intensity",
+    s_0:                          "💸 Execution Cost Model",
+    regime_mu_star_scale:         "🎯 Regime Topology Tuning",
+    n_particles:                  "⚙️ Structural / Meta Parameters",
+    stoploss_pct:                 "🛡️ Risk Management (TP / SL)",
+    warmup:                       "🔗 Confidence Gate  (V1 pass-through)",
+    confidence_high:              "🔗 Confidence Gate  (V1 pass-through)",
+    ema_fast:                     "📀 EMA / ATR  (V1 indicator pass-through)",
+    max_entry_bar_count:          "⏰ Bar-Count Gates",
+    v2_p_up_min:                  "🎯 V2 Bayesian & Tail Exit Overlays",
     v2_order_flow_imbalance_gate: "⚡ Taker Order-Flow Gate (iter45)",
+    v2_evr_enable:                "🩺 Entry-Validation Response (EVR, iter48/50)",
+    v2_holder_flow_entry_block:   "👥 Holder-Flow & Dev Sell Monitoring (iter36/43/56/66)",
+    v2_rate_split_enable:         "⚡ Kramers Rate-Split Exit (iter63/64)",
   };
 
   const paramHints = engineVersion === 2 ? v2Hints : v1Hints;
@@ -1488,9 +1537,8 @@ function renderSettings() {
     input.className = "param-input";
     input.dataset.key = key;
     input.value = val;
-    // determine type
-    if (Number.isInteger(val)) input.type = "number";
-    else { input.type = "number"; input.step = "0.001"; }
+    input.type = "number";
+    input.step = "any";
 
     group.append(label, input);
 
@@ -1527,8 +1575,12 @@ applySettingsBtn.addEventListener("click", () => {
   const inputs = settingsForm.querySelectorAll(".param-input");
   inputs.forEach(inp => {
     const key = inp.dataset.key;
-    const isInt = Number.isInteger(engineParams[key]);
-    engineParams[key] = isInt ? parseInt(inp.value, 10) : parseFloat(inp.value);
+    const rawVal = inp.value.trim();
+    if (rawVal === "") return;
+    const num = Number(rawVal);
+    if (!isNaN(num)) {
+      engineParams[key] = num;
+    }
   });
   settingsModal.classList.add("hidden");
   if (currentMint) connect(currentMint, currentTf);
