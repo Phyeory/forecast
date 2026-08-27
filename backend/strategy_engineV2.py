@@ -232,6 +232,14 @@ DEFAULT_CONFIG = {
     # LOO Δ +0.1375 SOL.  Default: 0.25 (ACCEPTED iter50 best config).
     "v2_evr_skip_sell_conc_min": 0.25,   # veto when maxsec sell share > this (0 = OFF)
     "v2_evr_skip_conc_window":  60,     # trailing window (s) for the share
+    # ── iter36/43/56/66: Holder-Flow & Dev Sell Monitoring ───────────────
+    "v2_holder_flow_entry_block":          1.0,   # 1.0 = ON, 0.0 = OFF
+    "v2_holder_flow_exit_enable":          1.0,   # 1.0 = ON, 0.0 = OFF
+    "v2_holder_flow_require_tag":          0.0,   # 0.0 = all large sells (gate 1.0); 1.0 = verified tags only
+    "v2_holder_flow_min_usd":            100.0,   # Min sell USD threshold to filter dust
+    "v2_holder_flow_entry_window_seconds":  30,   # Lookback window (s) before entry for dev/whale sell
+    "v2_holder_flow_exit_window_seconds":   15,   # Lookback window (s) in-position for dev/whale sell exit
+    "v2_hf_silence_gate_seconds":          0.0,   # Silence entry gate (s): 0 = OFF, 2700 = 45m
     # ── iter64: stationary Kramers rate-split exit (PRODUCTION ON) ──────
     # REPLACES the iter57/58 give-back adaptation and the iter61
     # participation floor (removed 2026-08-24 by explicit user decision).

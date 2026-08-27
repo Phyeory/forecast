@@ -177,6 +177,15 @@ class ForwardTester:
         # ``position_notional_usdc`` meta for the UI.  0 → legacy memecoin
         # pipeline (SOL-denominated, meta fields ≈ 0).
         sol_price_usd: float = 0.0,
+        # ── iter66: execution-level calibration (additive, default OFF) ────
+        # Live Jupiter-routed fills clear the recorded print stream at a
+        # structurally higher level (measured median +27% on entries, +23%
+        # on exits across the 2026-08-26 divergence audit).  These knobs
+        # shift simulated fill prices to that executable level so backtests
+        # can be made representative of live execution.  0.0 = exact legacy
+        # behaviour (×(1+0/100) is an IEEE-exact identity — bit-for-bit).
+        exec_offset_pct_buy: float = 0.0,
+        exec_offset_pct_sell: float = 0.0,
     ):
         if engine_kwargs is None:
             engine_kwargs = {}
@@ -187,6 +196,9 @@ class ForwardTester:
         self.priority_fee = 0.0001   # fixed: 0.0001 SOL per transaction
         self.bribe_fee = 0.0          # fixed: no bribe fee
         self.slippage_pct = slippage_pct
+        # iter66: execution-level calibration offsets (default 0.0 = OFF)
+        self.exec_offset_pct_buy = float(exec_offset_pct_buy)
+        self.exec_offset_pct_sell = float(exec_offset_pct_sell)
 
         # ── Futures account (only constructed for market_type="futures") ──
         self.market_type = "futures" if market_type == "futures" else "spot"
@@ -382,6 +394,11 @@ class ForwardTester:
         slip = (self._fut_slippage_pct if self.market_type == "futures"
                 else self.slippage_pct) / 100.0
         exec_price = raw_price * (1.0 + slip)
+
+        # iter66: optional execution-level calibration (spot only — futures
+        # keeps its own book-consistent fill model).  0.0 → ×1.0 exact identity.
+        if self.market_type != "futures" and self.exec_offset_pct_buy:
+            exec_price *= (1.0 + self.exec_offset_pct_buy / 100.0)
 
         # ── Futures entry: leveraged margin via FuturesAccount ───────────
         if self.market_type == "futures":
@@ -695,6 +712,10 @@ class ForwardTester:
         slip = (self._fut_slippage_pct if self.market_type == "futures"
                 else self.slippage_pct) / 100.0
         exec_price = raw_price * (1.0 - slip)
+
+        # iter66: optional execution-level calibration (spot only).  0.0 → ×1.0.
+        if self.market_type != "futures" and self.exec_offset_pct_sell:
+            exec_price *= (1.0 - self.exec_offset_pct_sell / 100.0)
 
         # ── Futures exit: settle via FuturesAccount ──────────────────────
         if self.market_type == "futures":

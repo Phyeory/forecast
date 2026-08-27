@@ -7883,3 +7883,81 @@ The §8 rescue path required the depth trajectory to be *predictive at entry*. S
 **Zero separation** — winners enter right into drains as often as tail losers do (≤−25% dip: 25.9% vs 25.0%; medians within 0.5pp). Engine entries happen on pump events that refill the curve; the pre-entry dip carries no label information. The entry-veto follow-up is dead without spending one engine run.
 
 **Net verdict on the `pool_sol` axis (iter65, closed):** the observable separates tail from winners *post-entry* (diagnostic) but not *pre-entry* (predictive-null). Under the engine's entry distribution, neither an exit (screen-REJECTED, §6) nor a veto (CF-null, §9) consumption is viable. The dormant default-OFF code stays in-tree as infrastructure, but the axis enters the graveyard for both consumption classes. Remaining ranked directions for the give-back mission: Kelly-`n_star` sizing, portfolio-level fleet heat.
+
+## Iter 66 — Live-vs-Backtest Divergence Fixes: Exec-Level Fill Calibration Knobs + Realtime Rate-Limit-Free Holder-Flow Source (whale stream via `observe_trade` + dev-ATA `accountSubscribe` watcher)
+
+**Date:** 2026-08-26
+**Focus:** Two user directives: (a) *"Apply fixes to make the live trader perform exactly like the backtester"*; (b) *"for the holder flow … we get rate limited right? is there a different service we can use to not get rate limited — we need the holder flow data to be in real time rather than delayed."*
+**Status:** SHIPPED (no engine change — `strategy_engineV2.py` byte-identical). (1) Divergence forensics: the live trader's decision sequence matched the backtester; the initial level-gap attribution was **REVISED same-day by the exec-knob calibration (§9)** — fill levels match within ~1%, and the residual gap is per-exit SECONDS-level timing lag, whose primary addressable cause (holder-flow delivery latency, 7–9 s) is what the shipped realtime watcher removes. (2) Additive `ForwardTester`/`run_backtest` knobs `exec_offset_pct_buy/sell` (default 0.0 = IEEE-exact identity; calibrated live-cost lens **buy=−0.99 / sell=−0.96**, §9). (3) On-chain watcher v1 (PumpPortal trade stream) was built then **REJECTED by live probe** — no PumpSwap coverage; v2 shipped instead: whale sells classified off the session trade stream, dev trades via SPL token-account balance subscription on the existing Solana WS hub; **GMGN demoted to enrichment/fallback**. All suites green; live-fire validated against an active graduated token.
+
+### 1. Divergence forensics (recap of the analysis half of this iteration)
+
+> **Superseded by §9 (same-day calibration): the +27.3%/−22.5% figures below compared live fills against candle references, not against the modelled fill. Systematic pairing of all 49 matchable trades shows entry levels within ~1% (live slightly CHEAPER — the model's +1% entry-slippage premium is phantom) and exit levels unbiased at median ≈ −1% with a wide [−26%, +24%] timing-driven scatter. Kept for history.**
+
+Replay of the overnight sessions (live_logs + auto-recordings vs their backtests) showed the post-iter57/iter39/iter41 parity machinery doing its job — the live trader's DECISION sequence matched the backtester — while every executed PRICE differed structurally: live entries filled at levels median **+27.3% above** the backtest's modeled intrabar fill and exits median **−22.5% below**. At 60–80% intra-trade volatilities this accounting gap dominates the PnL difference (BT +140% on position size vs live loss); the selection layer was not the problem. Secondary: holder-flow events reached the live engine 7–9 s after the on-chain swap (GMGN indexing lag + the 5 s poll), so `dev_sell_exit` fills systematically worse than the backtest's exact-timestamp replay.
+
+### 2. Exec-level calibration knobs (additive, default OFF)
+
+`forward_tester.ForwardTester(..., exec_offset_pct_buy=0.0, exec_offset_pct_sell=0.0)`, plumbed through `backtester.run_backtest(...)`. Applied spot-only AFTER the slippage multiplier: entry `×(1+b/100)`, exit `×(1−s/100)`; default `0.0` multiplies by exactly 1.0 (IEEE identity, byte-parity trivially preserved; unit-tested to 1e-12). Purpose: **separate strategy alpha from execution cost** — replay any batch at measured live fill levels to answer "would the engine's picks still be profitable if filled where live actually fills?" (calibrated values in §9: `(−0.99, −0.96)`). Analysis-layer only (not exposed via `/api/backtest` yet — follow-up).
+
+### 3. Watcher v1 (PumpPortal trade stream) — REJECTED by live probe
+
+First design consumed per-trade trader pubkeys from the shared PumpPortal hub the chart already uses. Controlled probe against ACTIVELY TRADING graduated tokens (DexScreener ground truth: 10–27 txns/min) delivered **zero** `subscribeTokenTrade` events over 25–35 s windows — PumpPortal covers bonding-curve tokens only, and **every recording in the current dataset routes through PumpSwapRPCClient post-graduation**. The primary source class was therefore unusable for the production cohort; v1 scrapped (server method names documented en route: `subscribeNewToken/subscribeTokenTrade/subscribeAccountTrade/subscribeMigration`).
+
+### 4. Watcher v2 design (shipped) — zero third-party indexers
+
+Two complementary channels in `holder_flow.py`, both feeding the SAME `holder_flow` table (delivery semantics unchanged — see §7):
+
+| class | channel | identity needed | latency |
+|---|---|---|---|
+| `whale` — any wallet selling ≥ `_MIN_SELL_USD` ($100) | NEW `HolderFlowMonitor.observe_trade(mint, trade)` called from BOTH `main.py` stream loops (recorder drain + `_process_stream`) for every non-synthetic tick | none (size+direction suffice — vault-diff trades carry no trader pubkey) | tick-time |
+| `dev` — the token creator, any side/size | `_onchain_devsell_loop`: resolve `coin_creator` from the PumpSwap pool account (byte 211, ONE HTTP RPC, 30 s retry), locate the dev's SPL token account (`getTokenAccountsByOwner`, ONE call), `accountSubscribe` it on the shared `_solana_hub`, diff the raw u64 balance per notification | resolved on-chain | ~1 s (WS push) |
+
+This exactly mirrors the iter43 production gate semantics (`require_tag=0`): the whale class matters because the rec3466 autopsy showed its exit-triggering sells were whale-tagged while the resolved dev had ZERO events (already fully dumped). Balance-delta sizing uses `last_price_sol` learned from the stream; SOL/USD comes from CoinGecko cached 60 s (non-blocking refresh ≤1/5 s, constant fallback). Dev resolution seeds `state.wallet_registry[dev]="dev"` so late-arriving GMGN trades from that wallet still carry the verified tag (inverse of the iter38 failure mode).
+
+**Cross-source dedupe:** `_claim_tx` tx-hash LRU (10 k cap, halving eviction) plus `_is_near_duplicate` — same side within ±5 s regardless of wallet when either identity is empty (wildcard for vault-diff/ATA events). Whichever source sees a trade first wins; the cost (two genuinely simultaneous same-side dumps collapsing into one event) is immaterial to the binary gates. `_dispatch_event` extracted as the common persistence/emission tail for all sources.
+
+**GMGN demoted, not removed:** remains the enrichment source for `sniper/bundler/rat_trader` tags and the fallback when no pool/creator/ATA is resolvable (e.g. bonding-curve tokens, or a dev who already holds nothing — observed live, §6).
+
+### 5. The rate-limit answer (user's question, factually)
+
+The delay root causes were (i) GMGN's own indexing lag, (ii) the 5 s poll interval, and (iii) potential silent 429 backoffs — not our poller's efficiency. The new path contains none of those stages: Solana WS pushes land in ~1 s, no API key, no service quota. Caveat observed during validation: public RPC *HTTP* endpoints do throttle bursts (publicnode returned 429/503 under probing), but production load is 1–2 HTTP calls per session start (pool decode + ATA lookup); steady state is pure WS push. Worst case under RPC degradation: the dev channel arms ≤30 s late (retry loop) — the whale channel is unaffected because it rides the session's own trade stream.
+
+### 6. Validation
+
+- **Unit suite** `analysis/test_holder_flow_onchain.py` — 18 tests, standalone AND pytest: pool-layout offset 211; classifier matrix (dev sell/buy, small non-dev ignored, whale ≥$100 incl. identity-less, buys never recorded for non-devs); dedupe (hash, near-dup wildcard, cross-source claim order, LRU eviction); SOL/USD cache + offline fallback; `observe_trade` (identity-less whale, dev-match below the whale floor, unwatched-mint/malformed no-op); end-to-end `_onchain_devsell_loop` vs a stubbed Solana hub (creator resolve → ATA fetch → subscribe → balance deltas become dev buy+sell rows → unsubscribe on cancel); `_fetch_dev_token_account` full HTTP+parsing path against a canned local RPC (pubkey extraction + u64 @ offset 64; error → `("", None)`); sync-context `watch_token` guard; FT knob identities; `run_backtest` signature defaults.
+- **Regressions:** `test_futures.py` 18/18 · `analysis/test_evr.py` 6/6 · `analysis/test_hf_silence.py` 5/5 · `analysis/test_regime_adapt.py` 10/10 · `analysis/test_live_parity.py` 10/10.
+- **Live fire** (Wittgenstein `DQJ9P44c…pump`, active pool `$9.5k` liq): dev `N9SyhAXD…` resolved from pool in <1 s; dev holds no ATA for the mint (already fully dumped — the exact case that made rec3466 whale-driven) → clean warn + 30 s retry, GMGN-only fallback; simulated whale sell dispatched off the stream ($293 ≥ floor, `tag=whale`, SELL log line, queue delivery); task cancelled with clean hub unsubscribe.
+- **ATA lookup vs real third-party holders** validated offline (public RPCs were throttling the probe IP at the time) by serving a canonical `getTokenAccountsByOwner` response from a local test server — the helper located the same account and parsed the raw balance.
+
+### 7. Parity & data-regime notes
+
+- **Engine untouched**: `strategy_engineV2.py` byte-identical; the three pipelines still consume events exclusively via `set_holder_flow_events()` (backtest) / the DB id-cursor pump (live) — exactly-once delivery preserved; the immediate-exit check (iter41) fires off the same pump tick.
+- **Backtests unchanged**: gates replay DB rows; pre-iter66 recordings behave identically.
+- **Data-regime break (documented, not lookahead)**: post-iter66 recordings accumulate events EARLIER than GMGN-era recordings did (tick-time whales, ~1 s devs vs 5–15 s indexed polls). Latency-sensitive statistics (e.g. `holder_flow_latency_seconds` studies) must not mix eras without noting the source change; gate SEMANTICS are unchanged.
+- `main.py` passes the pool address to `watch_token(..., pool_address=...)` only when `live_source == "solana_rpc"` (the source that actually yields per-tick size/direction).
+
+### 8. Disposition & follow-ups
+
+Production-live for all new recordings and live sessions. Ranked follow-ups: (1) expose `exec_offset_pct_*` through `/api/backtest` + UI so "replay at live fills" is a checkbox; (2) monitor dev-channel arm-rate in production logs (fraction of sessions resolving creator+ATA within 30 s) before trusting whale-only coverage numbers; (3) once stable, extend ATA watching to registered `rat_trader`/`sniper` wallets — the infrastructure (shared hub, dedupe, dispatch) already supports multiple watched accounts per mint.
+
+### 9. Addendum (same day) — Exec-knob CALIBRATION: the fill-LEVEL story revised; residual gap is exit TIMING
+
+`analysis/iter66_calibrate_exec_offsets.py` → `iter66_exec_calibration.json`. All 25 traded sessions from the 08-25/26 overnight run (56 closed live trades) were replayed through their own recordings with their own `engine_kwargs`, and every matchable trade was paired to its BT twin (entry ±5 s, reason-matched): **49 pairs**.
+
+**Measured offsets (knob parameterisation: buy_off = live/bt − 1; sell_off = 1 − live/bt):**
+
+| side | n | median | mean | p25 | p75 | min | max |
+|---|---|---|---|---|---|---|---|
+| BUY | 49 | **−0.99%** | −2.04 | −2.56 | −0.99 | −12.3 | −0.34 |
+| SELL (all exits) | 49 | −1.01% | −0.49 | −3.09 | +2.00 | −26.0 | +24.1 |
+| SELL (exit-reason-matched) | 42 | **−0.96%** | −0.06 | −3.09 | +2.47 | −26.0 | +24.1 |
+
+**Findings (this REVISES the earlier ad-hoc +27.3%/−22.5% level estimate, which compared fills against candle references rather than the modelled fill):**
+
+1. **Live entries fill ~1% BELOW the modelled fill — all 49 pairs negative.** The point estimate −0.99% ≈ −1/1.01 is exactly the model's own +1% slippage premium: live market-buys land ON the raw intrabar path price and pay no extra premium beyond what the frac-model already captures. Candle-verified (rec3404: live entry == candle-open tick of the entry second; bt = same tick ×1.01).
+2. **Exit levels are unbiased on average (median ≈ −1%) but scatter hugely ([−26%, +24%])** with a POSITIVE tail of late-printing exits: worst pairs are `dev_sell_exit` (+24.1%, +16.2%) and fast `gain_retrace`s where live confirmed seconds after the modelled exit tick, into already-dropped prices. corr(Δpnl_per_pair, sell_off) = **−0.62** vs corr(Δpnl, buy_off) = −0.21.
+3. **Applying the calibrated medians does NOT reconcile nightly PnL**: totals across the 25 sessions go BT-default +0.0082 SOL → BT-calibrated +0.0108 SOL vs actual live **−0.0029 SOL**. Expected: PnL depends on the entry/exit ratio, so near-equal level shifts mostly cancel, and no LEVEL knob can represent selling LATER on the path.
+4. **A uniform latency injection isn't it either**: `holder_flow_latency_seconds=7` across the same replays closes only ~20% of the gap (+0.0082→+0.0066) and is non-monotone per session (improves 002345, overshoots 031626/073911GhK). The residual is per-exit seconds-level path dispersion that averages out over larger samples.
+
+**Disposition:** production & research knob defaults stay **0.0** (baseline continuity). The calibrated pair (**buy=−0.99, sell=−0.96**) is recorded as the *live-cost lens* for research replays. Operationally, the addressable cause of the remaining live drag is exit-side delivery/confirmation lag — precisely what the iter66 realtime watcher attacks (dev-sell events now push in ~1 s instead of 7–15 s), so post-iter66 sessions should show a compressed positive tail on the sell-offset distribution; re-run this script periodically as the calibration monitor.

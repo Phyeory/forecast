@@ -267,7 +267,12 @@ async def recorder_start(body: dict = Body(...)):
         # recordings/sessions are active (iter36 rate-limit fix).
         holder_monitor = get_shared_monitor()
         await holder_monitor.start()
-        holder_monitor.watch_token(real_mint, recording_id=rec_id)
+        # pool_address (iter66) lets the realtime on-chain watcher resolve the
+        # dev wallet from the PumpSwap pool account — no GMGN involved.
+        _hf_pool = (token_info or {}).get("pair_address") \
+            if live_source == "solana_rpc" else None
+        holder_monitor.watch_token(real_mint, recording_id=rec_id,
+                                   pool_address=_hf_pool)
         # Consume events from the queue so it doesn't fill up
         async def _consume_holder_events():
             while not cancelled.is_set():
@@ -315,6 +320,13 @@ async def recorder_start(body: dict = Body(...)):
                         is_buy_rec = True
                     elif tx_rec == "sell":
                         is_buy_rec = False
+                    # iter66: feed the realtime on-chain holder-flow watcher.
+                    # Whale-class sells are classified straight off this
+                    # stream; dev trades come from the watcher's own ATA
+                    # subscription. observe_trade never blocks and is a no-op
+                    # for unwatched mints.
+                    if holder_monitor is not None:
+                        holder_monitor.observe_trade(real_mint, trade)
                 candle, is_new = aggregator.process_trade(
                     trade["price"], trade["sol_amount"], trade["timestamp"],
                     synthetic=is_synthetic,
@@ -1245,7 +1257,13 @@ class _LiveSession:
         # exit trigger fire in real time.  Parity: the engine checks the same
         # event list the backtester would later replay from the DB.
         # Shared process-wide monitor — one GMGN poller regardless of how many
-        # sessions are active (iter36 rate-limit fix).
+        # sessions are active (iter36 rate-limit fix).  iter66: the monitor
+        # ALSO runs a realtime on-chain dev-sell watcher per token (PumpPortal
+        # trade stream × pool-account coin_creator match — no GMGN, no rate
+        # limits, no indexing lag); both sources funnel into the same
+        # holder_flow table with cross-source tx-hash dedupe, and engine
+        # delivery stays exclusively via the id-cursor pump below so the
+        # backtester replays exactly what the live engine saw.
         holder_monitor = None
         # Track holder-flow events already pushed into the engine.  iter57
         # parity fix: delivery is by DB row id (lossless), NOT by counting the
@@ -1294,7 +1312,12 @@ class _LiveSession:
         try:
             holder_monitor = get_shared_monitor()
             await holder_monitor.start()
-            holder_monitor.watch_token(real_mint, recording_id=rec_id)
+            # pool_address (iter66) lets the realtime on-chain watcher resolve
+            # the dev wallet from the PumpSwap pool account — no GMGN involved.
+            _hf_pool = token_info.get("pair_address") \
+                if live_source == "solana_rpc" else None
+            holder_monitor.watch_token(real_mint, recording_id=rec_id,
+                                       pool_address=_hf_pool)
             # Pre-load any holder_flow events already persisted for this
             # recording (e.g. from a prior session on the same token, or events
             # the monitor captured before the session started).  This matches
@@ -1420,6 +1443,11 @@ class _LiveSession:
                             is_buy_live = True
                         elif tx_live == "sell":
                             is_buy_live = False
+                        # iter66: realtime holder-flow watcher feed (same as
+                        # the recorder loop — whale sells classified here,
+                        # dev trades via the watcher's ATA subscription).
+                        if holder_monitor is not None:
+                            holder_monitor.observe_trade(real_mint, trade)
                     candle, is_new = aggregator.process_trade(
                         trade["price"], trade["sol_amount"], trade["timestamp"],
                         synthetic=is_synthetic,
@@ -1839,7 +1867,7 @@ async def _get_or_create_live_session(
             # hardware.  Fires ONLY while fully idle (no position / pending
             # signal / swap), so teardown never needs an emergency sell; the
             # auto-recording is finalised by the normal session teardown.
-            no_motion_stop_seconds=60.0,
+            no_motion_stop_seconds=120.0,
         )
         live_trader.start_watchdog()
 
