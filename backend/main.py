@@ -1307,7 +1307,26 @@ class _LiveSession:
                                 pass  # V1 engine has no holder-flow surface
                 except Exception:
                     pass
-                await asyncio.sleep(1.0)
+                # Realtime delivery: wake the instant the shared monitor
+                # dispatches any event instead of sleeping out a full second.
+                # Entry gates and dev_sell exits must see holder-flow data at
+                # tick time to match the backtester, which always has events
+                # available at their exact on-chain timestamp (the fixed 1 s
+                # poll let late-arriving GMGN whales miss buy signals that had
+                # already fired).  1 s timeout bounds idle polling.
+                try:
+                    await asyncio.wait_for(
+                        holder_monitor.new_event_signal().wait(), timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    pass
+                except Exception:
+                    await asyncio.sleep(0.05)
+                else:
+                    try:
+                        holder_monitor.new_event_signal().clear()
+                    except Exception:
+                        pass
 
         try:
             holder_monitor = get_shared_monitor()

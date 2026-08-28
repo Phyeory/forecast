@@ -187,7 +187,7 @@ DEFAULT_CONFIG = {
     "fee_fraction":      0.0011,  # f   (iter16h cost-cal, ~0.11%)
     "latency_seconds":   0.5,   # Δ_lat
     "liquidity_cap_frac":0.10,   # n*  ≤ 0.1 · L_t
-    "warmup_bars":       60,     # V1-parity: V1's `max(warmup=30, 60)` belt-and-suspenders
+    "warmup_bars":       400,    # V1-parity: 100 full candles = 400 sub-state intakes
     # Deterministic RNG seed for the systematic resampler.  The RBF resample
     # previously drew `np.random.random()` from the process-global (unseeded)
     # stream, so identical backtests differed run-to-run AND across machines
@@ -195,7 +195,7 @@ DEFAULT_CONFIG = {
     # given seed across numpy versions.  Set to None to fall back to the
     # legacy global stream.
     "rng_seed":           42,     # deterministic resample (None = legacy)
-                             #   gate suppresses signals for 60 engine bars; V2 matches.
+                             #   gate suppresses signals for 400 engine bars (100 full candles); V2 matches.
     "ticks_per_state":   4,      # V1 4-state intra-candle expansion count
                                  #   (adapter-only; pure V2 ignores)
     "sigma_floor":       1e-6,   # numerical floor on σ
@@ -2813,9 +2813,15 @@ class StrategyEngineV2Adapter:
         # (Kramers P_down, reversal regime, gain-retrace, mu_drift_down_exit).
         self.stoploss_pct         = float(engine_kwargs.pop("stoploss_pct", 0.0))
         self.takeprofit_pct       = float(engine_kwargs.pop("takeprofit_pct", 0.0))
-        # warmup counts engine update() intakes (bars).  V1 default is 30 but its
-        # belt-and-suspenders gate floors at max(warmup, 60) — V1-parity default 60.
-        self._warmup_bars          = int(engine_kwargs.pop("warmup", 60))
+        # warmup counts engine update() intakes (bars).  100 full candles = 400 sub-states.
+        # Accept either 'warmup_bars' or 'warmup' (in candles <= 100 or sub-bars).
+        _warmup_val = engine_kwargs.pop("warmup_bars", None)
+        if _warmup_val is None:
+            _warmup_val = engine_kwargs.pop("warmup", 100)
+        if _warmup_val <= 100:
+            self._warmup_bars = int(_warmup_val * 4)
+        else:
+            self._warmup_bars = int(_warmup_val)
 
         # Forward remaining kwargs into V2 config (the 16 free params +
         # themselves listed in strategyV2.md §2 require N_p, n_grid, etc.).
@@ -3047,7 +3053,7 @@ class StrategyEngineV2Adapter:
         self.ema_slow_p = 7
         self.atr_period = 7
         self.roc_period = 3
-        self.warmup = self._warmup_bars
+        self.warmup = self._warmup_bars // 4
         self.S_strong = 4.0
         self.S_weak = 2.0
         self.S_noise = 1.15
@@ -3958,7 +3964,10 @@ class StrategyEngineV2Adapter:
         if _mu_sign_neg:
             self._mu_post_neg_count += 1
 
-        if self.bar_count <= max(self.warmup, 60):
+        # Belt-and-suspenders: never emit a signal during the warmup window
+        # (100 full candles = 400 intra-candle sub-state intakes).
+        _min_warmup_intakes = max(self._warmup_bars, 400) if not getattr(self, "_is_futures_engine", False) else self._warmup_bars
+        if self.bar_count <= _min_warmup_intakes:
             v1_signal = _V1Signal.NONE
             self.exit_signal_reason = ""
         elif self.in_position:

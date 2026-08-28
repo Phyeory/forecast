@@ -123,8 +123,8 @@ def _extract_holder_list(data) -> Optional[list]:
                     return lst
     return None
 
-# Poll interval for the smartmoney feed (seconds)
-_POLL_INTERVAL = 5.0
+# Poll interval for the smartmoney feed (seconds) — enrichment fallback only
+_POLL_INTERVAL = 30.0
 
 # How often to refresh the per-token wallet registry (seconds)
 _REGISTRY_REFRESH_INTERVAL = 60.0
@@ -350,6 +350,12 @@ class HolderFlowMonitor:
         self._onchain_tasks: dict[str, asyncio.Task] = {}
         self._dev_wallets: dict[str, str] = {}
         self._warn_log_ts: dict[str, float] = {}
+        # Realtime delivery wakeup: set on every dispatched event so consumer
+        # pumps (main.py's _holder_flow_pump) can pull DB rows immediately
+        # instead of waiting out their 1 s poll sleep — events must reach the
+        # live engine at tick time for entry-gate parity with the backtester
+        # (which always sees events at their exact on-chain timestamp).
+        self._new_event_signal: asyncio.Event = asyncio.Event()
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -504,6 +510,10 @@ class HolderFlowMonitor:
         """Queue of all detected events (for consumers that want to process every event)."""
         return self._event_queue
 
+    def new_event_signal(self) -> asyncio.Event:
+        """Asyncio Event set on every dispatched event (realtime wakeup)."""
+        return self._new_event_signal
+
     # ── iter66: realtime on-chain dev-sell detection ──────────────────────
 
     def _warn_once_min(self, key: str, msg: str, min_interval: float = 60.0):
@@ -581,6 +591,12 @@ class HolderFlowMonitor:
         except asyncio.QueueFull:
             pass
 
+        # Wake any consumer pump waiting on new events (see __init__).
+        try:
+            self._new_event_signal.set()
+        except Exception:
+            pass
+
         if event.side == "sell" and event.amount_usd >= _MIN_SELL_USD:
             logger.info(
                 f"[HolderFlow] SELL {event.mint[:8]} "
@@ -595,9 +611,11 @@ class HolderFlowMonitor:
 
         Matches:
           • ``dev``     — trader pubkey equals the pool's coin_creator
-                          (verified provenance, works under require_tag=0/1)
-        Everything else (non-dev trades) is ignored here; GMGN smartmoney
-        polling remains the source for smartmoney/insider/whale alerts.
+                          (verified provenance, works under require_tag=0/1).
+                          Non-dev trades from the raw stream are ignored here
+                          to avoid flooding holder_flow with anonymous whale
+                          events that cause entry starvation under require_tag=0.
+                          GMGN polling provides curated smartmoney/whale events.
         """
         trader = str(trade.get("trader") or "")
         side = str(trade.get("tx_type") or "")
@@ -609,6 +627,8 @@ class HolderFlowMonitor:
 
         if is_dev:
             tag = "dev"
+        elif trader and trader in state.wallet_registry:
+            tag = state.wallet_registry[trader]
         else:
             return
 
@@ -953,45 +973,57 @@ class HolderFlowMonitor:
         return []
 
     async def _registry_loop(self):
-        """Serially fetch per-token wallet registries (rate-limit friendly).
+        """Serially fetch per-token wallet registries with strict rate-limit pacing.
 
-        iter38 rate-limit fix: with one-tag-per-call, the loop paces fetches
-        at ≥ 3s apart to avoid 429s.  The periodic re-refresh iterates stale
-        tokens but makes at most ONE fetch per cycle (the next token gets its
-        turn on the next cycle), so with N watched tokens each token gets a
-        tag fetch every ~N×3s.
+        iter38/iter67: Paced at >= 3.0s between requests (<= 0.33 req/s),
+        ensuring GMGN's rate limits are never triggered.
+
+        Prioritizes:
+          1. Tokens newly queued via watch_token().
+          2. Tokens actively completing their initial or refresh tag rotation (cursor > 0).
+          3. Tokens whose last complete refresh is older than _REGISTRY_REFRESH_INTERVAL (60s).
         """
         while self._running:
             try:
-                mint = await asyncio.wait_for(self._registry_queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                # Periodic re-refresh: one fetch for the single stalest token.
-                now = time.time()
-                if not self._ban_active():
-                    stalest = None
+                if self._ban_active():
+                    await asyncio.sleep(2.0)
+                    continue
+
+                target_mint = None
+                # 1. Check for newly queued tokens
+                try:
+                    target_mint = self._registry_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+
+                # 2. Check for tokens mid-rotation (cursor > 0)
+                if not target_mint and self._watched:
+                    for m, state in list(self._watched.items()):
+                        if state._tag_cursor > 0:
+                            target_mint = m
+                            break
+
+                # 3. Check for stalest token exceeding _REGISTRY_REFRESH_INTERVAL
+                if not target_mint and self._watched:
+                    now = time.time()
                     stalest_age = -1.0
                     for m, state in list(self._watched.items()):
                         age = now - state.last_registry_refresh
-                        if age > _REGISTRY_REFRESH_INTERVAL and age > stalest_age:
-                            stalest = m
+                        if age >= _REGISTRY_REFRESH_INTERVAL and age > stalest_age:
+                            target_mint = m
                             stalest_age = age
-                    if stalest:
-                        await self._refresh_wallet_registry(stalest)
-                        await asyncio.sleep(3.0)
-                continue
+
+                if target_mint and target_mint in self._watched:
+                    await self._refresh_wallet_registry(target_mint)
+                    await asyncio.sleep(3.5)
+                else:
+                    await asyncio.sleep(1.0)
+
             except asyncio.CancelledError:
                 break
-            if self._ban_active():
-                # Re-queue after the ban lifts
-                await asyncio.sleep(2.0)
-                try:
-                    self._registry_queue.put_nowait(mint)
-                except asyncio.QueueFull:
-                    pass
-                continue
-            await self._refresh_wallet_registry(mint)
-            # Pace registry fetches — one tag per call, ≥3s between calls.
-            await asyncio.sleep(3.0)
+            except Exception as e:
+                logger.debug(f"[HolderFlow] Registry loop error: {e}")
+                await asyncio.sleep(1.0)
 
     async def _refresh_wallet_registry(self, mint: str):
         """Fetch ONE tracked-wallet tag for a token (round-robin per call).
