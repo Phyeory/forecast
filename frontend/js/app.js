@@ -54,7 +54,7 @@ let pendingMarkerData = [];  // raw marker data awaiting market cap resolution
 
 /* Strategy Engine Parameters — V1 (Physics-based regime detection) */
 let engineParamsV1 = {
-  ema_fast: 3, ema_slow: 7, atr_period: 7, roc_period: 3, warmup: 30,
+  ema_fast: 3, ema_slow: 7, atr_period: 7, roc_period: 3, warmup: 100,
   signal_strong: 4, signal_weak: 2, signal_noise: 1.1535714285714287,
   exhaustion_bars_limit: 3, delta_threshold: 0.3, kalman_gamma: 0.125,
   min_trend_bars: 2, reversal_confirm_bars: 2, chop_atr_pct: 0.3,
@@ -146,8 +146,8 @@ let engineParamsV2 = {
   fee_fraction:       0.0011, // fee fraction  (iter16h cost-cal ~0.11%)
   latency_seconds:    0.5,   // execution latency Δ_lat
   liquidity_cap_frac: 0.10,  // Kelly position cap  (0.10 = up to 10% of L_t)
-  warmup_bars:        60,    // bars (engine update() intakes) before any decision is emitted
-                            // V1 parity: V1 suppresses signals through max(warmup=30, 60) = 60 bars
+  warmup_bars:        400,   // bars (engine update() intakes) before any decision is emitted (100 full candles = 400 sub-states)
+                            // V1 parity: V1 suppresses signals through 400 sub-state updates (100 full candles)
   sigma_floor:        1e-6,  // numerical σ floor
   // ── Shared TP/SL parameters (V1 contract, adapter reads these) ──────
   stoploss_pct: 0,        // Hard-stop removed (iter18b): stoploss_pct=0 disables all price floors.
@@ -160,7 +160,7 @@ let engineParamsV2 = {
   // ── V1 confidence / regime-filter pass-through ───────────────────────
   // The V2 adapter inherits V1's well-tuned confidence gating on top of
   // Kramers / KDE checks.  These mirror the V1 defaults.
-  warmup: 30,
+  warmup: 100,
   confidence_high: 0.79,
   confidence_low: 0.19,
   entry_confidence_high: 0.79,
@@ -1451,7 +1451,8 @@ function renderSettings() {
     fee_fraction:       "Jupiter DEX fee fraction (e.g. 0.001 = 0.1%)",
     latency_seconds:    "Execution latency Δ_lat in seconds — cost of delayed execution is baked into Kelly",
     liquidity_cap_frac: "Kelly position cap as fraction of estimated liquidity L_t (e.g. 0.10 = up to 10%)",
-    warmup_bars:        "Bars before any signal is emitted — allows the RBPF state to stabilise",
+    warmup:             "Full candles to warmup indicators before emitting signals (100 full candles = 400 intra-candle states)",
+    warmup_bars:        "Bars (sub-state intakes) before any signal is emitted — allows the RBPF state to stabilise (400 = 100 full candles)",
     sigma_floor:        "Numerical σ floor to prevent division-by-zero in degenerate low-vol regimes",
     // iter45 order-flow gate
     v2_order_flow_imbalance_gate: "iter45 taker order-flow gate — 1.0 = block long entries while taker buy-ratio is below the min (validated r28_w10: big losers <-30% cut 33→23, +0.465 SOL loss-drag saved, p<0.01)",

@@ -4,7 +4,7 @@
     "ema_slow": 7,
     "atr_period": 7,
     "roc_period": 3,
-    "warmup": 30,
+    "warmup": 100,
     "signal_strong": 4,
     "signal_weak": 2,
     "signal_noise": 1.1535714285714287,

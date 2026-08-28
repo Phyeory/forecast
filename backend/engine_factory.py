@@ -78,7 +78,11 @@ def create_engine(engine_version: int = 1, **engine_kwargs: Any):
     engine_version = int(engine_version)
 
     if engine_version == 1:
-        return StrategyEngine(**engine_kwargs)
+        import inspect
+        sig = inspect.signature(StrategyEngine.__init__)
+        v1_valid = set(sig.parameters.keys()) - {"self"}
+        filtered = {k: v for k, v in engine_kwargs.items() if k in v1_valid}
+        return StrategyEngine(**filtered)
 
     if engine_version == 2:
         Adapter = _load_v2_adapter()

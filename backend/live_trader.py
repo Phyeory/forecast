@@ -166,6 +166,18 @@ BUY_FAIL_REENTRY_BLOCK_S: float = 120.0
 WATCHDOG_INTERVAL_S: float = 6.0
 WATCHDOG_TIMEOUT_S:  float = 45.0
 
+# ── SELL PROCEEDS SANITY FLOOR ────────────────────────────────────────────────
+# The wallet-delta proceeds measurement (post − pre + fee) is only correct if
+# both balance reads are fresh.  A lagging RPC can return the STALE pre-sell
+# balance, yielding received ≈ fee ≈ ~1e-6 SOL — which used to OVERRIDE the
+# (correct) Jupiter quote and book a phantom −100% trade (Shoob, rec3680,
+# 2026-08-27 03:51: a swap confirmed at +6.9% but was logged as −100%).
+# Execution reality bounds how low a REAL fill can go: the slippage ladder is
+# capped at 9000 bps, so an executed swap always pays out ≥ 10% of its quoted
+# outAmount.  Any measured delta below that floor cannot come from this TX —
+# it is an RPC artifact and must be rejected, not booked.
+PROCEEDS_SANITY_FRAC: float = 0.10
+
 # Market-cap floor stop: maximum time (seconds) the session will wait for the
 # emergency sell to confirm on-chain before terminating anyway.  Generous on
 # purpose — a panicked market needs the slippage/priority-fee escalation
@@ -387,6 +399,9 @@ class LiveTrader:
         # Set while update_historical_candle() replays warm-up candles so the
         # pending executor can never launch a real swap during warm-up.
         self._warming_up: bool = False
+        # Warmup enforcement: requires 100 full completed candles before signals
+        self.completed_candle_count: int = 0
+        self.warmup_candles: int = int(getattr(self.engine, "warmup", 100) or 100)
         # Last executed action surfaced to update()'s return payload.
         self._last_trade_action: Optional[str] = None
         self._last_swap_request: Optional[dict] = None
@@ -2085,7 +2100,17 @@ class LiveTrader:
         Returns None if the TX can't be read yet (not finalized / RPC miss);
         callers fall back to the wallet-delta measurement.
         """
-        result = await self._get_tx_result(sig)
+        # getTransaction frequently misses on the first poll right after a TX
+        # confirms (indexing lag ≤ a second) — retry briefly before declaring
+        # it unavailable, since every fallback tier below this one is an
+        # estimate rather than an exact ledger reading.
+        result = None
+        for _attempt in range(3):
+            result = await self._get_tx_result(sig)
+            if result:
+                break
+            if _attempt < 2:
+                await asyncio.sleep(0.35)
         if not result:
             logger.warning(f"[PROCEEDS] No getTransaction result yet for {sig[:8]}…")
             return None
@@ -2149,7 +2174,7 @@ class LiveTrader:
             logger.warning(f"[BUY VERIFY] postTokenBalances parse failed for {sig[:8]}…: {e}")
             return None
 
-    async def _measure_sell_proceeds(self) -> Optional[float]:
+    async def _measure_sell_proceeds(self, min_plausible_sol: float = 0.0) -> Optional[float]:
         """Actual SOL received from a completed sell, measured on-chain as the
         SOL-balance delta (post − pre) plus the known priority fee.
 
@@ -2158,6 +2183,13 @@ class LiveTrader:
         quote's outAmount estimate (which can differ by up to the slippage
         band) or a price×tokens estimate (which is worse).  Returns None when
         it cannot be measured; callers fall back to an estimate.
+
+        ``min_plausible_sol`` rejects RPC artifacts: if the post-sell balance
+        read is stale (returns the pre-sell snapshot), the computed delta is
+        ≈ the priority fee — near-zero but *not* None, so an unguarded caller
+        would book it as "measured" and produce the phantom −100% trades.
+        Callers pass PROCEEDS_SANITY_FRAC × expected-proceeds as the floor;
+        values at or below it are rejected in favour of the next tier.
         """
         pre = self._pre_sell_sol_balance
         if pre <= 0:
@@ -2170,7 +2202,18 @@ class LiveTrader:
             return None
         fee_sol = self.priority_fee_lamports / 1e9
         received = post - pre + fee_sol
-        return max(0.0, received)
+        # Absolute epsilon (1e-6 SOL ≈ 1000 lamports) also guards the no-floor
+        # callers: a stale read that returns the exact pre-sell balance leaves
+        # a floating-point residue of ~1e-16 SOL that must not be booked as a
+        # "measured" (i.e. ~zero-proceeds) result.
+        if received <= max(min_plausible_sol, 1e-6):
+            logger.warning(
+                f"[PROCEEDS] wallet-delta measurement implausible "
+                f"({received:.9f} SOL ≤ floor {max(min_plausible_sol, 0.0):.9f}) — "
+                f"rejecting stale read; falling back"
+            )
+            return None
+        return received
 
     async def _verify_sell_settled(self, sig: str, closed_trade):
         """
@@ -2565,16 +2608,47 @@ class LiveTrader:
 
                     # ── Success: TX confirmed on-chain — close ONCE ──────────
                     elapsed = time.time() - sell_start
-                    # EXACT proceeds: read the sell TX's own on-chain pre/post
-                    # balance change.  Fall back to the wallet-delta measurement,
-                    # then to the quote outAmount.  PnL is presented from the
-                    # SOL the wallet actually received, never from an estimate.
-                    sol_received = int(quote.get("outAmount", 0)) / 1e9
+                    # EXACT proceeds, resolved in tiers — a confirmed sell can
+                    # NEVER be booked as a −100% loss while its real payout is
+                    # knowable (the Shoob rec3680 bug: a stale wallet-delta
+                    # read ≈ priority fee overrode the correct quote):
+                    #   1. tx_delta        — exact on-chain ledger delta of the
+                    #                        sell TX itself (getTransaction,
+                    #                        briefly retried while indexing lags)
+                    #   2. wallet_delta    — post−pre+fee balance measurement,
+                    #                        accepted ONLY when plausible vs.
+                    #                        what this fill could really pay
+                    #                        (≥ PROCEEDS_SANITY_FRAC of the
+                    #                        quoted amount — swaps reject fills
+                    #                        beyond the 9000 bps slippage cap)
+                    #   3. quote_estimate  — this swap's own Jupiter outAmount
+                    #   4. price_estimate  — tokens held × last traded price
+                    ct_here = self.current_trade
+                    est_sol = 0.0
+                    if ct_here is not None and ct_here.size_tokens > 0:
+                        est_px = self._last_price or ct_here.entry_price
+                        if est_px > 0:
+                            est_sol = ct_here.size_tokens * est_px
+                    quote_out_sol = int(quote.get("outAmount", 0)) / 1e9
+                    expected_floor = PROCEEDS_SANITY_FRAC * max(quote_out_sol, est_sol)
+                    sol_received = max(0.0, quote_out_sol)
+                    proceeds_source = "quote_estimate"
                     measured = await self._get_tx_sol_proceeds(sig)
-                    if measured is None:
-                        measured = await self._measure_sell_proceeds()
                     if measured is not None:
-                        sol_received = measured
+                        sol_received, proceeds_source = measured, "tx_delta"
+                    else:
+                        measured = await self._measure_sell_proceeds(
+                            min_plausible_sol=expected_floor
+                        )
+                        if measured is not None:
+                            sol_received, proceeds_source = measured, "wallet_delta"
+                    if sol_received <= 0:
+                        # Absolute last resort: every tier above failed to
+                        # produce anything — book the best-known estimate
+                        # rather than zero (zero means "we think we got
+                        # nothing", which a confirmed swap never implies).
+                        if est_sol > 0:
+                            sol_received, proceeds_source = est_sol, "price_estimate"
 
                     self._token_balance = 0
                     self._cached_token_balance = 0
@@ -2596,7 +2670,7 @@ class LiveTrader:
                     )
                     logger.info(
                         f"[SELL OK] sig={sig} received={sol_received:.6f} SOL "
-                        f"group={attempt_group} elapsed={elapsed:.1f}s"
+                        f"({proceeds_source}) group={attempt_group} elapsed={elapsed:.1f}s"
                     )
                     logger.info(f"[SELL OK] https://solscan.io/tx/{sig}")
                     self._journal_event(
@@ -2604,6 +2678,8 @@ class LiveTrader:
                         tx_hash=sig, solscan=f"https://solscan.io/tx/{sig}",
                         sol_received=sol_received, attempt_group=attempt_group,
                         elapsed_s=round(elapsed, 3),
+                        proceeds_source=proceeds_source,
+                        estimated=(proceeds_source not in ("tx_delta", "wallet_delta")),
                         pnl_sol=(closed_trade.pnl_sol if closed_trade else None),
                         pnl_pct=(closed_trade.pnl_pct if closed_trade else None),
                     )
@@ -2642,8 +2718,19 @@ class LiveTrader:
                                 and st.get("confirmationStatus") in ("confirmed", "finalized")):
                             confirmed_sell = True
                             proceeds = await self._get_tx_sol_proceeds(self._last_sell_sig)
+                    # Sanity-floored wallet delta: a stale post-sell balance read
+                    # (≈ fee-sized delta) must never be booked as "measured" —
+                    # see PROCEEDS_SANITY_FRAC (phantom −100% guard).  Floor is
+                    # anchored to the position's price×tokens value at close.
+                    _ve_est = 0.0
+                    if self.current_trade and self.current_trade.size_tokens > 0:
+                        _ve_px = self._last_price or self.current_trade.entry_price
+                        if _ve_px > 0:
+                            _ve_est = self.current_trade.size_tokens * _ve_px
                     if proceeds is None:
-                        proceeds = await self._measure_sell_proceeds()
+                        proceeds = await self._measure_sell_proceeds(
+                            min_plausible_sol=PROCEEDS_SANITY_FRAC * _ve_est
+                        )
 
                     if confirmed_sell or (proceeds is not None and proceeds > 0):
                         # A sell DID land on-chain (even though the confirm
@@ -2916,8 +3003,19 @@ class LiveTrader:
                                 and st.get("confirmationStatus") in ("confirmed", "finalized")):
                             confirmed_sell = True
                             proceeds = await self._get_tx_sol_proceeds(self._last_sell_sig)
+                    # Sanity-floored wallet delta: a stale post-sell balance read
+                    # (≈ fee-sized delta) must never be booked as "measured" —
+                    # see PROCEEDS_SANITY_FRAC (phantom −100% guard).  Floor is
+                    # anchored to the position's price×tokens value at close.
+                    _ve_est = 0.0
+                    if self.current_trade and self.current_trade.size_tokens > 0:
+                        _ve_px = self._last_price or self.current_trade.entry_price
+                        if _ve_px > 0:
+                            _ve_est = self.current_trade.size_tokens * _ve_px
                     if proceeds is None:
-                        proceeds = await self._measure_sell_proceeds()
+                        proceeds = await self._measure_sell_proceeds(
+                            min_plausible_sol=PROCEEDS_SANITY_FRAC * _ve_est
+                        )
 
                     if not confirmed_sell and (proceeds is None or proceeds <= 0):
                         # NEVER reconcile an open position as a failed buy:
@@ -3231,6 +3329,9 @@ class LiveTrader:
         state, so a signal from state k executes at state k+1 exactly like
         the backtester (previously live only queued after the full 4-state
         loop, pushing every execution to the next candle boundary)."""
+        if self._warming_up or self.completed_candle_count < self.warmup_candles:
+            return
+
         detected_signal = result.get("signal", "none")
         detected_regime = result.get("regime", "")
 
@@ -3406,6 +3507,7 @@ class LiveTrader:
                 self._last_motion_price = c
                 self._last_motion_ts = time.time()
 
+        self.completed_candle_count += 1
         return result
 
     def check_immediate_holder_flow_exit(self) -> Optional[str]:

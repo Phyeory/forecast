@@ -364,7 +364,7 @@ class StrategyEngine:
         ema_slow: int = 7,
         atr_period: int = 7,
         roc_period: int = 3,
-        warmup: int = 30,
+        warmup: int = 100,
         signal_strong: float = 4.0,
         signal_weak: float = 2.0,
         signal_noise: float = 1.1535714285714287,
@@ -2210,8 +2210,9 @@ class StrategyEngine:
             self._update_peak_price(h, l)
 
         # Belt-and-suspenders: never emit a signal during the warmup window
-        # or early in the recording when data is insufficient.
-        if self.bar_count <= max(self.warmup, 60):
+        # (100 full candles = 400 intra-candle sub-state intakes).
+        _min_warmup_intakes = max(self.warmup * 4 if self.warmup <= 100 else self.warmup, 400)
+        if self.bar_count <= _min_warmup_intakes:
             signal = None
 
         if _build_full_result:
