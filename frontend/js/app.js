@@ -1,5 +1,5 @@
 /* ──────────────────────────────────────────────────────────────────────────
-   pump-chart  ·  Price Action + Strategy Dashboard
+   Mizuki Engine  ·  Price Action + Strategy Dashboard
    ────────────────────────────────────────────────────────────────────────── */
 
 const WS_PROTO = location.protocol === "https:" ? "wss:" : "ws:";
