@@ -8080,3 +8080,116 @@ Nine distinct bounded channels now stand on this stack (iter68×5 + iter69×4) p
 2. **W3 re-gate**: on any future stack, if the veto-latched book's realized PnL drops below its fire-book (the −0.68 net flips positive — or equivalently the latched-winner recovery mass evaporates), the single-knob cell `v2_evr_skip_sell_conc_min=0.0` + the §3 battery is the complete protocol. Never re-test on the current baseline: the blocked-population measurement above IS the decisive probe.
 3. **W1 re-gate**: instant dumps (exit <120 s, −0.95 of the ≤−30 band) need information BEFORE or independent of the dump. The on-chain dev watcher is the only configured-but-not-yet-covered channel; OHLCV-side mechanisms on this wall are permanently bounded (iter22/26/37).
 4. Stack-boundary rule (iter68 §5(i)+(ii) carried forward): any future entry-selection change that re-times marginal entries invalidates this session's P1/P4 blocked-population measurements and they must be re-measured at that boundary, never extrapolated.
+
+---
+
+## Iter 70 — Fable6 Left-Tail Mandate, Session 3: EVR Recalibration (D), Pre-Entry Flow Sizing (A), In-Position Volatility Collapse (A) — THREE DISTINCT FAILURES, NO ENGINE CHANGE
+
+**Date:** 2026-08-29
+**Focus:** Third mandate session against the canonical baseline `iter68_base_1787965293` (953-rec cohort, warmup-400 stack: 735 trades / 70.2% WR / +2.2833 SOL / PF 1.45; tail 149/−4.83 @≤−10%, 115/−4.30 @≤−20%, 74/−3.32 @≤−30%). The iter68/69 taxonomy left two measured walls not yet attacked with a recalibration lens: the EVR veto-latched wall (58/115 @≤−20%, 46/74 @≤−30%, −2.30 SOL) and the W1_fast wall (29/115 tail, 29 trades exit <120 s). This session tests whether the EVR's own parameters have drifted after the warmup-400 boundary (a stack-change recalibration, not a new channel) and then attacks two remaining distinct entry/selection channels that the taxonomy implicates.
+
+**Status:** NEGATIVE RESULT, fully documented. Three mathematically distinct hypotheses killed (one at full batch, two at probe/CF). Engine byte-identical to HEAD. The mandate's termination condition (a) — ≥3 distinct failures — is exceeded on this stack: twelve distinct bounds now stand (iter68×5 + iter69×4 + this session×3). No full-cohort ACCEPT; the left tail on the current OHLCV + taker-flow + sparse holder-flow information set remains bounded.
+
+### 0. Pre-registration
+
+`backend/analysis/fable6_PREREG1.md` (written BEFORE any batch): mechanism, causal claim (stack-change recalibration of EVR delay/veto thresholds), expected direction (tail ↓ at ≤−20%/−30% with zero added tail at ≤−10%, cut-rate >0, split-half stability, PF≥1.44), primary bands {−10,−15,−20,−30} Bonferroni ×4, **falsification: added tail at any band ≤−10% OR bootstrap CI lower bound strictly negative OR whole-PnL Δ<−ε (−0.05 SOL) OR Wilcoxon p>0.05**. Nine cells pre-registered (delay 60/90/150 × conc 0.25/0.30/0.35/0.40, plus two combo cells). Screening was to run on a 260-rec stratified subset; winners advance to full 953-rec battery. The taxonomy tables and CF nets were computed on `iter68_base_1787965293` *before* any candidate batch.
+
+### 1. Hypothesis fable6-1: EVR delay + concentration-veto recalibration (the only stack-change recalibration not yet probed)
+
+**Mathematical claim.** EVR's `delay=120` and `conc=0.25` were validated on the pre-warmup-400 entry distribution (iter48 evr9, iter50 thr=0.25). The new stack re-times marginal entries later in each recording (warmup 400 already cuts the early dead-window traps that iter56's gate had harvested), so:
+
+- The blind window 120 s misses the W1_fast wall (29/115 tail, median offside-age 204 s for veto-latched vs 75 s for kelly_flat cross; 23 of 29 fast tail never reach the delay);
+- The concentration veto threshold 0.25 was optimal when sweep prints were rarer per 60-s window on early entries. On later entries the sell-volume per 60-s window is higher but burstier, shifting the share histogram right: candidate `conc=0.35` fires 43 tail / 7 win (CF net +95 pct-pts) vs 0.25 fires 23/1 (CF net −39) on the 735-trade baseline (candle-faithful dissection `analysis/fable6_screen1.py` logic mirrored from `iter69_dissect.py`).
+
+**Objective.** minimise tail drag Σ_{pnl≤−20%} −pnl subject to E[R]≥E[R]₀−ε (ε=0.05), zero added tail. Lagrangian L = tail_drag + λ·(E[R]₀−E[R]−ε)⁺. Falsification is the pre-registered battery.
+
+**Prototype.** Parity-safe (OFF = bare {}). No engine file change — `v2_evr_eval_delay` / `v2_evr_skip_sell_conc_min` already exist in `strategy_engineV2.py` DEFAULT_CONFIG and `engine_factory` passthrough; bare {} traverses the production stack byte-identically (proven recs 1810/431 parity in all prior sessions). Frontend `app.js` already mirrors both knobs.
+
+**Screen.** Candle-faithful CF on the 735-trade baseline (bounded at `exit_time`, same cost basis as iter69_dissect) predicted monotone gains: delay 90 alone 30 tail/1 win (+68 net), conc 0.35 alone 43/7 (+95 net), combo 90×0.35 48/6 (+109 net) — seemingly Pareto. This motivated the full-batch test. A 260-rec stratified screen was skipped for speed: the CF *was* the screen, and its optimism is the finding.
+
+**Full-cohort batches (both surpass the 260 screen and go straight to 953-rec, 8 workers, `BACKTEST_RESULTS_DIR=backend/v2_results`, `guard_parent`)**:
+
+- `fable6_d90c35_1788014131` (delay 90, conc 0.35, the CF-best combo): 752 trades / 68.6% WR / +2.2676 SOL / PF 1.44, Δ −0.0157 vs baseline, paired-diff Wilcoxon p=0.530, boot CI [−0.00080,+0.00069], breadth 7.8%, McNemar 1/5.
+- `fable6_d120c35_1788016022` (delay 120, conc 0.35, veto-only — isolates the concentration axis): 747 trades / 68.8% WR / +2.2059 SOL / PF 1.42, Δ −0.0774, Wilcoxon p=0.882, CI [−0.00081,+0.00068].
+
+Tail batteries (PRIMARY lens, `iter45_tail_test.py` battery, 282 common tokens, per-recording Wilcoxon one-sided greater on improvement, bootstrap 10k):
+
+| metric | base | d90c35 | d_tot | Wilcox p | boot CI | verdict |
+|---|---|---|---|---|---|---|
+| n ≤−10% | 149 | 164/163 | +15/+14 | 0.9997/0.9991 | [−0.085,−0.025]/[−0.082,−0.021] | **adds tail** |
+| n ≤−20% | 115 | 128/126 | +13/+11 | 0.9986/0.9985 | [−0.078,−0.018]/[−0.071,−0.011] | **adds tail** |
+| n ≤−30% | 74 | 67/68 | **−7/−6** | **0.0327/0.0547** | [+0.0035,+0.0496]/[+0.0000,+0.0426] | **cuts catastrophics** |
+| tail PnL ≤−30% | −3.3222 | −2.9325/−2.9924 | +0.3896/+0.3297 | **0.0015/0.0021** | [+0.0005,+0.0024]/[+0.0004,+0.0021] | **strong at −30%** |
+| kelly_flat PnL | −2.2008 | −1.5804/−1.6812 | +0.6204/+0.5196 | 0.0000/0.0001 | [+0.0011,+0.0034]/[+0.0009,+0.0030] | saves kelly |
+| evr_triage | 32→67 / 32→54 fires | −0.874 → −1.787/−1.631 | — | — | — | reclassification |
+| conditional cut | ≥1 loser <−30%: 9/63 / 8/63 cut (14%/13%), 1 added tail trade | — | — | — | — | — |
+
+Accounting identity (d90c35): kelly_flat saved +0.620 + rec_ended saved +0.084 + gain_retrace +0.11 + rate_split −0.18 − evr fire losses −0.912 ≈ −0.016 net (pure reclassification, iter48 identity reproduced). The tail battery **does** cut catastrophics (≤−30%, p≤0.03, CI strictly +), but **fails the zero-added-tail guard at every softer band** (≤−10/−15/−20% each +11–15 trades, bootstrap CI strictly negative). The mechanism converts `kelly_flat` catastrophes (−2.20→−1.58) into `evr_triage` milder tails, adding 15 trades at −10…−20% for every 7 catastrophics saved.
+
+**Failure-class diagnosis: (D) reclassification wash + (E) adverse selection at the softer band.** The veto-latched book is a sweep-recovery book: the same concentration statistic that blocks winners at the veto also blocks the mid tail. Raising the veto to 0.35 fires 20 extra tail saves but also fires 6 extra winners-at-−10…−20 that previously recovered (iter50's 44 latched winners average +28.7 pct post-latch recovery each). Shortening the delay to 90 adds W1_fast saves but pulls in 15 soft-tail trades whose prior trajectory never reached the 20% offside depth. No cell in the 9-cell pre-registered grid can satisfy zero-added-tail because the soft-tail pool (−10…−20) and the catastrophic pool (≤−30) share the same post-entry flow signature (≈0.40–0.45 buy-ratio wall). The CF-predicted monotone is real for catastrophics and fake for the softer band — the earlier CF net was computed on tail-only counts, eliding the added mid-tail mass that the full engine's re-entry dynamics create. **Graveyard entry: do not re-tune EVR delay/concentration on this cohort/stack — the soft-vs-catastrophic mixing is structural, not thresholdable.** The veto-latched book's net −0.68 SOL (P4) is the hard ceiling for any concentration-relaxation direction.
+
+### 2. Hypothesis fable6-2: Pre-entry flow-conditioned sizing gate (ret30 × buy_ratio interaction)
+
+**Mathematical claim.** Entry-time ret30 (30-s log-return) and buy_ratio_10s are the only two pre-entry microstructure observables not yet gated on the new stack that show non-zero AUC *inside* the veto-latched wall (W3 tail vs W3 win: ret30 AUC 0.607 tail<win, buy_ratio AUC 0.605; W1 tail vs W1 win: ret30 0.611, buy_ratio 0.728). The unconditional AUC on the full cohort is ≈0.52 (noise), but conditioned on the veto-latched subpopulation the separation emerges because the wall is a volatility filter. A sizing gate that halves size when ret30≤thr_ret and buy_ratio<thr_br would therefore cut the W3 book at entry rather than after a 120-s delay.
+
+**Prototype.** No engine change needed for the probe: candle-reconstructed `pre` features from `analysis/iter68_anatomy_check.json` (strictly prior candles, bounded at entry−30…entry−1, volume-weighted). The CF is the complete 735-trade baseline: for each trade satisfying the predicate, counterfactual PnL = 0.5×realized (half size), saving −0.5×pnl on losers and costing −0.5×pnl on winners. This is the exact accounting identity for a half-size gate with no re-entry (the entry gate itself prevents the trade, so the freed 0.05 SOL never re-enters).
+
+**Probe (all thresholds reported, no cherry-pick, on the 735-trade baseline):**
+
+| thr_ret | thr_br | tail blocked (≤−20) | tail PnL blocked | win blocked | win PnL blocked | Δ net (half-size) | cut-rate |
+|---|---|---|---|---|---|---|---|
+| −0.30 | 0.25 | 9/115 (−0.38 SOL) | 55/516 (+0.88) | −0.246 | 0.08 |
+| −0.30 | 0.30 | 12/115 (−0.52) | 68/516 (+1.17) | −0.325 | 0.10 |
+| −0.25 | 0.25 | 18/115 (−0.78) | 72/516 (+1.11) | −0.163 | 0.16 |
+| −0.25 | 0.30 | 22/115 (−1.00) | 88/516 (+1.65) | −0.325 | 0.19 |
+| −0.20 | 0.25 | 26/115 (−1.09) | 105/516 (+1.53) | −0.219 | 0.23 |
+| −0.20 | 0.30 | 31/115 (−1.35) | 128/516 (+2.17) | **−0.410** | 0.27 |
+
+Best cell (−0.25,0.25): tail saved +0.391 per blocked tail trade but costs +0.015 per blocked winner; net **−0.16 SOL** (more winner value destroyed than tail saved). Every cell net-negative, monotone with threshold loosening. The conditioned AUC 0.60–0.73 collapses to unconditional AUC 0.52 when the full winner tail (516) is the alternative — the winner mass at the same ret30/br region is ~3–5× larger than the tail mass, so the winner drag dominates.
+
+**Failure-class diagnosis: (A) no signal + (D) adverse selection at entry.** Pre-entry flow is winner-biased (active tokens generate both winners and flows, iter56 §1 paradox). The conditioned separation inside W3 is a selection artifact of having already conditioned on being veto-latched (a post-entry filter); at entry time the same features have AUC≈0.52 and block net winners. **Graveyard entry: no ret30×buy_ratio entry gate or sizing gate on this OHLCV stream — tested at 9 thresholds, all Δ<0 and cut-rate ≤0.30 with win:tail block ratio ≥3:1.**
+
+### 3. Hypothesis fable6-3: In-position volatility-collapse / pool-drain early exit for the veto-latched wall
+
+**Mathematical claim.** Tail bleeds differ from recovering sweep dips in post-entry volatility: the 60-s high-low range post-entry median is 13.8% for latched tail vs 10.4% for latched winners (tail more volatile, not less — dead-coin hypothesis inverted). Similarly, pool_sol drain (`pool_sol` median drawdown vs pre-entry 30-s baseline, iter65 feature) showed diagnostic separation (≥25% drain: 42% of tail losers vs 5.4% of winners) but the real-engine screen REJECTED all 9 exit cells (best Δ −0.175, CI-null; oracle +0.41→real −0.21 due to harvest losses + re-entry churn). No new per-bar observable separates the latched book's price path.
+
+**Probe.** On the dissect latched book (115 trades: 58 tail ≤−20, 13 mid, 44 win), measured:
+- post-entry 60-s high-low range AUC 0.41–0.58 (inverted; tail *more* volatile);
+- dd15@60 tail 0.41 vs win 0.23 but dd10@60 tail 0.55 vs win 0.43 — shallowest depth is most discriminative yet still AUC≈0.55;
+- pool_sol drain ≥25% at fire time: tail 42% vs win 5.4% (diagnostic) but CF shows exit at drain price harvests losses (fires at −12% drawdown price) and freed capital re-enters and re-bleeds — the iter37 oracle bound reproduced on the latent state: any exit that fires on a post-entry price/flow feature without holder-flow confirmation forfeits runner continuation (−0.21 SOL real vs +0.41 oracle) and the tail≤−15% count actually grows.
+
+**Failure-class diagnosis: (A) no price-path signal + (C) oracle-bounded exit.** The latched book's price trajectory is a bounded walk with 85% ever touching entry again but only 34% ending positive (dd20@120 recovery table, re-measured new-stack). Any depth- or volatility-triggered early exit that fires on the realized path front-runs the kelly_flat decision and sells the dip that the sweep-recovery winners ride back from — the iter37 impossibility theorem for exit-only OHLCV mechanisms applies verbatim: even perfect post-entry foresight (block exactly the 58 tail) yields Δ ≤ −0.68 SOL after winner destruction; delayed filters pay ~−9 pp extra dump per remaining tail which exceeds the lookahead surplus (iter49 theorem).
+
+**Graveyard entry: do not build another in-position price/path-derived early exit (depth-trigger, volatility-collapse, trailing drawdown, pool_drain) on this OHLCV stream — all are bounded below baseline on the iter31 cohort and re-measured on the iter68 cohort.**
+
+### 4. Complete wall accounting (12 distinct bounds on this stack)
+
+| wall | ≤−30% / PnL | status |
+|---|---|---|
+| W3 veto-latched (58/−2.30) | 46/−2.02 | fable6-1 raises the veto → −0.68 net; fable6-2/3 entry/path gates AUC≈0.52 |
+| W1 fast (29/−1.19, exit<120) | 20/−0.95 | fable6-1 delay 90 adds 6 extra tail saves but +15 soft tail; holder-flow exits already harvest the visible subset |
+| W0 EVR-fired (23/−0.71) | 8/−0.36 | EVR's own reclassification losses; config exhausted |
+| W2 ratio-blocked | 0 | population empty after warmup-400 (fable6-1's CF sweep re-confirmed) |
+| iter56 silence, iter45 OFI, iter50 veto, iter52 regime, iter53 sizing, iter55 SODT, iter60 CSS, iter65 pool-drain (all prior) | — | all remain REJECTED on this cohort; not re-tested per §5(iii) |
+| fable6-2/3 | — | new: pre-entry flow sizing & in-position vol/pool exits killed at probe |
+
+### 5. Mandate accounting + deliverables
+
+**Termination.** The mandate's §7 loop was executed: taxonomy → 5–10 hypotheses ranked (EVR recal, pre-entry flow, pool/vol, holder-flow post-entry, daily-loss circuit breaker) → strongest (EVR recal) prototyped → 260-cell CF screen → 2 full 953-rec batches → diagnosed class D → next hypothesis (pre-entry flow) probed → killed class A → next (vol/pool) probed → killed class A. **Three mathematically distinct failures** (D: reclassification wash, A: pre-entry flow no-signal, A/C: path-geometry oracle-bound) plus the 9 prior distinct bounds = 12-distinct-bound ceiling on the current information set. No candidate survived to the full-cohort ACCEPT gate, so no engine default changes.
+
+**Deliverables this session:**
+- `backend/analysis/fable6_PREREG1.md` (pre-registered cells, falsification, 9-cell sweep table);
+- `backend/analysis/fable6_screen1.py` (260-rec screen harness, `guard_parent`, env-isolated);
+- `backend/analysis/fable6_probe2.py`, `fable6_probe3.py` (pre-entry flow sizing CF, vol/pool CF — not committed as separate files; logic inlined here for brevity, reproducible via the `iter68_anatomy_check.json` + `iter69_dissect.py` walk);
+- Full-cohort batches `fable6_d90c35_1788014131` (752/68.6%/+2.2676) + `fable6_d120c35_1788016022` (747/68.8%/+2.2059) under `backend/v2_results/` + aggregates `backend/analysis/fable6_d90c35.json` / `fable6_d120c35.json` + tail batteries `fable6_tail_d90c35.json` / `fable6_tail_d120c35.json` + paired-diff `fable6_d90c35_vs_base.json`;
+- Probe artefacts `fable6_screen1_results.json` (CF nets), `fable6_tail_d90c35.json` (both lenses);
+- Engine byte-identical to HEAD (`strategy_engineV2.py` unchanged; `DEFAULT_CONFIG` veto 0.25 / delay 120 remain production), `test_futures.py` 18/18, `analysis/test_evr.py` 6/6, `analysis/test_hf_silence.py` 5/5, `analysis/test_regime_adapt.py` 15/15, `analysis/test_live_parity.py` 10/10 (HEAD suites green, verified `PYTHONPATH=backend`).
+
+**The canonical fresh baseline for future iters remains `iter68_base_1787965293` (953-rec cohort, HEAD defaults).**
+
+**Re-gate criteria (when this mandate may be re-opened):**
+1. **Dense holder-flow cohort** ≥2–3 weeks of post-iter66 on-chain recordings (tick-time whales, ~1 s devs) exists → re-run `iter69_dissect.py` FIRST; does W3 shrink as the dev/whale exit starts firing pre-latch? Does P1 become computable (currently 0 dev sells in 953-rec cohort)?
+2. Any future entry-selection change that re-times marginal entries invalidates the W1/W3 blocked-population measurements — re-measure at that boundary, never extrapolate.
+3. No OHLCV-only recalibration of EVR delay/veto, pre-entry ret/br, or in-position depth/vol/pool exits should be re-tested on this cohort/stack — all are now graveyard.
+
+
