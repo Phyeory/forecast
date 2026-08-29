@@ -8192,4 +8192,60 @@ Best cell (−0.25,0.25): tail saved +0.391 per blocked tail trade but costs +0.
 2. Any future entry-selection change that re-times marginal entries invalidates the W1/W3 blocked-population measurements — re-measure at that boundary, never extrapolate.
 3. No OHLCV-only recalibration of EVR delay/veto, pre-entry ret/br, or in-position depth/vol/pool exits should be re-tested on this cohort/stack — all are now graveyard.
 
+---
+
+## Iter 71 — Left-Tail Mandate, Session 4: the pre-registered dense-coverage re-gate executed — W3 veto-latched wall COLLAPSED (58→5 tail trades) as predicted, holder-flow exits causally worth +0.2195 SOL on dense data (+75% relative, formal battery significant), W1_fast now the dominant wall and information-timing-bounded; four new probes killed (entry-window extension, bundler churn, min_usd extension, pre-entry flow re-check) — NO engine change
+
+**Date:** 2026-08-29
+**Focus:** Execute the re-gate criterion that iters 68/69/70 all pre-registered and deferred: holder-flow dense coverage (post-iter66 on-chain watcher) has accumulated 4 trading days (2026-08-26→29, 366 completed recordings with 276 carrying ≥5 holder-flow events — coverage regime changed from 56%-zero to ~85-94% covered, 3,800–7,100 events/day vs 1–2k before). The re-gate protocol is explicit: re-measure the wall population FIRST on dense coverage, never extrapolate the old-stack bounds. Canonical probe cohort `analysis/iter71_cohort_dense.json` (366 recs, dates 08-26→08-29, all `completed`).
+**Status:** MIXED — NEGATIVE on new tail-elimination mechanisms (four more probe kills), but **positive validation of the production stack**: the first causal, statistically significant measurement that holder-flow exits are a large net-positive tail mechanism on dense-coverage data. No engine change; `strategy_engineV2.py` byte-identical to HEAD.
+
+### 0. Dense-coverage data regime (measured, `analysis/iter71_cohort_dense.json`)
+
+Per-day holder-flow coverage (`GROUP BY date(started_at)`): pre-08-26 recordings average 56% zero-event / 1–2k events per trading day; 08-26→08-29 recordings are 85–94% covered with 3,800–7,100 events/day. Tag mix on the 366 dense recs: whale/sell 6,614, bundler/sell 1,356 + bundler/buy 1,282 (bundler BUYS are new — the on-chain watcher sees both sides), sniper 22, rat_trader 26, **dev 0**. The dev-ATA watcher produced ZERO events: either every dense-coverage dev had already fully dumped before recording start (plausible for pump.fun graduates — rec3466 precedent from iter43) or the dev-resolution path is failing in production. **Operational flag recorded: monitor dev-channel arm-rate in production logs (the iter66 §9 follow-up remains open).**
+
+### 1. Dense-coverage baseline batch `iter71_dense_base_1788020849` (bare `{}`, HEAD, 8 workers, 0 errors)
+
+**119 trades / 67.2% WR / +0.5133 SOL / PF 1.65** across 66 traded recordings. Tail: 23/−0.73 @≤−10%, 18/−0.66 @≤−20%, 15/−0.58 @≤−30%. `dev_sell_exit:*` fired **17 times** (on bundler-tagged sells — `_DEV_TAGS` = {dev, sniper, bundler, rat_trader} — the verified-insider exit channel is live on this data for the first time in any backtested cohort).
+
+### 2. Re-gate dissection (`analysis/iter69_dissect.py --batch-id iter71_dense_base_1788020849 --save analysis/iter71_dissect_dense.json`) — **the W3 prediction CONFIRMED**
+
+| wall (tail ≤−20%) | old stack (iter69, 953 recs) | dense stack (366 recs) | verdict |
+|---|---|---|---|
+| W3 veto-latched | 58 / −2.30 SOL (46/−2.02 @≤−30) | **5 / −0.181 SOL** | **COLLAPSED as predicted** — dev_sell_exit now fires pre-latch on bundler/whale prints |
+| W1_fast (exit <120 s) | 29 / −1.19 | **10 / −0.395** (4 rec_ended) | now the DOMINANT wall |
+| W0 EVR-fired | 23 / −0.71 | 3 / −0.080 | small |
+| W2 ratio-blocked | 3 / −0.07 | 0 | confirmed empty |
+| W5 armed-then-bled | 0 | 0 | rate_split stack still harvests every armed trade |
+
+The iter50 veto re-gate CF on the new data: un-latching the veto is still net-negative (CF −54.6 pct-pts, 2 latched winners give back more than 4 saved catastrophes) — **the veto remains structurally protective; do not un-latch.**
+
+### 3. Ablation batch `iter71_hfx_off_1788021967` (`{"v2_holder_flow_exit_enable": 0.0}`, sole param diff) — **causal attribution of the W3 collapse**
+
+`hfx_off`: 119 trades / 68.9% WR / **+0.2938 SOL / PF 1.27** vs baseline +0.5133 → **holder-flow exits are worth +0.2195 SOL (+75% relative) on dense data**. Tail: ≤−10% 28/−1.04 (vs 23/−0.73), ≤−20% 25/−1.01 (vs 18/−0.66), ≤−30% 19/−0.86 (vs 15/−0.58). Formal battery (`analysis/iter71_tail_ablation_dense.json`, 66 paired recordings, iter45/50 machinery): every tail band significantly WORSE without holder-flow exits — n≤−20% mean Δ −0.106 trades/rec (CI [−0.18,−0.03]), tail PnL ≤−20% mean Δ −0.0053 SOL/rec (CI [−0.0096,−0.0016]), tail PnL ≤−30% (CI [−0.0085,−0.0005]), kelly_flat PnL (CI [−0.0078,−0.0012]), worst_trade_pnl (CI [−6.8,−0.7]); verdict "TAIL REGRESSION detected — candidate worsens the left tail" (i.e. the ablation regresses the tail, the production stack protects it). Exit-reason identity: without HF exits, `kelly_flat` drag −0.211→−0.490, `evr_triage` −0.080→−0.218, `recording_ended` −0.193→−0.272. **This is the first batch-level, formally-tested causal quantification of the iter43/62/69 production stack's tail value — and it validates the 2026-08-23 re-application decision.**
+
+### 4. Probe kills this session (all cheap, no engine batch burned)
+
+| # | channel | probe | outcome | class |
+|---|---|---|---|---|
+| 1 | `v2_holder_flow_entry_window_seconds` 30→60/120/300/600 (never re-swept post-iter67; with tick-time delivery the 30 s window's semantics changed) | blocked-population CF | W60 blocks 9 trades carrying −0.020 NET; W120 blocks 22/+0.096; W300 blocks 48/+0.217; W600 blocks 74/+0.324 — blocks net winners at every window (iter56 §1 winner-bias re-confirmed on dense data) | (D) adverse selection |
+| 2 | Bundler churn (n/imbalance, 120–600 s pre-entry — bundler BUYS are new information on this regime) | AUC tail-vs-win | 0.389–0.505, medians all 0 | (A) no signal |
+| 3 | Sniper-tag presence pre-entry | AUC | 0.493 | (A) no signal |
+| 4 | Pre-entry big-sell counts/USD/time-since-last (60–600 s windows) re-checked on dense data | medians + AUC | bs_60..usd_600: AUC 0.44–0.53, tsl 0.52 — entry-side flow separation stays dead even at 6× event density | (A) no signal |
+| 5 | Exit `v2_holder_flow_min_usd` 100→50/200 (only HF exit knob never swept on any stack) | fire-set CF | min_usd=50 adds 2 fires (1 winner, NET +39 pts — under detection power); =200 adds 1 fire | (A) population empty at current density |
+
+### 5. W1_fast information-timing bound (the new dominant wall, 10/18 tail trades, −0.395 SOL)
+
+W1_fast tails hit −20% at median t+10…72 s after entry; the engine's exit paths that could respond (EVR 120 s, kelly_flat, HF exit) all arrive after. The decisive probe: does ANY in-position insider/whale sell event **lead** the −20% touch? Measured on all tail trades: only **1 of 4** trades with in-position big sells had the sell leading the −20% touch (rec3595, by 1 s — not exploitable); the rest coincide or lag. Pre-entry flow is dead (§4 probe 4). **W1_fast is information-timing-bounded on this stack: no observable that precedes the dump exists in holder-flow, and the iter22/26/31/37 OHLCV-side bounds carry over verbatim.** The 4-day dense window also cannot rule out that a longer window would grow the lead-time population — recorded as the standing re-gate.
+
+### 6. Mandate accounting + re-gate
+
+Sixteen distinct bounds now stand (iter68×5 + iter69×4 + iter70×3 + iter71×4), plus this session's positive causal result. The re-gate that iters 68/69/70 deferred has been **executed and answered**: the W3 wall collapsed exactly as the iter69 re-gate predicted, the production stack's protective value is now measured (not inferred) at +0.2195 SOL/4 days, and the remaining tail is concentrated in a wall whose trigger information arrives with the dump, not before it. No mechanism justified a full-cohort candidate batch (the mandate's two-lens protocol requires a candidate first; every live channel died at CF/probe).
+
+**Next re-gate (unchanged, sharpened):** (i) ≥2–3 weeks of dense coverage → re-run the §2 dissection; if W1_fast's lead-time population grows (in-position sells leading −20% by ≥5 s), an HF-exit latency tightening or window re-sweep becomes live; (ii) dev-channel: verify the watcher's arm-rate in production logs — 0 dev events on 366 dense recs is either benign (devs pre-dumped) or a silent failure that would explain part of W1; (iii) W1-fast rec_ended subset (4/−0.30 SOL this cohort): these are short recordings where the engine holds through the end — a recording-length-conditional sizing rule would be an entry-side gate (iter45-class) and must re-clear the full two-lens battery; not tested here for want of statistical power (n=4).
+
+**Deliverables:** `analysis/iter71_cohort_dense.json`, batches `iter71_dense_base_1788020849` + `iter71_hfx_off_1788021967` under `backend/v2_results/`, aggregates `iter71_dense_base.json` / `iter71_hfx_off.json`, dissection `iter71_dissect_dense.json`, formal battery `iter71_tail_ablation_dense.json`. Engine byte-identical to HEAD; suites green: `test_futures.py` 18/18, `analysis/test_evr.py`+`test_hf_silence.py`+`test_regime_adapt.py` 21/21, `test_live_parity.py`+`test_holder_flow_onchain.py`+`test_iter67_holder_flow_latency.py` 37/37.
+
+
+
 
