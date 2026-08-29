@@ -134,7 +134,7 @@ def _extract_holder_list(data) -> Optional[list]:
 # Rate-limit safety comes from the 429 ban backoff in `_ban_active()`, not
 # from a slow nominal interval, and the monitor is a process-wide singleton
 # so this is one request per interval regardless of session count.
-_POLL_INTERVAL = 5.0
+_POLL_INTERVAL = 15.0
 
 # Poll interval while nothing is watched — no session can consume the events,
 # so idle polling would only burn API quota.
