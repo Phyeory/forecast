@@ -130,6 +130,9 @@ def run_backtest_batch(
     maintenance_margin_rate: float = 0.005,
     futures_taker_fee: float = 0.00045,
     futures_slippage_pct: Optional[float] = None,
+    # iter67: replay holder-flow events at the live delivery lag instead of
+    # their exact on-chain timestamp (0.0 = legacy, byte-identical baselines).
+    holder_flow_latency_seconds: float = 0.0,
     persist_results: bool = True,
 ) -> list[dict]:
     """
@@ -192,6 +195,7 @@ def run_backtest_batch(
         maintenance_margin_rate=maintenance_margin_rate,
         futures_taker_fee=futures_taker_fee,
         futures_slippage_pct=futures_slippage_pct,
+        holder_flow_latency_seconds=holder_flow_latency_seconds,
         persist_results=persist_results,
         persist_candles=False,
     )
@@ -262,6 +266,14 @@ def run_backtest(
     # the live-executable level (default 0.0 = exact legacy behaviour).
     exec_offset_pct_buy: float = 0.0,
     exec_offset_pct_sell: float = 0.0,
+    # iter67: holder-flow delivery latency.  The backtester indexes every
+    # holder_flow row at its exact on-chain timestamp, but live can only act
+    # once the GMGN smartmoney poll surfaces the row.  Shifting event times
+    # forward by the measured live lag reproduces the live decision stream
+    # (entry blocks that never fired, dev_sell exits that fired seconds late).
+    # Default 0.0 = exact legacy behaviour, so every existing baseline is
+    # byte-identical.
+    holder_flow_latency_seconds: float = 0.0,
     persist_results: bool = True,
     persist_candles: bool = True,
 ) -> dict:
@@ -303,6 +315,7 @@ def run_backtest(
         engine_kwargs=engine_params,
         engine_version=engine_version,
         holder_flow_events=holder_flow_events,
+        holder_flow_latency_seconds=holder_flow_latency_seconds,
         market_type=market_type,
         leverage=leverage,
         funding_rate_per_interval=funding_rate_per_interval,
