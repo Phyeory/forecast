@@ -7,33 +7,48 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
-  <title>pump-chart · Strategy Dashboard</title>
+  <title>AOI·V2 — Strategy Terminal</title>
   <meta name="description"
     content="Real-time Solana token charting with physics-based strategy engine, recording, and backtesting" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="stylesheet"
-    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" />
+    href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" />
   <link rel="stylesheet" href="/static/css/style.css" />
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
+
+<!--
+  AOI·V2 UI RESTRUCTURE (2026-08-29)
+  Same functional sections as before — nav, live chart console, recorder, viewer,
+  backtest, futures, live trading, sniper, settings modal — but reorganized:
+
+  · Top bar: flat text-rail navigation (no pill group); brand mark + status readout.
+  · Live page: one command strip (address + timeframes + engine), a single
+    "tape" strip consolidating token identity / price / OHLC / stats / regime,
+    and the engine rail moved to the RIGHT of the chart so the chart owns the left.
+  · Sub-pages: icon chips and stacked glass cards replaced by a compact page
+    masthead plus flat panels separated by hairlines; live-trading's four loose
+    cards merged into one control deck; viewer actions promoted into the masthead.
+  · All element ids, data-* attributes, onclick handlers and JS-owned classes are
+    preserved exactly — app.js / sniper.js hooks are untouched.
+-->
 
 <body>
   <div id="app">
 
     <header id="topbar">
-      <div id="logo">pump<span>chart</span></div>
+      <div id="logo">AOI<span>V2</span></div>
 
       <!-- Navigation Tabs -->
       <nav id="main-nav">
-        <button class="nav-tab active" data-page="live" id="nav-live">📈 Live</button>
-        <button class="nav-tab" data-page="recorder" id="nav-recorder">🔴 Record</button>
-        <button class="nav-tab" data-page="viewer" id="nav-viewer">📂 Viewer</button>
-        <button class="nav-tab" data-page="backtest" id="nav-backtest">🧪 Backtest</button>
-        <button class="nav-tab" data-page="futures-backtest" id="nav-futures-backtest">⚖️ Futures</button>
-        <button class="nav-tab" data-page="live-trading" id="nav-live-trading">⚡ Live Trading</button>
-        <button class="nav-tab" data-page="sniper" id="nav-sniper">🎯 Sniper</button>
+        <button class="nav-tab active" data-page="live" id="nav-live">Live</button>
+        <button class="nav-tab" data-page="recorder" id="nav-recorder">Record</button>
+        <button class="nav-tab" data-page="viewer" id="nav-viewer">Viewer</button>
+        <button class="nav-tab" data-page="backtest" id="nav-backtest">Backtest</button>
+        <button class="nav-tab" data-page="futures-backtest" id="nav-futures-backtest">Futures</button>
+        <button class="nav-tab" data-page="live-trading" id="nav-live-trading">Execution</button>
+        <button class="nav-tab" data-page="sniper" id="nav-sniper">Sniper</button>
       </nav>
-
 
       <div id="conn-indicator">
         <div id="dot" class="dot"></div>
@@ -42,15 +57,15 @@
     </header>
 
     <!-- ═══════════════════════════════════════════════════════════════════ -->
-    <!-- PAGE: LIVE (original chart)                                       -->
+    <!-- PAGE: LIVE (chart console)                                        -->
     <!-- ═══════════════════════════════════════════════════════════════════ -->
     <div id="page-live" class="page active">
       <div id="live-controls">
         <form id="address-form" onsubmit="return false">
           <input id="mint-input" type="text" placeholder="Enter pump.fun token address…" autocomplete="off"
             spellcheck="false" />
-          <button id="load-btn" type="button">Load Chart</button>
-          <button id="settings-btn" type="button">⚙️</button>
+          <button id="load-btn" type="button">Load</button>
+          <button id="settings-btn" type="button" title="Strategy parameters">PRM</button>
         </form>
         <div id="tf-bar">
           <button class="tf-btn" data-tf="1s">1s</button>
@@ -62,26 +77,31 @@
           <button class="tf-btn" data-tf="1h">1h</button>
         </div>
         <div class="engine-ver-toggle" id="engine-ver-toggle" title="Switch strategy engine version">
-          <button class="engine-ver-btn active" id="engine-ver-v1" data-ver="1">⚙️ V1</button>
-          <button class="engine-ver-btn" id="engine-ver-v2" data-ver="2">🔬 V2</button>
+          <button class="engine-ver-btn active" id="engine-ver-v1" data-ver="1">V1</button>
+          <button class="engine-ver-btn" id="engine-ver-v2" data-ver="2">V2</button>
         </div>
       </div>
 
+      <!-- Token tape: identity / price / OHLC / session stats / engine state -->
       <div id="token-bar" class="hidden">
-        <img id="token-logo" alt="" />
-        <span id="token-name">—</span>
-        <span id="token-symbol"></span>
-        <div style="width:1px;height:24px;background:var(--border)"></div>
+        <div class="tape-id">
+          <img id="token-logo" alt="" />
+          <span id="token-name">—</span>
+          <span id="token-symbol"></span>
+        </div>
+        <div class="tape-sep"></div>
+        <div class="tape-px">
+          <span id="last-price">—</span>
+          <span id="price-change" class="price-change">—</span>
+        </div>
+        <div class="tape-sep"></div>
         <div id="ohlc-strip" class="ohlc-strip">
           <span class="ohlc-item">O <span id="ohlc-open">—</span></span>
           <span class="ohlc-item">H <span id="ohlc-high">—</span></span>
           <span class="ohlc-item">L <span id="ohlc-low">—</span></span>
           <span class="ohlc-item">C <span id="ohlc-close">—</span></span>
         </div>
-        <div style="width:1px;height:24px;background:var(--border)"></div>
-        <span id="last-price">—</span>
-        <span id="price-change" class="price-change">—</span>
-        <div style="width:1px;height:24px;background:var(--border)"></div>
+        <div class="tape-sep"></div>
         <div class="stat-item">
           <span class="stat-label">Mkt Cap</span>
           <span class="stat-value" id="stat-mcap">—</span>
@@ -90,39 +110,40 @@
           <span class="stat-label">Session Vol</span>
           <span class="stat-value" id="stat-vol">0 SOL</span>
         </div>
-        <div style="width:1px;height:24px;background:var(--border)"></div>
-        <div id="regime-badge" class="regime-badge">IDLE</div>
-        <div id="direction-badge" class="direction-badge">— NONE</div>
         <div class="stat-item">
           <span class="stat-label">Signal S</span>
           <span class="stat-value" id="signal-strength">0.00</span>
         </div>
+        <div class="tape-right">
+          <div id="regime-badge" class="regime-badge">IDLE</div>
+          <div id="direction-badge" class="direction-badge">— NONE</div>
+        </div>
       </div>
 
       <div id="main-content">
-        <aside id="strategy-panel">
-          <div class="panel-section">
-            <h3 class="panel-title">📊 Indicators</h3>
-            <div id="indicators-display" class="indicators-grid"></div>
-          </div>
-          <div class="panel-section">
-            <h3 class="panel-title">💰 Forward Test</h3>
-            <div id="ft-stats" class="ft-grid"></div>
-          </div>
-        </aside>
-
         <div id="chart-area">
           <div id="chart-wrapper">
             <div id="chart"></div>
             <div id="trade-feed"></div>
             <div id="overlay">
-              <div id="overlay-icon">📈</div>
+              <div id="overlay-icon">◈</div>
               <div id="overlay-msg">Enter a pump.fun token address above to start.</div>
             </div>
           </div>
           <div id="regime-bar-canvas" class="sub-pane-wrapper regime-bar-wrapper"></div>
           <div id="sub-pane" class="sub-pane-wrapper"></div>
         </div>
+
+        <aside id="strategy-panel">
+          <div class="panel-section">
+            <h3 class="panel-title">Indicators</h3>
+            <div id="indicators-display" class="indicators-grid"></div>
+          </div>
+          <div class="panel-section">
+            <h3 class="panel-title">Forward Test</h3>
+            <div id="ft-stats" class="ft-grid"></div>
+          </div>
+        </aside>
       </div>
     </div>
 
@@ -131,15 +152,12 @@
     <!-- ═══════════════════════════════════════════════════════════════════ -->
     <div id="page-recorder" class="page">
       <div class="page-inner">
-        <div class="page-header">
-          <div class="page-header-icon">🔴</div>
-          <div>
-            <h1 class="page-title">Price Recorder</h1>
-            <p class="page-subtitle">Record live price action for any token to use in backtesting later</p>
-          </div>
+        <div class="page-head">
+          <h1 class="page-title">Recorder</h1>
+          <p class="page-subtitle">Capture live price action for any token to use in backtesting later</p>
         </div>
 
-        <div class="recorder-card glass-card">
+        <div class="panel recorder-card">
           <div class="recorder-form">
             <div class="form-group">
               <label class="form-label">Token Address</label>
@@ -159,23 +177,23 @@
               </select>
             </div>
             <div class="form-actions">
-              <button id="rec-start-btn" class="btn btn-record">⏺ Start Recording</button>
+              <button id="rec-start-btn" class="btn btn-record">Start Recording</button>
             </div>
           </div>
 
-          <!-- Active recording status bar -->
-          <div id="rec-status" class="hidden"
-            style="margin-top:12px;padding:10px 14px;background:rgba(239,83,80,0.12);border:1px solid rgba(239,83,80,0.3);border-radius:8px;display:flex;gap:16px;align-items:center;font-size:13px;">
-            <span style="color:#ef5350;font-weight:600;">🔴 Recording</span>
-            <span id="rec-status-mint" style="color:#d1d5e0;font-weight:600;"></span>
+          <!-- Active recording status strip -->
+          <div id="rec-status" class="rec-strip hidden">
+            <span class="rec-strip-dot"></span>
+            <span class="rec-strip-label">Recording</span>
+            <span id="rec-status-mint" class="rec-strip-mint"></span>
             <span id="rec-status-tf" class="rec-card-badge"></span>
-            <span id="rec-status-candles" style="color:#5a6071;"></span>
+            <span id="rec-status-candles" class="rec-strip-meta"></span>
           </div>
         </div>
 
         <!-- Saved recordings list -->
         <div class="recordings-section">
-          <h2 class="section-title">📂 Saved Recordings</h2>
+          <h2 class="section-title">Saved Recordings</h2>
           <div id="recordings-list" class="recordings-grid">
             <div class="empty-state">No recordings yet. Start recording to capture price data.</div>
           </div>
@@ -188,22 +206,18 @@
     <!-- ═══════════════════════════════════════════════════════════════════ -->
     <div id="page-viewer" class="page">
       <div class="page-inner">
-        <div class="page-header">
-          <div class="page-header-icon">📂</div>
+        <div class="page-head">
           <div>
-            <h1 class="page-title">Price Viewer</h1>
-            <p class="page-subtitle">Load and view saved price action recordings</p>
+            <h1 class="page-title">Viewer</h1>
+            <p class="page-subtitle">Load and inspect saved price action recordings</p>
+          </div>
+          <div class="page-head-side">
+            <button id="viewer-cleanup-btn" class="btn btn-danger" onclick="cleanupRecordings()">Clean Up</button>
+            <button id="viewer-fix-stale-btn" class="btn btn-secondary" onclick="finishStaleRecordings()">Fix Stale</button>
           </div>
         </div>
 
         <div id="viewer-select-area">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
-            <h2 class="section-title" style="margin-bottom:0;">📂 Saved Recordings</h2>
-            <div style="display:flex;gap:8px;align-items:center;">
-              <button id="viewer-cleanup-btn" class="btn btn-danger" onclick="cleanupRecordings()">🧹 Clean up</button>
-              <button id="viewer-fix-stale-btn" class="btn btn-secondary" onclick="finishStaleRecordings()">🛠 Fix Stale</button>
-            </div>
-          </div>
           <div id="viewer-recordings-list" class="recordings-grid">
             <div class="empty-state">No recordings available. Record some price data first.</div>
           </div>
@@ -229,16 +243,13 @@
     <!-- ═══════════════════════════════════════════════════════════════════ -->
     <div id="page-backtest" class="page">
       <div class="page-inner">
-        <div class="page-header">
-          <div class="page-header-icon">🧪</div>
-          <div>
-            <h1 class="page-title">Backtester</h1>
-            <p class="page-subtitle">Run the strategy engine on saved price data and analyze results</p>
-          </div>
+        <div class="page-head">
+          <h1 class="page-title">Backtester</h1>
+          <p class="page-subtitle">Run the strategy engine on saved price data and analyze results</p>
         </div>
 
         <!-- Backtest controls -->
-        <div id="bt-controls" class="glass-card">
+        <div id="bt-controls" class="panel">
           <div class="bt-form">
             <div class="form-group">
               <label class="form-label">Select Recording</label>
@@ -247,11 +258,11 @@
               </select>
             </div>
             <div class="form-actions">
-              <button id="bt-run-btn" class="btn btn-primary">▶ Run Backtest</button>
-              <button id="bt-run-all-btn" class="btn btn-secondary">⚡ Run All Recordings</button>
-              <button id="bt-run-last-night-btn" class="btn btn-secondary">🌙 Run Batch Last Night</button>
-              <button id="bt-run-last-12h-btn" class="btn btn-secondary">🕒 Run Batch Last 12h</button>
-              <button id="bt-params-btn" class="btn btn-secondary">⚙️ Parameters</button>
+              <button id="bt-run-btn" class="btn btn-primary">Run Backtest</button>
+              <button id="bt-run-all-btn" class="btn btn-secondary">Run All</button>
+              <button id="bt-run-last-night-btn" class="btn btn-secondary">Batch · Last Night</button>
+              <button id="bt-run-last-12h-btn" class="btn btn-secondary">Batch · Last 12h</button>
+              <button id="bt-params-btn" class="btn btn-secondary">Parameters</button>
             </div>
           </div>
           <div id="bt-progress" class="hidden">
@@ -262,14 +273,11 @@
           </div>
         </div>
 
-
-
-
         <!-- Saved backtests -->
         <div class="backtests-section">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
-            <h2 class="section-title" style="margin-bottom:0;">📊 Saved Backtests</h2>
-            <button id="bt-delete-all-btn" class="btn btn-danger" onclick="deleteAllBacktests()">🗑 Delete All</button>
+          <div class="toolbar-row">
+            <h2 class="section-title">Saved Backtests</h2>
+            <button id="bt-delete-all-btn" class="btn btn-danger" onclick="deleteAllBacktests()">Delete All</button>
           </div>
           <div id="backtests-list" class="backtests-grid">
             <div class="empty-state">No backtests yet. Select a recording and run a backtest.</div>
@@ -294,7 +302,7 @@
 
           <!-- Trades table -->
           <div class="bt-trades-section">
-            <h3 class="section-title">📋 Trade Log</h3>
+            <h3 class="section-title">Trade Log</h3>
             <div id="bt-trades-table-wrapper" class="trades-table-wrapper">
               <table id="bt-trades-table" class="trades-table">
                 <thead>
@@ -323,18 +331,16 @@
     <!-- ═══════════════════════════════════════════════════════════════════ -->
     <div id="page-futures-backtest" class="page">
       <div class="page-inner">
-        <div class="page-header">
-          <div class="page-header-icon">⚖️</div>
-          <div>
-            <h1 class="page-title">Futures Backtester</h1>
-            <p class="page-subtitle">Leveraged perp simulation over the same OHLCV recordings — margin, funding, and mark-price liquidation layered on the same engine</p>
-          </div>
+        <div class="page-head">
+          <h1 class="page-title">Futures Backtester</h1>
+          <p class="page-subtitle">Leveraged perp simulation over the same OHLCV recordings — margin, funding, and
+            mark-price liquidation layered on the same engine</p>
         </div>
 
         <!-- Futures instruments (fetched from the exchange cache) -->
-        <div id="fbt-controls" class="glass-card">
-          <div style="margin-bottom:14px">
-            <h3 class="panel-title" style="margin-bottom:8px">📡 Instrument (USDC-margined, 1h)</h3>
+        <div id="fbt-controls" class="panel">
+          <div class="fbt-block">
+            <h3 class="panel-title">Instrument · USDC-margined · 1h</h3>
             <div id="fbt-instruments" class="fbt-instrument-grid">
               <!-- populated from /api/futures/markets -->
             </div>
@@ -353,7 +359,7 @@
               </select>
             </div>
             <div class="form-group">
-              <label class="form-label">History window</label>
+              <label class="form-label">History Window</label>
               <select id="fbt-days-back" class="form-select">
                 <option value="7">7 days</option>
                 <option value="30" selected>30 days</option>
@@ -362,19 +368,20 @@
               </select>
             </div>
             <div class="form-group">
-              <label class="form-label">Margin per trade (USDC)</label>
+              <label class="form-label">Margin / Trade (USDC)</label>
               <input id="fbt-margin" type="number" class="form-input" value="100" step="10" min="1" />
             </div>
             <div class="form-group">
-              <label class="form-label">Starting balance (USDC)</label>
+              <label class="form-label">Starting Balance (USDC)</label>
               <input id="fbt-starting-balance" type="number" class="form-input" value="1000" step="100" min="10" />
             </div>
             <div class="form-group">
               <label class="form-label">Funding / 8h (fallback)</label>
-              <input id="fbt-funding-rate" type="number" class="form-input" value="0.0001" step="0.00001" min="-0.01" max="0.01" />
+              <input id="fbt-funding-rate" type="number" class="form-input" value="0.0001" step="0.00001" min="-0.01"
+                max="0.01" />
             </div>
             <div class="form-group">
-              <label class="form-label">Taker fee</label>
+              <label class="form-label">Taker Fee</label>
               <input id="fbt-taker-fee" type="number" class="form-input" value="0.00045" step="0.00005" min="0" />
             </div>
             <div class="form-group">
@@ -382,9 +389,9 @@
               <input id="fbt-slippage" type="number" class="form-input" value="0.1" step="0.05" min="0" />
             </div>
             <div class="form-actions">
-              <button id="fbt-run-btn" class="btn btn-primary">▶ Run Futures Backtest</button>
-              <button id="fbt-run-all-btn" class="btn btn-secondary">⚡ Run All Instruments</button>
-              <button id="fbt-params-btn" class="btn btn-secondary">⚙️ Engine Parameters</button>
+              <button id="fbt-run-btn" class="btn btn-primary">Run Backtest</button>
+              <button id="fbt-run-all-btn" class="btn btn-secondary">Run All Instruments</button>
+              <button id="fbt-params-btn" class="btn btn-secondary">Engine Parameters</button>
             </div>
           </div>
           <div id="fbt-progress" class="hidden">
@@ -393,19 +400,19 @@
             </div>
             <span id="fbt-progress-label" class="progress-label">Running…</span>
           </div>
-          <div style="font-size:11px;color:#888;margin-top:10px">
+          <div class="micro-note">
             Accounted in <b>USDC</b> (USDT-margined upstream at Bybit — stable 1:1 USD proxy for USDC PnL).
             First run of an instrument downloads its 30-day history once and caches it locally in
-            <code>backend/data/futures_cache.db</code>.  Real funding rates, mark prices, and open-interest are
-            ingested alongside the klines — no recording needed.  ⚠️ long-only (engine constraint, iter33–39).
+            <code>backend/data/futures_cache.db</code>. Real funding rates, mark prices, and open-interest are
+            ingested alongside the klines — no recording needed. Long-only (engine constraint, iter33–39).
           </div>
         </div>
 
         <!-- Saved futures backtests -->
         <div class="backtests-section">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
-            <h2 class="section-title" style="margin-bottom:0;">📊 Saved Futures Backtests</h2>
-            <button id="fbt-delete-all-btn" class="btn btn-danger" onclick="deleteAllBacktests()">🗑 Delete All</button>
+          <div class="toolbar-row">
+            <h2 class="section-title">Saved Futures Backtests</h2>
+            <button id="fbt-delete-all-btn" class="btn btn-danger" onclick="deleteAllBacktests()">Delete All</button>
           </div>
           <div id="fbt-backtests-list" class="backtests-grid">
             <div class="empty-state">No futures backtests yet. Configure leverage and run one.</div>
@@ -418,7 +425,7 @@
             <div class="bt-result-meta">
               <span id="fbt-result-name" class="bt-result-name"></span>
               <span id="fbt-result-tf" class="viewer-meta-badge"></span>
-              <span id="fbt-result-lev" class="viewer-meta-badge" style="margin-left:6px;background:#2b2416;color:#e3b341"></span>
+              <span id="fbt-result-lev" class="viewer-meta-badge lev-badge"></span>
             </div>
             <button id="fbt-result-back-btn" class="btn btn-secondary">← Back</button>
           </div>
@@ -428,7 +435,7 @@
           <div id="fbt-chart" class="viewer-chart-container"></div>
 
           <div class="bt-trades-section">
-            <h3 class="section-title">📋 Futures Trade Log</h3>
+            <h3 class="section-title">Futures Trade Log</h3>
             <div id="fbt-trades-table-wrapper" class="trades-table-wrapper">
               <table id="fbt-trades-table" class="trades-table">
                 <thead>
@@ -456,22 +463,37 @@
     </div>
 
     <!-- ═══════════════════════════════════════════════════════════════════ -->
-    <!-- PAGE: LIVE TRADING                                                -->
+    <!-- PAGE: LIVE TRADING (execution)                                    -->
     <!-- ═══════════════════════════════════════════════════════════════════ -->
     <div id="page-live-trading" class="page">
       <div class="page-inner">
-        <div class="page-header">
-          <div class="page-header-icon">⚡</div>
-          <div>
-            <h1 class="page-title">Live Trading</h1>
-            <p class="page-subtitle">Real on-chain trading with your Phantom wallet — same algorithm, real transactions
-            </p>
-          </div>
+        <div class="page-head">
+          <h1 class="page-title">Execution</h1>
+          <p class="page-subtitle">Real on-chain trading — same algorithm, real transactions</p>
         </div>
 
-        <!-- Session Stats (aggregated across active traders) -->
-        <div class="glass-card" id="lt-session-card" style="display:none">
-          <div style="display:flex;align-items:flex-start;gap:28px;flex-wrap:wrap;">
+        <!-- Control deck: wallet / session / config / dispatch merged into one panel -->
+        <div class="panel lt-deck">
+          <div class="deck-zone" id="lt-wallet-card">
+            <div class="lt-wallet-row">
+              <div class="lt-wallet-status">
+                <div id="lt-wallet-dot" class="dot error"></div>
+                <span id="lt-wallet-label">Wallet not connected</span>
+                <span id="lt-wallet-addr" class="lt-wallet-addr"></span>
+                <span id="lt-wallet-bal" class="lt-wallet-bal"></span>
+              </div>
+              <div class="lt-key-row">
+                <input id="lt-private-key" type="password" class="form-input"
+                  placeholder="Base58 private key (from Phantom export)…" autocomplete="off" spellcheck="false" />
+                <button id="lt-connect-btn" class="btn btn-primary" onclick="connectWallet()">Set Wallet</button>
+              </div>
+            </div>
+            <div class="micro-note">Private key is sent to your local backend only (for server-side signing). Never
+              share this key.</div>
+          </div>
+
+          <!-- Session Stats (aggregated across active traders) -->
+          <div class="deck-zone deck-stats" id="lt-session-card" style="display:none">
             <div class="bt-stat">
               <span class="bt-stat-label">Session PnL</span>
               <span class="bt-stat-value" id="lts-pnl">+0.0000 SOL</span>
@@ -493,98 +515,73 @@
               <span class="bt-stat-value" id="lts-tokens">0</span>
             </div>
           </div>
-        </div>
 
-        <!-- Wallet Connection (Private Key) -->
-        <div class="glass-card" id="lt-wallet-card">
-          <div class="lt-wallet-row">
-            <div class="lt-wallet-status">
-              <div id="lt-wallet-dot" class="dot error"></div>
-              <span id="lt-wallet-label">Wallet not connected</span>
-              <span id="lt-wallet-addr" class="lt-wallet-addr"></span>
-              <span id="lt-wallet-bal" class="lt-wallet-bal"></span>
-            </div>
-          </div>
-          <div style="margin-top:12px;display:flex;gap:8px">
-            <input id="lt-private-key" type="password" class="form-input" style="flex:1"
-              placeholder="Enter Base58 Private Key (from Phantom export)…" autocomplete="off" spellcheck="false" />
-            <button id="lt-connect-btn" class="btn btn-primary" onclick="connectWallet()">🔑 Set Wallet</button>
-          </div>
-          <div style="margin-top:8px;font-size:11px;color:#888;">
-            * Private key is sent to your local backend only (for server-side signing). Never share this key.
-          </div>
-        </div>
-
-
-        <!-- Trading Config -->
-        <div class="glass-card" id="lt-config-card">
-
-          <h3 class="panel-title" style="margin-bottom:12px">⚙️ Trading Configuration</h3>
-          <div class="lt-config-grid">
-            <div class="form-group">
-              <label class="form-label">Buy Size (SOL)</label>
-              <input id="lt-buy-size" type="number" class="form-input" value="0.01" step="0.01" min="0.001" />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Slippage (%)</label>
-              <input id="lt-slippage" type="number" class="form-input" value="15" step="0.5" min="0.1" max="50" />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Priority Fee (SOL)</label>
-              <input id="lt-priority-fee" type="number" class="form-input" value="0.0001" step="0.0001" min="0" />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Timeframe</label>
-              <select id="lt-timeframe" class="form-select">
-                <option value="1s" selected>1s</option>
-                <option value="5s">5s</option>
-                <option value="15s">15s</option>
-                <option value="1m">1m</option>
-                <option value="5m">5m</option>
-                <option value="15m">15m</option>
-                <option value="1h">1h</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Engine</label>
-              <div class="engine-ver-toggle engine-ver-toggle-sm" id="lt-engine-toggle" title="Strategy engine version for live trading">
-                <button class="engine-ver-btn"        id="lt-engine-v1" data-ver="1">V1</button>
-                <button class="engine-ver-btn active" id="lt-engine-v2" data-ver="2">V2</button>
+          <div class="deck-zone" id="lt-config-card">
+            <h3 class="panel-title">Trading Configuration</h3>
+            <div class="lt-config-grid">
+              <div class="form-group">
+                <label class="form-label">Buy Size (SOL)</label>
+                <input id="lt-buy-size" type="number" class="form-input" value="0.01" step="0.01" min="0.001" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Slippage (%)</label>
+                <input id="lt-slippage" type="number" class="form-input" value="15" step="0.5" min="0.1" max="50" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Priority Fee (SOL)</label>
+                <input id="lt-priority-fee" type="number" class="form-input" value="0.0001" step="0.0001" min="0" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Timeframe</label>
+                <select id="lt-timeframe" class="form-select">
+                  <option value="1s" selected>1s</option>
+                  <option value="5s">5s</option>
+                  <option value="15s">15s</option>
+                  <option value="1m">1m</option>
+                  <option value="5m">5m</option>
+                  <option value="15m">15m</option>
+                  <option value="1h">1h</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Engine</label>
+                <div class="engine-ver-toggle engine-ver-toggle-sm" id="lt-engine-toggle"
+                  title="Strategy engine version for live trading">
+                  <button class="engine-ver-btn" id="lt-engine-v1" data-ver="1">V1</button>
+                  <button class="engine-ver-btn active" id="lt-engine-v2" data-ver="2">V2</button>
+                </div>
               </div>
             </div>
           </div>
-        </div>
 
-        <!-- Add Token -->
-        <div class="glass-card" id="lt-add-card">
-          <div class="lt-add-row">
-            <input id="lt-token-input" type="text" class="form-input"
-              placeholder="Enter token address to start live trading…" autocomplete="off" spellcheck="false"
-              style="flex:1" />
-            <button id="lt-add-btn" class="btn btn-record" disabled>⚡ Start Trading</button>
-            <button id="lt-stop-all-btn" class="btn btn-danger" style="display:none">⏹ Stop All</button>
+          <div class="deck-zone" id="lt-add-card">
+            <div class="lt-add-row">
+              <input id="lt-token-input" type="text" class="form-input"
+                placeholder="Enter token address to start live trading…" autocomplete="off" spellcheck="false" />
+              <button id="lt-add-btn" class="btn btn-record" disabled>Start Trading</button>
+              <button id="lt-stop-all-btn" class="btn btn-danger" style="display:none">Stop All</button>
+            </div>
           </div>
         </div>
 
         <!-- AutoFeed (gmgn.ai) -->
-        <div class="glass-card" id="lt-autofeed-card">
-          <h3 class="panel-title" style="margin-bottom:12px">📡 AutoFeed (gmgn.ai)</h3>
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-            <label style="font-size:13px;font-weight:600">AutoFeed Engine</label>
+        <div class="panel" id="lt-autofeed-card">
+          <div class="af-head">
+            <h3 class="panel-title">AutoFeed · gmgn.ai</h3>
             <label class="af-switch" title="Cannot be turned on until wallet key is set">
               <input type="checkbox" id="af-toggle" />
               <span class="af-slider"></span>
             </label>
           </div>
-          <div style="display:flex;align-items:center;gap:8px;font-size:11px">
+          <div class="af-statusline">
             <span id="af-status-dot" class="dot error"></span>
-            <span id="af-status-text" style="color:#888">Disconnected</span>
-            <span id="af-cli-status" style="margin-left:auto;color:#888"></span>
+            <span id="af-status-text">Disconnected</span>
+            <span id="af-cli-status" class="af-cli"></span>
           </div>
 
           <!-- Settings -->
-          <div class="af-settings" id="af-settings" style="margin-top:14px;display:none">
-            <h4 style="font-size:12px;color:#aaa;text-transform:uppercase;margin-bottom:8px">Discovery Filters</h4>
+          <div class="af-settings" id="af-settings" style="display:none">
+            <h4 class="af-subhead">Discovery Filters</h4>
             <div class="lt-config-grid">
               <div class="form-group">
                 <label class="form-label">Poll Interval (s)</label>
@@ -638,7 +635,7 @@
                   <option value="marketcap">Market cap</option>
                 </select>
               </div>
-              <div class="form-group" style="grid-column: span 2">
+              <div class="form-group span-2">
                 <label class="form-label">Migration Exchanges (comma-sep, lower-case)</label>
                 <input id="af-migration-exchanges" type="text" class="form-input"
                   value="pump_amm,meteora_dlmm,meteora_damm_v2,raydium,raydium_cpmm,orca_whirlpool" autocomplete="off"
@@ -693,62 +690,53 @@
               </div>
             </div>
 
-            <h4 style="font-size:12px;color:#aaa;text-transform:uppercase;margin:14px 0 8px">Boolean Gates</h4>
-            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px;font-size:12px">
-              <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="af-req-renounced-mint"
-                  checked /> Renounced Mint</label>
-              <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="af-req-renounced-freeze"
-                  checked /> Renounced Freeze</label>
-              <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="af-rej-wash" checked />
-                Reject Wash Trading</label>
-              <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="af-rej-honeypot"
-                  checked /> Reject Honeypot</label>
-              <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="af-req-social" />
-                Require Social</label>
-              <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="af-req-migration"
-                  checked /> Require Migration Exchange</label>
+            <h4 class="af-subhead">Boolean Gates</h4>
+            <div class="af-gates">
+              <label><input type="checkbox" id="af-req-renounced-mint" checked /> Renounced Mint</label>
+              <label><input type="checkbox" id="af-req-renounced-freeze" checked /> Renounced Freeze</label>
+              <label><input type="checkbox" id="af-rej-wash" checked /> Reject Wash Trading</label>
+              <label><input type="checkbox" id="af-rej-honeypot" checked /> Reject Honeypot</label>
+              <label><input type="checkbox" id="af-req-social" /> Require Social</label>
+              <label><input type="checkbox" id="af-req-migration" checked /> Require Migration Exchange</label>
             </div>
 
-            <div style="margin-top:14px;display:flex;gap:8px">
-              <button class="btn btn-primary" id="af-save-config">💾 Save Settings</button>
-              <button class="btn" id="af-test-poll" style="background:#26a69a;color:#000">🧪 Poll Once</button>
-              <span id="af-preview" style="margin-left:auto;font-size:11px;color:#888;align-self:center"></span>
+            <div class="af-actions">
+              <button class="btn btn-primary" id="af-save-config">Save Settings</button>
+              <button class="btn btn-secondary" id="af-test-poll">Poll Once</button>
+              <span id="af-preview" class="af-preview"></span>
             </div>
           </div>
 
           <!-- Stats summary -->
-          <div class="af-stats" id="af-stats"
-            style="margin-top:10px;display:grid;grid-template-columns:repeat(4,1fr);gap:8px;font-size:11px;opacity:.9">
+          <div class="af-stats" id="af-stats">
             <div>
-              <div style="color:#888">Total Seen</div>
-              <div id="af-stat-seen">0</div>
+              <div class="af-stat-label">Total Seen</div>
+              <div class="af-stat-value" id="af-stat-seen">0</div>
             </div>
             <div>
-              <div style="color:#888">Total Fed</div>
-              <div id="af-stat-fed">0</div>
+              <div class="af-stat-label">Total Fed</div>
+              <div class="af-stat-value" id="af-stat-fed">0</div>
             </div>
             <div>
-              <div style="color:#888">Active Tracked</div>
-              <div id="af-stat-tracked">0</div>
+              <div class="af-stat-label">Active Tracked</div>
+              <div class="af-stat-value" id="af-stat-tracked">0</div>
             </div>
             <div>
-              <div style="color:#888">Last Poll</div>
-              <div id="af-stat-lastpoll">—</div>
+              <div class="af-stat-label">Last Poll</div>
+              <div class="af-stat-value" id="af-stat-lastpoll">—</div>
             </div>
           </div>
 
           <!-- Recent candidates feed -->
-          <h4 style="font-size:12px;color:#aaa;text-transform:uppercase;margin:14px 0 8px">Recent Candidates</h4>
-          <div id="af-candidates"
-            style="max-height:280px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
-            <div class="empty-state" style="font-size:11px;padding:14px">No candidates yet. Toggle AutoFeed on (requires
-              wallet key).</div>
+          <h4 class="af-subhead">Recent Candidates</h4>
+          <div id="af-candidates" class="af-cand-list">
+            <div class="empty-state">No candidates yet. Toggle AutoFeed on (requires wallet key).</div>
           </div>
         </div>
 
         <!-- Active Traders Grid -->
         <div class="lt-traders-section">
-          <h2 class="section-title">📊 Active Traders</h2>
+          <h2 class="section-title">Active Traders</h2>
           <div id="lt-traders-grid" class="lt-traders-grid">
             <div class="empty-state">No active traders. Connect wallet and add tokens above.</div>
           </div>
@@ -756,7 +744,7 @@
 
         <!-- Trade History -->
         <div class="lt-history-section">
-          <h2 class="section-title">📋 Trade History</h2>
+          <h2 class="section-title">Trade History</h2>
           <div id="lt-trades-table-wrapper" class="trades-table-wrapper">
             <table id="lt-trades-table" class="trades-table">
               <thead>
@@ -780,118 +768,95 @@
     </div>
 
     <!-- ═══════════════════════════════════════════════════════════════════ -->
-    <!-- PAGE: SNIPER                                                       -->
+    <!-- PAGE: SNIPER                                                      -->
     <!-- ═══════════════════════════════════════════════════════════════════ -->
     <div id="page-sniper" class="page">
       <div class="page-inner">
 
-        <!-- Header -->
-        <div class="page-header">
-          <div class="page-header-icon">🎯</div>
-          <div>
-            <h1 class="page-title">New Pair Sniper</h1>
-            <p class="page-subtitle">Scans PumpPortal live for new pairs at creation — scores quality, auto-enters on
-              the pump, exits at target</p>
-          </div>
+        <div class="page-head">
+          <h1 class="page-title">New Pair Sniper</h1>
+          <p class="page-subtitle">Scans PumpPortal live for new pairs at creation — scores quality, auto-enters on
+            the pump, exits at target</p>
         </div>
 
         <!-- Mode + Config -->
-        <div class="glass-card" id="sniper-config-card" style="margin-bottom: 24px;">
-
-          <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:20px">
-            <!-- Mode Toggle -->
-            <div style="display:flex;align-items:center;gap:10px;margin-left:auto">
-              <span style="font-size:12px;color:#888;font-weight:600">MODE</span>
-              <div class="sniper-mode-toggle" id="sniper-mode-toggle"
-                style="background: var(--bg); padding: 4px; border-radius: 8px; display: flex; gap: 4px;">
-                <button class="sniper-mode-btn active" id="sniper-mode-paper" data-mode="paper"
-                  style="border-radius: 6px; padding: 6px 12px; font-weight: 600;">📋 Paper</button>
-                <button class="sniper-mode-btn" id="sniper-mode-live" data-mode="live"
-                  style="border-radius: 6px; padding: 6px 12px; font-weight: 600;">⚡ Live</button>
-              </div>
+        <div class="panel" id="sniper-config-card">
+          <div class="sn-head">
+            <span class="af-subhead">Configuration</span>
+            <div class="sniper-mode-toggle" id="sniper-mode-toggle">
+              <button class="sniper-mode-btn active" id="sniper-mode-paper" data-mode="paper">Paper</button>
+              <button class="sniper-mode-btn" id="sniper-mode-live" data-mode="live">Live</button>
             </div>
           </div>
 
-          <div
-            style="font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px;">
-            CONFIGURATION</div>
-          <div class="lt-config-grid" style="grid-template-columns: repeat(4, 1fr);">
+          <div class="lt-config-grid sniper-config-grid">
             <div class="form-group">
-              <label class="form-label">SIZE (SOL)</label>
+              <label class="form-label">Size (SOL)</label>
               <input id="sniper-buy-size" type="number" class="form-input" value="0.05" step="0.01" min="0.001" />
             </div>
             <div class="form-group">
-              <label class="form-label">SLIPPAGE (%)</label>
+              <label class="form-label">Slippage (%)</label>
               <input id="sniper-slippage" type="number" class="form-input" value="15" step="0.5" min="1" max="50" />
             </div>
             <div class="form-group">
-              <label class="form-label">PRIORITY FEE (SOL)</label>
+              <label class="form-label">Priority Fee (SOL)</label>
               <input id="sniper-priority-fee" type="number" class="form-input" value="0.0001" step="0.0001" />
             </div>
             <div class="form-group">
-              <label class="form-label">MAX COINS</label>
+              <label class="form-label">Max Coins</label>
               <input id="sniper-max-coins" type="number" class="form-input" value="5" step="1" min="1" max="20" />
             </div>
           </div>
 
           <!-- Live mode: private key (hidden unless live mode) -->
-          <div id="sniper-live-key-row" style="display:none; margin-top:16px;">
-            <label class="form-label">PRIVATE KEY (LIVE MODE)</label>
-            <div style="display:flex;gap:8px;margin-top:4px">
-              <input id="sniper-private-key" type="password" class="form-input" style="flex:1"
-                placeholder="Base58 private key…" autocomplete="off" spellcheck="false" />
-            </div>
-            <div style="margin-top:6px;font-size:11px;color:#888">Sent only to your local backend for signing. Never
-              shared.</div>
+          <div id="sniper-live-key-row" class="sn-live-key" style="display:none">
+            <label class="form-label">Private Key (live mode)</label>
+            <input id="sniper-private-key" type="password" class="form-input"
+              placeholder="Base58 private key…" autocomplete="off" spellcheck="false" />
+            <div class="micro-note">Sent only to your local backend for signing. Never shared.</div>
           </div>
 
-          <div class="form-actions"
-            style="margin-top:20px; display: flex; gap: 12px; border-top: 1px solid var(--border); padding-top: 20px;">
-            <button id="sniper-start-btn" class="btn btn-record" style="min-width: 140px; justify-content: center;">
-              <span class="sniper-pulse-indicator" id="sniper-pulse"
-                style="display: none; box-shadow: none; margin-right: 4px;"></span> 🎯 Start Sniper
+          <div class="form-actions sn-actions">
+            <button id="sniper-start-btn" class="btn btn-record">
+              <span class="sniper-pulse-indicator" id="sniper-pulse" style="display: none;"></span> Start Sniper
             </button>
-            <button id="sniper-stop-btn" class="btn btn-danger"
-              style="display:none; min-width: 140px; justify-content: center;">⏹ Stop Sniper</button>
+            <button id="sniper-stop-btn" class="btn btn-danger" style="display:none">Stop Sniper</button>
           </div>
         </div>
 
         <!-- Status Bar -->
-        <div id="sniper-status-bar" class="hidden"
-          style="margin-bottom:24px;padding:12px 20px;background:var(--surface);border:1px solid var(--border);border-radius:10px;display:flex;gap:24px;align-items:center;flex-wrap:wrap;font-size:13px;font-family:var(--mono);">
-          <span style="color:var(--green);font-weight:700">🟢 SCANNING</span>
-          <span>Active: <b id="sniper-status-active">0</b></span>
-          <span>Trades: <b id="sniper-status-trades">0</b></span>
-          <span>PnL: <b id="sniper-status-pnl" style="color:var(--green)">+0.000 SOL</b></span>
-          <span>Win Rate: <b id="sniper-status-winrate">—</b></span>
-          <span style="margin-left:auto;color:var(--muted);font-size:11px;text-transform:uppercase;"
-            id="sniper-status-mode">paper</span>
+        <div id="sniper-status-bar" class="sn-status hidden">
+          <span class="sn-status-scan">Scanning</span>
+          <span>Active <b id="sniper-status-active">0</b></span>
+          <span>Trades <b id="sniper-status-trades">0</b></span>
+          <span>PnL <b id="sniper-status-pnl" class="pos">+0.000 SOL</b></span>
+          <span>Win Rate <b id="sniper-status-winrate">—</b></span>
+          <span class="sn-status-mode" id="sniper-status-mode">paper</span>
         </div>
 
         <!-- Live pair feed -->
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+        <div class="split-2col">
 
           <!-- Left: New pairs feed -->
           <div>
-            <h2 class="section-title">📡 Tracking Radar</h2>
-            <div id="sniper-feed" style="display:flex;flex-direction:column;gap:8px;max-height:380px;overflow-y:auto">
+            <h2 class="section-title">Tracking Radar</h2>
+            <div id="sniper-feed" class="sn-feed">
               <div class="empty-state">Start the sniper to see new pairs…</div>
             </div>
           </div>
 
           <!-- Right: Active coin sessions -->
           <div>
-            <h2 class="section-title">🎯 Active Positions</h2>
-            <div id="sniper-positions"
-              style="display:flex;flex-direction:column;gap:8px;max-height:380px;overflow-y:auto">
+            <h2 class="section-title">Active Positions</h2>
+            <div id="sniper-positions" class="sn-feed">
               <div class="empty-state">No active positions</div>
             </div>
           </div>
         </div>
 
         <!-- Trade History -->
-        <div class="lt-history-section" style="margin-top:32px">
-          <h2 class="section-title">📋 Operations Ledger</h2>
+        <div class="lt-history-section">
+          <h2 class="section-title">Operations Ledger</h2>
           <div class="trades-table-wrapper">
             <table class="trades-table">
               <thead>
@@ -909,8 +874,7 @@
               </thead>
               <tbody id="sniper-trades-tbody">
                 <tr id="sniper-history-empty">
-                  <td colspan="9" style="text-align: center; color: var(--muted); padding: 20px;">No historical trades
-                    recorded in current session.</td>
+                  <td colspan="9" class="cell-empty">No historical trades recorded in current session.</td>
                 </tr>
               </tbody>
             </table>
@@ -925,7 +889,7 @@
       <div class="settings-content">
         <div class="settings-header">
           <h2>Strategy Parameters <span id="settings-engine-badge" class="engine-badge">V1</span></h2>
-          <div style="display:flex;align-items:center;gap:12px">
+          <div class="settings-head-tools">
             <div class="engine-ver-toggle engine-ver-toggle-sm" id="settings-engine-toggle" title="Switch engine version">
               <button class="engine-ver-btn active" id="settings-ver-v1" data-ver="1">V1</button>
               <button class="engine-ver-btn" id="settings-ver-v2" data-ver="2">V2</button>
@@ -935,11 +899,11 @@
         </div>
         <div class="settings-body" id="settings-form">
         </div>
-        <hr style="border: 0; border-top: 1px solid var(--border); margin: 0;">
-        <div class="settings-header" style="border-bottom: none; padding-bottom: 0;">
+        <div class="settings-rule"></div>
+        <div class="settings-header settings-header-plain">
           <h2>Tester Configuration</h2>
         </div>
-        <div class="settings-body" style="padding-top: 10px;">
+        <div class="settings-body settings-body-plain">
           <div class="param-group">
             <label class="param-label">Buy Size (SOL)</label>
             <input id="tester-buy-size" type="number" class="param-input" value="0.1" step="0.01" min="0.001" />

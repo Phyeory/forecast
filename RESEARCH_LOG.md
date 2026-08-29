@@ -7961,3 +7961,68 @@ Production-live for all new recordings and live sessions. Ranked follow-ups: (1)
 4. **A uniform latency injection isn't it either**: `holder_flow_latency_seconds=7` across the same replays closes only ~20% of the gap (+0.0082→+0.0066) and is non-monotone per session (improves 002345, overshoots 031626/073911GhK). The residual is per-exit seconds-level path dispersion that averages out over larger samples.
 
 **Disposition:** production & research knob defaults stay **0.0** (baseline continuity). The calibrated pair (**buy=−0.99, sell=−0.96**) is recorded as the *live-cost lens* for research replays. Operationally, the addressable cause of the remaining live drag is exit-side delivery/confirmation lag — precisely what the iter66 realtime watcher attacks (dev-sell events now push in ~1 s instead of 7–15 s), so post-iter66 sessions should show a compressed positive tail on the sell-offset distribution; re-run this script periodically as the calibration monitor.
+
+---
+
+## Iter 68 — Left-Tail Elimination Mandate: fresh baseline (warmup 400), tail anatomy, five probe kills, and the `v2_hf_silence_gate_seconds` re-admission sweep (ALL REJECTED on the current stack)
+
+**Date:** 2026-08-29
+**Focus:** The left-tail elimination mandate: iterate hypothesis → math → probe → tail test → full batch until a statistically significant tail-elimination system is delivered or ≥3 mathematically distinct failure classes are diagnosed. Executed both: five distinct channels probed/killed cheaply, and the one pre-registered full-batch candidate (restore the iter56-ACCEPTED holder-flow silence gate, disabled with no documented statistical reason) was swept at three windows and REJECTED under its own pre-registered gates on the current production stack. **No engine change: `strategy_engineV2.py` byte-identical to HEAD `37a112e`; production defaults unchanged.**
+**Status:** NEGATIVE RESULT, fully documented. Baseline re-measured at battery time per the drift-mandate.
+
+### 0. Ground truth: first batch-level measurement of the undocumented `warmup_bars 60→400` production change (commit `37a112e`, 2026-08-28)
+
+`iter68_base_1787965293` (bare `{}`, HEAD, 953-rec `iter48_cohort_full.json` cohort, buy 0.1 SOL, 8 workers, 0 errors): **735 trades / 70.2% WR / +2.2833 SOL / PF 1.45** (282 recordings traded). Tail: 149/−4.83 @≤−10%, 115/−4.30 @≤−20%, 74/−3.32 @≤−30%. Exit-reason drag: `kelly_flat` −2.20 (49), `recording_ended` −1.08 (51), `evr_triage` −0.87 (32).
+
+Paired against the last old-stack baseline (`1787660685963`, warmup 60, same cohort: 907 trades / 67.0% / +1.9391): on the 260 recordings that trade in BOTH stacks the difference is a wash (620→610 trades, Δ −0.028 SOL, tail sets byte-similar — 101 vs 101 trades ≤−20%). The +0.34 SOL cohort-level improvement comes entirely from **entry re-timing, not tail cuts**: the old stack churned 151 recordings that the 100-candle warmup now silences (+0.086 net across 287 trades), while the new stack unlocks 22 late-entry recordings worth **+0.458 net** (fresh-pump entries the 15 s warmup used to burn earlier in dead windows). The warmup change is a good trade but it is NOT a tail mechanism, and it materially changes which marginal entries future entry-gates meet.
+
+### 1. Step-Zero anatomy (mandated taxonomy first) — `analysis/iter68_anatomy.py` → `iter68_anatomy_prod.json`
+
+On the old-stack production batch (907 trades): the 152 tail trades (≤−20%, −5.70 SOL) bucket as instant-rec-end 15/−0.62, instant-dump (dd30≤60 s) 42/−1.71, fast-bleed (dd20≤120 s) 37/−1.34, mid 13/−0.39, slow-bleed 45/−1.64. Corrected for a post-exit-contamination bug in the first draft of the script (paths now bounded at `exit_time`):
+
+- **Recovery table (the adverse-selection killer):** of trades that hit −30% within 60 s, **72% ever touch entry again and 24% end ≥−10%**; at −20%/30 s: 77% touch entry, 32% end positive. Depth-triggered early exits pay the rebound they are trying to dodge. Re-confirms iter07/22/46 on the current stack.
+- **Pre-entry features:** ret_5s/10s/30s and buy_ratio_10s medians are within 0.004 between tail and winners. Entry-time OHLCV/flow separation is dead — again (iter31/34/35/46 §3).
+- **Exit-stack interplay:** 90% of tail trades never arm (MFE < +8%). The EVR-eligible pool (unconfirmed + ≥20% offside by 120 s) holds 88 tail trades realizing −3.42; only 18 fired; 70 not-fired (−2.86) split into **ratio-blocked** (br ≥ 0.45 at every qualifying tick; absorption failure) and **veto-latched** (iter50 conc veto fired at the first qualifying look).
+
+### 2. Five probe kills (no engine run; CF/cheap screens only)
+
+| # | channel | probe | outcome | class |
+|---|---|---|---|---|
+| 1 | depth-triggered early exits (dd20/25/30 × 30/60/120 s) | fire-at-cross CF | naive saves carry 13–52 winner cuts; 72–78% of crossers touch entry | (D) adverse selection |
+| 2 | pre-entry velocity/flow | tail-vs-win medians, AUC lens | zero separation | (A) no signal |
+| 3 | EVR flow-starvation (`br is None` floor) | post-entry volume trajectories | 6 eligible trades, naive +0.015 SOL; tail trades carry MORE volume than winners (4.42 vs 4.03 SOL/20 s) | (A) no signal |
+| 4 | iter50-veto re-arm (new post-veto low, 4 cells W×M) | candle-sim CF on 129 vetoed | fired-set realized −0.61…−0.64 ≈ fire-book ⇒ net ≈ 0 | (D) reclassification wash |
+| 5 | iter45 order-flow imbalance gate (reread) | RESEARCH_LOG §Iter45 | already REJECTED at full batch (whole-PnL −0.6 SOL despite tail lens passing); tail-lens-pass/whole-burn is exactly the iter45 lesson | graveyard, confirmed |
+
+Also checked and closed without runs: pre-entry whale-sell rate gates (contradicted by iter56 §1: pre-entry selling volume is mildly PROTECTIVE, AUC 0.42–0.54); particle-dispersion sizing (engine-posterior variables exhaustively AUC 0.44–0.61 in iter46 §3); in-position silence exit (SODT family, iter55 REJECTED); pool_sol (iter65 closed both consumption classes).
+
+### 3. Pre-registered candidate: restore `v2_hf_silence_gate_seconds = 2700` (iter56-ACCEPTED; disabled as part of the user's explicit iter64 adoption decision — a policy call on the pre-warmup stack, never statistically re-verified against the current baseline)
+
+Pre-registration (`analysis/iter68_PREREGISTRATION.md`, written BEFORE the candidate batch): mechanism, causal claim (stream-silence = dead-coin signature), expected direction (tail ↓ all bands, whole-PnL ≥ baseline, zero added tail, non-zero cut rate, split-half stability), primary bands {−10, −15, −20, −30} with Bonferroni ×4, **falsification: whole-PnL Δ strictly negative beyond ε = 0.05 SOL or CI lower bound strictly negative, or added tail, or tail CIs straddling zero**. Single-knob A/B verified: the only param diff vs baseline is the gate value. Robustness cells 1800/3600 pre-registered.
+
+**Sibling A/B preview (old stack, warmup 60):** `1787660685963` vs `1787665311792` (differ ONLY in the gate): 907/+1.9391 → 987(trade-file count 1009 paired)/+2.3293, **Δ +0.3902**, 18 significant tail metrics, zero added tail, cut rate 5.4–5.8%, McNemar clean. Identity: `rec_ended +0.3315 + gain_retrace +0.2354 + rate_split +0.0875 + scratch/flip/dev +0.048 − evr −0.185 − kelly_flat −0.111 ≈ +0.39`. On the old stack the gate was exactly what iter56 promised. **This preview did NOT transfer to the new stack** — the reason is §0: warmup 400 already removed the early dead-window entries the gate used to block.
+
+### 4. Full-cohort sweep on the NEW baseline (953 recs, paired battery + paired_diff both lenses)
+
+| cell | trades | WR | PnL (batch) | Δ PnL | paired-diff | tail battery (pre-registered bands) | verdict |
+|---|---|---|---|---|---|---|---|
+| baseline (gate 0) | 735 | 70.2% | +2.2833 | — | — | — | — |
+| **2700 (primary)** | 697 | 70.6% | +2.0582 | **−0.1950** | Wilcoxon p=0.495, boot CI [−0.00249, +0.00047]/token → lower bound STRICTLY NEGATIVE | sig only ≤0% (p=0.0156) + ≤−10% (p=0.0312); −15/−20/−30 NOT significant ⇒ fails Bonferroni ×4; zero added tail; cut 3.8% | **REJECT (fails own falsification: Δ < −ε and CI<0)** |
+| 3600 | 705 | 70.5% | +2.0699 | −0.1617 | CI negative | sig only ≤0% (p=0.0156); deep bands null | REJECT |
+| 1800 | 686 | 70.7% | +1.9686 | −0.2820 | (monotone worse) | 13 sig metrics incl. ≤−20% (p=0.0312); still fails whole-PnL worse | REJECT |
+
+Sweep table complete — every cell reported. The pattern is monotone and diagnostic: **the tail battery strengthens as the window shortens while whole-PnL degrades monotonically** — the tail cuts and the PnL loss are the SAME blocked trades.
+
+**Accounting identity (2700):** 39 baseline trades blocked (1 new). Blocked set carries **+0.2211 SOL net** — 6 `rate_split_flip` (+0.362) + 19 `gain_retrace` (+0.131) vs 5 `rec_ended` (−0.125) + 2 `kelly_flat` (−0.101) + others (−0.048). Downstream re-timing shifts a further −0.35 (`rate_split` −0.36, `gain_retrace` −0.13). Concentration caveat reported, not used to rescue the verdict: the single worst regression (rec1360 SOW, two blocked winners, −0.192) accounts for ~all of Δ; but the pre-registered gates bind on the full cohort and the bootstrap CI lower bound is strictly negative regardless.
+
+### 5. Failure-class diagnosis
+
+**Class (C/A hybrid): mechanism-stack interaction.** The gate's blocked marginal population is NOT stable across stack changes. On warmup-60 the blocked set was disproportionately early dead-window traps (net −0.28 of tail, plus re-timing gains ⇒ +0.39). On warmup-400 those windows are already skipped, so the marginal blocked entries are exactly the late fresh-pump class the new warmup unlocked (+0.46 source) — GMGN-era stream sparsity (56% of cohort recordings carry ZERO holder-flow rows; 44% coverage overall) makes "silent ≥45 min" uninformative for them, so the gate blocks net winners at a ~6:1 winner:tail ratio. No window value can fix a wrong marginal population — the sweep's monotonicity proves it.
+
+**Re-gate criteria (when this may become viable again):** (i) post-iter66 on-chain coverage (tick-time whales, ~1 s devs) makes silence informative — re-gate when ≥2–3 weeks of dense-coverage recordings exist and re-measure the blocked population FIRST (a one-day probe, `analysis/iter68_anatomy.py` pattern); (ii) if a future entry-selection change re-opens early-recording windows, re-test at that stack boundary; (iii) never re-test on this cohort/stack again — the blocked-population measurement above is the cheap decisive probe.
+
+### 6. Mandate accounting
+
+Loop closure per the mandate bar: **five distinct failure-class diagnoses** (two class-(A) no-signal channels, two class-(D) reclassification/adverse-selection washes, one class-(C/A) mechanism-stack interaction at full batch) **and** one pre-registered candidate family swept to exhaustion with both lenses published. Deliverables: `analysis/iter68_anatomy.py`, `iter68_probe1.py`, `iter68_probe2.py`, `iter68_PREREGISTRATION.md`, battery JSONs (`iter68_tail_hfs{1800,2700,3600}_newbase.json`, `iter68_hfs2700_vs_base.json`), batch artifacts `iter68_base_1787965293` / `iter68_hfs{1800,2700,3600}_*` under `backend/v2_results/`. Engine byte-identical to HEAD; `test_futures.py` 18/18, `analysis/test_hf_silence.py` green, `test_evr.py`/`test_regime_adapt.py`/`test_live_parity.py` green as of HEAD.
+
+The canonical fresh baseline for future iters is **`iter68_base_1787965293`** (953-rec cohort, HEAD defaults).
