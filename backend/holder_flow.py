@@ -123,8 +123,22 @@ def _extract_holder_list(data) -> Optional[list]:
                     return lst
     return None
 
-# Poll interval for the smartmoney feed (seconds) — enrichment fallback only
-_POLL_INTERVAL = 30.0
+# Poll interval for the smartmoney feed (seconds) while at least one token is
+# watched.  /v1/user/smartmoney is a GLOBAL rolling window of the newest N
+# Solana smartmoney trades, so the poll interval bounds BOTH delivery latency
+# AND coverage: a trade that scrolls out of the window between two polls is
+# lost permanently, not merely delayed.  A 30 s interval left the engine's
+# 30 s entry-block / 15 s exit windows racing the poll phase, while the
+# backtester replays every row at its exact on-chain timestamp — so live
+# entered trades the backtest had blocked and exited dev sells seconds late.
+# Rate-limit safety comes from the 429 ban backoff in `_ban_active()`, not
+# from a slow nominal interval, and the monitor is a process-wide singleton
+# so this is one request per interval regardless of session count.
+_POLL_INTERVAL = 5.0
+
+# Poll interval while nothing is watched — no session can consume the events,
+# so idle polling would only burn API quota.
+_POLL_INTERVAL_IDLE = 30.0
 
 # How often to refresh the per-token wallet registry (seconds)
 _REGISTRY_REFRESH_INTERVAL = 60.0
@@ -356,6 +370,15 @@ class HolderFlowMonitor:
         # live engine at tick time for entry-gate parity with the backtester
         # (which always sees events at their exact on-chain timestamp).
         self._new_event_signal: asyncio.Event = asyncio.Event()
+        # Set by watch_token() so the poll loop breaks its sleep and polls a
+        # freshly watched token immediately instead of waiting out a full
+        # interval (a session opening just after a poll tick would otherwise
+        # start blind to the feed for the whole interval).
+        self._watch_signal: asyncio.Event = asyncio.Event()
+        # Newest feed timestamp observed in the previous poll window, and the
+        # oldest one in the current window — used to detect that the global
+        # rolling window turned over between polls (⇒ events lost, not late).
+        self._feed_newest_ts: int = 0
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -430,6 +453,12 @@ class HolderFlowMonitor:
             mint=mint, recording_id=recording_id, pool_address=pool_address,
         )
         logger.info(f"[HolderFlow] Watching {mint[:8]} (recording_id={recording_id})")
+        # Break the poll loop's sleep so this token is covered by the very next
+        # feed fetch instead of after up to a full interval of blindness.
+        try:
+            self._watch_signal.set()
+        except Exception:
+            pass
         # Queue a wallet-registry fetch (processed serially by the registry loop)
         try:
             self._registry_queue.put_nowait(mint)
@@ -878,7 +907,13 @@ class HolderFlowMonitor:
     # ── Internal: polling loops ───────────────────────────────────────────
 
     async def _poll_loop(self):
-        """Main polling loop: fetch smartmoney trades and match against watched tokens."""
+        """Main polling loop: fetch smartmoney trades and match against watched tokens.
+
+        Sleeps `_POLL_INTERVAL` while any token is watched (the interval bounds
+        both delivery latency and feed coverage — see the constant's comment)
+        and `_POLL_INTERVAL_IDLE` otherwise.  The sleep is interruptible by
+        `watch_token()` so a session that opens mid-interval is polled at once.
+        """
         while self._running:
             try:
                 if self._ban_active():
@@ -889,7 +924,15 @@ class HolderFlowMonitor:
                 break
             except Exception as e:
                 logger.debug(f"[HolderFlow] Poll error: {e}")
-            await asyncio.sleep(_POLL_INTERVAL)
+            interval = _POLL_INTERVAL if self._watched else _POLL_INTERVAL_IDLE
+            try:
+                await asyncio.wait_for(self._watch_signal.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+            except asyncio.CancelledError:
+                break
+            else:
+                self._watch_signal.clear()
 
     async def _poll_once(self):
         """Single poll of the smartmoney feed."""
@@ -900,6 +943,8 @@ class HolderFlowMonitor:
         trades = await self._fetch_smartmoney_trades()
         if not trades:
             return
+
+        self._note_feed_coverage(trades)
 
         # Filter for watched tokens and check against wallet registry
         watched_mints = set(self._watched.keys())
@@ -960,6 +1005,39 @@ class HolderFlowMonitor:
             )
 
             self._dispatch_event(state, event)
+
+    def _note_feed_coverage(self, trades: list[dict]):
+        """Detect that the global smartmoney window turned over between polls.
+
+        `/v1/user/smartmoney` returns only the newest N Solana smartmoney
+        trades.  When the OLDEST row of this poll is newer than the NEWEST row
+        of the previous poll, every trade in between scrolled out unseen — those
+        events are lost permanently, so the live engine can never reach parity
+        with a backtest replay of the same recording no matter how fast the
+        pump delivers.  Log it (rate-limited) so the residual gap is visible
+        instead of silently degrading the entry gate.
+        """
+        stamps = []
+        for t in trades:
+            try:
+                ts = int(t.get("timestamp") or 0)
+            except (TypeError, ValueError):
+                continue
+            if ts > 0:
+                stamps.append(ts)
+        if not stamps:
+            return
+        oldest, newest = min(stamps), max(stamps)
+        prev_newest = self._feed_newest_ts
+        if prev_newest and oldest > prev_newest:
+            self._log_rl(
+                "feed_window_gap",
+                f"[HolderFlow] smartmoney window turned over between polls — "
+                f"{oldest - prev_newest}s of feed history was never seen "
+                f"(window span {newest - oldest}s over {len(stamps)} rows). "
+                f"Lower _POLL_INTERVAL (now {_POLL_INTERVAL:.0f}s) to close it.",
+            )
+        self._feed_newest_ts = max(prev_newest, newest)
 
     async def _fetch_smartmoney_trades(self) -> list[dict]:
         """Fetch the latest smartmoney trades from GMGN (exist auth, no signature)."""
