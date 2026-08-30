@@ -308,7 +308,7 @@ class LiveTrader:
         buy_size_sol: float,
         slippage_bps: int = 1500,
         priority_fee_lamports: int = 100_000,
-        min_market_cap_usd: float = 6_000.0,
+        min_market_cap_usd: float = 3_000.0,
         engine_kwargs: Optional[dict] = None,
 
         # Skip on-chain simulation on the hot path (saves ~300 ms per swap).
