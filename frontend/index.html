@@ -13,7 +13,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="stylesheet"
     href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" />
-  <link rel="stylesheet" href="/static/css/style.css?v=202" />
+  <link rel="stylesheet" href="/static/css/style.css?v=203" />
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 
@@ -395,6 +395,7 @@
                   title="Strategy engine version for live trading">
                   <button class="engine-ver-btn" id="lt-engine-v1" data-ver="1">V1</button>
                   <button class="engine-ver-btn active" id="lt-engine-v2" data-ver="2">V2</button>
+                  <button class="engine-ver-btn" id="lt-engine-v3" data-ver="3">V3</button>
                 </div>
               </div>
             </div>
@@ -719,12 +720,21 @@
                 <label class="form-label">Max Birth MCap ($)</label>
                 <input id="np-max-mcap" type="number" class="form-input" value="0" step="1000" min="0" />
               </div>
+              <div class="form-group">
+                <label class="form-label">Min Global Fees Paid (SOL)</label>
+                <input id="np-min-fees" type="number" class="form-input" value="0.5" step="0.1" min="0" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Fees Check Timeout (s)</label>
+                <input id="np-qual-timeout" type="number" class="form-input" value="1800" step="60" min="0" />
+              </div>
               <div class="form-group span-2">
                 <label class="form-label">Exclude Mints (comma-sep)</label>
                 <input id="np-exclude" type="text" class="form-input" value="" placeholder="Mints to skip…"
                   autocomplete="off" spellcheck="false" />
               </div>
             </div>
+            <div class="micro-note">Global fees gate: a birth is only auto-recorded once the cumulative trading fees paid on the token (1% of all traded volume) exceed the threshold — 0.5 SOL ≈ 50 SOL of genuine volume. Births wait in a qualification pool until they qualify or time out.</div>
 
             <h4 class="af-subhead">Boolean Gates</h4>
             <div class="af-gates">
@@ -810,6 +820,7 @@
             <div class="engine-ver-toggle engine-ver-toggle-sm" id="settings-engine-toggle" title="Switch engine version">
               <button class="engine-ver-btn active" id="settings-ver-v1" data-ver="1">V1</button>
               <button class="engine-ver-btn" id="settings-ver-v2" data-ver="2">V2</button>
+              <button class="engine-ver-btn" id="settings-ver-v3" data-ver="3">V3</button>
             </div>
             <button id="close-settings">&times;</button>
           </div>
@@ -866,7 +877,7 @@
       setTimeout(check, 1000);
     })();
   </script>
-  <script src="/static/js/app.js?v=121"></script>
+  <script src="/static/js/app.js?v=123"></script>
 </body>
 
 </html>

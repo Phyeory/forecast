@@ -376,6 +376,44 @@ async def get_ds_pair_by_mint(session: aiohttp.ClientSession, mint: str) -> Opti
     return await _ds_token(session, mint)
 
 
+async def get_ds_pairs_by_mints(mints: list[str]) -> dict[str, list[dict]]:
+    """Batched DexScreener lookup — up to 30 mints per HTTP call (their
+    documented cap).  Returns ``{mint: [pair, ...]}`` for every mint that has
+    at least one solana pair (a mint can carry several pairs once migrated:
+    bonding curve + PumpSwap).
+
+    Used by the new-pairs feed's fees-qualification sweeper: one call prices
+    30 pending candidates, keeping the sweep inside DexScreener's rate
+    budget even at ~1k births/hour.
+    """
+    result: dict[str, list[dict]] = {}
+    if not mints:
+        return result
+    async with aiohttp.ClientSession(headers=_HDR_DS) as session:
+        for i in range(0, len(mints), 30):
+            chunk = [m for m in mints[i:i + 30] if m]
+            if not chunk:
+                continue
+            try:
+                async with session.get(
+                    f"{DEXSCREENER}/latest/dex/tokens/{','.join(chunk)}",
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as r:
+                    if r.status != 200:
+                        continue
+                    data = await r.json(content_type=None)
+            except Exception as e:
+                logger.debug(f"get_ds_pairs_by_mints: {e}")
+                continue
+            for pair in (data.get("pairs") or []):
+                if pair.get("chainId") != "solana":
+                    continue
+                mint = (pair.get("baseToken") or {}).get("address", "")
+                if mint:
+                    result.setdefault(mint, []).append(pair)
+    return result
+
+
 async def get_historical_candles(
     mint: str, timeframe: str = "1m", limit: int = 500
 ) -> list[dict]:

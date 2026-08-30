@@ -224,33 +224,90 @@ let engineParamsV2 = {
   v2_rate_split_theta:          0.55,  // sustained stationary-split threshold
   v2_rate_split_persist:          12,  // consecutive 4-state ticks (≈3 s)
   v2_rate_split_min_peak_age_ticks: 0, // runner-immunity veto REJECTED (0 = off)
-  // ── Whale-dump confirmed exit (iter72). Candle sell_volume is the full-
-  // coverage whale observable (the holder_flow stream persists only ~7% of
-  // ≥$100 sell prints). ON (1.0) since 2026-08-30 (explicit user adoption);
-  // 0.0 restores byte-identical pre-iter72 behaviour.
-  v2_whale_dump_exit_enable:    0.0,   // 1.0 = ON (production default since 2026-08-30)
-  v2_whale_dump_min_usd:      200.0,   // qualifying print size (USD)
-  v2_whale_dump_offside_pct:   8.0,   // print close must be ≥ this % below entry
-  v2_whale_dump_max_peak_pct: 5.0,   // trade must have never armed (peak gain ≤ this %)
-  v2_whale_dump_confirm_s:      5,   // candles confirming price stayed under the print close
-  v2_whale_dump_confirm_g:      3.0,   // confirm close ≤ print close × (1 − g/100)
 };
 
-/* Engine version: 1 = V1 (Physics), 2 = V2 (RBPF/UKF/KDE/Kramers) */
+/* Strategy Engine Parameters — V3 (newborn-coin dump-bottom recovery).
+   Mirrors backend/strategy_engineV3.py DEFAULT_CONFIG. */
+let engineParamsV3 = {
+  // ── V2 core passthrough (RBPF/UKF/KDE/Kramers — same math, newborn-tuned) ──
+  lambda_mu:  0.30,   // μ mean-reversion rate (faster than V2 spot: newborns live on a 10-60s clock)
+  kappa_mu:   0.05,   // order-flow coupling φ→μ
+  sigma_mu:   0.10,   // drift shock std per √s
+  eta:        0.10,   // h mean-reversion rate
+  sigma_h:    0.20,   // log-var shock std
+  alpha:      0.30,   // φ mean-reversion rate (faster: flow shifts in seconds)
+  beta:       1.00,   // signed-delta coefficient
+  sigma_phi:  0.15,   // φ shock std
+  theta:      0.10,   // ℓ mean-reversion rate
+  sigma_ell:  0.10,   // ℓ shock std
+  zeta:       0.30,   // liquidity-jump decay magnitude
+  lambda_0:   0.00027778, // KDE decay rate (1/3600s ≈ 1h newborn memory)
+  lambda_1:   0.10,   // secondary slow-decay component
+  kappa_J:    0.05,   // jump-intensity Poisson rate
+  s_0:        0.011,  // base slippage fraction
+  s_1:        0.0005, // marginal slippage per unit size
+  n_particles:      200,    // RBPF particle count
+  n_grid:           200,    // spatial grid size for U(x,t)
+  grid_sigma_extent: 5.0,   // grid half-width in σ_t·√T_w units
+  tw_window_seconds: 3600.0, // KDE memory window (s)
+  tau_min:    5.0,   // shortest prediction horizon (s)
+  tau_max:    30.0,  // longest prediction horizon (s) — V2-validated sweep (τ=10 starved P_zero decay)
+  tau_step:   5.0,   // horizon sweep step (s)
+  eps_div:    1.0,   // ε in δ_k/(v_k+ε)
+  fee_fraction: 0.0011, // fee fraction
+  latency_seconds: 0.5,  // execution latency Δ_lat
+  liquidity_cap_frac: 0.10, // Kelly position cap
+  warmup_bars: 60,    // engine intakes before decisions (15 full candles × 4 states — newborn tapes are short)
+  sigma_floor: 1e-6,  // numerical σ floor
+  // ── V3 lifecycle: LAUNCH PUMP ────────────────────────────────────────
+  v3_launch_gain_min_pct: 20.0,  // launch high ≥ open·(1+20/100) arms the pump leg
+  // ── V3 lifecycle: DUMP ──────────────────────────────────────────────
+  v3_dump_retrace_pct:    50.0,  // dump low ≤ launch_high·(1−50/100)
+  v3_dump_sell_ratio_min: 0.60, // trailing buy ratio ≤ 0.60 marks sell-dominated tape
+  v3_dump_window_seconds: 60,   // flow window (s) the sell ratio is read over
+  // ── V3 lifecycle: BOTTOM → ORGANIC entry gate ───────────────────────
+  v3_p_up_min:               0.60,  // Bayesian floor on P_up (Kramers escape probability)
+  v3_organic_buy_ratio_min:  0.60,  // min trailing taker buy-ratio (organic buyers present)
+  v3_organic_window_seconds: 30,    // organic flow window (s)
+  v3_organic_volume_min_sol: 0.05,  // window volume floor (SOL); below → silence ≠ demand
+  v3_sigma_t_min:            0.010, // posterior σ_t floor (barrier geometry resolved)
+  v3_mcap_entry_min_usd:     2000,  // entry band floor (user spec: ~2k mcap)
+  v3_mcap_entry_max_usd:     4000,  // entry band ceiling (user spec: ~4k mcap)
+  // ── V3 STRICT exits ──────────────────────────────────────────────────
+  v3_takeprofit_pct: 250.0, // strict TP: bank at +250% (the 2k→8k band is a 3-4× move)
+  v3_stoploss_pct:    30.0, // strict SL: cut the dead coin at -30% (survives newborn chop)
+  v3_mcap_exit_usd:  7500,  // mcap band exit (user spec: sell ≈ 7-8k)
+  // ── V3 supplementary posterior exits (offside-guarded, never cut winners) ──
+  v3_kramers_down_persist:     12,    // consecutive down-dominant ticks (≈3 s)
+  v3_kramers_offside_pct:      15.0,  // only on trades ≤ -15% offside
+  v3_holder_flow_enable:       1.0,   // dev/insider sell exit + entry block
+  v3_holder_flow_min_usd:      100.0,
+  v3_holder_flow_window_seconds: 30,
+};
+
+/* Engine version: 1 = V1 (Physics), 2 = V2 (RBPF/UKF/KDE/Kramers),
+   3 = V3 (newborn dump-bottom on the V2 math) */
 let engineVersion = 1;
 
 /* Live-trader engine version — independent from the chart engine toggle.
    Persisted across page loads; defaults to V2 (production engine) unless an
    explicit "1" is stored. */
-let ltEngineVersion = localStorage.getItem("lt_engine_version") === "1" ? 1 : 2;
+let ltEngineVersion = (() => {
+  const v = parseInt(localStorage.getItem("lt_engine_version") || "2", 10);
+  return (v === 1 || v === 3) ? v : 2;
+})();
 
 /* Active params getter — returns the params for the current engine version */
 function getEngineParams() {
-  return engineVersion === 2 ? engineParamsV2 : engineParamsV1;
+  return engineVersion === 2 ? engineParamsV2
+       : engineVersion === 3 ? engineParamsV3
+       : engineParamsV1;
 }
 /* Params for live trader (based on its own engine version selector) */
 function getLtEngineParams() {
-  return ltEngineVersion === 2 ? engineParamsV2 : engineParamsV1;
+  return ltEngineVersion === 2 ? engineParamsV2
+       : ltEngineVersion === 3 ? engineParamsV3
+       : engineParamsV1;
 }
 /* Legacy compat — direct references to `engineParams` throughout the file */
 let engineParams = engineParamsV1;
@@ -289,8 +346,8 @@ function renderSettings() {
   // Update engine badge in settings modal
   const badge = document.getElementById("settings-engine-badge");
   if (badge) {
-    badge.textContent = engineVersion === 2 ? "V2" : "V1";
-    badge.className = "engine-badge" + (engineVersion === 2 ? " v2" : "");
+    badge.textContent = "V" + engineVersion;
+    badge.className = "engine-badge" + (engineVersion >= 2 ? ` v${engineVersion}` : "");
   }
 
   // ── Shared param hints (both engines) ──
@@ -412,6 +469,75 @@ function renderSettings() {
     v2_whale_dump_confirm_g:              "Confirmation give-back %: confirm close ≤ print close × (1 − g/100)",
   };
 
+  // ── V3 parameter hints (newborn dump-bottom engine) ──
+  const v3Hints = {
+    lambda_mu:              "μ mean-reversion rate — newborn-tuned (faster than V2 spot)",
+    kappa_mu:               "Order-flow coupling (φ - φ̄) → μ",
+    sigma_mu:               "Drift shock std per √s",
+    eta:                    "h mean-reversion rate (log-variance OU)",
+    sigma_h:                "Log-variance shock std",
+    alpha:                  "φ mean-reversion rate — faster for newborn flow shifts",
+    beta:                   "Signed-delta coefficient (δ_k / (v_k + ε))",
+    sigma_phi:              "φ shock std",
+    theta:                  "ℓ mean-reversion rate (liquidity OU)",
+    sigma_ell:              "ℓ shock std",
+    zeta:                   "Liquidity-jump decay magnitude on ℓ",
+    lambda_0:               "KDE decay rate (1/3600s ≈ 1h newborn memory)",
+    lambda_1:               "Secondary slow-decay component",
+    kappa_J:                "Jump-intensity Poisson rate per second",
+    s_0:                    "Base slippage fraction (cost model)",
+    s_1:                    "Marginal slippage per unit size",
+    n_particles:            "RBPF particle count (more = slower, accurate)",
+    n_grid:                 "Spatial grid size for U(x,t)",
+    grid_sigma_extent:      "Grid half-width in σ_t·√T_w units",
+    tw_window_seconds:      "KDE memory window T_w in seconds (newborn: 3600)",
+    tau_min:                "Shortest prediction horizon (s)",
+    tau_max:                "Longest prediction horizon (s) — V2-validated sweep (τ=10 starved P_zero decay)",
+    tau_step:               "Horizon sweep step (s)",
+    eps_div:                "ε in δ_k/(v_k+ε)",
+    fee_fraction:           "Fee fraction in the Kelly cost model",
+    latency_seconds:        "Execution latency Δ_lat (s)",
+    liquidity_cap_frac:     "Kelly position cap (fraction of L_t)",
+    warmup_bars:            "Engine intakes before decisions (15 full candles × 4 states)",
+    sigma_floor:            "Numerical σ floor",
+    v3_launch_gain_min_pct:       "LAUNCH phase: pump registered when launch high ≥ open·(1+this%)",
+    v3_dump_retrace_pct:          "DUMP phase: confirmed when low ≤ launch_high·(1−this%)",
+    v3_dump_sell_ratio_min:       "Sell-side taker dominance: trailing buy-ratio ≤ (1−this)",
+    v3_dump_window_seconds:       "Flow window (s) the dump sell ratio is read over",
+    v3_p_up_min:                  "Bayesian entry floor on P_up (Kramers upward escape probability)",
+    v3_organic_buy_ratio_min:     "Min trailing taker buy-ratio — organic buyers must be present",
+    v3_organic_window_seconds:   "Organic flow window (s)",
+    v3_organic_volume_min_sol:    "Window volume floor (SOL); below → silence ≠ demand",
+    v3_sigma_t_min:               "Posterior σ_t floor (Kramers barrier geometry resolved)",
+    v3_mcap_entry_min_usd:        "Entry band floor (USD mcap) — user spec ~2k",
+    v3_mcap_entry_max_usd:        "Entry band ceiling (USD mcap) — user spec ~4k",
+    v3_takeprofit_pct:            "STRICT take-profit: exit at +this% (fixed level, no posterior veto)",
+    v3_stoploss_pct:              "STRICT stop-loss: exit at −this% (dead coin cut at a fixed price)",
+    v3_mcap_exit_usd:             "Mcap band exit (USD) — user spec: sell ≈ 7-8k",
+    v3_kramers_down_persist:     "Consecutive down-dominant ticks before the supplementary Kramers exit (≈ ticks/4 s)",
+    v3_kramers_offside_pct:      "Offside % required before the supplementary Kramers exit may fire",
+    v3_holder_flow_enable:       "1.0 = dev/insider sell blocks entry and exits an open position",
+    v3_holder_flow_min_usd:      "Min dev/insider sell size (USD) to qualify",
+    v3_holder_flow_window_seconds: "Lookback window (s) for dev/insider sell detection",
+  };
+
+  // ── V3 section headers ──
+  const v3Sections = {
+    lambda_mu:              "🌊 Drift μ  (OU process — newborn-tuned)",
+    alpha:                  "⚡ Order-Flow Pressure φ  (AR-1)",
+    theta:                  "💧 Liquidity ℓ  (OU + Jump)",
+    lambda_0:               "📈 KDE  (1h newborn memory)",
+    s_0:                   "💸 Execution Cost Model",
+    n_particles:           "⚙️ Structural / Meta Parameters",
+    tw_window_seconds:     "⏱️ Kramers Horizon (compressed)",
+    v3_launch_gain_min_pct: "🚀 Lifecycle — LAUNCH PUMP Detection",
+    v3_dump_retrace_pct:   "📉 Lifecycle — DUMP Detection",
+    v3_p_up_min:           "🌱 Lifecycle — BOTTOM → ORGANIC Entry Gate",
+    v3_takeprofit_pct:     "🛡️ STRICT Exits (TP / SL / Mcap Band)",
+    v3_kramers_down_persist: "🧠 Supplementary Posterior Exits",
+    v3_holder_flow_enable:  "👥 Holder-Flow (Dev/Insider Sells)",
+  };
+
   // ── V2 section headers — label displayed above first key of each group ──
   const v2Sections = {
     lambda_mu:                    "🌊 Drift μ  (OU process)",
@@ -436,8 +562,10 @@ function renderSettings() {
     v2_whale_dump_exit_enable:    "🐋 Whale-Dump Confirmed Exit (iter72)",
   };
 
-  const paramHints = engineVersion === 2 ? v2Hints : v1Hints;
-  const sectionMap  = engineVersion === 2 ? v2Sections : {};
+  const paramHints = engineVersion === 2 ? v2Hints
+                   : engineVersion === 3 ? v3Hints : v1Hints;
+  const sectionMap  = engineVersion === 2 ? v2Sections
+                   : engineVersion === 3 ? v3Sections : {};
   const renderedSections = new Set();
 
   for (const [key, val] of Object.entries(engineParams)) {
@@ -507,10 +635,10 @@ function setEngineVersion(v) {
   engineVersion = v;
 
   // Sync settings-modal toggle
-  const sv1 = document.getElementById("settings-ver-v1");
-  const sv2 = document.getElementById("settings-ver-v2");
-  if (sv1) sv1.classList.toggle("active", v === 1);
-  if (sv2) sv2.classList.toggle("active", v === 2);
+  for (const n of [1, 2, 3]) {
+    const btn = document.getElementById(`settings-ver-v${n}`);
+    if (btn) btn.classList.toggle("active", v === n);
+  }
 
   // Re-render the settings form live if the modal is currently open
   if (settingsModal && !settingsModal.classList.contains("hidden")) {
@@ -519,8 +647,8 @@ function setEngineVersion(v) {
     // Still update the badge even when modal is closed
     const badge = document.getElementById("settings-engine-badge");
     if (badge) {
-      badge.textContent = v === 2 ? "V2" : "V1";
-      badge.className = "engine-badge" + (v === 2 ? " v2" : "");
+      badge.textContent = "V" + v;
+      badge.className = "engine-badge" + (v >= 2 ? ` v${v}` : "");
     }
   }
 }
@@ -535,10 +663,10 @@ document.querySelectorAll("#settings-engine-toggle .engine-ver-btn").forEach(btn
 function setLtEngineVersion(v) {
   ltEngineVersion = v;
   localStorage.setItem("lt_engine_version", String(v));
-  const v1Btn = document.getElementById("lt-engine-v1");
-  const v2Btn = document.getElementById("lt-engine-v2");
-  if (v1Btn) v1Btn.classList.toggle("active", v === 1);
-  if (v2Btn) v2Btn.classList.toggle("active", v === 2);
+  for (const n of [1, 2, 3]) {
+    const btn = document.getElementById(`lt-engine-v${n}`);
+    if (btn) btn.classList.toggle("active", v === n);
+  }
 }
 
 document.querySelectorAll("#lt-engine-toggle .engine-ver-btn").forEach(btn => {
@@ -1628,7 +1756,7 @@ function updateTraderCard(mint) {
       <div class="lt-card-header">
         <div><span class="lt-card-name" id="lth-name-${mint}"></span><span class="lt-card-symbol" id="lth-sym-${mint}"></span></div>
         <div style="display:flex;gap:6px;align-items:center">
-          <span class="engine-badge${ctx.engineVersion === 2 ? ' v2' : ''}" title="Strategy engine">${ctx.engineVersion === 2 ? 'V2' : 'V1'}</span>
+          <span class="engine-badge${ctx.engineVersion >= 2 ? ` v${ctx.engineVersion}` : ''}" title="Strategy engine">${ctx.engineVersion ? `V${ctx.engineVersion}` : 'V1'}</span>
           <div id="lth-trend-${mint}" class="direction-badge" style="font-size:10px; padding:2px 6px; display:none"></div>
           <div id="lth-regime-${mint}" class="regime-badge" style="font-size:10px; padding:2px 6px; display:none"></div>
           <div id="lth-status-${mint}"></div>
@@ -2932,6 +3060,11 @@ function npHandleStatus(snap) {
   // Populate form fields from backend
   npPopulateForm(snap);
 
+  // Cache the fees-gate threshold for candidate-row coloring
+  if (snap.min_global_fees_sol !== undefined && snap.min_global_fees_sol !== null) {
+    _npFeesThresholdCache = snap.min_global_fees_sol;
+  }
+
   // Stats
   npStatSeen.textContent = snap.total_seen || 0;
   npStatFed.textContent = snap.total_fed || 0;
@@ -2947,7 +3080,12 @@ function npHandleStatus(snap) {
   // Running state — no wallet gate on this tab (nothing is traded).
   if (snap.is_running) {
     npSetStatus("running", "Running — auto-recording newborns");
-    $("np-source-status").textContent = "PumpPortal subscribeNewToken: ✅ live";
+    const pend = snap.pending_qualification || 0;
+    const feesGate = (snap.min_global_fees_sol || 0) > 0;
+    $("np-source-status").textContent =
+      "PumpPortal subscribeNewToken: ✅ live" +
+      (feesGate ? ` · fees ≥ ${snap.min_global_fees_sol} SOL` : "") +
+      (pend > 0 ? ` · ${pend} awaiting fees check` : "");
     $("np-source-status").style.color = "var(--green, #26a69a)";
   } else {
     npSetStatus("off", "Idle");
@@ -2976,6 +3114,13 @@ function npHandleStatus(snap) {
 
 function npHandleCandidate(cand) {
   npAddCandidateRow(cand);
+}
+
+/* Current global-fees gate threshold (SOL) for coloring candidate rows.
+   Falls back to the last status snapshot, then the field's default. */
+let _npFeesThresholdCache = 0.5;
+function npFeesThreshold() {
+  return _npFeesThresholdCache;
 }
 
 /* ── Session stats bar (deck-zone aggregate) ──────────────────────────── */
@@ -3044,8 +3189,11 @@ function npRenderRowHTML(c) {
         <div class="af-metric">${social}</div>
       </div>
       <div>
-        <div class="af-sub">Curve SOL</div>
-        <div class="af-metric">${fmtSol(c.pool_sol)}</div>
+        <div class="af-sub">Fees Paid</div>
+        <div class="af-metric">${(c.global_fees_sol || 0) > 0
+          ? `<span style="color:${c.global_fees_sol >= npFeesThreshold() ? "var(--green,#26a69a)" : "inherit"}">${c.global_fees_sol.toFixed(3)} SOL</span>`
+          : "—"}</div>
+        <div class="af-sub">Curve: ${fmtSol(c.pool_sol)}</div>
       </div>
       <div>
         <div class="af-sub">Age</div>
@@ -3396,6 +3544,8 @@ const NP_FIELD_MAP = [
   ["np-max-dev-buy", "max_initial_buy_sol", "float"],
   ["np-min-mcap", "min_mcap_usd", "float"],
   ["np-max-mcap", "max_mcap_usd", "float"],
+  ["np-min-fees", "min_global_fees_sol", "float"],
+  ["np-qual-timeout", "qualification_timeout_seconds", "float"],
   ["np-req-social", "require_social", "bool"],
   ["np-exclude", "exclude_mints", "str"],
   ["np-max-concurrent", "max_concurrent_sessions", "int"],

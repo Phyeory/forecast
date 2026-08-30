@@ -821,3 +821,43 @@ future agent must therefore:
 > **Validation:** `analysis/test_iter67_holder_flow_latency.py` 8/8 (pins `_POLL_INTERVAL ≤ 5.0`; verifies `_watch_signal.is_set()` after `watch_token()`; async scenario confirms poll fires within 50 ms of new watch; feed-window-turnover logged on timestamp gap; `run_backtest`/`run_backtest_batch` expose the knob; `ForwardTester` shifts event times at the correct lat without mutating caller's list; lat=60 s prevents what lat=0 s allows on a 30 s window). Regressions: futures 18/18 · live_parity 10/10 · evr 6/6 · hf_silence 5/5 · rate_split 3/3 · no_motion 11/11 · holder_flow_onchain 2/2.
 > **Calibration note (iter66 correction):** the iter66 calibration script compared `live_trade["entry_price"]` (the raw candle-close anchor set at signal time) to the BT model anchor — both are the same model construct, not real AMM quotes. The reported "live entries fill ~1% BELOW the modelled fill" finding is therefore measuring model-anchor noise, not real execution. Actual Jupiter quotes are median ~1.255× the recorded candle close; round-trip execution drag is approximately −2.3%. The `exec_offset_pct_buy/sell` knob defaults remain 0.0 for baseline continuity; a valid calibration would pair real on-chain fill SOL amounts (from `confirm_buy`/`confirm_sell`) against BT intrabar prices, which requires post-hoc log analysis of the swap receipts.
 > **Residual live-vs-backtest gap (not addressed by this patch):** exit fill timing (live exit fires median +3.3 s after BT, plus ~1.9 s on-chain settlement); ATA rent (~0.00209 SOL per new mint, ~70/124 trades each night) silently excluded from `confirm_sell` PnL because basis is `size_sol` not `cost_sol`; real Jupiter slippage not captured in the BT model. These are measurement/accounting gaps, not decision-parity gaps.
+
+---
+
+## Strategy Engine V3 Specification (Newborn-Coin Dump-Bottom Recovery)
+
+**File:** `backend/strategy_engineV3.py` (adapter `StrategyEngineV3Adapter`; engine_version=3 via `engine_factory.create_engine`)
+
+V3 reuses the **V2 mathematical core verbatim** (RBPF + UKF + KDE market potential + Kramers escape + Kelly utility, imported from `strategy_engineV2.py`, never duplicated) and layers a **four-phase lifecycle state machine** specialised for pump.fun newborn tokens, where the first minutes follow a predictable inorganic script: snipers/bundlers pump at birth, dump their supply, and organic buyers either arrive at the bottom or never do.
+
+### 1. Lifecycle Phases (per 4-state tick, monotone forward)
+
+| Phase | Regime map | Transition condition |
+| :--- | :--- | :--- |
+| `P_LAUNCH` | TREND | birth → running high ≥ open·(1+`v3_launch_gain_min_pct`/100) (default +20%) |
+| `P_DUMP` | EXHAUSTION | low ≤ launch_high·(1−`v3_dump_retrace_pct`/100) (default −50% round-trip); multi-leg dumps re-arm BOTTOM when a new low < dump_low·0.85 |
+| `P_BOTTOM` | IDLE | trailing buy-ratio over `v3_dump_window_seconds` recovers above 1−`v3_dump_sell_ratio_min` (or the window empties = exhaustion) |
+| `P_ORGANIC` | CONTINUATION | terminal entry-hunting phase; a stillborn tape (no pump) never leaves LAUNCH and never trades — correct: no dump to recover from |
+
+### 2. Entry Gate (all five conditions, evaluated only in ORGANIC phase)
+1. **Bayesian**: direction=+1 AND E*>0 AND P_up ≥ `v3_p_up_min` (0.60) — same Kramers contract as V2.
+2. **Organic flow**: trailing buy-ratio ≥ `v3_organic_buy_ratio_min` (0.60) over `v3_organic_window_seconds` (30 s) with window volume ≥ `v3_organic_volume_min_sol` (silence ≠ demand).
+3. **Mcap entry band**: `v3_mcap_entry_min_usd` ≤ mcap ≤ `v3_mcap_entry_max_usd` (user spec: $2k–$4k).
+4. **Volatility floor**: posterior σ_t ≥ `v3_sigma_t_min` (0.010).
+5. **Holder-flow block**: no dev/insider sell ≥ `v3_holder_flow_min_usd` within `v3_holder_flow_window_seconds`.
+
+### 3. STRICT Exits (fixed levels, no posterior veto — unlike V1/V2)
+1. **Take-profit**: close ≥ entry·(1+`v3_takeprofit_pct`/100) → `v3_take_profit` (default +250%; the 2k→8k band ≈ 3–4×).
+2. **Mcap band exit**: mcap ≥ `v3_mcap_exit_usd` → `v3_mcap_band_exit` (default $7.5k = user spec 7–8k midpoint).
+3. **Stop-loss**: close ≤ entry·(1−`v3_stoploss_pct`/100) → `v3_stop_loss` (default −30%; survives newborn chop, caps dead-coin tail).
+4. **Supplementary** (offside-guarded, never cut winners): sustained Kramers down-flip (K=12 ticks, ≥15% offside) → `v3_kramers_down_exit`; dev/insider sell in position → `v3_dev_sell_exit`.
+
+### 4. Calibration Notes
+- OU rates 2× faster than V2 spot (lambda_mu 0.30, alpha 0.30); KDE memory T_w=3600 s (a newborn tape IS the memory); warmup 60 intakes (15 candles — newborn tapes run 30–100 candles).
+- **τ horizon sweep MUST stay 5–30 s** (V2-validated): a compressed τ_max=10 starves `P_zero=e^{−kτ}` decay — measured 257 vs 57 gate-clearing ticks on the same tape with dir≡0 throughout.
+- Lifecycle/flow gates read candle-level buy/sell splits (state-4 ticks), identical across all three pipelines (`market_cap_usd` reaches `engine.update()` in backtest, paper, and live already).
+
+### 5. Verification Status (2026-08-30)
+- `backend/test_engine_v3.py` — 43/43: factory dispatch, full V1 surface (every capture attr), lifecycle transitions, entry-gate refusals (silence, out-of-band mcap, dev-sell block), strict TP/SL/mcap exits, holder-flow exit+block, determinism.
+- Real-tape chain (rec 3943, wide mcap band): 3 trades, `v3_stop_loss`×2 + `v3_take_profit`, +0.15 SOL — the complete lifecycle→gate→entry→exit path works end-to-end.
+- With the production 2k–4k band: 0 trades on all 12 tested graduated-pair recordings (they never visit the band) and correct phase tracking on all 10 newborn recordings in `newpairs_data.db` — **the engine is conservative-by-design on the current data regime**; current newborn recordings carry volume only in birth-seed buys (per-mint trade streams were IP-throttled), so the organic-flow gate has no sell side to measure yet. First genuine V3 backtests require new newborn recordings with full taker splits.
