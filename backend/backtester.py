@@ -122,14 +122,6 @@ def run_backtest_batch(
     recording_ids: Optional[list[int]] = None,
     last_night: bool = False,
     last_12h: bool = False,
-    # Futures mode (option A) — passthroughs; "spot" defaults = no-op.
-    market_type: str = "spot",
-    leverage: float = 1.0,
-    funding_rate_per_interval: float = 0.0001,
-    funding_interval_seconds: int = 28800,
-    maintenance_margin_rate: float = 0.005,
-    futures_taker_fee: float = 0.00045,
-    futures_slippage_pct: Optional[float] = None,
     # iter67: replay holder-flow events at the live delivery lag instead of
     # their exact on-chain timestamp (0.0 = legacy, byte-identical baselines).
     holder_flow_latency_seconds: float = 0.0,
@@ -188,13 +180,6 @@ def run_backtest_batch(
         starting_balance=starting_balance,
         batch_id=batch_id,
         engine_version=engine_version,
-        market_type=market_type,
-        leverage=leverage,
-        funding_rate_per_interval=funding_rate_per_interval,
-        funding_interval_seconds=funding_interval_seconds,
-        maintenance_margin_rate=maintenance_margin_rate,
-        futures_taker_fee=futures_taker_fee,
-        futures_slippage_pct=futures_slippage_pct,
         holder_flow_latency_seconds=holder_flow_latency_seconds,
         persist_results=persist_results,
         persist_candles=False,
@@ -254,14 +239,6 @@ def run_backtest(
     starting_balance: float = 1.0,
     batch_id: Optional[str] = None,
     engine_version: int = 1,
-    # ── Futures mode (option A, additive; "spot" default = zero behaviour change)
-    market_type: str = "spot",
-    leverage: float = 1.0,
-    funding_rate_per_interval: float = 0.0001,
-    funding_interval_seconds: int = 28800,
-    maintenance_margin_rate: float = 0.005,
-    futures_taker_fee: float = 0.00045,
-    futures_slippage_pct: Optional[float] = None,
     # iter66: execution-level calibration — shifts simulated fill prices to
     # the live-executable level (default 0.0 = exact legacy behaviour).
     exec_offset_pct_buy: float = 0.0,
@@ -316,13 +293,6 @@ def run_backtest(
         engine_version=engine_version,
         holder_flow_events=holder_flow_events,
         holder_flow_latency_seconds=holder_flow_latency_seconds,
-        market_type=market_type,
-        leverage=leverage,
-        funding_rate_per_interval=funding_rate_per_interval,
-        funding_interval_seconds=funding_interval_seconds,
-        maintenance_margin_rate=maintenance_margin_rate,
-        futures_taker_fee=futures_taker_fee,
-        futures_slippage_pct=futures_slippage_pct,
         exec_offset_pct_buy=exec_offset_pct_buy,
         exec_offset_pct_sell=exec_offset_pct_sell,
     )
@@ -348,8 +318,6 @@ def run_backtest(
         sell_vol = candle.get("sell_volume", 0.0)
         pool_sol = candle.get("pool_sol", 0.0)
         mcap_usd = candle.get("market_cap_usd", 0.0)
-        funding_rate = candle.get("funding_rate", 0.0) or 0.0
-        mark_price = candle.get("mark_price", 0.0) or 0.0
 
         # Bull bar: high comes before low; bear bar: low before high
         bullish = c >= o
@@ -393,8 +361,6 @@ def run_backtest(
                            buy_volume=buy_vol, sell_volume=sell_vol,
                            pool_sol=pool_sol,
                            market_cap_usd=mcap_usd,
-                           funding_rate=funding_rate,
-                           mark_price=mark_price,
                            _build_full_result=False)
         fwd = result.get("forward_test")
         if fwd and trade_action_for_candle is None and fwd.get("trade_action"):
@@ -442,15 +408,7 @@ def run_backtest(
     stats = ft.stats.to_dict()
 
     # Save to backtest DB
-    # Merge futures run config into the saved engine_params so paired_diff /
-    # per-token logs stay self-describing about which pipeline produced them.
     saved_params = dict(engine_params)
-    if market_type == "futures" and ft.futures_cfg_snapshot:
-        saved_params.update(
-            {"futures_" + k: v for k, v in ft.futures_cfg_snapshot.items()
-             if k != "market_type"}
-        )
-        saved_params["market_type"] = "futures"
 
     bt_id = None
     if persist_results:
@@ -465,7 +423,6 @@ def run_backtest(
             candle_results=candle_results or [],
             trades=trades,
             batch_id=batch_id,
-            market_type=market_type,
         )
 
     # ── Write per-token JSON trade log (only when trades were placed) ────────
@@ -490,240 +447,6 @@ def run_backtest(
         "candle_count":  len(candles),
         "stats":         stats,
         "trade_count":   len(trades),
-    }
-
-
-# ── Historical futures backtest (option B) ─────────────────────────────────
-# Reuses the exact same ForwardTester + engine + 4-state intra-candle loop as
-# the recorded-spot pipeline, but sources candles from the exchange cache
-# (futures_exchange) instead of a recording id.  Results persist through the
-# same create_backtest() storage with market_type="futures".
-
-def run_futures_backtest(
-    symbol: str,
-    engine_params: Optional[dict] = None,
-    market_params: Optional[dict] = None,
-    engine_version: int = 1,
-    batch_id: Optional[str] = None,
-    futures_days: int = 30,
-    timeframe: str = "1h",
-) -> dict:
-    """
-    Run the shared engine over cached historical perp data for *symbol*.
-
-    market_params keys (all optional; defaults are CEX-realistic for majors):
-      buy_size_sol      → margin per trade in USDC (default 100)
-      starting_balance  → starting equity (default 1000)
-      leverage          → notional = margin × leverage (default 5)
-      timeframe         → "1h" (default) | "15m"
-      futures_slippage_pct / funding_interval_seconds / funding_rate_per_interval /
-        maintenance_margin_rate / futures_taker_fee
-    """
-    import futures_exchange as fe
-
-    market_params = dict(market_params or {})
-    leverage = float(market_params.get("leverage", 5.0))
-    timeframe = str(market_params.get("timeframe", timeframe))
-    slippage = float(market_params.get("futures_slippage_pct", 0.1))
-
-    if engine_params is None:
-        engine_params = {}
-
-    bars = fe.get_futures_candles(symbol, timeframe=timeframe,
-                                  days_back=int(market_params.get("futures_days", futures_days)))
-    if not bars:
-        raise ValueError(f"no cached futures data for symbol {symbol!r} ({timeframe})")
-
-    # ── Futures second param-set (engine V2) ─────────────────────────────
-    # Auto-derive recommended `v2_volume_scale_fut` per symbol from the
-    # fetched cache so the engine's SOL-scale OU processes are fed sane
-    # magnitudes (~1e-3..50/bar median).  Caller may override explicitly via
-    # engine_params["v2_volume_scale_fut"] (kept verbatim); otherwise the
-    # default is `v2_target_bar_volume_usd / median(turnover)` with a
-    # defensive 1e3 bound.  This is a *deterministic* per-symbol function
-    # and does not depend on the trade path — spot behaviour is untouched.
-    # NB: must run AFTER `bars = fe.get_futures_candles(...)` so the cache
-    # is in scope; otherwise `vscale` falls back to 1.0 (no scaling).
-    if int(engine_version) == 2 and engine_params is not None:
-        import strategy_engineV2
-        if "v2_futures_overrides" not in engine_params:
-            preset = dict(strategy_engineV2.FUTURES_DEFAULT_CONFIG)
-            if "v2_volume_scale_fut" not in engine_params:
-                try:
-                    med = sorted(b["turnover"] for b in bars)[len(bars) // 2] or 1.0
-                except Exception:
-                    med = 1.0
-                tgt = float(strategy_engineV2.FUTURES_DEFAULT_CONFIG.get(
-                    "v2_target_bar_volume_usd", 1.0))
-                vscale = tgt / max(med, 1.0)
-                # Defensive bound: never scale past 1e3 (or below 1e-12).
-                preset["v2_volume_scale_fut"] = min(max(float(vscale), 1e-12), 1e3)
-            engine_params = dict(engine_params)
-            engine_params["v2_futures_overrides"] = preset
-
-    ft = ForwardTester(
-        starting_balance=float(market_params.get("starting_balance", 1000.0)),
-        buy_size_sol=float(market_params.get("buy_size_sol", 100.0)),
-        priority_fee=0.0,
-        bribe_fee=0.0,
-        slippage_pct=slippage,
-        engine_kwargs=engine_params,
-        engine_version=engine_version,
-        holder_flow_events=None,
-        market_type="futures",
-        leverage=leverage,
-        funding_rate_per_interval=float(market_params.get("funding_rate_per_interval", 0.0001)),
-        funding_interval_seconds=int(market_params.get("funding_interval_seconds", 28800)),
-        maintenance_margin_rate=float(market_params.get("maintenance_margin_rate", 0.005)),
-        futures_taker_fee=float(market_params.get("futures_taker_fee", 0.00045)),
-        futures_slippage_pct=slippage,
-        sol_price_usd=1.0,            # USD-priced bars → 1 unit == 1 USDC
-    )
-
-    candle_results = []
-    ft_update = ft.update
-    engine = ft.engine
-    last_candle = None
-
-    for bar in bars:
-        t = int(bar["ts_s"])          # normalised field name in the cache
-        o, h, l, c = bar["open"], bar["high"], bar["low"], bar["close"]
-        vol = bar.get("turnover", 0.0)
-        funding_rate = bar.get("funding_rate", 0.0) or 0.0
-        mark_price = bar.get("mark_price", 0.0) or 0.0
-        open_interest = bar.get("open_interest", 0.0) or 0.0
-
-        bullish = c >= o
-        mid_first, mid_second = (h, l) if bullish else (l, h)
-        buy_vol = float(bar.get("taker_buy_volume", 0.0))
-        sell_vol = float(bar.get("taker_sell_volume", 0.0))
-        # Spread real (turnover) volume across the 4 intra-candle states so
-        # the KDE buffer fills and measurement variance R stays well-scaled.
-        # Fall back to a linear 25/25/25/25 split if no taker-side split is
-        # available.
-        v_each = vol / 4.0
-        vb_each = buy_vol / 4.0
-        vs_each = sell_vol / 4.0
-
-        trade_action_for_candle = None
-        trade_label_for_candle = None
-
-        result = ft_update(time=t, o=o, h=o, l=o, c=o, volume=v_each,
-                           buy_volume=vb_each, sell_volume=vs_each,
-                           mark_price=mark_price, funding_rate=funding_rate,
-                           _build_full_result=False)
-        fwd = result.get("forward_test") or {}
-        if fwd.get("trade_action"):
-            trade_action_for_candle = fwd["trade_action"]
-            trade_label_for_candle = fwd.get("trade_label")
-
-        h2, l2 = max(o, mid_first), min(o, mid_first)
-        result = ft_update(time=t, o=o, h=h2, l=l2, c=mid_first, volume=v_each,
-                           buy_volume=vb_each, sell_volume=vs_each,
-                           mark_price=mark_price, funding_rate=funding_rate,
-                           _build_full_result=False)
-        fwd = result.get("forward_test") or {}
-        if trade_action_for_candle is None and fwd.get("trade_action"):
-            trade_action_for_candle = fwd["trade_action"]
-            trade_label_for_candle = fwd.get("trade_label")
-
-        result = ft_update(time=t, o=o, h=h, l=l, c=mid_second, volume=v_each,
-                           buy_volume=vb_each, sell_volume=vs_each,
-                           mark_price=mark_price, funding_rate=funding_rate,
-                           _build_full_result=False)
-        fwd = result.get("forward_test") or {}
-        if trade_action_for_candle is None and fwd.get("trade_action"):
-            trade_action_for_candle = fwd["trade_action"]
-            trade_label_for_candle = fwd.get("trade_label")
-
-        result = ft_update(time=t, o=o, h=h, l=l, c=c, volume=v_each,
-                           buy_volume=vb_each, sell_volume=vs_each,
-                           pool_sol=0.0, market_cap_usd=0.0,
-                           funding_rate=funding_rate, mark_price=mark_price,
-                           _build_full_result=False)
-        fwd = result.get("forward_test") or {}
-        if trade_action_for_candle is None and fwd.get("trade_action"):
-            trade_action_for_candle = fwd["trade_action"]
-            trade_label_for_candle = fwd.get("trade_label")
-
-        candle_results.append({
-            "time": t, "open": o, "high": h, "low": l, "close": c, "volume": vol,
-            "regime": engine.regime.value,
-            "direction": engine.direction.value,
-            "signal": result.get("signal", "none") if result else "none",
-            "signal_strength": engine.signal_strength,
-            "ema_fast": engine.ema_fast_val,
-            "ema_slow": engine.ema_slow_val,
-            "atr": engine.atr_val,
-            "roc": engine.m_hat,
-            "confidence": engine.trend_confidence,
-            "trade_action": trade_action_for_candle,
-            "trade_label": trade_label_for_candle,
-            "balance": round(ft.balance, 6),
-            "unrealized_pnl": 0,
-        })
-        last_candle = (t, o, h, l, c, mark_price, funding_rate)
-
-    # Force-close any position still open at end of data (parity with the
-    # recorded pipeline — no right-tail bias), at the LAST mark price.
-    if ft.current_trade is not None and last_candle:
-        t_l, o_l, h_l, l_l, c_l, mk_l, fr_l = last_candle
-        close_px = mk_l or c_l
-        ft._close_long(close_px, close_px, close_px, close_px, t_l,
-                       reason="recording_ended")
-
-    trades = [t.to_dict() for t in ft.trade_history]
-    stats = ft.stats.to_dict()
-
-    saved_params = dict(engine_params)
-    if ft.futures_cfg_snapshot:
-        saved_params.update(
-            {"futures_" + k: v for k, v in ft.futures_cfg_snapshot.items()
-             if k != "market_type"}
-        )
-        saved_params["market_type"] = "futures"
-        saved_params["futures_symbol"] = symbol
-        saved_params["futures_days"] = futures_days
-
-    ex_symbol = f"{symbol}USDT"
-    bt_id = create_backtest(
-        recording_id=0,
-        mint=f"FUT:{ex_symbol}",
-        token_name=symbol,
-        token_symbol=f"FUT:{symbol}",
-        timeframe=timeframe,
-        engine_params=saved_params,
-        stats=stats,
-        candle_results=candle_results,
-        trades=trades,
-        batch_id=batch_id,
-        market_type="futures",
-    )
-
-    if trades:
-        _write_trade_log(
-            recording_id=0,
-            token_name=symbol,
-            token_symbol=f"FUT:{symbol}",
-            engine_params=saved_params,
-            stats=stats,
-            trades=trades,
-            batch_id=batch_id,
-        )
-
-    return {
-        "backtest_id": bt_id,
-        "recording_id": 0,
-        "mint": f"FUT:{ex_symbol}",
-        "token_name": symbol,
-        "token_symbol": f"FUT:{symbol}",
-        "timeframe": timeframe,
-        "candle_count": len(candle_results),
-        "stats": stats,
-        "trade_count": len(trades),
-        "symbol": symbol,
-        "exchange_symbol": ex_symbol,
-        "account_ccy": "USDC",
     }
 
 

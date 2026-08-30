@@ -93,7 +93,7 @@ def _v2_entry_snapshot(eng) -> dict:
 class Trade:
     entry_time: int
     entry_price: float          # Hyper-realistic price (delay + slippage)
-    size_sol: float             # SOL committed to the trade (spot: stake / futures: margin)
+    size_sol: float             # SOL committed to the trade
     size_tokens: float          # tokens bought (accounting for slippage)
     exit_time: Optional[int] = None
     exit_price: Optional[float] = None   # Hyper-realistic price at exit
@@ -106,14 +106,6 @@ class Trade:
     outcome: str = ""           # "W" or "L" — set when trade is closed
     entry_params: dict = field(default_factory=dict)  # engine snapshot at entry
     exit_params: dict = field(default_factory=dict)   # engine snapshot at exit
-    # ── Futures mode extensions (additive; all defaults = spot values) ───
-    market_type: str = "spot"             # "spot" | "futures"
-    side: str = "long"                    # long-only pipeline (see futures_model docstring)
-    leverage: float = 1.0                 # position notional = size_sol * leverage
-    notional_sol: float = 0.0             # qty * entry_price (futures)
-    funding_paid: float = 0.0             # SOL net funding debited (futures)
-    liquidation_price: float = 0.0        # mark-price trigger (futures)
-    liquidation_fee: float = 0.0          # insurance-fund fee (futures)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -131,14 +123,6 @@ class ForwardTestStats:
     max_drawdown_pct: float = 0.0
     peak_balance: float = 1.0
     win_rate: float = 0.0
-    # ── Futures mode aggregates (additive; defaults = spot values) ───────
-    market_type: str = "spot"
-    leverage: float = 1.0
-    total_liquidations: int = 0
-    total_funding_paid: float = 0.0        # SOL debited across all trades
-    total_funding_received: float = 0.0
-    total_fees_paid_futures: float = 0.0   # taker/maker/liq fees (not gor fees)
-    max_leverage_used: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -161,22 +145,6 @@ class ForwardTester:
         engine_version: int = 1,
         holder_flow_events: Optional[list[dict]] = None,
         holder_flow_latency_seconds: float = 0.0,
-        # ── Futures mode (option A, additive). market_type="spot" (default)
-        # keeps byte-identical spot behaviour; "futures" enables leveraged
-        # margin accounting via FuturesAccount. ───────────────────────────
-        market_type: str = "spot",
-        leverage: float = 1.0,
-        funding_rate_per_interval: float = 0.0001,
-        funding_interval_seconds: int = 28800,
-        maintenance_margin_rate: float = 0.005,
-        liquidation_fee_fraction: float = 0.005,
-        futures_taker_fee: float = 0.00045,
-        futures_slippage_pct: Optional[float] = None,
-        # USDC-native accounting for real futures markets.  When > 0, 1 USDC
-        # = 1 SOL-equivalent pressure unit; margins/Qty/PnL then carry
-        # ``position_notional_usdc`` meta for the UI.  0 → legacy memecoin
-        # pipeline (SOL-denominated, meta fields ≈ 0).
-        sol_price_usd: float = 0.0,
         # ── iter66: execution-level calibration (additive, default OFF) ────
         # Live Jupiter-routed fills clear the recorded print stream at a
         # structurally higher level (measured median +27% on entries, +23%
@@ -199,43 +167,6 @@ class ForwardTester:
         # iter66: execution-level calibration offsets (default 0.0 = OFF)
         self.exec_offset_pct_buy = float(exec_offset_pct_buy)
         self.exec_offset_pct_sell = float(exec_offset_pct_sell)
-
-        # ── Futures account (only constructed for market_type="futures") ──
-        self.market_type = "futures" if market_type == "futures" else "spot"
-        self.futures: Optional[object] = None   # lazily-held FuturesAccount
-        self._fut_last_bar_time: Optional[int] = None
-        self._fut_last_funding_rate: Optional[float] = None
-        self.futures_cfg_snapshot: Optional[dict] = None
-        if self.market_type == "futures":
-            from futures_model import FuturesConfig  # local import: keeps spot import cheap
-            fut_slippage = (slippage_pct if futures_slippage_pct is None
-                            else futures_slippage_pct)
-            cfg = FuturesConfig(
-                leverage=max(float(leverage), 1.0),
-                funding_rate_per_interval=float(funding_rate_per_interval),
-                funding_interval_seconds=max(int(funding_interval_seconds), 1),
-                maintenance_margin_rate=float(maintenance_margin_rate),
-                liquidation_fee_fraction=float(liquidation_fee_fraction),
-                slippage_pct=float(fut_slippage),
-                taker_fee_fraction=float(futures_taker_fee),
-            )
-            if futures_slippage_pct is not None:
-                # Futures slippage overrides the pipeline-level fill model so
-                # mark/last and liquidation math stay consistent with fees.
-                self.slippage_pct = float(futures_slippage_pct)
-            self.futures_cfg_snapshot = {
-                "market_type": "futures",
-                "leverage": cfg.leverage,
-                "funding_rate_per_interval": cfg.funding_rate_per_interval,
-                "funding_interval_seconds": cfg.funding_interval_seconds,
-                "maintenance_margin_rate": cfg.maintenance_margin_rate,
-                "liquidation_fee_fraction": cfg.liquidation_fee_fraction,
-                "taker_fee_fraction": cfg.taker_fee_fraction,
-                "slippage_pct": cfg.slippage_pct,
-            }
-            from futures_model import FuturesAccount
-            self.futures = FuturesAccount(cfg=cfg, starting_equity=starting_balance,
-                                           sol_price_usd=sol_price_usd)
 
         # Holder-flow events for this recording (dev/insider wallet trades).
         # Passed into the engine so the V2 adapter can check them as an
@@ -260,8 +191,6 @@ class ForwardTester:
             starting_balance=starting_balance,
             current_balance=starting_balance,
             peak_balance=starting_balance,
-            market_type=self.market_type,
-            leverage=float(leverage) if self.market_type == "futures" else 1.0,
         )
 
         self.current_trade: Optional[Trade] = None
@@ -280,13 +209,6 @@ class ForwardTester:
         # it fills on candle N+1.
         self._stashed_entry_params: dict = {}
         self._stashed_exit_params: dict = {}
-
-        # ── Futures-mode helpers ──────────────────────────────────────────
-        # None on spot runs — the spot accounting path below never touches
-        # these, preserving byte-identical spot behaviour.
-        self._fut_slippage_pct: float = (
-            slippage_pct if futures_slippage_pct is None else futures_slippage_pct
-        )
 
     @property
     def total_fees_per_trade(self) -> float:
@@ -388,50 +310,12 @@ class ForwardTester:
         raw_price = self._intrabar_price(o, h, l, c, frac)
 
         # 2. Add slippage (buy → price kicks up)
-        #    Futures mode overrides the pipeline slippage with the futures-
-        #    book slippage (default 0.1% — a liquid perp order book, vs the
-        #    1–10% pump.fun bonding-curve defaults).
-        slip = (self._fut_slippage_pct if self.market_type == "futures"
-                else self.slippage_pct) / 100.0
+        slip = self.slippage_pct / 100.0
         exec_price = raw_price * (1.0 + slip)
 
-        # iter66: optional execution-level calibration (spot only — futures
-        # keeps its own book-consistent fill model).  0.0 → ×1.0 exact identity.
-        if self.market_type != "futures" and self.exec_offset_pct_buy:
+        # iter66: optional execution-level calibration.  0.0 → ×1.0 exact identity.
+        if self.exec_offset_pct_buy:
             exec_price *= (1.0 + self.exec_offset_pct_buy / 100.0)
-
-        # ── Futures entry: leveraged margin via FuturesAccount ───────────
-        if self.market_type == "futures":
-            if self.engine.in_position:
-                return None
-            # USDC-native accounting: when the run is marked with
-            # `sol_price_usd` (USD price of one unit of the account CCY),
-            # FuturesAccount.trade PnL carries ``position_notional_usdc``
-            # alongside the SOL-equivalent internal units.  The booking stays
-            # in the same units the pipeline uses elsewhere; the *reporting*
-            # is USDC-denominated.
-            pos = self.futures.open_long(exec_price, time, margin=self.buy_size_sol)
-            if pos is None:
-                return None
-            trade = Trade(
-                entry_time=time,
-                entry_price=pos.entry_price,
-                size_sol=pos.margin,
-                size_tokens=pos.qty,
-                entry_reason=reason,
-                entry_params=self._stashed_entry_params,
-                fees_paid=pos.entry_fee,
-                market_type="futures",
-                side="long",
-                leverage=pos.leverage,
-                notional_sol=pos.notional,
-                liquidation_price=pos.liq_price,
-            )
-            self._stashed_entry_params = {}
-            self.current_trade = trade
-            self.balance = self.futures.equity
-            self.engine.notify_trade_opened(exec_price, Direction.UP)
-            return trade
 
         fees = self.total_fees_per_trade
         trade_size = min(self.buy_size_sol, self.balance - fees)
@@ -708,63 +592,12 @@ class ForwardTester:
         raw_price = self._intrabar_price(o, h, l, c, frac)
 
         # 2. Add slippage (sell → price kicks down)
-        #    (same futures-slippage override as the open path)
-        slip = (self._fut_slippage_pct if self.market_type == "futures"
-                else self.slippage_pct) / 100.0
+        slip = self.slippage_pct / 100.0
         exec_price = raw_price * (1.0 - slip)
 
-        # iter66: optional execution-level calibration (spot only).  0.0 → ×1.0.
-        if self.market_type != "futures" and self.exec_offset_pct_sell:
+        # iter66: optional execution-level calibration.  0.0 → ×1.0.
+        if self.exec_offset_pct_sell:
             exec_price *= (1.0 - self.exec_offset_pct_sell / 100.0)
-
-        # ── Futures exit: settle via FuturesAccount ──────────────────────
-        if self.market_type == "futures":
-            res = self.futures.close_long(exec_price, time, reason,
-                                          funding_rate=self._fut_last_funding_rate)
-            if res is None:
-                return None
-            trade.exit_time = res["exit_time"]
-            trade.exit_price = res["exit_price"]
-            trade.pnl_sol = res["pnl_sol"]
-            trade.pnl_pct = res["pnl_pct"]
-            trade.exit_reason = reason
-            trade.fees_paid += res["exit_fee"]
-            trade.funding_paid = res["funding_paid"] - res["funding_received"]
-            trade.liquidation_fee = res["liquidation_fee"]
-            trade.exit_params = self._stashed_exit_params
-            self._stashed_exit_params = {}
-            self.balance = self.futures.equity
-            self.stats.current_balance = self.balance
-            self.stats.total_trades += 1
-            self.stats.total_pnl_sol += res["pnl_sol"]
-            total_fut_fees = res["entry_fee"] + res["exit_fee"] + res["liquidation_fee"]
-            self.stats.total_fees_paid += total_fut_fees
-            self.stats.total_fees_paid_futures += total_fut_fees
-            self.stats.total_funding_paid += res["funding_paid"]
-            self.stats.total_funding_received += res["funding_received"]
-            if reason == "liquidation":
-                self.stats.total_liquidations += 1
-            if res["pnl_sol"] > 0:
-                self.stats.winning_trades += 1
-                trade.outcome = "W"
-            else:
-                self.stats.losing_trades += 1
-                trade.outcome = "L"
-            self.stats.win_rate = self.stats.winning_trades / self.stats.total_trades * 100
-            if self.balance > self.stats.peak_balance:
-                self.stats.peak_balance = self.balance
-            drawdown = ((self.stats.peak_balance - self.balance)
-                        / self.stats.peak_balance * 100
-                        if self.stats.peak_balance > 0 else 0)
-            if drawdown > self.stats.max_drawdown_pct:
-                self.stats.max_drawdown_pct = drawdown
-            fut_stats = self.futures.stats.to_dict()
-            self.stats.max_leverage_used = max(self.stats.max_leverage_used,
-                                               fut_stats["max_leverage_used"])
-            self.trade_history.append(trade)
-            self.current_trade = None
-            self.engine.notify_trade_closed()
-            return trade
 
         # Proceeds at realistic slipped price
         proceeds = trade.size_tokens * exec_price
@@ -841,8 +674,6 @@ class ForwardTester:
         sell_volume: float = 0.0,
         pool_sol: float = 0.0,
         market_cap_usd: float = 0.0,
-        funding_rate: float = 0.0,
-        mark_price: float = 0.0,
         _build_full_result: bool = True,
     ) -> dict:
         """
@@ -865,47 +696,8 @@ class ForwardTester:
         closed_trade = None
         opened_trade = None
 
-        # ── Futures bookkeeping: funding + mark-price liquidation ─────────
-        # Funding settles on bar-boundary crossings (called once per unique
-        # timestamp so the 4-state expansion doesn't double-apply), then the
-        # open position's mark price is refreshed on EVERY intra-candle
-        # state.  Liquidation is checked BEFORE the engine's pending-signal
-        # execution — a margin call must win over any previously-queued
-        # engine exit (risk side wins in real perp execution order too).
-        fut_liq_trade: Optional[Trade] = None
-        if self.market_type == "futures" and self.current_trade is not None:
-            if time != self._fut_last_bar_time:
-                self._fut_last_bar_time = int(time)
-                self._fut_last_funding_rate = funding_rate
-                # funding_rate=0.0 on a candle means "no per-bar funding data"
-                # funding_rate=0.0 on a candle means "no per-bar funding data"
-                # (DB default), so pass None → FuturesAccount falls back to
-                # the run default.  Non-zero per-bar data overrides.
-                self.futures.settle_funding(
-                    int(time),
-                    funding_rate=(funding_rate if funding_rate else None),
-                    price=(mark_price if (mark_price and mark_price > 0.0) else c),
-                )
-                # Propagate account-level aggregates into ForwardTestStats so
-                # in-run stats show live funding/fee accrual, not only close.
-                acc = self.futures
-                self.stats.total_funding_paid = acc.stats.total_funding_paid
-                self.stats.total_funding_received = acc.stats.total_funding_received
-                self.stats.total_fees_paid_futures = acc.stats.total_fees_paid_futures
-            mark = mark_price if (mark_price and mark_price > 0.0) else c
-            self.futures.mark_to_price(mark)
-            if self.futures.check_liquidation(int(time), mark_price=mark):
-                self._pending_exit = False
-                self._pending_exit_reason = ""
-                self._stashed_exit_params = {}
-                fut_liq_trade = self._close_long(mark, mark, mark, mark,
-                                                 int(time), reason="liquidation")
-
         # ── Step 1: Execute pending signal from the previous bar ──────────
-        if fut_liq_trade is not None:
-            closed_trade = fut_liq_trade
-            trade_action = "exit"
-        elif self._pending_buy and self.current_trade is None:
+        if self._pending_buy and self.current_trade is None:
             opened_trade = self._open_long(o, h, l, c, time, getattr(self, '_pending_buy_reason', 'buy'))
             if opened_trade:
                 trade_action = "buy"
@@ -964,17 +756,6 @@ class ForwardTester:
 
         # ── Fast path: skip expensive output construction ─────────────────
         if not _build_full_result:
-            # Return minimal dict — trade_action + futures stats are needed
-            # by the backtester's candle log (futures only; spot unchanged).
-            minimal = {}
-            if self.market_type == "futures":
-                minimal["forward_test"] = {
-                    "trade_action": trade_action,
-                    "trade_label": (closed_trade.exit_reason if closed_trade
-                                    else (opened_trade.entry_reason if opened_trade else "")),
-                    "stats": self.stats.to_dict(),
-                }
-                return minimal
             if trade_action:
                 trade_label = ""
                 if trade_action == "buy" and opened_trade:
@@ -994,28 +775,20 @@ class ForwardTester:
         unrealized_pnl_pct = 0.0
         current_trade = self.current_trade
         if current_trade is not None:
-            if self.market_type == "futures":
-                # Leveraged PnL on notional vs margin committed (uses mark-price
-                # refresh done in Step 1.5).  Futures path is valuation-only —
-                # funding/fees settle at close, funded amounts accrue live.
-                unrealized_pnl = self.futures.unrealized(c)
-                if current_trade.size_sol > 0:
-                    unrealized_pnl_pct = unrealized_pnl / current_trade.size_sol * 100
-            else:
-                # Simulate delay and slippage for hypothetical exit right now
-                slip = self.slippage_pct / 100.0
-                hypothetical_exit_price = c * (1.0 - slip)
+            # Simulate delay and slippage for hypothetical exit right now
+            slip = self.slippage_pct / 100.0
+            hypothetical_exit_price = c * (1.0 - slip)
 
-                hypothetical_proceeds = current_trade.size_tokens * hypothetical_exit_price
-                hypothetical_proceeds -= self.total_fees_per_trade
-                unrealized_pnl = hypothetical_proceeds - current_trade.size_sol
+            hypothetical_proceeds = current_trade.size_tokens * hypothetical_exit_price
+            hypothetical_proceeds -= self.total_fees_per_trade
+            unrealized_pnl = hypothetical_proceeds - current_trade.size_sol
 
-                if current_trade.entry_price > 0:
-                    unrealized_pnl_pct = (
-                        (hypothetical_exit_price - current_trade.entry_price)
-                        / current_trade.entry_price
-                        * 100
-                    )
+            if current_trade.entry_price > 0:
+                unrealized_pnl_pct = (
+                    (hypothetical_exit_price - current_trade.entry_price)
+                    / current_trade.entry_price
+                    * 100
+                )
 
         # ── Log executed action ───────────────────────────────────────────
         if trade_action:
