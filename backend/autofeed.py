@@ -92,7 +92,7 @@ GMGN_RAINDOW   = os.environ.get("GMGN_CLI_RAW",  "--raw")  # always pass --raw
 
 DEFAULT_POLL_SECONDS              = 60.0
 # Spec: feed pump.fun migrated tokens above 15k mcap.
-DEFAULT_MIN_MCAP_USD              = 30_000.0
+DEFAULT_MIN_MCAP_USD              = 20_000.0
 DEFAULT_MAX_MCAP_USD              = 10_000_000.0   # OP: allow up to $10M
 DEFAULT_MIN_LIQUIDITY_USD         = 5_000.0        # GMGN pass-tier > $50k; we ease to broaden
 DEFAULT_MIN_HOLDERS               = 50             # organic metabolic mass
@@ -133,7 +133,7 @@ DEFAULT_MIGRATION_EXCHANGES         = "pump_amm,meteora_dlmm,meteora_damm_v2,met
 # post-graduation on the open market).
 DEFAULT_PLATFORMS                 = "Pump.fun"
 DEFAULT_INTERVAL                  = "1h"
-DEFAULT_MAX_CONCURRENT_FEED         = 20
+DEFAULT_MAX_CONCURRENT_FEED         = 100
 DEFAULT_COOLDOWN_AFTER_FEED_MINUTES = 1.0
 DEFAULT_EXCLUDE_MINTS              = ""   # comma-separated manual exclusion
 
