@@ -27,15 +27,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from candle_aggregator import CandleAggregator, TIMEFRAME_SECONDS
-from pumpfun_client import DexScreenerPollClient, PumpFunWSClient, PumpSwapRPCClient, get_historical_candles, get_token_info, resolve_input, SUB_MINUTE_TFS, NewPairsStream
+from pumpfun_client import DexScreenerPollClient, PumpFunWSClient, PumpSwapRPCClient, get_historical_candles, get_token_info, resolve_input, SUB_MINUTE_TFS
 from forward_tester import ForwardTester
-from live_trader import LiveTrader, keypair_from_private_key
+from live_trader import LiveTrader, keypair_from_private_key, SOLANA_RPC_PRIMARY
 from autofeed import AutoFeed, AutofeedConfig, Candidate
 import data_store
-from backtester import run_backtest, run_backtest_batch, run_futures_backtest
-import futures_exchange
-from sniper.sniper_router import router as sniper_router, set_engine as set_sniper_engine
-from sniper.sniper_engine import SniperEngine, SniperConfig
+from backtester import run_backtest, run_backtest_batch
 from holder_flow import HolderFlowMonitor, get_shared_monitor
 
 logging.basicConfig(
@@ -59,9 +56,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Mount sniper router
-app.include_router(sniper_router)
 
 if FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
@@ -153,24 +147,6 @@ async def startup_load_live_key():
             logger.info(f"[LIVE] Restored server-side private key for wallet {str(kp.pubkey())[:8]}…")
         except Exception as e:
             logger.warning(f"[LIVE] Saved private key file invalid: {e}")
-
-
-@app.on_event("startup")
-async def startup_sniper():
-    """Initialize and start the SniperEngine on app startup."""
-    import os
-    config = SniperConfig(
-        mode=os.environ.get("SNIPER_MODE", "forward_test"),
-        fee_threshold_sol=float(os.environ.get("SNIPER_FEE_THRESHOLD_SOL", "0.1")),
-        max_concurrent_positions=int(os.environ.get("SNIPER_MAX_POSITIONS", "3")),
-        daily_loss_limit_sol=float(os.environ.get("SNIPER_DAILY_LOSS_LIMIT_SOL", "2.0")),
-        min_forward_trades_for_live=int(os.environ.get("SNIPER_MIN_FORWARD_TRADES_FOR_LIVE", "200")),
-    )
-    engine = SniperEngine(config=config)
-    app.state.sniper = engine
-    set_sniper_engine(engine)
-    # Do not auto-start; wait for /api/sniper/start
-    logger.info(f"[Sniper] Initialized (mode={config.mode}, fee_threshold={config.fee_threshold_sol} SOL). Not started yet.")
 
 
 @app.get("/")
@@ -611,24 +587,6 @@ async def run_backtest_endpoint(body: dict = Body(...)):
         return JSONResponse({"error": "recording_id is required"}, status_code=400)
     engine_params = body.get("engine_params", {})
     engine_version = int(body.get("engine_version", 1))
-    # ── Futures mode params (validated; "spot" is the no-op default) ──────
-    market_type = str(body.get("market_type", "spot")).lower()
-    if market_type not in ("spot", "futures"):
-        return JSONResponse({"error": "market_type must be 'spot' or 'futures'"}, status_code=400)
-    leverage = float(body.get("leverage", 1.0))
-    if not (1.0 <= leverage <= 125.0):
-        return JSONResponse({"error": "leverage must be between 1 and 125"}, status_code=400)
-    futures_kwargs = {}
-    if market_type == "futures":
-        futures_kwargs = {
-            "market_type": "futures",
-            "leverage": leverage,
-            "funding_rate_per_interval": float(body.get("funding_rate_per_interval", 0.0001)),
-            "funding_interval_seconds": int(body.get("funding_interval_seconds", 28800)),
-            "maintenance_margin_rate": float(body.get("maintenance_margin_rate", 0.005)),
-            "futures_taker_fee": float(body.get("futures_taker_fee", 0.00045)),
-            "futures_slippage_pct": body.get("futures_slippage_pct"),
-        }
     try:
         # Run CPU-bound backtest in thread pool to avoid blocking the event loop
         result = await asyncio.to_thread(
@@ -641,7 +599,6 @@ async def run_backtest_endpoint(body: dict = Body(...)):
             slippage_pct=body.get("slippage_pct", 1.0),
             starting_balance=body.get("starting_balance", 1.0),
             engine_version=engine_version,
-            **futures_kwargs,
         )
         return JSONResponse(result)
     except ValueError as e:
@@ -669,24 +626,6 @@ async def run_backtest_batch_endpoint(body: dict = Body(default={})):
         recording_ids = [int(r) for r in recording_ids]
     last_night = bool(body.get("last_night", False))
     last_12h = bool(body.get("last_12h", False))
-    # ── Futures mode params ────────────────────────────────────────────────
-    market_type = str(body.get("market_type", "spot")).lower()
-    if market_type not in ("spot", "futures"):
-        return JSONResponse({"error": "market_type must be 'spot' or 'futures'"}, status_code=400)
-    leverage = float(body.get("leverage", 1.0))
-    if not (1.0 <= leverage <= 125.0):
-        return JSONResponse({"error": "leverage must be between 1 and 125"}, status_code=400)
-    futures_kwargs = {}
-    if market_type == "futures":
-        futures_kwargs = {
-            "market_type": "futures",
-            "leverage": leverage,
-            "funding_rate_per_interval": float(body.get("funding_rate_per_interval", 0.0001)),
-            "funding_interval_seconds": int(body.get("funding_interval_seconds", 28800)),
-            "maintenance_margin_rate": float(body.get("maintenance_margin_rate", 0.005)),
-            "futures_taker_fee": float(body.get("futures_taker_fee", 0.00045)),
-            "futures_slippage_pct": body.get("futures_slippage_pct"),
-        }
     try:
         results = await asyncio.to_thread(
             run_backtest_batch,
@@ -702,7 +641,6 @@ async def run_backtest_batch_endpoint(body: dict = Body(default={})):
             recording_ids=recording_ids,
             last_night=last_night,
             last_12h=last_12h,
-            **futures_kwargs,
         )
         succeeded = [r for r in results if "error" not in r]
         failed = [r for r in results if "error" in r]
@@ -751,101 +689,6 @@ async def delete_backtest_batch_endpoint(batch_id: str):
     return JSONResponse({"status": "deleted"})
 
 
-# ── Futures data + backtest API ───────────────────────────────────────────────
-
-@app.get("/api/futures/markets")
-async def list_futures_markets():
-    """Listed perp instruments + how much history is currently cached."""
-    return JSONResponse(futures_exchange.list_supported_symbols())
-
-
-@app.post("/api/futures/backtest")
-async def run_futures_backtest_endpoint(body: dict = Body(...)):
-    """
-    Historical perp backtest on Bybit linear-USDT klines (accounted in USDC).
-
-    Required body fields:
-      symbol      – one of BTC / ETH / SOL / LTC
-    Optional:
-      days_back   – 30 (default) … 90    how much history to pull/cache
-      timeframe   – "1h" (default) | "15m"
-      leverage    – 1 (default) … 50
-      buy_size_sol (margin per trade, USDC)          – default 100
-      starting_balance (USDC)                        – default 1000
-      funding_rate_per_interval / funding_interval_seconds
-      futures_taker_fee / futures_slippage_pct / maintenance_margin_rate
-      engine_params / engine_version (1 default, 2 = V2 RBPF)
-      batch_id    – batch label for grouping
-    """
-    symbol = str(body.get("symbol", "")).strip().upper()
-    if symbol not in futures_exchange.DEFAULT_SYMBOLS:
-        return JSONResponse(
-            {"error": f"symbol must be one of {sorted(futures_exchange.DEFAULT_SYMBOLS)}"},
-            status_code=400,
-        )
-
-    timeframe = str(body.get("timeframe", "1h"))
-    days_back = int(body.get("days_back", 30))
-    if days_back < 1 or days_back > 90:
-        return JSONResponse({"error": "days_back must be 1..90"}, status_code=400)
-    if timeframe not in ("15m", "1h"):
-        return JSONResponse({"error": "timeframe must be '1h' or '15m'"}, status_code=400)
-
-    # Pull market-level defaults from the FUTURES_MARKET_DEFAULTS constant so
-    # the user-facing tab inherits the Pareto-optimal starting point (iter42
-    # convergence). Caller-supplied body fields always override.
-    try:
-        from strategy_engineV2 import FUTURES_MARKET_DEFAULTS
-    except Exception:
-        FUTURES_MARKET_DEFAULTS = {}
-    _md = FUTURES_MARKET_DEFAULTS or {}
-
-    leverage = float(body.get("leverage", _md.get("leverage", 1.0)))
-    if not (1.0 <= leverage <= 50.0):
-        return JSONResponse({"error": "leverage must be 1..50"}, status_code=400)
-
-    market_params = {
-        "leverage": leverage,
-        "timeframe": timeframe,
-        "futures_days": days_back,
-        "buy_size_sol": float(body.get("buy_size_sol", _md.get("buy_size_sol", 100.0))),
-        "starting_balance": float(body.get("starting_balance", _md.get("starting_balance", 1000.0))),
-        "futures_taker_fee": float(body.get("futures_taker_fee", _md.get("futures_taker_fee", 0.00045))),
-        "futures_slippage_pct": float(body.get("futures_slippage_pct", _md.get("futures_slippage_pct", 0.1))),
-        "maintenance_margin_rate": float(body.get("maintenance_margin_rate", _md.get("maintenance_margin_rate", 0.005))),
-        "funding_interval_seconds": int(body.get("funding_interval_seconds", _md.get("funding_interval_seconds", 28800))),
-        "funding_rate_per_interval": float(body.get("funding_rate_per_interval", _md.get("funding_rate_per_interval", 0.0001))),
-    }
-    engine_params = body.get("engine_params", {}) or {}
-    engine_version = int(body.get("engine_version", 1))
-    batch_id = body.get("batch_id") or None
-
-    try:
-        # Materialise the cache + run the backtest off-thread (CPU-bound and
-        # does outbound HTTP with retry — never on the event loop).
-        def _run():
-            futures_exchange.get_futures_candles(
-                symbol, timeframe=timeframe, days_back=days_back,
-            )
-            saved = dict(engine_params)
-            saved["futures_symbol"] = symbol
-            saved["futures_timeframe"] = timeframe
-            return run_futures_backtest(
-                symbol=symbol,
-                engine_params=saved,
-                market_params=market_params,
-                engine_version=engine_version,
-                batch_id=batch_id,
-                futures_days=days_back,
-            )
-        return JSONResponse(await asyncio.to_thread(_run))
-    except ValueError as e:
-        return JSONResponse({"error": str(e)}, status_code=404)
-    except Exception as e:
-        logger.error(f"Futures backtest error: {e}")
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
 @app.websocket("/ws/{mint}")
 async def chart_ws(
     websocket: WebSocket,
@@ -857,14 +700,14 @@ async def chart_ws(
     engine_version: int = Query(default=1),
 ):
     # Guard: reject reserved path segments that have dedicated routes.
-    # FastAPI matches /ws/{mint} before /ws/sniper because the wildcard is
+    # FastAPI matches /ws/{mint} before /ws/live because the wildcard is
     # declared first. Must accept() before close() to avoid a 403.
     # For "autofeed", delegate directly — FastAPI WS routing doesn't fall
     # through, so the dedicated /ws/autofeed endpoint is unreachable.
     if mint == "autofeed":
         await _autofeed_ws_handler(websocket)
         return
-    _RESERVED = {"sniper", "live"}
+    _RESERVED = {"live"}
     if mint in _RESERVED:
         await websocket.accept()
         await websocket.close(code=4004, reason=f"Use /ws/{mint} dedicated endpoint")
@@ -1725,15 +1568,13 @@ async def live_status():
     })
 
 
-@app.get("/api/live/history")
-async def live_history(limit: int = Query(20, ge=1, le=100)):
+def _load_ledger_sessions(limit: int = 20) -> list[dict]:
     """Recent completed live-trading sessions with their closed trades.
 
     Read from each session's physical trades.jsonl ledger (survives restarts
-    and sessions that ended before the page was opened).  Enables the
-    frontend to rebuild the live trade-history table on page load — SELL rows
-    for trades that closed while the dashboard was closed were previously
-    lost forever because the table was only ever fed by live WS events.
+    and sessions that ended before the page was opened).  Consumed by
+    /api/live/history and /api/portfolio so both surfaces see the same
+    durable trade stream.
     """
     from live_session_logger import LOG_ROOT
     sessions = []
@@ -1772,7 +1613,175 @@ async def live_history(limit: int = Query(20, ge=1, le=100)):
                 "wallet": meta["wallet"],
                 "trades": trades,
             })
+    return sessions
+
+
+@app.get("/api/live/history")
+async def live_history(limit: int = Query(20, ge=1, le=100)):
+    """Recent completed live-trading sessions with their closed trades."""
+    sessions = _load_ledger_sessions(limit)
     return JSONResponse({"sessions": sessions, "count": len(sessions)})
+
+
+async def _fetch_wallet_sol_balance(pubkey: str) -> Optional[float]:
+    """Standalone wallet SOL balance via the primary public RPC — used when
+    no live session is running (active sessions expose their own cached
+    balance, so no extra RPC is spent while trading)."""
+    import aiohttp
+    payload = {
+        "jsonrpc": "2.0", "id": 1, "method": "getBalance",
+        "params": [pubkey, {"commitment": "confirmed"}],
+    }
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=3.0)
+        ) as http:
+            async with http.post(SOLANA_RPC_PRIMARY, json=payload) as resp:
+                data = await resp.json(content_type=None)
+                lamports = (data.get("result") or {}).get("value") or 0
+                return float(lamports) / 1e9
+    except Exception as e:
+        logger.warning(f"[PORTFOLIO] Wallet balance fetch failed: {e}")
+        return None
+
+
+@app.get("/api/portfolio")
+async def portfolio_status():
+    """Aggregated portfolio state for the Portfolio tab.
+
+    One call returns everything the page renders:
+      wallet        — pubkey + on-chain SOL balance (cached when sessions run)
+      positions     — open positions across active live sessions
+      trades        — durable closed-trade history (session ledgers + this
+                      run's confirmed events, deduped by sell tx signature)
+      summary       — realized / unrealized / total PnL, win rate, counts
+      equity_curve  — cumulative realized PnL over time for the PnL chart
+    """
+    # ── Wallet ────────────────────────────────────────────────────────────
+    pubkey = ""
+    sol_balance: Optional[float] = None
+    active = [s for s in _active_live_traders.values() if not s.cancelled.is_set()]
+    if active:
+        pubkey = active[0].wallet()
+        try:
+            sol_balance = active[0].trader._get_cached_sol_balance()
+        except Exception:
+            sol_balance = None
+    else:
+        pk = getattr(app.state, "lt_private_key", "") or _load_backend_private_key()
+        if pk:
+            try:
+                pubkey = str(keypair_from_private_key(pk).pubkey())
+                sol_balance = await _fetch_wallet_sol_balance(pubkey)
+            except Exception:
+                pubkey = ""
+
+    # ── Open positions across active sessions ─────────────────────────────
+    positions = []
+    unrealized_pnl = 0.0
+    seen_mints = set()
+    for mint, session in _active_live_traders.items():
+        seen_mints.add(mint)
+        trader = session.trader
+        ct = trader.current_trade
+        if ct is None:
+            continue
+        last = float(getattr(trader, "_last_price", 0.0) or 0.0)
+        upnl = upnl_pct = 0.0
+        if last > 0 and ct.entry_price > 0:
+            upnl_pct = (last - ct.entry_price) / ct.entry_price * 100.0
+            upnl = upnl_pct / 100.0 * ct.size_sol
+        unrealized_pnl += upnl
+        positions.append({
+            "mint": mint,
+            "token_name": session.token_name,
+            "token_symbol": session.token_symbol,
+            "size_sol": ct.size_sol,
+            "size_tokens": ct.size_tokens,
+            "entry_price": ct.entry_price,
+            "last_price": last,
+            "unrealized_pnl_sol": upnl,
+            "unrealized_pnl_pct": upnl_pct,
+            "entry_time": ct.entry_time,
+            "entry_reason": ct.entry_reason,
+        })
+
+    # ── Closed-trade history: ledger (durable) + this run's events ────────
+    closed: list[dict] = []
+    seen_sigs: set[str] = set()
+
+    def _add_closed(item: dict) -> None:
+        sig = item.get("tx_hash") or ""
+        if sig and sig in seen_sigs:
+            return
+        if sig:
+            seen_sigs.add(sig)
+        closed.append(item)
+
+    for ev in _server_trade_events:
+        if ev.get("action") != "SELL":
+            continue
+        _add_closed({
+            "mint": ev.get("mint", ""),
+            "token_symbol": ev.get("token_symbol", ""),
+            "ts": ev.get("timestamp"),
+            "pnl_sol": ev.get("pnl_sol", 0.0),
+            "pnl_pct": ev.get("pnl_pct", 0.0),
+            "tx_hash": ev.get("tx_hash", ""),
+        })
+
+    for sess in _load_ledger_sessions(limit=100):
+        mint = sess.get("token_mint", "")
+        seen_mints.add(mint)
+        for t in sess.get("trades", []):
+            _add_closed({
+                "mint": t.get("token_mint") or mint,
+                "token_symbol": "",
+                "ts": t.get("exit_time") or t.get("event_ts"),
+                "entry_price": t.get("entry_price"),
+                "exit_price": t.get("exit_price"),
+                "pnl_sol": t.get("pnl_sol", 0.0),
+                "pnl_pct": t.get("pnl_pct", 0.0),
+                "exit_reason": t.get("exit_reason", ""),
+                "tx_hash": t.get("tx_hash_sell") or "",
+            })
+
+    closed.sort(key=lambda t: t.get("ts") or 0, reverse=True)
+
+    realized_pnl = sum(t.get("pnl_sol", 0.0) for t in closed)
+    winning = sum(1 for t in closed if (t.get("pnl_sol") or 0.0) > 0)
+    losing = len(closed) - winning
+    win_rate = (winning / len(closed) * 100.0) if closed else 0.0
+
+    # Cumulative realized PnL (chronological) for the PnL curve
+    equity_curve = []
+    cum = 0.0
+    for t in sorted(closed, key=lambda t: t.get("ts") or 0):
+        cum += t.get("pnl_sol", 0.0)
+        ts = t.get("ts")
+        if ts:
+            equity_curve.append({"time": int(ts), "value": round(cum, 6)})
+
+    return JSONResponse({
+        "wallet": {
+            "pubkey": pubkey,
+            "connected": bool(pubkey),
+            "sol_balance": sol_balance,
+        },
+        "positions": positions,
+        "trades": closed,
+        "summary": {
+            "realized_pnl_sol": round(realized_pnl, 6),
+            "unrealized_pnl_sol": round(unrealized_pnl, 6),
+            "total_pnl_sol": round(realized_pnl + unrealized_pnl, 6),
+            "winning_trades": winning,
+            "losing_trades": losing,
+            "total_trades": len(closed),
+            "win_rate": round(win_rate, 2),
+            "tokens_traded": len(seen_mints),
+        },
+        "equity_curve": equity_curve,
+    })
 
 
 @app.post("/api/live/stop")

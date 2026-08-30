@@ -5,15 +5,12 @@
    · One flat token system: four warm charcoal-brown surface tiers + bone
      text scale + a single copper accent (brand, active states, primary
      CTA only) + sage/terracotta reserved for pos/neg data.
-   · Chrome consolidation: the old stack of separate boxed bars is now a
-     command strip + a single "tape" readout; the engine rail sits to the
-     RIGHT of the chart so price action owns the left edge.
    · De-card-soup: gradient glass cards, glow buttons, emoji icon chips
      and card-soup grids are replaced by flat panels separated by hairline
      rules (.panel > * + *), compact page mastheads, and micro-label
      typography. Information density is varied on purpose: tape and decks
      are dense; page headers and empty states are quiet.
-   · All class names that app.js / sniper.js generate or query are kept
+   · All class names that app.js generates or queries are kept
      (cards, badges, table cells, dots, param-*, af-*, lt-card-* …) and
      every legacy CSS custom property (--bg, --surface, --accent, --green,
      --red, --up/--down …) is aliased onto the new palette, so JS-injected
@@ -124,7 +121,6 @@ input, select, button, textarea { accent-color: var(--copper); }
 .nav-tab:hover { color: var(--bone-2); }
 .nav-tab.active { color: var(--bone); border-bottom-color: var(--copper); }
 
-#conn-indicator { display: flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); white-space: nowrap; margin-left: auto; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex-shrink: 0; }
 .dot.connecting { background: var(--amber); animation: blink 1.1s infinite; }
 .dot.connected  { background: var(--sage); }
@@ -248,118 +244,6 @@ input, select, button, textarea { accent-color: var(--copper); }
 
 .span-2 { grid-column: span 2; }
 
-/* ── LIVE PAGE — command strip ───────────────────────────────────────── */
-
-#live-controls { display: flex; align-items: center; gap: 18px; padding: 8px 20px; background: var(--ink-1); border-bottom: 1px solid var(--line); flex-shrink: 0; flex-wrap: wrap; }
-
-#address-form { display: flex; flex: 1; min-width: 260px; max-width: 480px; gap: 6px; }
-
-#mint-input { flex: 1; background: var(--ink-0); border: 1px solid var(--line); border-radius: var(--radius); color: var(--bone); font-family: var(--mono); font-size: 11.5px; padding: 7px 10px; outline: none; transition: border-color .12s; }
-#mint-input:focus { border-color: var(--copper-lo); }
-#mint-input::placeholder { color: var(--faint); }
-
-#load-btn { background: var(--copper); border: 1px solid var(--copper); border-radius: var(--radius); color: var(--ink-0); cursor: pointer; font-family: var(--mono); font-size: 10.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; padding: 7px 16px; transition: background .12s; white-space: nowrap; }
-#load-btn:hover { background: var(--copper-hi); border-color: var(--copper-hi); }
-#load-btn:active { background: var(--copper-lo); }
-#load-btn:disabled { opacity: .5; cursor: default; }
-
-#settings-btn { background: transparent; border: 1px solid var(--line-2); border-radius: var(--radius); color: var(--dim); cursor: pointer; font-family: var(--mono); font-size: 9.5px; font-weight: 600; letter-spacing: .12em; padding: 7px 11px; transition: color .12s, border-color .12s; }
-#settings-btn:hover { color: var(--bone); border-color: var(--dim); }
-
-#tf-bar { display: flex; gap: 2px; }
-.tf-btn { background: transparent; border: none; border-bottom: 2px solid transparent; border-radius: 0; color: var(--dim); cursor: pointer; font-family: var(--mono); font-size: 11px; font-weight: 600; padding: 5px 8px 4px; transition: color .12s; }
-.tf-btn:hover { color: var(--bone-2); }
-.tf-btn.active { color: var(--bone); border-bottom-color: var(--copper); }
-
-/* ── LIVE PAGE — token tape (identity · price · OHLC · stats · state) ── */
-
-#token-bar { display: flex; align-items: center; gap: 16px; padding: 8px 20px; background: var(--ink-1); border-bottom: 1px solid var(--line); flex-shrink: 0; overflow-x: auto; scrollbar-width: none; }
-#token-bar::-webkit-scrollbar { display: none; }
-#token-bar.hidden { display: none; }
-
-.tape-id { display: flex; align-items: center; gap: 9px; flex-shrink: 0; }
-#token-logo { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; flex-shrink: 0; display: none; }
-#token-name { font-weight: 600; font-size: 14px; color: var(--bone); white-space: nowrap; }
-#token-symbol { color: var(--dim); font-family: var(--mono); font-size: 11px; white-space: nowrap; }
-
-.tape-sep { width: 1px; height: 22px; background: var(--line); flex-shrink: 0; }
-
-.tape-px { display: flex; align-items: baseline; gap: 9px; flex-shrink: 0; }
-#last-price { font-size: 17px; font-family: var(--mono); font-weight: 700; color: var(--copper); white-space: nowrap; }
-.price-change { font-size: 11px; font-family: var(--mono); font-weight: 600; white-space: nowrap; }
-
-.ohlc-strip { display: flex; align-items: center; gap: 12px; font-family: var(--mono); font-size: 10.5px; color: var(--dim); white-space: nowrap; flex-shrink: 0; }
-.ohlc-item { display: inline-flex; align-items: center; gap: 4px; }
-.ohlc-item span { color: var(--bone-2); font-weight: 600; }
-
-.stat-item { display: flex; flex-direction: column; gap: 1px; flex-shrink: 0; }
-.stat-label { color: var(--dim); font-family: var(--mono); font-size: 8.5px; text-transform: uppercase; letter-spacing: .12em; }
-.stat-value { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--bone-2); white-space: nowrap; }
-
-.tape-right { display: flex; align-items: center; gap: 12px; margin-left: auto; flex-shrink: 0; }
-
-.regime-badge {
-  display: inline-flex; align-items: center; padding: 3px 9px; border-radius: var(--radius);
-  font-size: 9.5px; font-weight: 700; font-family: var(--mono); color: #F2EDE2;
-  text-transform: uppercase; letter-spacing: .1em; background: var(--faint);
-  white-space: nowrap; transition: background 0.3s ease;
-}
-
-.direction-badge { font-size: 11.5px; font-weight: 700; font-family: var(--mono); white-space: nowrap; letter-spacing: .04em; }
-
-/* ── LIVE PAGE — main: chart left, engine rail right ─────────────────── */
-
-#main-content { flex: 1; display: flex; overflow: hidden; }
-
-#chart-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--ink-0); }
-#chart-wrapper { flex: 1; position: relative; overflow: hidden; }
-#chart { width: 100%; height: 100%; }
-
-.sub-pane-wrapper { background: var(--ink-0); border-top: 1px solid var(--line); overflow: hidden; }
-#sub-pane { height: 120px; min-height: 80px; }
-.regime-bar-wrapper { height: 16px; min-height: 16px; }
-
-.vp-canvas { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 5; }
-
-/* Engine rail */
-#strategy-panel { width: 232px; min-width: 232px; background: var(--ink-1); border-left: 1px solid var(--line); overflow-y: auto; flex-shrink: 0; }
-
-.panel-section { padding: 14px 16px; border-bottom: 1px solid var(--line); }
-.panel-section:last-child { border-bottom: none; }
-
-.indicators-grid { display: flex; flex-direction: column; gap: 6px; }
-.ind-row { display: flex; justify-content: space-between; align-items: center; font-size: 11px; font-family: var(--mono); }
-.ind-label { font-weight: 600; font-size: 10px; color: var(--dim); }
-.ind-val { color: var(--bone-2); }
-
-.ft-grid { display: flex; flex-direction: column; gap: 5px; }
-.ft-row { display: flex; justify-content: space-between; align-items: center; font-size: 11px; font-family: var(--mono); }
-.ft-label { color: var(--dim); font-size: 10px; font-weight: 600; }
-.ft-val { color: var(--bone-2); font-size: 11px; }
-.ft-divider { height: 1px; background: var(--line); margin: 5px 0; }
-
-/* Trade feed overlay — flat rows with a side rule, no blur */
-#trade-feed { position: absolute; top: 8px; right: 8px; width: 224px; max-height: calc(100% - 16px); overflow-y: auto; display: flex; flex-direction: column; gap: 2px; pointer-events: none; }
-
-.trade-row { display: flex; justify-content: space-between; align-items: center; background: rgba(15, 13, 10, 0.82); border-radius: 0; padding: 3px 8px; font-family: var(--mono); font-size: 10.5px; border-left: 2px solid transparent; animation: slideIn .12s ease; }
-.trade-row.buy  { border-left-color: var(--sage); }
-.trade-row.sell { border-left-color: var(--terra); }
-@keyframes slideIn { from { opacity: 0; transform: translateX(8px); } to { opacity: 1; transform: none; } }
-
-.trade-type { font-weight: 700; text-transform: uppercase; font-size: 9.5px; letter-spacing: .06em; }
-.trade-type.buy  { color: var(--sage); }
-.trade-type.sell { color: var(--terra); }
-.trade-sol  { color: var(--bone-2); }
-.trade-time { color: var(--dim); font-size: 9.5px; }
-
-#overlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; background: rgba(15, 13, 10, 0.9); z-index: 10; pointer-events: none; }
-#overlay.hidden { display: none; }
-#overlay-icon { font-size: 26px; color: var(--copper); }
-#overlay-msg  { font-size: 12px; color: var(--dim); font-family: var(--mono); text-align: center; max-width: 320px; }
-
-.social-link { display: inline-flex; align-items: center; justify-content: center; min-width: 26px; height: 20px; padding: 0 6px; background: var(--ink-0); border: 1px solid var(--line); border-radius: var(--radius); color: var(--dim); font-family: var(--mono); font-size: 10px; font-weight: 700; text-decoration: none; transition: color .12s, border-color .12s; white-space: nowrap; }
-.social-link:hover { color: var(--bone); border-color: var(--line-2); }
-
 /* ── Recorder ────────────────────────────────────────────────────────── */
 
 .recorder-card { margin-bottom: 8px; }
@@ -373,7 +257,7 @@ input, select, button, textarea { accent-color: var(--copper); }
 
 @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 
-/* ── Cards: recordings · backtests · traders · sniper feed ───────────── */
+/* ── Cards: recordings · backtests · traders ─────────────────────────── */
 
 .recordings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
 .backtests-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; }
@@ -444,7 +328,6 @@ input, select, button, textarea { accent-color: var(--copper); }
   padding: 2px 8px; border-radius: var(--radius);
   background: var(--ink-2); border: 1px solid var(--line); color: var(--bone-2);
 }
-.lev-badge { color: var(--amber); border-color: rgba(217, 179, 106, 0.35); background: rgba(217, 179, 106, 0.07); }
 
 .viewer-chart-container { width: 100%; height: 500px; background: var(--ink-0); border: 1px solid var(--line); border-radius: 0; overflow: hidden; }
 
@@ -452,7 +335,7 @@ input, select, button, textarea { accent-color: var(--copper); }
 
 .bt-form { display: flex; gap: 16px; align-items: flex-end; padding: 18px 20px; flex-wrap: wrap; }
 .bt-form .form-group { flex: 1; min-width: 220px; }
-#bt-controls .form-actions, #fbt-controls .form-actions { padding-bottom: 1px; }
+#bt-controls .form-actions { padding-bottom: 1px; }
 
 .bt-result-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .bt-result-name { font-weight: 600; color: var(--bone); font-size: 16px; }
@@ -625,48 +508,9 @@ input, select, button, textarea { accent-color: var(--copper); }
 .engine-ver-btn { background: transparent; border: none; border-radius: var(--radius); color: var(--dim); cursor: pointer; font-family: var(--mono); font-size: 11px; font-weight: 700; padding: 5px 12px; transition: background .12s, color .12s; white-space: nowrap; line-height: 1; }
 .engine-ver-btn:hover:not(.active) { color: var(--bone-2); background: var(--ink-3); }
 .engine-ver-btn.active { background: var(--ink-3); color: var(--bone); }
-#engine-ver-v2.active, #settings-ver-v2.active, #lt-engine-v2.active { background: rgba(193, 135, 79, 0.12); color: var(--copper); }
+#settings-ver-v2.active, #lt-engine-v2.active { background: rgba(193, 135, 79, 0.12); color: var(--copper); }
 
 .engine-ver-toggle-sm .engine-ver-btn { font-size: 10px; padding: 4px 10px; }
-
-/* ── Futures instrument selector ─────────────────────────────────────── */
-
-.fbt-block { padding: 18px 20px 16px; }
-.fbt-instrument-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
-.fbt-instrument-card { background: var(--ink-2); border: 1px solid var(--line); border-radius: 0; padding: 10px 12px; color: inherit; text-align: left; cursor: pointer; font: inherit; transition: border-color .12s, background .12s; }
-.fbt-instrument-card:hover { border-color: var(--line-2); }
-.fbt-instrument-card.active { border-color: var(--copper-lo); background: var(--ink-3); }
-.fbt-instrument-card.active .fbt-instrument-name { color: var(--copper); }
-.fbt-instrument-name { display: block; font-weight: 600; font-size: 14px; color: var(--bone); }
-.fbt-instrument-sub { display: block; font-family: var(--mono); font-size: 10px; color: var(--dim); margin-top: 2px; }
-
-/* ── Sniper ──────────────────────────────────────────────────────────── */
-
-#sniper-config-card { margin-bottom: 20px; }
-.sn-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; }
-.sn-head .af-subhead { margin: 0; }
-
-.sniper-mode-toggle { background: var(--ink-0); border: 1px solid var(--line); border-radius: var(--radius); padding: 2px; display: flex; gap: 2px; }
-.sniper-mode-btn { background: transparent; border: none; border-radius: var(--radius); color: var(--dim); cursor: pointer; font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; padding: 5px 14px; transition: background .12s, color .12s; }
-.sniper-mode-btn:hover:not(.active) { color: var(--bone-2); }
-.sniper-mode-btn.active { background: var(--ink-3); color: var(--bone); }
-
-.sniper-config-grid { padding: 0 20px 16px; }
-.sn-live-key { padding: 0 20px 16px; display: flex; flex-direction: column; gap: 6px; }
-.sn-live-key .form-input { margin-top: 2px; }
-.sn-actions { padding: 14px 20px 16px; }
-
-.sniper-pulse-indicator { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-0); animation: recBlink 1.2s infinite; }
-
-.sn-status { display: flex; align-items: center; gap: 22px; padding: 10px 16px; background: var(--ink-1); border: 1px solid var(--line); border-radius: 0; margin-bottom: 20px; font-family: var(--mono); font-size: 11px; color: var(--dim); flex-wrap: wrap; }
-.sn-status b { color: var(--bone); font-weight: 700; }
-.sn-status-scan { color: var(--sage); font-weight: 700; text-transform: uppercase; letter-spacing: .1em; font-size: 9.5px; display: inline-flex; align-items: center; gap: 7px; }
-.sn-status-scan::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--sage); animation: blink 1.6s infinite; }
-.sn-status-mode { margin-left: auto; color: var(--dim); font-size: 9.5px; text-transform: uppercase; letter-spacing: .1em; }
-
-.split-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-.sn-feed { display: flex; flex-direction: column; gap: 8px; max-height: 380px; overflow-y: auto; }
-.sn-feed .empty-state { grid-column: auto; }
 
 /* ── Settings modal ──────────────────────────────────────────────────── */
 
@@ -705,15 +549,20 @@ input, select, button, textarea { accent-color: var(--copper); }
   margin-top: 6px;
 }
 
+/* ── Portfolio ───────────────────────────────────────────────────────── */
+
+.pf-wallet-addr { font-family: var(--mono); font-size: 11px; color: var(--bone-2); background: var(--ink-0); border: 1px solid var(--line); padding: 4px 10px; border-radius: var(--radius); }
+.pf-wallet-bal { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--copper); }
+
+.pf-pnl-panel { padding: 16px 20px; }
+.pf-chart { width: 100%; height: 300px; }
+
+.pf-section { margin-top: 26px; }
+.pf-history-table { max-height: 480px; overflow-y: auto; }
+
 /* ── Responsive ──────────────────────────────────────────────────────── */
 
-@media (max-width: 960px) {
-  #strategy-panel { display: none; }
-  .split-2col { grid-template-columns: 1fr; }
-}
-
 @media (max-width: 768px) {
-  #sub-pane { height: 80px; min-height: 60px; }
   .page-inner { padding: 14px 16px 40px; }
   .recorder-form { grid-template-columns: 1fr; }
   .bt-form { flex-direction: column; align-items: stretch; }

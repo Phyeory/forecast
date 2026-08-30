@@ -13,24 +13,24 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="stylesheet"
     href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" />
-  <link rel="stylesheet" href="/static/css/style.css?v=200" />
+  <link rel="stylesheet" href="/static/css/style.css?v=201" />
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 
 <!--
   MIZUKI ENGINE UI (2026-08-29)
-  Same functional sections as before — nav, live chart console, recorder, viewer,
-  backtest, futures, live trading, sniper, settings modal — but reorganized:
+  Pages: portfolio, recorder, viewer, backtest, live trading (execution),
+  settings modal.
 
-  · Top bar: flat text-rail navigation (no pill group); brand mark + status readout.
-  · Live page: one command strip (address + timeframes + engine), a single
-    "tape" strip consolidating token identity / price / OHLC / stats / regime,
-    and the engine rail moved to the RIGHT of the chart so the chart owns the left.
-  · Sub-pages: icon chips and stacked glass cards replaced by a compact page
-    masthead plus flat panels separated by hairlines; live-trading's four loose
-    cards merged into one control deck; viewer actions promoted into the masthead.
-  · All element ids, data-* attributes, onclick handlers and JS-owned classes are
-    preserved exactly — app.js / sniper.js hooks are untouched.
+  · Top bar: flat text-rail navigation; brand mark only (the old chart-console
+    connection readout retired with the Live page).
+  · Portfolio (default page): wallet readout, summary stat cards, cumulative
+    realized-PnL curve, open positions, and durable trade history — one
+    /api/portfolio call drives the whole page.
+  · Sub-pages: compact page masthead plus flat panels separated by hairlines;
+    live-trading's control deck / autofeed / trader grid unchanged.
+  · Element ids, data-* attributes and onclick handlers for the remaining
+    pages are preserved exactly — app.js hooks stay stable.
 -->
 
 <body>
@@ -41,109 +41,90 @@
 
       <!-- Navigation Tabs -->
       <nav id="main-nav">
-        <button class="nav-tab active" data-page="live" id="nav-live">Live</button>
+        <button class="nav-tab active" data-page="portfolio" id="nav-portfolio">Portfolio</button>
         <button class="nav-tab" data-page="recorder" id="nav-recorder">Record</button>
         <button class="nav-tab" data-page="viewer" id="nav-viewer">Viewer</button>
         <button class="nav-tab" data-page="backtest" id="nav-backtest">Backtest</button>
-        <button class="nav-tab" data-page="futures-backtest" id="nav-futures-backtest">Futures</button>
         <button class="nav-tab" data-page="live-trading" id="nav-live-trading">Execution</button>
-        <button class="nav-tab" data-page="sniper" id="nav-sniper">Sniper</button>
       </nav>
-
-      <div id="conn-indicator">
-        <div id="dot" class="dot"></div>
-        <span id="conn-label">Idle</span>
-      </div>
     </header>
 
     <!-- ═══════════════════════════════════════════════════════════════════ -->
-    <!-- PAGE: LIVE (chart console)                                        -->
+    <!-- PAGE: PORTFOLIO                                                   -->
     <!-- ═══════════════════════════════════════════════════════════════════ -->
-    <div id="page-live" class="page active">
-      <div id="live-controls">
-        <form id="address-form" onsubmit="return false">
-          <input id="mint-input" type="text" placeholder="Enter pump.fun token address…" autocomplete="off"
-            spellcheck="false" />
-          <button id="load-btn" type="button">Load</button>
-          <button id="settings-btn" type="button" title="Strategy parameters">PRM</button>
-        </form>
-        <div id="tf-bar">
-          <button class="tf-btn" data-tf="1s">1s</button>
-          <button class="tf-btn" data-tf="5s">5s</button>
-          <button class="tf-btn" data-tf="15s">15s</button>
-          <button class="tf-btn active" data-tf="1m">1m</button>
-          <button class="tf-btn" data-tf="5m">5m</button>
-          <button class="tf-btn" data-tf="15m">15m</button>
-          <button class="tf-btn" data-tf="1h">1h</button>
-        </div>
-        <div class="engine-ver-toggle" id="engine-ver-toggle" title="Switch strategy engine version">
-          <button class="engine-ver-btn active" id="engine-ver-v1" data-ver="1">V1</button>
-          <button class="engine-ver-btn" id="engine-ver-v2" data-ver="2">V2</button>
-        </div>
-      </div>
-
-      <!-- Token tape: identity / price / OHLC / session stats / engine state -->
-      <div id="token-bar" class="hidden">
-        <div class="tape-id">
-          <img id="token-logo" alt="" />
-          <span id="token-name">—</span>
-          <span id="token-symbol"></span>
-        </div>
-        <div class="tape-sep"></div>
-        <div class="tape-px">
-          <span id="last-price">—</span>
-          <span id="price-change" class="price-change">—</span>
-        </div>
-        <div class="tape-sep"></div>
-        <div id="ohlc-strip" class="ohlc-strip">
-          <span class="ohlc-item">O <span id="ohlc-open">—</span></span>
-          <span class="ohlc-item">H <span id="ohlc-high">—</span></span>
-          <span class="ohlc-item">L <span id="ohlc-low">—</span></span>
-          <span class="ohlc-item">C <span id="ohlc-close">—</span></span>
-        </div>
-        <div class="tape-sep"></div>
-        <div class="stat-item">
-          <span class="stat-label">Mkt Cap</span>
-          <span class="stat-value" id="stat-mcap">—</span>
-        </div>
-        <div class="stat-item">
-          <span class="stat-label">Session Vol</span>
-          <span class="stat-value" id="stat-vol">0 SOL</span>
-        </div>
-        <div class="stat-item">
-          <span class="stat-label">Signal S</span>
-          <span class="stat-value" id="signal-strength">0.00</span>
-        </div>
-        <div class="tape-right">
-          <div id="regime-badge" class="regime-badge">IDLE</div>
-          <div id="direction-badge" class="direction-badge">— NONE</div>
-        </div>
-      </div>
-
-      <div id="main-content">
-        <div id="chart-area">
-          <div id="chart-wrapper">
-            <div id="chart"></div>
-            <div id="trade-feed"></div>
-            <div id="overlay">
-              <div id="overlay-icon">◈</div>
-              <div id="overlay-msg">Enter a pump.fun token address above to start.</div>
-            </div>
+    <div id="page-portfolio" class="page active">
+      <div class="page-inner">
+        <div class="page-head">
+          <div>
+            <h1 class="page-title">Portfolio</h1>
+            <p class="page-subtitle">Live account overview — balance, open positions, PnL curve, and trade history</p>
           </div>
-          <div id="regime-bar-canvas" class="sub-pane-wrapper regime-bar-wrapper"></div>
-          <div id="sub-pane" class="sub-pane-wrapper"></div>
+          <div class="page-head-side" id="pf-wallet-box">
+            <span id="pf-wallet-addr" class="pf-wallet-addr"></span>
+            <span id="pf-wallet-bal" class="pf-wallet-bal"></span>
+          </div>
         </div>
 
-        <aside id="strategy-panel">
-          <div class="panel-section">
-            <h3 class="panel-title">Indicators</h3>
-            <div id="indicators-display" class="indicators-grid"></div>
+        <!-- Summary stat cards -->
+        <div id="pf-stats-grid" class="bt-stats-grid"></div>
+
+        <!-- Cumulative realized PnL curve -->
+        <div class="panel pf-pnl-panel">
+          <h3 class="panel-title">Cumulative Realized PnL</h3>
+          <div id="pf-pnl-chart" class="pf-chart"></div>
+        </div>
+
+        <!-- Open positions -->
+        <div class="pf-section">
+          <div class="toolbar-row">
+            <h2 class="section-title">Open Positions</h2>
+            <button id="pf-stop-all-btn" class="btn btn-danger" style="display:none">Stop All</button>
           </div>
-          <div class="panel-section">
-            <h3 class="panel-title">Forward Test</h3>
-            <div id="ft-stats" class="ft-grid"></div>
+          <div class="trades-table-wrapper">
+            <table class="trades-table">
+              <thead>
+                <tr>
+                  <th>Token</th>
+                  <th>Size (SOL)</th>
+                  <th>Tokens</th>
+                  <th>Entry Price</th>
+                  <th>Last Price</th>
+                  <th>Unrealized PnL</th>
+                  <th>Age</th>
+                  <th>Entry Reason</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="pf-positions-tbody">
+                <tr><td colspan="9" class="cell-empty">No open positions.</td></tr>
+              </tbody>
+            </table>
           </div>
-        </aside>
+        </div>
+
+        <!-- Trade history -->
+        <div class="pf-section">
+          <h2 class="section-title">Trade History</h2>
+          <div class="trades-table-wrapper pf-history-table">
+            <table class="trades-table">
+              <thead>
+                <tr>
+                  <th>Token</th>
+                  <th>Exit Time</th>
+                  <th>Entry Price</th>
+                  <th>Exit Price</th>
+                  <th>PnL SOL</th>
+                  <th>PnL %</th>
+                  <th>Exit Reason</th>
+                  <th>TX</th>
+                </tr>
+              </thead>
+              <tbody id="pf-trades-tbody">
+                <tr><td colspan="8" class="cell-empty">No closed trades yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -319,142 +300,6 @@
                   </tr>
                 </thead>
                 <tbody id="bt-trades-tbody"></tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- ═══════════════════════════════════════════════════════════════════ -->
-    <!-- PAGE: FUTURES BACKTEST                                            -->
-    <!-- ═══════════════════════════════════════════════════════════════════ -->
-    <div id="page-futures-backtest" class="page">
-      <div class="page-inner">
-        <div class="page-head">
-          <h1 class="page-title">Futures Backtester</h1>
-          <p class="page-subtitle">Leveraged perp simulation over the same OHLCV recordings — margin, funding, and
-            mark-price liquidation layered on the same engine</p>
-        </div>
-
-        <!-- Futures instruments (fetched from the exchange cache) -->
-        <div id="fbt-controls" class="panel">
-          <div class="fbt-block">
-            <h3 class="panel-title">Instrument · USDC-margined · 1h</h3>
-            <div id="fbt-instruments" class="fbt-instrument-grid">
-              <!-- populated from /api/futures/markets -->
-            </div>
-          </div>
-          <div class="bt-form">
-            <div class="form-group">
-              <label class="form-label">Leverage</label>
-              <select id="fbt-leverage" class="form-select">
-                <option value="1">1×</option>
-                <option value="2">2×</option>
-                <option value="3" selected>3×</option>
-                <option value="5">5×</option>
-                <option value="10">10×</option>
-                <option value="20">20×</option>
-                <option value="25">25×</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label class="form-label">History Window</label>
-              <select id="fbt-days-back" class="form-select">
-                <option value="7">7 days</option>
-                <option value="30" selected>30 days</option>
-                <option value="60">60 days</option>
-                <option value="90">90 days</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Margin / Trade (USDC)</label>
-              <input id="fbt-margin" type="number" class="form-input" value="100" step="10" min="1" />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Starting Balance (USDC)</label>
-              <input id="fbt-starting-balance" type="number" class="form-input" value="1000" step="100" min="10" />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Funding / 8h (fallback)</label>
-              <input id="fbt-funding-rate" type="number" class="form-input" value="0.0001" step="0.00001" min="-0.01"
-                max="0.01" />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Taker Fee</label>
-              <input id="fbt-taker-fee" type="number" class="form-input" value="0.00045" step="0.00005" min="0" />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Slippage (%)</label>
-              <input id="fbt-slippage" type="number" class="form-input" value="0.1" step="0.05" min="0" />
-            </div>
-            <div class="form-actions">
-              <button id="fbt-run-btn" class="btn btn-primary">Run Backtest</button>
-              <button id="fbt-run-all-btn" class="btn btn-secondary">Run All Instruments</button>
-              <button id="fbt-params-btn" class="btn btn-secondary">Engine Parameters</button>
-            </div>
-          </div>
-          <div id="fbt-progress" class="hidden">
-            <div class="progress-bar">
-              <div id="fbt-progress-fill" class="progress-fill"></div>
-            </div>
-            <span id="fbt-progress-label" class="progress-label">Running…</span>
-          </div>
-          <div class="micro-note">
-            Accounted in <b>USDC</b> (USDT-margined upstream at Bybit — stable 1:1 USD proxy for USDC PnL).
-            First run of an instrument downloads its 30-day history once and caches it locally in
-            <code>backend/data/futures_cache.db</code>. Real funding rates, mark prices, and open-interest are
-            ingested alongside the klines — no recording needed. Long-only (engine constraint, iter33–39).
-          </div>
-        </div>
-
-        <!-- Saved futures backtests -->
-        <div class="backtests-section">
-          <div class="toolbar-row">
-            <h2 class="section-title">Saved Futures Backtests</h2>
-            <button id="fbt-delete-all-btn" class="btn btn-danger" onclick="deleteAllBacktests()">Delete All</button>
-          </div>
-          <div id="fbt-backtests-list" class="backtests-grid">
-            <div class="empty-state">No futures backtests yet. Configure leverage and run one.</div>
-          </div>
-        </div>
-
-        <!-- Futures backtest result view -->
-        <div id="fbt-result-area" class="hidden">
-          <div class="bt-result-header">
-            <div class="bt-result-meta">
-              <span id="fbt-result-name" class="bt-result-name"></span>
-              <span id="fbt-result-tf" class="viewer-meta-badge"></span>
-              <span id="fbt-result-lev" class="viewer-meta-badge lev-badge"></span>
-            </div>
-            <button id="fbt-result-back-btn" class="btn btn-secondary">← Back</button>
-          </div>
-
-          <div id="fbt-stats-grid" class="bt-stats-grid"></div>
-
-          <div id="fbt-chart" class="viewer-chart-container"></div>
-
-          <div class="bt-trades-section">
-            <h3 class="section-title">Futures Trade Log</h3>
-            <div id="fbt-trades-table-wrapper" class="trades-table-wrapper">
-              <table id="fbt-trades-table" class="trades-table">
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>Entry Time</th>
-                    <th>Entry Price</th>
-                    <th>Exit Time</th>
-                    <th>Exit Price</th>
-                    <th>Margin</th>
-                    <th>Lev</th>
-                    <th>Notional</th>
-                    <th>PnL SOL</th>
-                    <th>PnL %</th>
-                    <th>Funding</th>
-                    <th>Exit Reason</th>
-                  </tr>
-                </thead>
-                <tbody id="fbt-trades-tbody"></tbody>
               </table>
             </div>
           </div>
@@ -767,121 +612,6 @@
       </div>
     </div>
 
-    <!-- ═══════════════════════════════════════════════════════════════════ -->
-    <!-- PAGE: SNIPER                                                      -->
-    <!-- ═══════════════════════════════════════════════════════════════════ -->
-    <div id="page-sniper" class="page">
-      <div class="page-inner">
-
-        <div class="page-head">
-          <h1 class="page-title">New Pair Sniper</h1>
-          <p class="page-subtitle">Scans PumpPortal live for new pairs at creation — scores quality, auto-enters on
-            the pump, exits at target</p>
-        </div>
-
-        <!-- Mode + Config -->
-        <div class="panel" id="sniper-config-card">
-          <div class="sn-head">
-            <span class="af-subhead">Configuration</span>
-            <div class="sniper-mode-toggle" id="sniper-mode-toggle">
-              <button class="sniper-mode-btn active" id="sniper-mode-paper" data-mode="paper">Paper</button>
-              <button class="sniper-mode-btn" id="sniper-mode-live" data-mode="live">Live</button>
-            </div>
-          </div>
-
-          <div class="lt-config-grid sniper-config-grid">
-            <div class="form-group">
-              <label class="form-label">Size (SOL)</label>
-              <input id="sniper-buy-size" type="number" class="form-input" value="0.05" step="0.01" min="0.001" />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Slippage (%)</label>
-              <input id="sniper-slippage" type="number" class="form-input" value="15" step="0.5" min="1" max="50" />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Priority Fee (SOL)</label>
-              <input id="sniper-priority-fee" type="number" class="form-input" value="0.0001" step="0.0001" />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Max Coins</label>
-              <input id="sniper-max-coins" type="number" class="form-input" value="5" step="1" min="1" max="20" />
-            </div>
-          </div>
-
-          <!-- Live mode: private key (hidden unless live mode) -->
-          <div id="sniper-live-key-row" class="sn-live-key" style="display:none">
-            <label class="form-label">Private Key (live mode)</label>
-            <input id="sniper-private-key" type="password" class="form-input"
-              placeholder="Base58 private key…" autocomplete="off" spellcheck="false" />
-            <div class="micro-note">Sent only to your local backend for signing. Never shared.</div>
-          </div>
-
-          <div class="form-actions sn-actions">
-            <button id="sniper-start-btn" class="btn btn-record">
-              <span class="sniper-pulse-indicator" id="sniper-pulse" style="display: none;"></span> Start Sniper
-            </button>
-            <button id="sniper-stop-btn" class="btn btn-danger" style="display:none">Stop Sniper</button>
-          </div>
-        </div>
-
-        <!-- Status Bar -->
-        <div id="sniper-status-bar" class="sn-status hidden">
-          <span class="sn-status-scan">Scanning</span>
-          <span>Active <b id="sniper-status-active">0</b></span>
-          <span>Trades <b id="sniper-status-trades">0</b></span>
-          <span>PnL <b id="sniper-status-pnl" class="pos">+0.000 SOL</b></span>
-          <span>Win Rate <b id="sniper-status-winrate">—</b></span>
-          <span class="sn-status-mode" id="sniper-status-mode">paper</span>
-        </div>
-
-        <!-- Live pair feed -->
-        <div class="split-2col">
-
-          <!-- Left: New pairs feed -->
-          <div>
-            <h2 class="section-title">Tracking Radar</h2>
-            <div id="sniper-feed" class="sn-feed">
-              <div class="empty-state">Start the sniper to see new pairs…</div>
-            </div>
-          </div>
-
-          <!-- Right: Active coin sessions -->
-          <div>
-            <h2 class="section-title">Active Positions</h2>
-            <div id="sniper-positions" class="sn-feed">
-              <div class="empty-state">No active positions</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Trade History -->
-        <div class="lt-history-section">
-          <h2 class="section-title">Operations Ledger</h2>
-          <div class="trades-table-wrapper">
-            <table class="trades-table">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Token</th>
-                  <th>Mode</th>
-                  <th>Status</th>
-                  <th>Action</th>
-                  <th>PnL SOL</th>
-                  <th>PnL %</th>
-                  <th>Entry Reason</th>
-                  <th>Exit Log</th>
-                </tr>
-              </thead>
-              <tbody id="sniper-trades-tbody">
-                <tr id="sniper-history-empty">
-                  <td colspan="9" class="cell-empty">No historical trades recorded in current session.</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-      </div>
     </div>
 
     <!-- Settings Modal (shared) -->
@@ -949,8 +679,7 @@
       setTimeout(check, 1000);
     })();
   </script>
-  <script src="/static/js/app.js?v=119"></script>
-  <script src="/static/js/sniper.js"></script>
+  <script src="/static/js/app.js?v=120"></script>
 </body>
 
 </html>

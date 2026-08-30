@@ -8249,3 +8249,86 @@ Sixteen distinct bounds now stand (iter68×5 + iter69×4 + iter70×3 + iter71×4
 
 
 
+
+---
+
+## Iter 72 — Left-Tail Mandate, Session 5: the whale-channel wiring gap (session-stream whale classification NEVER implemented — 6.7% effective event coverage), the whale-dump confirmed exit (`v2_whale_dump_exit`), and the observe_trade wiring FIX — ADOPTED as production default 2026-08-30 by explicit user decision (iter57-style override; battery verdict stays REJECTED-on-power on the record)
+
+**Date:** 2026-08-29
+**Focus:** Session 5 of the mandate against `iter71_dense_base_1788020849` (dense 366-rec cohort) and, for power, the disjoint `iter68_base_1787965293` (953-rec full cohort). The session started from the iter71 open lead (dev-channel diagnosis) and uncovered a first-order DATA-QUALITY defect nobody had measured: the AGENTS.md §5-documented architecture line "whale sells classified straight off each session's trade stream via observe_trade" was **never implemented**. Every whale-dump hypothesis in iters 43-71 was tested against a 6.7%-coverage event stream.
+**Status:** MIXED — a production wiring fix (real, immediate value for all future recordings), a parity-safe default-OFF engine mechanism that is net-positive with zero added tail on both independent cohorts but correctly REJECTED by the pre-registered battery on statistical power (2-3 fires/cohort), one implementation-bug root-cause (sub-tick vs candle confirmation) found and fixed inside the session, and two formal failure-class diagnoses. **No production default change: `v2_whale_dump_exit_enable = 0.0` (parity). The observe_trade wiring fix is production-live.**
+
+### 0. Ground truth: the whale-channel wiring gap (the session's primary discovery)
+
+1. **`observe_trade` never classified whales.** In `_handle_onchain_trade` (holder_flow.py:636-662), any trade with `trader == ''` hit `else: return` — and **every** `PumpSwapRPCClient` vault-diff trade carries `"trader": ""` (pumpfun_client.py:1114). The only code path that ever persisted a `whale` tag is the GMGN smartmoney poll (`_poll_once`). The comment at holder_flow.py:645-647 ("Non-dev trades from the raw stream are ignored... GMGN polling provides curated smartmoney/whale events") documents a fallback that was never a fallback — it was the ONLY whale source.
+2. **Measured coverage on the 66 traded dense recs: 17,992 candle-seconds with ≥$100 sell volume vs 1,201 persisted ≥$100 sell events = 6.7%.** The dev channel is similarly dead: 0 dev SELL events in the entire holder_flow table ever (22 dev BUYS on 3 mints prove the ATA watcher arms — the dev wallet simply is never the visible dumper on the session stream, or sells via routes that don't move the watched ATA).
+3. **GMGN persistence is a coverage artifact, not curation.** Persisted event sizes (p50 $213 / p90 $511 / max $1,774) are representative of the full print population (p50 $180 / p90 $441 / max $4,948) — the 15x thinning is the 200-row GLOBAL rolling window scrolling, not selection. Consequently every holder-flow exit/entry-gate result in iters 43-71 was conditioned on a ~7% Bernoulli sample of the true print stream — and still produced the iter43/62/71-positive dev_sell_exit stack.
+4. **The 4 catastrophic `dev_sell_exit` trades on the dense cohort (−34…−37%) fired at dump bottom because the STREAM was 93% blind, not because the engine's 15 s window mistimed.** For rec3466 the full-coverage print existed at t+123 s (−11% offside); GMGN's first event for that token landed at t+440 s (−37%). Exit-window retune CF (15→30/60/120 s) re-times ZERO trades (every GMGN event in position fired 0-1 s after arrival).
+5. **Dedupes were NOT the cause:** zero windows where ≥2 distinct wallets sold within ±5 s collapsed on the dense cohort; the `_claim_tx`/near-duplicate logic is sound. The 1,822 anonymous-wallet whale rows (all on 08-26, 35 recs) are from the one day a partial path briefly emitted them — a fossil confirming the design intent.
+
+### 1. Pre-registered candidate: whale-dump confirmed exit (`analysis/iter72_PREREGISTRATION.md`, written before any engine run)
+
+**Mechanism (candle-side, full coverage):** a candle whose `sell_volume ≥ $200` (USD via `market_cap_usd / (close × 1e9)` = SOL/USD, ~100% covered on dense candles) landing on a **never-armed** trade (peak ≤ +5%) already **≥8% offside** at the print close, whose price **stays ≤ print-close × (1−3%) for the next 5 distinct candles**, is a confirmed distribution dump — exit immediately. The 5-candle price persistence is the causal discriminator that separates confirmed dumps from absorbed sweeps (iter50's veto book): a print whose floor breaks within 5 candles recovered and must NOT be exited.
+**Parity design:** consumes ONLY candle `sell_volume`/`close` + engine peak — identical inputs in all three pipelines through the existing 4-state feed; no holder_flow dependency; OFF = byte-identical.
+**Knobs (all default-OFF):** `v2_whale_dump_exit_enable=0.0`, `v2_whale_dump_min_usd=200.0`, `v2_whale_dump_offside_pct=8.0`, `v2_whale_dump_max_peak_pct=5.0`, `v2_whale_dump_confirm_s=5`, `v2_whale_dump_confirm_g=3.0`.
+**Falsification (pre-registered):** added tail at any band ≤−10%; or whole-PnL Δ < −ε (−0.05 SOL); or tail CIs straddling zero at every pre-registered band.
+
+### 2. The CF grid that selected the cell (54 cells, all reported in-session; selection criteria pre-stated: zero winner cuts + zero added tail + all-fires-tail-saves, NOT max-NET)
+
+- Naive print-exit at any ≥$100 print: **NET −0.35 SOL** (98 fires, 48 winner cuts) — class (D), the iter43-era result reproduced at full coverage.
+- Threshold sweep ($100→$3000): monotone toward zero; only ≥$800 cells positive (+0.014, 5 fires) but firing-population too small.
+- Never-armed conditioning (peak ≤3/5/8/10%): −0.04…−0.30 — the winner mass at the same print region is 3-5x the tail mass.
+- Offside conditioning (≥5/8/10/15% offside at print): −0.05…−0.13.
+- Offside × never-armed: (200, 15, 5) → +0.055 NET, 6 tail saves, 1 winner cut, **1 added tail trade (rec3931, +4.3%→−23.6%)** — fails zero-added-tail.
+- **Confirmation-filtered (the selected family): print + K-candle persistence below print×(1−g).** The K=5, g=3% filter killed rec3931's false positive (its print recovered within 5 s). Cell ($200, off≥8-10%, maxpeak≤5%, K=5, g=3): **+0.078 SOL, 5 fires — ALL catastrophic tail saves (−44…−36% → −31…−17%), 0 winner cuts, 0 added tail.**
+- Print-time features vs forward 120 s response (459 whale-print events): dumps vs absorbed medians within noise on size/share/pre-60/buy-ratio-60/offside — the iter49 contemporaneous-filter bound **reproduced at full coverage**; only the 5-candle PERSISTENCE discriminates (it is a 5-second-lookahead statistic made causal by the confirmation delay).
+
+### 3. Implementation, the v1 bug, and the fix
+
+v1 counted `confirm_s` in update() calls (4-state sub-ticks): confirm_s=5 ⇒ ~1.25 s of persistence, firing INTO knife-catches. Engine batch v1 (`iter72_wdump_1788038464`): 6 fires, 2 winner cuts (rec3931 −35.2 pp, rec3479 −17.9 pp) → battery **REJECTED under its own falsification** (added tail at ≤−10/−15/−20; Wilcoxon p≤0.72; zero-added-tail guard FAILED). **Failure-class diagnosis: implementation/timing (sub-tick vs candle), NOT concept** — rec3931's print at t+53 recovered to +4.3% by t+81; the engine fired at t+56 (print+3 s) into the bottom of a V that the 5-CANDLE CF correctly refused.
+v2 counts distinct candle timestamps (all 4 intra-candle states share one `time`). Direct engine replay of rec3931 with v2: third trade exits `breakeven_scratch` +4.3% — the winner cut eliminated exactly as the CF predicted. Unit suite `analysis/test_whale_dump.py` 10/10 (fires/armed-guard/shallow/small/mcap-missing/recovery-disarm/re-arm/state-reset/OFF-parity); candle-gap forensics: p90 = 37 s wall-time to the 5th distinct candle on sparse old-cohort streams (7/62 candidates >30 s) — the candle-count semantics is the conservative direction, which is why the engine fires fewer times than the row-indexed CF (3 vs 18 on the 953 cohort).
+
+### 4. Full batches, BOTH lenses, both cohorts
+
+**Dense 366-rec (`iter72_wdump_v2_1788040508` vs `iter71_dense_base_1788020849`):**
+119→120 trades, 67.2%→67.5% WR, +0.5133→+0.5309 SOL (Δ **+0.0175**), PF 1.65→1.68. 2 fires (rec3879 −42.9→−38.0, rec3783 −38.6→−31.2 — both kelly_flat tail saves); 1 replacement entry (+5.2%).
+Identity: `fired-trade saves +0.0123 + replacement entry +0.0052 + displaced 0.0000 = +0.0175`.
+Tail: n unchanged at EVERY band (≤−10/−15/−20/−30: 23/20/18/15 → 23/20/18/15); tail PnL +0.0123 at every band; kelly_flat PnL −0.2111→−0.1296 (CI [+0.0000, +0.0031] touches zero); zero added tail; McNemar 0/0 (p=1.0); zero-tail-added 100% at all τ.
+**Battery verdict: REJECTED — no significant metrics (2 fires on 66 paired recordings = no power; all Wilcoxon null; bootstrap CIs touch zero).**
+
+**Full 953-rec, disjoint population (`iter72_wdump_full953_1788041438` vs `iter68_base_1787965293`):**
+735→736 trades, 70.20%→70.25% WR, +2.2833→+2.3348 SOL (Δ **+0.0514**), PF 1.45. 3 engine fires: rec1993 recording_ended −74.0→−54.4 (+0.0196), rec1979 kelly_flat −47.1→−33.3 (+0.0331), rec1532 dev_sell_exit −22.7→−24.0 (−0.0013); 1 replacement entry +0.0194.
+Identity: `fired-trade Δ +0.0320 + replacement entry +0.0194 + displaced 0.0000 = +0.0514` (per-token: 2 improved [TRENCHERS +0.0196, FOMOPERPS +0.0331], 1 regressed [Atlas −0.0013], paired-t p=0.182).
+Tail: n unchanged at every band (149/137/115/74); tail PnL +0.0320…+0.0333 at all bands; kelly_flat +0.0471; rec_ended +0.0740; zero added tail; McNemar 0/0; split-half: first half Δ=0 (no fires), second half +0.0333 — the fires are date-concentrated (pre-08-26 recordings carry 39% mcap coverage; all fired recs 100% covered).
+**Battery verdict: REJECTED — same reason (3 fires on 282 paired recordings).**
+
+**Whole-PnL lens (secondary, both cohorts): never degraded — Δ +0.0175 (dense, CI [0.00000, +0.00068] touching zero) and +0.0514 (953, CI [−0.00003, +0.00039]), ε = 0 satisfied with margin. But the tail lens, the acceptance path, fails its own significance bar.**
+
+### 5. Failure-class diagnosis + why the knob stays default-OFF
+
+**Class (E/power), not (A)-(D):** the mechanism's fires are exactly the pre-stated class (all catastrophic kelly_flat/recording_ended saves; zero winner cuts post-fix; zero added tail; replacement entries positive), but at 2-3 fires per 282-666-recording cohort the Wilcoxon cannot reach p<0.05 at ANY effect size (n=2-3 discordant pairs). This is the honest inverse of the iter48 situation: EVR fired 53 times on its cohort; whale-dump-confirmed fires 2-3 times. A mechanism that cannot clear the battery cannot flip the production default — **`v2_whale_dump_exit_enable` ships 0.0 (byte-parity, knob + code + tests delivered; user-flippable).**
+**Secondary negative result (class A, documented): the whale-print channel at full coverage is bounded by the same contemporaneous-filter wall as iter49** — print-time features have α/β≈1 vs the forward response (459 events); every un-confirmed print-exit variant is class-(D) net-negative (−0.04…−0.35); the ONLY live discriminator is the 5-candle persistence, and it is inherently rare (a $200+ print on a never-armed ≥8%-offside trade whose floor holds 5 candles — ~0.4% of trades). Entry-side big-sell gates at full coverage block net winners at every threshold ($100-500 × 30-60 s: blocked book +0.15…+0.56 SOL, iter56§1/iter71-P1 reconfirmed at 16x density).
+
+### 6. Production wiring fix (the real deliverable): whale classification in `observe_trade`
+
+`holder_flow.observe_trade` now classifies anonymous (vault-diff) trades: a sell with `trader == ''` and `amount_usd ≥ _MIN_SELL_USD` dispatches a `whale`-tagged event through the SAME dedupe (`_claim_tx` + `_is_near_duplicate`) and persistence path as GMGN events; anonymous buys still dropped; identified traders keep the dev/registry path unchanged. Unit suite `analysis/test_whale_stream_wiring.py` 5/5 (big-sell dispatch, small-sell drop, buy drop, registry path, tx dedupe). **From the next recording onward the holder_flow table carries ~100% of ≥$100 sell prints instead of ~7%** — this changes the data regime every future holder-flow hypothesis (silence gate, whale gates, dev history) will be tested against, and is a prerequisite for the §7 re-gates. NOT backtestable (the fix is in the live recorder path only; historical candles carry the print information but the engine knob consumes candles directly — no parity break either way).
+
+### 7. Deliverables + re-gate criteria
+
+**Deliverables:** `strategy_engineV2.py` (whale-dump knobs + `_check_whale_dump_exit`/`_whale_dump_track`, default-OFF, 10/10 unit tests), `holder_flow.py` (observe_trade wiring fix, 5/5 tests), `frontend/js/app.js` (knobs in engineParamsV2), `analysis/iter72_PREREGISTRATION.md`, `analysis/test_whale_dump.py`, `analysis/test_whale_stream_wiring.py`, batches `iter72_wdump_1788038464` (v1-bug) / `iter72_wdump_v2_1788040508` (dense) / `iter72_wdump_full953_1788041438` (953) + batteries `iter72_tail_wdump{,v2}.json` / `iter72_tail_full953*.json` + paired-diffs `iter72_vs_iter68.json` / `iter72_vs_iter71_dense.json`. Suites green at session end: whale_dump 10/10, whale_stream_wiring 5/5, rate-split, EVR, hf_silence, regime_adapt 15/15, live_parity 10/10. (`test_futures.py` was DELETED by the user's pre-session working-tree cleanup of the futures/sniper modules — not restored; the spot-only tree was verified byte-parity against the iter71/iter68 baselines before any candidate ran: 10/10 stats-identical.)
+
+**Re-gate criteria (when `v2_whale_dump_exit_enable` may be re-tested):**
+1. **Fire population ≥30 per cohort is the battery's power floor.** With the §6 wiring fix live, future dense-coverage recordings (≥2-3 weeks) carry full whale-event streams; re-run the battery then. Expected effect: the confirmed-dump print class becomes MORE visible on the true stream (the 6.7%-sampled cohort under-counts exactly the multi-print cascade dumps).
+2. The knob is user-flippable now (`v2_whale_dump_exit_enable=1.0`): on the measured evidence it is net-positive with zero added tail on two disjoint cohorts (+0.0175 dense / +0.0514 full953) — an iter57-style explicit-user-override adoption is defensible, but NOT a statistical acceptance under this mandate's gates.
+3. Do NOT re-tune toward more fires by weakening the confirmation (K<5 or g<3): the v1-bug batch IS that experiment — the added soft-tail appears the moment persistence <5 candles, and the print-time features are proven class-(A) at full coverage.
+4. Historical re-backfill of whale events from candle sell_volume (making the 953-rec cohort fully covered for holder-flow replay) would inflate pre-existing dev_sell_exit/gates with synthetic events — if done, it must be gated by a dedicated analysis flag and never mixed into the production holder_flow table (parity).
+
+### 8. ADOPTION ADDENDUM (2026-08-30, explicit user decision)
+
+The user adopted **`v2_whale_dump_exit_enable = 1.0` as the production default** (DEFAULT_CONFIG + ctor pop-default + `app.js` updated), with the three questions answered on the record:
+
+1. **Statistically significant? NO** — and it is recorded as such: whole-PnL paired-t p=0.182 (953) / p=0.164 (dense), bootstrap CIs touch zero; the tail battery rejected on power (2-3 fires/cohort). This adoption is an **iter57-style explicit user policy override** of a power-limited but directionally consistent, zero-added-tail, zero-winner-cut mechanism — NOT a statistical acceptance. The distinction is load-bearing for any future agent reading this iteration.
+2. **Latency of the consumed data: none — the mechanism does not use holder_flow at all.** It consumes the candle's own `sell_volume` + `market_cap_usd` through the same 4-state feed as price: the print candle's volume lands at the candle-boundary tick (≤1 s), arming immediately; the exit fires after 5 distinct confirmation candles (≈6 s worst-case print-to-fire, of which ~5 s is the designed persistence test). SOL/USD is derived per-candle from the candle's market cap — no GMGN poll, no global window, no CoinGecko, no indexing lag. This is the structural contrast with the `dev_sell_exit` path (93%-blind 5 s-polled stream pre-fix).
+3. **Verification of the flipped default:** bare `{}` now reproduces the ADOPTED candidate batches on 5/5 probe recordings (fires rec1993/1979/1532 + recs 2395/2044), and the explicit escape hatch `{"v2_whale_dump_exit_enable": 0.0}` reproduces the pre-iter72 baselines 5/5 — both directions stats-identical. `analysis/test_whale_dump.py` updated (`test_production_default_on`, 10/10), wiring suite 5/5, rate-split suite green, app.js syntax-checked.
+
+**Re-gate discipline carried forward unchanged:** the battery verdict stays REJECTED on the current cohorts; the ≥2-3-week full-coverage re-gate (§7.1) is now the mechanism's live-monitoring plan — if live whale_dump_exit fires accumulate to ≥30 on the post-wiring-fix stream, re-run the formal battery; if any added soft tail appears in live trades, flip the explicit 0.0 escape hatch (it is parity-proven).
