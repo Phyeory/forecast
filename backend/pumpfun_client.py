@@ -364,6 +364,18 @@ async def get_token_info(mint: str) -> Optional[dict]:
         return _info_from_ds(pair) if pair else None
 
 
+async def get_ds_pair_by_mint(session: aiohttp.ClientSession, mint: str) -> Optional[dict]:
+    """Exact Solana pair snapshot for a token mint, one HTTP call.
+
+    Public one-shot wrapper used by the new-pairs recorder's silence-gated
+    fallback poller: newborn bonding-curve tokens appear on DexScreener
+    ~45–70 s after birth — the price source of last resort when PumpPortal's
+    per-mint trade stream is throttled (measured 2026-08-30: births keep
+    flowing while per-mint trades deliver nothing for hours).
+    """
+    return await _ds_token(session, mint)
+
+
 async def get_historical_candles(
     mint: str, timeframe: str = "1m", limit: int = 500
 ) -> list[dict]:

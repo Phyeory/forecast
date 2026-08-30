@@ -13,7 +13,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="stylesheet"
     href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" />
-  <link rel="stylesheet" href="/static/css/style.css?v=201" />
+  <link rel="stylesheet" href="/static/css/style.css?v=202" />
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 
@@ -46,6 +46,7 @@
         <button class="nav-tab" data-page="viewer" id="nav-viewer">Viewer</button>
         <button class="nav-tab" data-page="backtest" id="nav-backtest">Backtest</button>
         <button class="nav-tab" data-page="live-trading" id="nav-live-trading">Execution</button>
+        <button class="nav-tab" data-page="new-pairs" id="nav-new-pairs">New Pairs</button>
       </nav>
     </header>
 
@@ -612,6 +613,192 @@
       </div>
     </div>
 
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <!-- PAGE: NEW PAIRS (newborn pump.fun recorder — no engine, no trading) -->
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <div id="page-new-pairs" class="page">
+      <div class="page-inner">
+        <div class="page-head">
+          <h1 class="page-title">New Pairs</h1>
+          <p class="page-subtitle">Auto-record newly-born pump.fun tokens (pre-migration) — price capture only, no engine, no trading. Sessions end after 2 min without price motion.</p>
+        </div>
+
+        <!-- Control deck: session stats + config, mirroring the Execution deck minus wallet/trading -->
+        <div class="panel lt-deck">
+          <!-- Session Stats (aggregated across active recording sessions) -->
+          <div class="deck-zone deck-stats" id="np-session-card" style="display:none">
+            <div class="bt-stat">
+              <span class="bt-stat-label">Recording</span>
+              <span class="bt-stat-value" id="nps-recording">0</span>
+            </div>
+            <div class="bt-stat">
+              <span class="bt-stat-label">Births Seen</span>
+              <span class="bt-stat-value" id="nps-seen">0</span>
+            </div>
+            <div class="bt-stat">
+              <span class="bt-stat-label">Recordings Started</span>
+              <span class="bt-stat-value" id="nps-fed">0</span>
+            </div>
+            <div class="bt-stat">
+              <span class="bt-stat-label">Total Candles</span>
+              <span class="bt-stat-value" id="nps-candles">0</span>
+            </div>
+          </div>
+
+          <div class="deck-zone" id="np-config-card">
+            <h3 class="panel-title">Recording Configuration</h3>
+            <div class="lt-config-grid">
+              <div class="form-group">
+                <label class="form-label">Timeframe</label>
+                <select id="np-timeframe" class="form-select">
+                  <option value="1s" selected>1s</option>
+                  <option value="5s">5s</option>
+                  <option value="15s">15s</option>
+                  <option value="1m">1m</option>
+                  <option value="5m">5m</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Max Concurrent Sessions</label>
+                <input id="np-max-concurrent" type="number" class="form-input" value="20" step="1" min="1" max="100" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">No-Motion Stop (s)</label>
+                <input id="np-no-motion" type="number" class="form-input" value="120" step="10" min="10" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Re-record Cooldown (s)</label>
+                <input id="np-cooldown" type="number" class="form-input" value="3600" step="60" min="0" />
+              </div>
+            </div>
+            <div class="micro-note">Termination policy is no-motion only — there is deliberately no market-cap floor on this tab. A session records until the token stops printing price changes for the configured window.</div>
+          </div>
+
+          <div class="deck-zone" id="np-add-card">
+            <div class="lt-add-row">
+              <input id="np-token-input" type="text" class="form-input"
+                placeholder="Enter newborn token address to record manually…" autocomplete="off" spellcheck="false" />
+              <button id="np-add-btn" class="btn btn-record">Start Recording</button>
+              <button id="np-stop-all-btn" class="btn btn-danger" style="display:none">Stop All</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- NewPairs Feed (PumpPortal subscribeNewToken) -->
+        <div class="panel" id="np-feed-card">
+          <div class="af-head">
+            <h3 class="panel-title">New-Pair Feed · pump.fun births</h3>
+            <label class="af-switch" title="Auto-record every accepted newborn token">
+              <input type="checkbox" id="np-toggle" />
+              <span class="af-slider"></span>
+            </label>
+          </div>
+          <div class="af-statusline">
+            <span id="np-status-dot" class="dot error"></span>
+            <span id="np-status-text">Disconnected</span>
+            <span id="np-source-status" class="af-cli"></span>
+          </div>
+
+          <!-- Settings -->
+          <div class="af-settings" id="np-settings" style="display:none">
+            <h4 class="af-subhead">Birth Filters</h4>
+            <div class="lt-config-grid">
+              <div class="form-group">
+                <label class="form-label">Min Dev Buy (SOL)</label>
+                <input id="np-min-dev-buy" type="number" class="form-input" value="0" step="0.1" min="0" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Max Dev Buy (SOL)</label>
+                <input id="np-max-dev-buy" type="number" class="form-input" value="0" step="0.5" min="0" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Min Birth MCap ($)</label>
+                <input id="np-min-mcap" type="number" class="form-input" value="0" step="1000" min="0" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Max Birth MCap ($)</label>
+                <input id="np-max-mcap" type="number" class="form-input" value="0" step="1000" min="0" />
+              </div>
+              <div class="form-group span-2">
+                <label class="form-label">Exclude Mints (comma-sep)</label>
+                <input id="np-exclude" type="text" class="form-input" value="" placeholder="Mints to skip…"
+                  autocomplete="off" spellcheck="false" />
+              </div>
+            </div>
+
+            <h4 class="af-subhead">Boolean Gates</h4>
+            <div class="af-gates">
+              <label><input type="checkbox" id="np-req-social" /> Require Social</label>
+            </div>
+
+            <div class="af-actions">
+              <button class="btn btn-primary" id="np-save-config">Save Settings</button>
+              <span id="np-preview" class="af-preview"></span>
+            </div>
+          </div>
+
+          <!-- Stats summary -->
+          <div class="af-stats" id="np-stats">
+            <div>
+              <div class="af-stat-label">Total Seen</div>
+              <div class="af-stat-value" id="np-stat-seen">0</div>
+            </div>
+            <div>
+              <div class="af-stat-label">Recordings Started</div>
+              <div class="af-stat-value" id="np-stat-fed">0</div>
+            </div>
+            <div>
+              <div class="af-stat-label">Active Sessions</div>
+              <div class="af-stat-value" id="np-stat-active">0</div>
+            </div>
+            <div>
+              <div class="af-stat-label">Last Birth</div>
+              <div class="af-stat-value" id="np-stat-lastpoll">—</div>
+            </div>
+          </div>
+
+          <!-- Recent births feed -->
+          <h4 class="af-subhead">Recent New Pairs</h4>
+          <div id="np-candidates" class="af-cand-list">
+            <div class="empty-state">No births yet. Toggle the feed on to auto-record new pump.fun tokens.</div>
+          </div>
+        </div>
+
+        <!-- Active Recording Sessions Grid -->
+        <div class="lt-traders-section">
+          <h2 class="section-title">Active Recordings</h2>
+          <div id="np-traders-grid" class="lt-traders-grid">
+            <div class="empty-state">No active recordings. Toggle the feed on or add a newborn mint above.</div>
+          </div>
+        </div>
+
+        <!-- Completed new-pair recordings (separate DB) -->
+        <div class="recordings-section">
+          <div class="toolbar-row">
+            <h2 class="section-title">New-Pair Recordings</h2>
+            <button id="np-cleanup-btn" class="btn btn-danger" onclick="npCleanupRecordings()">Clean Up</button>
+          </div>
+          <div id="np-recordings-list" class="recordings-grid">
+            <div class="empty-state">No newborn-token recordings yet.</div>
+          </div>
+        </div>
+
+        <!-- Viewer chart area (opened from a recording card) -->
+        <div id="np-viewer-area" class="hidden">
+          <div class="viewer-header">
+            <div class="viewer-meta">
+              <span id="np-viewer-token-name" class="viewer-meta-name"></span>
+              <span id="np-viewer-token-symbol" class="viewer-meta-symbol"></span>
+              <span id="np-viewer-meta-tf" class="viewer-meta-badge"></span>
+              <span id="np-viewer-meta-candles" class="viewer-meta-badge"></span>
+            </div>
+            <button id="np-viewer-back-btn" class="btn btn-secondary">← Back</button>
+          </div>
+          <div id="np-viewer-chart" class="viewer-chart-container"></div>
+        </div>
+      </div>
+    </div>
+
     </div>
 
     <!-- Settings Modal (shared) -->
@@ -679,7 +866,7 @@
       setTimeout(check, 1000);
     })();
   </script>
-  <script src="/static/js/app.js?v=120"></script>
+  <script src="/static/js/app.js?v=121"></script>
 </body>
 
 </html>
