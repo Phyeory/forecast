@@ -396,6 +396,11 @@ class LiveTrader:
         # track staleness for the retry cap.
         self.pending_signal_max_age_seconds: float = pending_signal_max_age_seconds
         self._pending_buy_ts: float = 0.0
+        # Engine anchor captured at SIGNAL time (signal-state close × (1 +
+        # engine slippage)) so a BUY that retries after a blocked launch
+        # still notifies the engine on the same price basis the backtester's
+        # instant model registered for that signal state (decision parity).
+        self._pending_buy_anchor: Optional[float] = None
         # Set while update_historical_candle() replays warm-up candles so the
         # pending executor can never launch a real swap during warm-up.
         self._warming_up: bool = False
@@ -1816,6 +1821,7 @@ class LiveTrader:
         self._buy_tx_in_flight = False
         self._pending_buy = False
         self._pending_buy_reason = ""
+        self._pending_buy_anchor = None
         # No automatic buy for the re-entry block window — a failed buy must
         # never be immediately re-attempted by a lingering engine signal.
         self._buy_failed_until = time.time() + BUY_FAIL_REENTRY_BLOCK_S
@@ -3244,13 +3250,21 @@ class LiveTrader:
                     )
                     self._pending_buy = False
                     self._pending_buy_reason = ""
+                    self._pending_buy_anchor = None
                 else:
                     buy_reason = self._pending_buy_reason
-                    # Engine anchor: the signal-instant price basis the
+                    # Engine anchor: the SIGNAL-instant price basis the
                     # backtester registers for the same state (state close ×
-                    # (1 + engine slippage)).  The real on-chain fill
-                    # overwrites entry_price at confirmation.
-                    fill = sc * (1.0 + self.engine_fill_slippage_pct / 100.0)
+                    # (1 + engine slippage)).  Captured at queue time so a
+                    # delayed launch (sell still settling) still notifies the
+                    # engine on the identical basis as the backtester.  The
+                    # real on-chain fill overwrites entry_price at
+                    # confirmation.
+                    if self._pending_buy_anchor is not None:
+                        fill = self._pending_buy_anchor
+                    else:
+                        fill = sc * (1.0 + self.engine_fill_slippage_pct / 100.0)
+                    self._pending_buy_anchor = None
                     trade = LiveTrade(
                         token_mint=self.token_mint,
                         entry_time=t,
@@ -3324,8 +3338,17 @@ class LiveTrader:
         detected_signal = result.get("signal", "none")
         detected_regime = result.get("regime", "")
 
-        if detected_signal == Signal.BUY.value and self.current_trade is None \
-                and not self._pending_buy:
+        if detected_signal == Signal.BUY.value and not self._pending_buy and (
+                self.current_trade is None
+                or getattr(self.current_trade, "status", "") == "closing"):
+            # NOTE: a BUY is queueable while the previous trade is "closing"
+            # (its sell swap still settling) — the engine is already flat
+            # (notify_trade_closed fired at the exit signal), and the pending
+            # executor guards prevent the buy from firing until the sell
+            # settles (current_trade cleared) and the drain retries it.  The
+            # backtester's instant model re-enters on the same candle-state
+            # sequence; dropping the queued BUY here would break decision
+            # parity on every exit→re-entry within one settle window.
             if time.time() < self._buy_failed_until:
                 # A previous buy failed — NO further automatic buys until the
                 # re-entry block window elapses.  A failed buy is never
@@ -3341,10 +3364,16 @@ class LiveTrader:
                     )
                 self._pending_buy = False
                 self._pending_buy_reason = ""
+                self._pending_buy_anchor = None
             else:
                 self._pending_buy = True
                 self._pending_buy_reason = f"buy_{detected_regime}"
                 self._pending_buy_ts = time.time()
+                # Freeze the engine anchor on the signal state's close so
+                # later retries (blocked launch → post-settle drain) notify
+                # the engine on the same basis the backtester used.
+                if sc is not None:
+                    self._pending_buy_anchor = sc * (1.0 + self.engine_fill_slippage_pct / 100.0)
                 self._pending_exit = False
                 # Instant execution: fire the buy on THIS state's prices.
                 # Falls through to the pending-retry path if a guard blocks.
@@ -3365,6 +3394,7 @@ class LiveTrader:
             self._pending_exit = True
             self._pending_exit_reason = reason
             self._pending_buy = False
+            self._pending_buy_anchor = None
             # Instant execution: fire the sell on THIS state's prices.
             self._execute_pending_signals(t, so, sh, sl, sc)
 
@@ -3551,6 +3581,7 @@ class LiveTrader:
         self._pending_exit_reason = ""
         self._pending_buy = False
         self._pending_buy_reason = ""
+        self._pending_buy_anchor = None
         self._last_trade_action = "exit"
         self.engine.notify_trade_closed()
         asyncio.ensure_future(self.execute_sell(exit_reason))
@@ -3589,6 +3620,7 @@ class LiveTrader:
         # signals from triggering an immediate buy when live trades commence.
         self._pending_buy = False
         self._pending_buy_reason = ""
+        self._pending_buy_anchor = None
         self._pending_exit = False
         self._pending_exit_reason = ""
 

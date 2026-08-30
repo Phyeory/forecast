@@ -3580,7 +3580,6 @@ function npReadForm() {
 
 npToggle.addEventListener("change", async () => {
   if (npToggle.checked) {
-    localStorage.setItem("np_feed_enabled", "true");
     try {
       await apiFetch("/api/newpairs/config", {
         method: "POST",
@@ -3591,13 +3590,11 @@ npToggle.addEventListener("change", async () => {
       npConnectWS();
     } catch (e) {
       npToggle.checked = false;
-      localStorage.setItem("np_feed_enabled", "false");
       npSettingsWrap.style.display = "none";
       console.error("[NewPairs] start failed", e);
       alert("New Pairs feed start failed: " + e.message);
     }
   } else {
-    localStorage.setItem("np_feed_enabled", "false");
     npSettingsWrap.style.display = "none";
     try {
       await apiFetch("/api/newpairs/stop", { method: "POST" });
@@ -3785,28 +3782,17 @@ setInterval(() => {
     .catch(() => { });
 }, 5000);
 
-// Restore persisted feed toggle state on load (no wallet gate — recording
-// never trades).
+// Sync the switch with the backend on load.  Default is OFF: the feed is
+// only ever started by an explicit toggle — a dashboard launch never
+// auto-starts it.  If the feed is genuinely running server-side (started
+// in a previous session and not yet stopped) the switch mirrors that.
 (async function npRestoreState() {
   try {
     const snap = await apiFetch("/api/newpairs/status");
     if (snap && !snap.error) npHandleStatus(snap);
-    const savedEnabled = localStorage.getItem("np_feed_enabled") === "true";
-    if (snap.is_running || savedEnabled) {
+    if (snap && !snap.error && snap.is_running) {
       npToggle.checked = true;
       npSettingsWrap.style.display = "block";
-      localStorage.setItem("np_feed_enabled", "true");
-      if (!snap.is_running) {
-        try {
-          await apiFetch("/api/newpairs/config", {
-            method: "POST",
-            body: JSON.stringify(npReadForm()),
-          });
-          await apiFetch("/api/newpairs/start", { method: "POST", body: "{}" });
-        } catch (err) {
-          console.warn("[NewPairs] Failed to auto-start backend feed", err);
-        }
-      }
       npConnectWS();
     } else {
       npToggle.checked = false;

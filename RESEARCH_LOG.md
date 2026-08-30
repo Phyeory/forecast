@@ -8194,3 +8194,50 @@ Best cell (−0.25,0.25): tail saved +0.391 per blocked tail trade but costs +0.
 
 ---
 
+
+## Iter 73 — Signal-Instant Execution Parity: live trader fires swaps at the signal tick; backtester default `exec_model="instant"` (n+1 mid-bar model retired to the `legacy` escape hatch); measured-latency overlay priced on the recorded path
+
+**Date:** 2026-08-30
+**Focus:** User directive: "the live trader performs significantly worse than the backtester because of trade delay and slippage — make either the live trader as fast as the backtester or the backtester simulate delay/slippage realistically. The n+1 bar entry mechanism is a terrible simulation; the live trader must open and close trades on the instant the signal is generated." Both halves implemented — the live trader now fires at the signal instant, and the backtester's default fills at the same instant, with an optional measured-latency overlay for realism studies.
+
+### 1. Ground truth: measured live execution latency (626 sessions, `data/live_logs/*/trades.jsonl`)
+
+From 143 buy attempts / 138 confirms and 138 sell attempts/confirms:
+
+| leg | median | p25 | p75 | p90 | max |
+| :-- | --: | --: | --: | --: | --: |
+| buy signal→on-chain confirm | 9.98 s | 2.37 s | 12.67 s | 15.73 s | 42.70 s |
+| buy broadcast→confirm | 9.68 s | 1.89 s | 12.33 s | 15.47 s | 40.15 s |
+| sell attempt→confirm | 2.27 s | 1.81 s | 3.10 s | 4.54 s | 158.34 s |
+
+The buy leg is dominated by the `_background_buy_settle` poll loop on free RPCs (BUY_SETTLE_POLL_S 0.4 s cadence + balance probes), not by landing time — the TX usually lands in 1–3 s but `buy_confirmed` is stamped late. The old backtester's fill_fraction model represented ~1.5 s of latency; live buys were ~10 s to *confirmed*. (Latency numbers are confirm-stamped upper bounds on landing.)
+
+### 2. Live trader (`live_trader.py`) — signal-instant execution
+
+- `_queue_signal_from_state(result, t, so, sh, sl, sc)` now receives each state's prices and fires `_execute_pending_signals` ON THE SIGNAL STATE itself: engine `notify_trade_opened/closed` synchronously, swap task launched immediately. Previously a signal from state k launched at state k+1 (and state-4 signals at the next candle boundary) — microseconds in wall-clock but the WRONG price basis, and state-4 buys waited a full extra tick.
+- The phantom `_engine_fill_fraction`/`_engine_intrabar_price` mid-bar anchor is REMOVED. The engine anchor is now `signal-state close × (1 + engine_fill_slippage_pct=1%)` — the same basis the backtester's instant model registers. The real on-chain fill still overwrites `entry_price` at confirmation.
+- **Pending semantics preserved and extended**: a signal that cannot launch (swap in flight, buy-fail re-entry block, mcap/no-motion stop) stays pending and is retried at every state, at the boundary, and on swap settle (`_drain_after_settle`). A BUY may now be QUEUED while the previous trade is still `"closing"` (its sell settling) — the engine is already flat at that point, and the post-settle drain fires the buy; without this the backtester's same-candle exit→re-entry sequences broke live parity (found via rec2949: 7 vs 9 trades).
+- **Signal-time anchor freeze**: the queued BUY's engine anchor is captured at queue time (`_pending_buy_anchor`) so a delayed launch still notifies the engine on the same price basis the backtester used for that signal (rec2949 exit-reason mismatch `evr_triage` vs `gain_retrace` root cause).
+
+### 3. Backtester (`forward_tester.py` + `backtester.py`) — three execution models
+
+- **`exec_model="instant"` (new DEFAULT)**: a signal from state k fills at THAT state's close ± `slippage_pct` (± iter66 exec offsets). No pending queue, no n+1 wait; engine notified at the signal state. This is the exact mirror of the live trader — the n+1 mid-bar "trade latency" simulation the user rejected is no longer the default.
+- **`exec_model="legacy"`**: the pre-change n+1 model byte-identical (fill_fraction mid-bar interpolation, pending queue). Every historical baseline batch remains reproducible by passing `exec_model="legacy"` (or `{"exec_model": "legacy"}` via the API's new body keys). Verified: bare legacy runs reproduce pre-change behavior; the change is a default flip plus additive knobs.
+- **Measured-latency overlay** (on `instant` when `entry_latency_seconds`/`exit_latency_seconds` > 0): the fill is deferred to `t_signal + latency` and priced by interpolating the RECORDED intra-candle path (open→extreme→extreme→close of the containing candle, `_path_price_at`) at the target timestamp; the engine is notified when the fill lands. No lookahead: the containing candle must complete (state 4) before the fill resolves. Calibration defaults from §1: buys ≈10 s, sells ≈2.3 s. This is the "realistic delay+slippage" lens the user asked for — use it to A/B the cost of real latency: rec2935 spot-check: instant +0.0430 → latency(10/2.3) +0.0192 SOL (−55% on a 5-trade session).
+- `run_backtest`/`run_backtest_batch`/`/api/backtest`/`/api/backtest/batch` all expose `exec_model`, `entry_latency_seconds`, `exit_latency_seconds`.
+
+### 4. Parity verification
+
+- `analysis/test_live_parity.py` 10/10: end-to-end decision parity (entry times ±1 s, reasons, exit sequences) holds on recs {2935, 2949, 2941} under the new instant model — live fires swaps immediately and the backtester fills at the same instant.
+- NEW `analysis/test_exec_model.py` 11/11: instant fill math, legacy fill_fraction math, exec-offset knobs on both modes, path-price interpolation/clamping, latency end-to-end (entry+exit), mode-selection matrix.
+- Updated: `test_holder_flow_onchain.py::test_forward_tester_exec_offset_knobs` (pins both models), `test_iter67_holder_flow_latency.py::test_poll_interval_is_fast` (15 s is the deliberate ca89f98 production poll).
+- Determinism: repeated in-process and fresh-process runs are trade-identical in every mode (recs 2935/2949/2941).
+- Full suite: `pytest analysis/ -q --ignore=test_sodt_wccb --ignore=test_live_trader_balance --ignore=test_timeout_hypothesis` → 102 passed; the 17 remaining failures (test_mcap_floor_hold, test_whale_dump, test_whale_stream_wiring::test_anonymous_big_sell_dispatches_whale) are PRE-EXISTING and unrelated to this change: the mcap-floor hold policy commit `3ec53f9` and the whale-gate commit `91c7536`'s subject are orphaned/reverted on this branch (no branch contains `3ec53f9`; `_v2_whale_dump_*` attrs and the anonymous-whale dispatch path are absent from working `live_trader.py`/`holder_flow.py`), and the tests pin those mechanisms. Flagged for the user — either restore those commits or retire the tests.
+
+### 5. What this changes for research
+
+- All NEW baselines from this point use `exec_model="instant"` fills (signal-instant prices); comparisons against pre-73 batches must pin `exec_model="legacy"`. The iter68 baseline (`iter68_base_1787965293`) remains the last legacy-fill canonical cohort.
+- The latency overlay gives the first honest instrument for the live-vs-BT gap beyond fills: entry-latency A/B (0 → 10 s) quantifies how much of the live PnL shortfall is entry-timing decay on 1 s memecoin bars. Recommended first study: full-cohort `{0, 5, 10, 15}s × {exit 0, 2.3s}` grid vs the new instant baseline.
+- Live no longer waits a state/boundary before launching swaps; expect modest live improvement on fast exits (dev_sell/evr style) where the old extra hop mattered most on illiquid tokens.
+
+---
