@@ -9,6 +9,8 @@ indirection point that decides V1 vs V2.
 Contract:
     eng = create_engine(engine_version=1, **kwargs)   # → V1 StrategyEngine
     eng = create_engine(engine_version=2, **kwargs)   # → V2 StrategyEngineV2Adapter
+    eng = create_engine(engine_version=3, **kwargs)   # → V3 StrategyEngineV3Adapter
+        (V3 = newborn-coin dump-bottom engine on the V2 mathematical core)
 
 Both V1 and V2 expose the EXACT same call surface used by the pipelines:
     eng.update(time, o, h, l, c, volume, buy_volume, sell_volume, ...)
@@ -34,6 +36,10 @@ from strategy_engine import StrategyEngine
 _V2Adapter = None
 _V2_IMPORT_LOCK = False
 
+# V3 (newborn dump-bottom engine) re-imports the same V2 core and is cached
+# the same way.
+_V3Adapter = None
+
 
 def _load_v2_adapter():
     """Import `StrategyEngineV2Adapter` lazily and cache the class ref."""
@@ -53,6 +59,16 @@ def _load_v2_adapter():
         _V2_IMPORT_LOCK = False
 
 
+def _load_v3_adapter():
+    """Import `StrategyEngineV3Adapter` lazily and cache the class ref."""
+    global _V3Adapter
+    if _V3Adapter is not None:
+        return _V3Adapter
+    from strategy_engineV3 import StrategyEngineV3Adapter  # noqa: WPS433
+    _V3Adapter = StrategyEngineV3Adapter
+    return _V3Adapter
+
+
 def create_engine(engine_version: int = 1, **engine_kwargs: Any):
     """
     Return a fresh strategy engine instance for the requested version.
@@ -63,6 +79,9 @@ def create_engine(engine_version: int = 1, **engine_kwargs: Any):
         1 → V1 `StrategyEngine` (physics / Langevin / Kalman regime detector)
         2 → V2 `StrategyEngineV2Adapter`
             (RBPF + UKF + KDE + Kramers escape, wrapped to V1 surface)
+        3 → V3 `StrategyEngineV3Adapter`
+            (newborn-coin dump-bottom recovery on the V2 core: launch →
+            dump → bottom → organic-buyer entry, strict TP/SL + mcap band)
     **engine_kwargs : Any
         Free parameters passed straight through to the chosen engine
         constructor.  V1 ignores unknown V2 keys (and vice-versa); the V2
@@ -88,8 +107,12 @@ def create_engine(engine_version: int = 1, **engine_kwargs: Any):
         Adapter = _load_v2_adapter()
         return Adapter(**engine_kwargs)
 
+    if engine_version == 3:
+        Adapter = _load_v3_adapter()
+        return Adapter(**engine_kwargs)
+
     raise ValueError(
-        f"Unknown engine_version={engine_version!r} (expected 1 or 2)"
+        f"Unknown engine_version={engine_version!r} (expected 1, 2 or 3)"
     )
 
 

@@ -3192,52 +3192,29 @@ class LiveTrader:
 
     # ── Intra-candle 4-state expansion (matches ForwardTester exactly) ──────
 
-    # Engine-anchor fill model — mirrors ForwardTester._fill_fraction() with
-    # the run_backtest defaults (fixed 0.0001 SOL fees, slippage 1 %).  The
+    # Engine anchor slippage — the premium applied to the signal-state close
+    # to form the engine's entry anchor (notify_trade_opened(price)).  The
     # engine's exit thresholds (tp_v2 / gain_retrace / breakeven / EVR
-    # offside) anchor on notify_trade_opened(price); anchoring live at the
-    # SAME simulated intrabar fill the backtester uses makes every exit
-    # decision fire on the identical price basis (iter57 parity fix).  The
-    # real on-chain fill is recorded separately on the trade at confirmation.
-    _ENGINE_FILL_REF_FEE: float = 0.0001
-    _ENGINE_FILL_REF_SIZE: float = 0.1
+    # offside) anchor on that price; using the signal-instant price basis
+    # (state close × (1 + 1 %), matching the backtester's default
+    # slippage_pct=1.0 under exec_model="instant") keeps every exit decision
+    # on the identical price basis in both pipelines (2026-08-30 signal-
+    # instant execution).  The real on-chain fill is recorded separately on
+    # the trade at confirmation.
     engine_fill_slippage_pct: float = 1.0
-
-    def _engine_fill_fraction(self) -> float:
-        import math
-        total_fee = max(self.priority_fee_lamports / 1e9, 1e-12)
-        base_delay = self._ENGINE_FILL_REF_FEE / (self._ENGINE_FILL_REF_FEE + total_fee)
-        size_penalty = 1.0 + math.log10(max(1.0, self.buy_size_sol / self._ENGINE_FILL_REF_SIZE))
-        slippage_factor = 1.0 + self.engine_fill_slippage_pct / 100.0
-        return max(0.02, min(0.98, base_delay * size_penalty * slippage_factor))
-
-    @staticmethod
-    def _engine_intrabar_price(o: float, h: float, l: float, c: float, frac: float) -> float:
-        """Identical to ForwardTester._intrabar_price (bull/bear path split at
-        thirds)."""
-        bullish = c >= o
-        if bullish:
-            p0, p1, p2, p3 = o, h, l, c
-        else:
-            p0, p1, p2, p3 = o, l, h, c
-        if frac <= 1 / 3:
-            return p0 + (p1 - p0) * (frac * 3)
-        elif frac <= 2 / 3:
-            return p1 + (p2 - p1) * ((frac - 1 / 3) * 3)
-        else:
-            return p2 + (p3 - p2) * ((frac - 2 / 3) * 3)
 
     def _execute_pending_signals(self, t: int, so: float, sh: float,
                                  sl: float, sc: float) -> None:
-        """Consume pending BUY/EXIT signals — mirrors ForwardTester.update() Step 1.
+        """Consume pending BUY/EXIT signals (engine notify + swap launch).
 
-        Called before EACH intra-candle engine.update() state (so
-        engine.notify_trade_opened/closed lands at the same intra-candle slot
-        as the backtester's _open_long/_close_long, with the same simulated
-        intrabar fill anchor), at the "state 1 of candle N+1" slot (the
-        boundary tick, whose open is the fill basis), and whenever a blocking
-        swap settles (sell confirmed / buy failed) so re-entry signals are
-        not lost.
+        Since the 2026-08-30 signal-instant change this is primarily the
+        RETRY path: _queue_signal_from_state fires newly detected signals
+        immediately on their own state, and calls this right after — signals
+        that pass the guards execute on the same tick they were generated.
+        It is also called before each intra-candle state, at the candle
+        boundary, and whenever a blocking swap settles (sell confirmed /
+        buy failed) so a signal that could not execute earlier (swap in
+        flight, re-entry block, stop) is not lost.
 
         Retry semantics: a signal that cannot execute yet (swap in flight,
         previous sell still settling, buy-failure re-entry block) STAYS
@@ -3269,15 +3246,15 @@ class LiveTrader:
                     self._pending_buy_reason = ""
                 else:
                     buy_reason = self._pending_buy_reason
-                    # Engine anchor: the SAME simulated fill the backtester
-                    # would register for this execution state.
-                    fill = self._engine_intrabar_price(
-                        so, sh, sl, sc, self._engine_fill_fraction()
-                    ) * (1.0 + self.engine_fill_slippage_pct / 100.0)
+                    # Engine anchor: the signal-instant price basis the
+                    # backtester registers for the same state (state close ×
+                    # (1 + engine slippage)).  The real on-chain fill
+                    # overwrites entry_price at confirmation.
+                    fill = sc * (1.0 + self.engine_fill_slippage_pct / 100.0)
                     trade = LiveTrade(
                         token_mint=self.token_mint,
                         entry_time=t,
-                        entry_price=sc,
+                        entry_price=fill,
                         size_sol=self.buy_size_sol,
                         size_tokens=0,
                         entry_reason=buy_reason,
@@ -3324,11 +3301,23 @@ class LiveTrader:
                 "price": sc,
             }
 
-    def _queue_signal_from_state(self, result: dict) -> None:
-        """Mirror ForwardTester.update() Step 3 — runs after EVERY intra-candle
-        state, so a signal from state k executes at state k+1 exactly like
-        the backtester (previously live only queued after the full 4-state
-        loop, pushing every execution to the next candle boundary)."""
+    def _queue_signal_from_state(self, result: dict, t: Optional[int] = None,
+                                 so: Optional[float] = None, sh: Optional[float] = None,
+                                 sl: Optional[float] = None, sc: Optional[float] = None) -> None:
+        """Signal detection + INSTANT execution (2026-08-30 signal-instant model).
+
+        Mirrors ForwardTester.update() Step 3 for detection, but the swap is
+        fired on the SAME intra-candle state that generated the signal — no
+        next-state hop, no N+1-bar wait.  The engine is notified
+        synchronously at the signal state with the signal-instant price
+        anchor (state close × (1 + engine slippage)), the same basis the
+        backtester's exec_model="instant" registers.
+
+        Signals that CANNOT execute right now (a swap still in flight, a
+        buy-failure re-entry block, mcap/no-motion stop) fall back to the
+        pending queue and are retried by _execute_pending_signals on every
+        subsequent state / boundary / swap settle — the iter57 retry
+        semantics are unchanged."""
         if self._warming_up or self.completed_candle_count < self.warmup_candles:
             return
 
@@ -3357,6 +3346,9 @@ class LiveTrader:
                 self._pending_buy_reason = f"buy_{detected_regime}"
                 self._pending_buy_ts = time.time()
                 self._pending_exit = False
+                # Instant execution: fire the buy on THIS state's prices.
+                # Falls through to the pending-retry path if a guard blocks.
+                self._execute_pending_signals(t, so, sh, sl, sc)
 
         elif detected_signal == Signal.EXIT.value and self.current_trade is not None:
             reason = result.get("exit_reason")
@@ -3373,6 +3365,8 @@ class LiveTrader:
             self._pending_exit = True
             self._pending_exit_reason = reason
             self._pending_buy = False
+            # Instant execution: fire the sell on THIS state's prices.
+            self._execute_pending_signals(t, so, sh, sl, sc)
 
     def _drain_pending_signals(self) -> None:
         """Retry pending signals after a swap settled (sell confirmed / buy
@@ -3408,20 +3402,21 @@ class LiveTrader:
                                    market_cap_usd: float = 0.0,
                                    pool_sol: float = 0.0) -> dict:
         """
-        Mirror ForwardTester.update() exactly — called once per completed
-        candle, once per intra-candle state:
+        Mirror ForwardTester.update() — called once per completed candle,
+        once per intra-candle state:
 
           Step 1  execute pending signal (engine notify + swap launch)
           Step 2  engine.update() on the state
-          Step 3  queue any signal the state produced
+          Step 3  detect any signal the state produced and execute it
+                  INSTANTLY (engine notify + swap launch on this same state)
 
-        A signal from state k of candle N therefore executes at state k+1 of
-        candle N — identical to the backtester.  A signal from state 4 is
-        executed by update() at the boundary tick with the NEW candle's open
-        (the backtester's "state 1 of candle N+1" slot).
-
-        Un-executable signals stay pending and retry (see
-        _execute_pending_signals) instead of being cleared.
+        Since the 2026-08-30 signal-instant execution change, a signal from
+        state k fires its swap at state k — the instant it is generated —
+        identical to the backtester's exec_model="instant".  Only signals
+        blocked by a guard (swap in flight, re-entry block, stop) fall back
+        to the pending queue: they are retried by _execute_pending_signals
+        at every subsequent state, at the candle boundary, and when a swap
+        settles.
 
         Returns the engine result from the final sub-state (state 4) with
         the earliest signal of the candle propagated.
@@ -3440,7 +3435,7 @@ class LiveTrader:
         # State 1: open tick
         self._execute_pending_signals(t, o, o, o, o)
         result = self.engine.update(t, o, o, o, o, 0.0, _build_full_result=False)
-        self._queue_signal_from_state(result)
+        self._queue_signal_from_state(result, t, o, o, o, o)
         sig = result.get("signal", "none")
         if sig not in (Signal.NONE.value, "none"):
             final_signal = sig
@@ -3452,7 +3447,7 @@ class LiveTrader:
         l2 = min(o, mid_first)
         self._execute_pending_signals(t, o, h2, l2, mid_first)
         result = self.engine.update(t, o, h2, l2, mid_first, 0.0, _build_full_result=False)
-        self._queue_signal_from_state(result)
+        self._queue_signal_from_state(result, t, o, h2, l2, mid_first)
         sig = result.get("signal", "none")
         if sig not in (Signal.NONE.value, "none") and final_signal is None:
             final_signal = sig
@@ -3462,7 +3457,7 @@ class LiveTrader:
         # State 3: both extremes
         self._execute_pending_signals(t, o, h, l, mid_second)
         result = self.engine.update(t, o, h, l, mid_second, 0.0, _build_full_result=False)
-        self._queue_signal_from_state(result)
+        self._queue_signal_from_state(result, t, o, h, l, mid_second)
         sig = result.get("signal", "none")
         if sig not in (Signal.NONE.value, "none") and final_signal is None:
             final_signal = sig
@@ -3476,7 +3471,7 @@ class LiveTrader:
                                     pool_sol=pool_sol,
                                     market_cap_usd=market_cap_usd,
                                     _build_full_result=False)
-        self._queue_signal_from_state(result)
+        self._queue_signal_from_state(result, t, o, h, l, c)
         sig = result.get("signal", "none")
         if sig not in (Signal.NONE.value, "none") and final_signal is None:
             final_signal = sig
@@ -3491,9 +3486,9 @@ class LiveTrader:
                 result["regime"] = final_regime
             result["exit_reason"] = final_reason
 
-        # NOTE: a signal queued at state 4 is NOT executed here — update()
-        # executes it at the boundary tick with the new candle's open, which
-        # is the backtester's "state 1 of candle N+1" fill slot.
+        # NOTE: a signal detected at state 4 was ALREADY executed inside
+        # _queue_signal_from_state (signal-instant execution) — at state 4's
+        # own close price, with no wait for the next candle boundary.
 
         # ── No-motion tracking ───────────────────────────────────────────
         # Only a close that DIFFERS from the previously tracked close counts
@@ -3634,15 +3629,16 @@ class LiveTrader:
 
         Indicator evolution is IDENTICAL to the backtester:
           - Completed candles are expanded into 4 sub-states.
-          - engine.notify_trade_opened/closed() is called IMMEDIATELY when a
-            signal is detected (matching the backtester's synchronous
-            _open_long/_close_long → notify at Step 1 of the next candle).
+          - engine.notify_trade_opened/closed() is called at the SIGNAL state
+            (the instant the signal is generated — 2026-08-30 signal-instant
+            execution, matching the backtester's exec_model="instant").
             If a buy fails on-chain, _fail_buy_flat() rolls back with
             notify_trade_closed().
 
-        Live swaps fire IMMEDIATELY (no N+1 bar wait):
+        Live swaps fire IMMEDIATELY (no next-state hop, no N+1 bar wait):
           - When a BUY/EXIT signal is detected, the asyncio swap task is fired
-            at once and the engine is notified synchronously.
+            at once on that state's prices and the engine is notified
+            synchronously.  Blocked signals retry via _execute_pending_signals.
         """
         self._last_price = c
         trade_action = None
@@ -3653,14 +3649,12 @@ class LiveTrader:
         if is_new and self._current_accumulating is not None:
             prev = self._current_accumulating
 
-            # _process_completed_candle mirrors ForwardTester.update() fully:
-            #   per state — execute pending signal (notify at the same
-            #                intra-candle slot as the backtester), then
-            #                engine.update() on the state
-            #   after the loop — queue newly detected signal and execute it
-            #                (the backtester's "state 1 of candle N+1" slot)
-            # Live swaps fire inside that call — at the same wall-clock
-            # boundary moment the backtester would fill, with no N+1 bar wait.
+            # _process_completed_candle mirrors ForwardTester.update():
+            #   per state — execute pending signals, engine.update(), then
+            #                INSTANTLY execute any signal that state produced
+            #                (swap launch + engine notify on the signal tick)
+            # Live swaps fire inside that call at the signal instant; the
+            # boundary pass below only retries signals blocked earlier.
             result = self._process_completed_candle(
                 prev["t"], prev["o"], prev["h"], prev["l"], prev["c"], prev["vol"],
                 buy_vol=prev.get("buy_vol", 0.0),
@@ -3670,10 +3664,9 @@ class LiveTrader:
             )
             self._last_engine_result = result
 
-            # A signal queued at state 4 of the completed candle executes
-            # HERE — the backtester's "state 1 of candle N+1" slot.  This
-            # boundary tick IS the first tick of candle N+1, so its open is
-            # the fill basis the backtester would use.
+            # Retry pass: any signal that could not execute instantly (swap
+            # in flight, re-entry block, stop) gets another chance here with
+            # the new candle's open as the price basis.
             self._execute_pending_signals(time_val, o, o, o, o)
 
             # Surface whatever the pending executor did for the UI payload.

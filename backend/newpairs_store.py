@@ -63,7 +63,8 @@ def init_newpairs_db():
             telegram         TEXT DEFAULT '',
             website          TEXT DEFAULT '',
             initial_sol      REAL DEFAULT 0,   -- dev's initial buy size (SOL)
-            market_cap_sol0  REAL DEFAULT 0    -- market cap (SOL) at creation
+            market_cap_sol0  REAL DEFAULT 0,   -- market cap (SOL) at creation
+            global_fees_sol  REAL DEFAULT 0    -- cumulative fees paid at spawn time
         );
 
         CREATE TABLE IF NOT EXISTS candles (
@@ -84,6 +85,11 @@ def init_newpairs_db():
 
         CREATE INDEX IF NOT EXISTS idx_np_candles_rec_time ON candles(recording_id, time);
     """)
+    # Migrate DBs created before the fees-qualification gate existed
+    try:
+        conn.execute("ALTER TABLE recordings ADD COLUMN global_fees_sol REAL DEFAULT 0")
+    except Exception:
+        pass  # column already exists
     conn.commit()
     conn.close()
 
@@ -100,15 +106,16 @@ def create_recording(
     website: str = "",
     initial_sol: float = 0.0,
     market_cap_sol0: float = 0.0,
+    global_fees_sol: float = 0.0,
 ) -> int:
     conn = _get_conn()
     cur = conn.execute(
         """INSERT INTO recordings
            (mint, token_name, token_symbol, timeframe, started_at,
-            creator, twitter, telegram, website, initial_sol, market_cap_sol0)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            creator, twitter, telegram, website, initial_sol, market_cap_sol0, global_fees_sol)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (mint, token_name, token_symbol, timeframe, time.time(),
-         creator, twitter, telegram, website, initial_sol, market_cap_sol0),
+         creator, twitter, telegram, website, initial_sol, market_cap_sol0, global_fees_sol),
     )
     rec_id = cur.lastrowid
     conn.commit()

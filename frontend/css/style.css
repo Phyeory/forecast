@@ -502,6 +502,7 @@ input, select, button, textarea { accent-color: var(--copper); }
   vertical-align: middle; margin-left: 6px;
 }
 .engine-badge.v2 { background: rgba(193, 135, 79, 0.08); color: var(--copper); border-color: var(--copper-lo); }
+.engine-badge.v3 { background: rgba(122, 162, 114, 0.10); color: #7ac272; border-color: rgba(122, 194, 114, 0.35); }
 
 .engine-ver-toggle { display: inline-flex; align-items: center; background: var(--ink-0); border: 1px solid var(--line); border-radius: var(--radius); padding: 2px; gap: 2px; flex-shrink: 0; }
 

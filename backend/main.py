@@ -601,6 +601,13 @@ async def run_backtest_endpoint(body: dict = Body(...)):
             slippage_pct=body.get("slippage_pct", 1.0),
             starting_balance=body.get("starting_balance", 1.0),
             engine_version=engine_version,
+            # 2026-08-30 execution model: "instant" (default) fills at the
+            # signal-instant price, mirroring the live trader; "legacy"
+            # reproduces the old n+1 mid-bar model.  Latency overlays defer
+            # fills to t_signal + latency on the recorded price path.
+            exec_model=body.get("exec_model", "instant"),
+            entry_latency_seconds=float(body.get("entry_latency_seconds", 0.0)),
+            exit_latency_seconds=float(body.get("exit_latency_seconds", 0.0)),
         )
         return JSONResponse(result)
     except ValueError as e:
@@ -643,6 +650,9 @@ async def run_backtest_batch_endpoint(body: dict = Body(default={})):
             recording_ids=recording_ids,
             last_night=last_night,
             last_12h=last_12h,
+            exec_model=body.get("exec_model", "instant"),
+            entry_latency_seconds=float(body.get("entry_latency_seconds", 0.0)),
+            exit_latency_seconds=float(body.get("exit_latency_seconds", 0.0)),
         )
         succeeded = [r for r in results if "error" not in r]
         failed = [r for r in results if "error" in r]
@@ -1899,6 +1909,7 @@ async def _get_or_create_newpair_session(
             website=meta.get("website", ""),
             initial_sol=float(meta.get("initial_sol", 0.0) or 0.0),
             market_cap_sol0=float(meta.get("market_cap_sol", 0.0) or 0.0),
+            global_fees_sol=float(meta.get("global_fees_sol", 0.0) or 0.0),
         )
         logger.info(f"[NEWPAIR] Auto-recording candles → recording {session.rec_id}")
         _active_newpair_sessions[real_mint] = session
@@ -2472,9 +2483,10 @@ def _newpairs_active_count() -> int:
     return len(_active_newpair_sessions)
 
 
-async def _newpairs_forward(cand: NewPairCandidate):
-    """Feed callback: broadcast the birth event to viewers and auto-spawn a
-    recording session for the newborn token."""
+async def _newpairs_notify(cand: NewPairCandidate):
+    """Feed callback: broadcast every accepted birth event to /ws/newpairs/feed
+    viewers.  Called for ALL births — qualified or still awaiting the
+    global-fees check — so the UI shows the full birth stream."""
     payload = {
         "type": "newpair_candidate",
         "candidate": cand.to_dict(),
@@ -2486,12 +2498,11 @@ async def _newpairs_forward(cand: NewPairCandidate):
         except asyncio.QueueFull:
             pass
 
-    if not _newpairs_feed.config.enabled:
-        return  # feed toggled off mid-flight — broadcast only
 
-    # Backpressure: max concurrent sessions + per-mint cooldown.
-    if not _newpairs_feed.can_spawn_session(cand.mint):
-        return
+async def _newpairs_spawn(cand: NewPairCandidate):
+    """Feed callback: spawn a recording session for a QUALIFIED birth (fees
+    gate passed, or gate disabled).  Backpressure (max concurrent sessions +
+    per-mint cooldown) is enforced by the caller (feed)."""
     try:
         session, created = await _get_or_create_newpair_session(
             real_mint=cand.mint,
@@ -2505,7 +2516,8 @@ async def _newpairs_forward(cand: NewPairCandidate):
             _newpairs_feed.note_spawned(cand.mint)
             logger.info(
                 f"[NewPairs] Recording ${cand.symbol} ({cand.mint[:8]}…) "
-                f"dev_buy={cand.initial_sol:.2f} SOL mcap≈${cand.market_cap_usd:.0f}"
+                f"dev_buy={cand.initial_sol:.2f} SOL fees_paid={cand.global_fees_sol:.3f} SOL "
+                f"mcap≈${cand.market_cap_usd:.0f}"
             )
             for q in list(_newpairs_clients):
                 try:
@@ -2565,7 +2577,8 @@ async def newpairs_start(body: dict = Body(default={})):
     if body:
         _newpairs_feed.set_config({k: v for k, v in body.items() if k != "enabled"})
     _newpairs_feed.config.enabled = True
-    _newpairs_feed.start(forward_fn=_newpairs_forward, active_count_fn=_newpairs_active_count)
+    _newpairs_feed.start(notify_fn=_newpairs_notify, forward_fn=_newpairs_spawn,
+                         active_count_fn=_newpairs_active_count)
     return JSONResponse({"status": "started", "snapshot": _newpairs_feed.snapshot()})
 
 

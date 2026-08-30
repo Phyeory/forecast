@@ -26,8 +26,15 @@ Signal model — identical to ForwardTester / LiveTrader:
   EMA, ATR, trend confidence, etc.) evolve identically — signals fire at the
   same intra-candle moment as live trading.
 
-  The 1-bar-delay execution model is preserved: a pending BUY/EXIT queued
-  during candle N executes at State 1 of candle N+1 (open price of next bar).
+  Execution models (ForwardTester exec_model):
+    "instant" (default): a signal from state k fills at THAT state's close
+      price ± slippage — the exact mirror of the live trader's signal-instant
+      execution (2026-08-30).  entry/exit_latency_seconds>0 defer the fill to
+      t_signal + latency, priced on the recorded intra-candle path.
+    "legacy": the historical n+1 model — a pending BUY/EXIT queued during
+      candle N executed at State 1 of candle N+1 with a fill_fraction
+      mid-bar price.  Kept byte-identical so every pre-change baseline
+      batch remains reproducible.
 
 Performance optimisation:
   Intra-candle states are generated inline (no list allocation) and the
@@ -126,6 +133,16 @@ def run_backtest_batch(
     # their exact on-chain timestamp (0.0 = legacy, byte-identical baselines).
     holder_flow_latency_seconds: float = 0.0,
     persist_results: bool = True,
+    # 2026-08-30 execution model (see ForwardTester docstring):
+    #   exec_model="instant" (default) fills at the signal-instant price —
+    #   the exact mirror of the live trader.  "legacy" reproduces the
+    #   pre-change n+1 mid-bar model byte-identically (historical baselines).
+    #   entry/exit_latency_seconds>0 add a measured-latency overlay that
+    #   prices the fill on the recorded path at t_signal + latency
+    #   (live journals: buy signal→confirm median 10.0 s, sell 2.3 s).
+    exec_model: str = "instant",
+    entry_latency_seconds: float = 0.0,
+    exit_latency_seconds: float = 0.0,
 ) -> list[dict]:
     """
     Run backtests on ALL completed recordings.
@@ -183,6 +200,9 @@ def run_backtest_batch(
         holder_flow_latency_seconds=holder_flow_latency_seconds,
         persist_results=persist_results,
         persist_candles=False,
+        exec_model=exec_model,
+        entry_latency_seconds=entry_latency_seconds,
+        exit_latency_seconds=exit_latency_seconds,
     )
 
     # Scheduling only (per-recording computation is identical either way):
@@ -200,10 +220,10 @@ def run_backtest_batch(
         return results
 
     # Large batches: use parallel processes
-    if engine_version == 2:
+    if engine_version in (2, 3):
         try:
             from engine_factory import create_engine
-            _w_eng = create_engine(engine_version=2)
+            _w_eng = create_engine(engine_version=engine_version)
             _w_eng.update(time=0, o=1.0, h=1.0, l=1.0, c=1.0, volume=1.0, buy_volume=0.5, sell_volume=0.5)
         except Exception:
             pass
@@ -253,6 +273,13 @@ def run_backtest(
     holder_flow_latency_seconds: float = 0.0,
     persist_results: bool = True,
     persist_candles: bool = True,
+    # 2026-08-30 execution model (see ForwardTester docstring): "instant"
+    # fills at the signal-instant price (live mirror); "legacy" reproduces
+    # the pre-change n+1 mid-bar model byte-identically.  Latency overlays
+    # defer the fill to t_signal + latency on the recorded price path.
+    exec_model: str = "instant",
+    entry_latency_seconds: float = 0.0,
+    exit_latency_seconds: float = 0.0,
 ) -> dict:
     """
     Run a full backtest on a saved recording.
@@ -295,6 +322,9 @@ def run_backtest(
         holder_flow_latency_seconds=holder_flow_latency_seconds,
         exec_offset_pct_buy=exec_offset_pct_buy,
         exec_offset_pct_sell=exec_offset_pct_sell,
+        exec_model=exec_model,
+        entry_latency_seconds=entry_latency_seconds,
+        exit_latency_seconds=exit_latency_seconds,
     )
 
     # Saving full candle series is useful for an interactive single backtest,

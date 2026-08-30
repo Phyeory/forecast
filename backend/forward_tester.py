@@ -5,37 +5,58 @@ Settings:
   - Starting balance: 1 SOL
   - Buy size: 0.1 SOL (10% of portfolio)
   - Priority fee: 0.0001 SOL (fixed, no bribe fee)
-  - Slippage: 10%
+  - Slippage: 1% (run_backtest default)
 
-Execution model (timed-delay fill):
-  - Signals from candle N are executed during candle N+1 (1-bar delay).
-  - The fill time within candle N+1 is determined by a *fill_fraction* (0 → 1)
-    that represents how far into the bar the transaction completes:
+Execution models (``exec_model``):
 
-      fill_fraction = clamp(base_delay * size_penalty * slippage_penalty, 0.02, 0.98)
+  "instant" (DEFAULT — mirrors LiveTrader after the 2026-08-30 signal-instant
+  execution change):
+    - Signals from candle state k are executed IMMEDIATELY at that state's
+      close price (the price at the instant the signal was generated).
+    - Fill price = signal-state close ± slippage_pct (× exec_offset if set).
+    - No pending queue, no n+1-bar wait.  The engine is notified of the
+      open/close at the same intra-candle state that produced the signal,
+      exactly like the live trader.
+    - Optional measured-latency overlay: ``entry_latency_seconds`` /
+      ``exit_latency_seconds`` (> 0) defer the FILL to a target time
+      t_signal + latency and fill at the recorded intra-candle price path
+      interpolated at that target (walks the realistic open→extreme→extreme→
+      close path of the containing candle).  The engine is notified when the
+      fill lands.  Measured live signal→confirm latencies (626-session
+      journal audit, 2026-08-30): buys median 10.0 s (p90 15.7 s — includes
+      RPC confirm lag), sells median 2.3 s (p90 4.5 s); on-chain LANDING is
+      earlier than confirm, so treat those as upper bounds.
 
-    where:
-      base_delay     = reference_fee / (reference_fee + total_fee)
-                       smooth bounded decay: 0 (very high fee, instant) → 1 (zero fee)
-                       e.g. low fee 0.00011 → ~0.82 | mid 0.0006 → ~0.45 | high 0.0025 → ~0.17
-      size_penalty   = 1 + log10(max(1, buy_size_sol / ref_size))
-                       (larger order → more queue depth → slower fill)
-      slippage_penalty = 1 + slippage_pct / 100
+  "legacy" (pre-2026-08-30 n+1 model — byte-identical to every historical
+  baseline batch):
+    - Signals from candle N are executed during candle N+1 (1-bar delay).
+    - The fill time within candle N+1 is determined by a *fill_fraction*
+      (0 → 1) that represents how far into the bar the transaction completes:
+
+        fill_fraction = clamp(base_delay * size_penalty * slippage_penalty, 0.02, 0.98)
+
+      where:
+        base_delay     = reference_fee / (reference_fee + total_fee)
+                         smooth bounded decay: 0 (very high fee, instant) → 1 (zero fee)
+                         e.g. low fee 0.00011 → ~0.82 | mid 0.0006 → ~0.45 | high 0.0025 → ~0.17
+        size_penalty   = 1 + log10(max(1, buy_size_sol / ref_size))
+                         (larger order → more queue depth → slower fill)
+        slippage_penalty = 1 + slippage_pct / 100
                          (higher slippage tolerance adds modest extra latency)
-      reference_fee  = 0.0001 SOL  (fixed per-transaction fee)
-      ref_size       = 0.1  SOL    (typical retail buy size)
+        reference_fee  = 0.0001 SOL  (fixed per-transaction fee)
+        ref_size       = 0.1  SOL    (typical retail buy size)
 
-  - The intra-bar price at fill_fraction is interpolated along the realistic
-    candle path:  open → first_extreme → second_extreme → close
-    (bull bar: open→high→low→close; bear bar: open→low→high→close).
+    - The intra-bar price at fill_fraction is interpolated along the realistic
+      candle path:  open → first_extreme → second_extreme → close
+      (bull bar: open→high→low→close; bear bar: open→low→high→close).
 
-  - Slippage is then applied on top of the interpolated price:
-      buy  → price * (1 + slip)
-      sell → price * (1 - slip)
+    - Slippage is then applied on top of the interpolated price:
+        buy  → price * (1 + slip)
+        sell → price * (1 - slip)
 
-  - The final hyper-realistic price is stored as entry_price / exit_price,
-    so the chart reflects what you actually got filled at.
-  - pnl_pct reflects the performance based on these final real prices.
+    - The final hyper-realistic price is stored as entry_price / exit_price,
+      so the chart reflects what you actually got filled at.
+    - pnl_pct reflects the performance based on these final real prices.
 """
 
 from __future__ import annotations
@@ -154,6 +175,16 @@ class ForwardTester:
         # behaviour (×(1+0/100) is an IEEE-exact identity — bit-for-bit).
         exec_offset_pct_buy: float = 0.0,
         exec_offset_pct_sell: float = 0.0,
+        # ── Execution model (2026-08-30 signal-instant execution) ──────────
+        # "instant": fill at the signal-instant price (state close ± slippage),
+        #            no n+1-bar wait — the exact mirror of the live trader.
+        # "legacy":  pre-change n+1 mid-bar model, byte-identical to every
+        #            historical baseline batch.
+        # entry/exit_latency_seconds: fill deferred to t_signal + latency and
+        #            priced on the recorded intra-candle path (latency mode).
+        exec_model: str = "instant",
+        entry_latency_seconds: float = 0.0,
+        exit_latency_seconds: float = 0.0,
     ):
         if engine_kwargs is None:
             engine_kwargs = {}
@@ -167,6 +198,30 @@ class ForwardTester:
         # iter66: execution-level calibration offsets (default 0.0 = OFF)
         self.exec_offset_pct_buy = float(exec_offset_pct_buy)
         self.exec_offset_pct_sell = float(exec_offset_pct_sell)
+        # Execution model selection: "instant" (default, mirrors live),
+        # "latency" (instant + measured-latency path-priced fill), or
+        # "legacy" (pre-2026-08-30 n+1 mid-bar model — byte-identical to
+        # every historical baseline batch).
+        self.exec_model = str(exec_model)
+        self.entry_latency_seconds = max(0.0, float(entry_latency_seconds))
+        self.exit_latency_seconds = max(0.0, float(exit_latency_seconds))
+        if self.exec_model == "legacy":
+            self._exec_mode = "legacy"
+        elif self.entry_latency_seconds > 0.0 or self.exit_latency_seconds > 0.0:
+            self._exec_mode = "latency"
+        else:
+            self._exec_mode = "instant"
+        # Recorded intra-candle path per candle time: t → (o, h, l, c).
+        # Populated by update(); consumed by _path_price_at() so latency
+        # fills price against the same recorded price stream the live
+        # trader acted on.
+        self._path_candles: dict[int, tuple] = {}
+        self._path_times: list[int] = []
+        # Latency-mode deferred fill: {"side": "buy"|"exit", "target_ts": float,
+        # "reason": str, "entry": Trade|None}.  At most one in flight — the
+        # engine cannot emit a second signal while a fill is pending because
+        # in_position gates entries and exits respectively.
+        self._latency_pending: Optional[dict] = None
 
         # Holder-flow events for this recording (dev/insider wallet trades).
         # Passed into the engine so the V2 adapter can check them as an
@@ -291,23 +346,96 @@ class ForwardTester:
             t = (frac - 2 / 3) * 3
             return p2 + (p3 - p2) * t
 
-    def _open_long(self, o: float, h: float, l: float, c: float, time: int, reason: str = "") -> Optional[Trade]:
+    # ── Latency-mode price-path resolution ──────────────────────────────────
+
+    def _record_path_candle(self, time: int, o: float, h: float, l: float,
+                            c: float) -> None:
+        """Buffer the candle's OHLC so latency fills can price against the
+        recorded path.  States 1-3 share the candle time and progressively
+        complete h/l/c; the final write per time is the full candle."""
+        if self._exec_mode != "latency":
+            return
+        t = int(time)
+        if t not in self._path_candles:
+            self._path_times.append(t)
+        self._path_candles[t] = (o, h, l, c)
+
+    def _path_price_at(self, target_ts: float) -> float:
+        """Price on the recorded intra-candle path at absolute time *target_ts*.
+
+        Locates the candle containing the timestamp (greatest buffered candle
+        time ≤ target) and interpolates along its open→extreme→extreme→close
+        path using the NEXT buffered candle time as the bar span.  Beyond the
+        recording end this clamps to the last close (the same convention as
+        the recording_ended force-close)."""
+        import bisect
+        if not self._path_times:
+            return 0.0
+        t0 = int(target_ts)
+        idx = bisect.bisect_right(self._path_times, t0) - 1
+        if idx < 0:
+            o, h, l, c = self._path_candles[self._path_times[0]]
+            return o
+        t = self._path_times[idx]
+        o, h, l, c = self._path_candles[t]
+        if idx + 1 < len(self._path_times):
+            span = self._path_times[idx + 1] - t
+        else:
+            span = 1  # recording end — assume the recording's bar length
+        frac = max(0.0, min(1.0, (target_ts - t) / span))
+        return self._intrabar_price(o, h, l, c, frac)
+
+    def _resolve_latency_fill(self, time: int, o: float, h: float, l: float,
+                              c: float) -> tuple[Optional[str], Optional[Trade]]:
+        """Execute the deferred fill once the candle containing its target
+        timestamp is complete (time > floor(target_ts) — no intra-candle
+        future leak).  Returns (trade_action, trade)."""
+        pend = self._latency_pending
+        if pend is None:
+            return None, None
+        target_ts = pend["target_ts"]
+        # The containing candle's full path is only known once its state 4
+        # has been fed — i.e. on the first update whose time exceeds it.
+        if float(time) <= target_ts:
+            return None, None
+        self._latency_pending = None
+        fill_price = self._path_price_at(target_ts)
+        fill_time = int(target_ts)
+        if pend["side"] == "buy":
+            trade = self._open_long(o, h, l, c, fill_time,
+                                    reason=pend["reason"], fill_price=fill_price)
+            return ("buy", trade) if trade else (None, None)
+        trade = self._close_long(o, h, l, c, fill_time,
+                                 reason=pend["reason"], fill_price=fill_price)
+        return ("exit", trade) if trade else (None, None)
+
+    def _open_long(self, o: float, h: float, l: float, c: float, time: int, reason: str = "",
+                   fill_price: Optional[float] = None) -> Optional[Trade]:
         """
         Open a long position.
 
-        Fill time within the execution candle is determined by _fill_fraction(),
-        which accounts for fee competitiveness, order size, and slippage tolerance.
-        The fill price is interpolated along the candle's intra-bar price path and
-        then slippage is applied on top.
+        Fill price resolution:
+          - fill_price given (latency mode) → use it directly.
+          - instant mode                    → the signal state's close (the
+            price at the instant the signal was generated).
+          - legacy mode                     → interpolated along the execution
+            candle's intra-bar path at _fill_fraction(), which accounts for
+            fee competitiveness, order size, and slippage tolerance.
+        Slippage is applied on top of the resolved price.
         """
         if self.current_trade is not None:
             return None
         if o <= 0:
             return None
 
-        # 1. Timed-delay: find where in the bar we get filled
-        frac = self._fill_fraction()
-        raw_price = self._intrabar_price(o, h, l, c, frac)
+        # 1. Resolve the raw fill price
+        if fill_price is not None:
+            raw_price = float(fill_price)
+        elif self._exec_mode == "instant":
+            raw_price = c
+        else:
+            frac = self._fill_fraction()
+            raw_price = self._intrabar_price(o, h, l, c, frac)
 
         # 2. Add slippage (buy → price kicks up)
         slip = self.slippage_pct / 100.0
@@ -568,15 +696,17 @@ class ForwardTester:
             **_v2_entry_snapshot(eng),
         }
 
-    def _close_long(self, o: float, h: float, l: float, c: float, time: int, reason: str = "") -> Optional[Trade]:
+    def _close_long(self, o: float, h: float, l: float, c: float, time: int, reason: str = "",
+                    fill_price: Optional[float] = None) -> Optional[Trade]:
         """
         Close long position.
 
-        Same timed-delay model as _open_long: fill_fraction determines where in
-        the execution candle the sell completes.  For a sell the intra-bar path
-        is traversed in reverse priority (bear path hurts more), so the fill
-        price can only realistically be at or below the open.
-        Slippage is applied downward on top of the interpolated price.
+        Fill price resolution mirrors _open_long:
+          - fill_price given (latency mode) → use it directly.
+          - instant mode                    → the signal state's close.
+          - legacy mode                     → intra-bar path at _fill_fraction();
+            for an exit (sell) the fill price can only realistically be at or
+            below the open.  Slippage is applied downward on top.
         """
         if self.current_trade is None:
             return None
@@ -585,11 +715,16 @@ class ForwardTester:
         assert trade is not None
         fees = self.total_fees_per_trade
 
-        # 1. Timed-delay: find where in the bar we get filled
-        frac = self._fill_fraction()
-        #    For an exit (sell) we want the *bear* perspective of the intra-bar
-        #    path: open → low → high → close, so adverse moves come first.
-        raw_price = self._intrabar_price(o, h, l, c, frac)
+        # 1. Resolve the raw fill price
+        if fill_price is not None:
+            raw_price = float(fill_price)
+        elif self._exec_mode == "instant":
+            raw_price = c
+        else:
+            frac = self._fill_fraction()
+            #    For an exit (sell) we want the *bear* perspective of the intra-bar
+            #    path: open → low → high → close, so adverse moves come first.
+            raw_price = self._intrabar_price(o, h, l, c, frac)
 
         # 2. Add slippage (sell → price kicks down)
         slip = self.slippage_pct / 100.0
@@ -677,15 +812,20 @@ class ForwardTester:
         _build_full_result: bool = True,
     ) -> dict:
         """
-        Process one candle through strategy engine + forward tester.
+        Process one candle state through strategy engine + forward tester.
         LONG-ONLY: only BUY to enter, EXIT to close.
 
-        Execution model:
-          1. Any pending signal from the PREVIOUS bar is executed at THIS
-             candle's open price.  entry_price / exit_price will equal the
-             open visible on the chart.
-          2. The strategy engine evaluates THIS full candle and may queue
-             a new pending signal for the NEXT candle.
+        Execution models (see module docstring):
+          instant (default): a signal produced by THIS state executes at THIS
+            state's close price immediately — no pending queue, no n+1-bar
+            wait.  Engine notified at the same intra-candle state, exactly
+            like the live trader.
+          latency: like instant, but the fill is deferred to
+            t_signal + entry/exit_latency_seconds and priced on the recorded
+            intra-candle path at that target (measured-latency overlay).
+          legacy: the pre-2026-08-30 n+1 model — signals queue and execute at
+            the next state with a fill_fraction mid-bar price.  Byte-identical
+            to all historical baseline batches.
 
         When _build_full_result=False (backtester fast path), the strategy
         engine still processes the bar fully, but the expensive result dict
@@ -696,23 +836,35 @@ class ForwardTester:
         closed_trade = None
         opened_trade = None
 
-        # ── Step 1: Execute pending signal from the previous bar ──────────
-        if self._pending_buy and self.current_trade is None:
-            opened_trade = self._open_long(o, h, l, c, time, getattr(self, '_pending_buy_reason', 'buy'))
-            if opened_trade:
+        # ── Step 0: record the price path / resolve deferred fills ────────
+        self._record_path_candle(time, o, h, l, c)
+        if self._latency_pending is not None:
+            action, trade = self._resolve_latency_fill(time, o, h, l, c)
+            if action == "buy" and trade is not None:
+                opened_trade = trade
                 trade_action = "buy"
-            self._pending_buy = False
+            elif action == "exit" and trade is not None:
+                closed_trade = trade
+                trade_action = "exit"
 
-        elif self._pending_exit and self.current_trade is not None:
-            closed_trade = self._close_long(o, h, l, c, time, self._pending_exit_reason)
-            trade_action = "exit"
-            self._pending_exit = False
-            self._pending_exit_reason = ""
+        # ── Step 1 (legacy only): Execute pending signal from the previous bar ──
+        if self._exec_mode == "legacy":
+            if self._pending_buy and self.current_trade is None:
+                opened_trade = self._open_long(o, h, l, c, time, getattr(self, '_pending_buy_reason', 'buy'))
+                if opened_trade:
+                    trade_action = "buy"
+                self._pending_buy = False
 
-        # Guard: a just-opened trade shouldn't also be pending exit
-        if opened_trade and self._pending_exit:
-            self._pending_exit = False
-            self._pending_exit_reason = ""
+            elif self._pending_exit and self.current_trade is not None:
+                closed_trade = self._close_long(o, h, l, c, time, self._pending_exit_reason)
+                trade_action = "exit"
+                self._pending_exit = False
+                self._pending_exit_reason = ""
+
+            # Guard: a just-opened trade shouldn't also be pending exit
+            if opened_trade and self._pending_exit:
+                self._pending_exit = False
+                self._pending_exit_reason = ""
 
         # ── Step 2: Run strategy engine on this full candle ───────────────
         result = self.engine.update(time, o, h, l, c, volume,
@@ -724,18 +876,36 @@ class ForwardTester:
         signal = result.get("signal", "none")
         regime = result.get("regime", "idle")
 
-        # ── Step 3: Queue signal for the NEXT candle's open ───────────────
-        # Snapshots are taken HERE (after engine.update on candle N) so they
-        # reflect the signal candle's engine state.  They are stashed and
-        # assigned to the trade when it fills on candle N+1.
-        if signal == Signal.BUY.value and self.current_trade is None and not self._pending_buy:
-            self._pending_buy = True
-            self._pending_buy_reason = f"buy_{regime}"
-            self._pending_exit = False
-            # Snapshot engine state on the signal candle (close price as ref)
-            self._stashed_entry_params = self._capture_entry_params(c)
+        # ── Step 3: Execute (instant) or queue (legacy / latency) ─────────
+        # Snapshots are captured after engine.update so they reflect the
+        # signal state's engine state.  In instant mode they are consumed by
+        # the same-state fill; in latency/legacy mode they are stashed until
+        # the fill resolves.
+        if signal == Signal.BUY.value and self.current_trade is None \
+                and not self._pending_buy and self._latency_pending is None:
+            reason = f"buy_{regime}"
+            if self._exec_mode == "instant":
+                self._pending_exit = False
+                self._pending_exit_reason = ""
+                self._stashed_entry_params = self._capture_entry_params(c)
+                opened_trade = self._open_long(o, h, l, c, time, reason)
+                if opened_trade:
+                    trade_action = "buy"
+            elif self._exec_mode == "latency":
+                self._stashed_entry_params = self._capture_entry_params(c)
+                self._latency_pending = {
+                    "side": "buy",
+                    "target_ts": float(time) + self.entry_latency_seconds,
+                    "reason": reason,
+                }
+            else:  # legacy: queue for the next state's open
+                self._pending_buy = True
+                self._pending_buy_reason = reason
+                self._pending_exit = False
+                self._stashed_entry_params = self._capture_entry_params(c)
 
-        elif signal == Signal.EXIT.value and self.current_trade is not None:
+        elif signal == Signal.EXIT.value and self.current_trade is not None \
+                and self._latency_pending is None:
             reason = result.get("exit_reason")
             if not reason:
                 reason = "exit_signal"
@@ -748,11 +918,24 @@ class ForwardTester:
                 elif regime == Regime.TREND.value:
                     reason = "trend_exit"
 
-            self._pending_exit = True
-            self._pending_exit_reason = reason
-            self._pending_buy = False
-            # Snapshot engine state on the signal candle (close price as ref)
-            self._stashed_exit_params = self._capture_exit_params(c)
+            if self._exec_mode == "instant":
+                self._pending_buy = False
+                self._pending_buy_reason = ""
+                self._stashed_exit_params = self._capture_exit_params(c)
+                closed_trade = self._close_long(o, h, l, c, time, reason)
+                trade_action = "exit"
+            elif self._exec_mode == "latency":
+                self._stashed_exit_params = self._capture_exit_params(c)
+                self._latency_pending = {
+                    "side": "exit",
+                    "target_ts": float(time) + self.exit_latency_seconds,
+                    "reason": reason,
+                }
+            else:  # legacy: queue for the next state's open
+                self._pending_exit = True
+                self._pending_exit_reason = reason
+                self._pending_buy = False
+                self._stashed_exit_params = self._capture_exit_params(c)
 
         # ── Fast path: skip expensive output construction ─────────────────
         if not _build_full_result:
