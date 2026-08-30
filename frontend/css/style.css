@@ -574,3 +574,24 @@ input, select, button, textarea { accent-color: var(--copper); }
   .span-2 { grid-column: auto; }
   #main-nav { gap: 14px; margin-left: 8px; }
 }
+
+/* ── New Pairs tab (newborn pump.fun recorder) ──────────────────────────
+   Reuses the Execution tab's lt-deck / af-* / lt-trader-card classes; only
+   the birth-candidate row grid (6 columns incl. Record action) and the
+   np-session-card variant need their own rules. */
+
+#np-feed-card { margin-top: 20px; }
+
+#np-candidates .np-candidate { padding: 7px 12px; border-bottom: 1px solid var(--line); font-size: 10.5px; font-family: var(--mono); display: grid; grid-template-columns: 1.5fr 0.7fr 0.7fr 0.7fr 0.5fr 0.8fr; gap: 8px; align-items: center; }
+#np-candidates .np-candidate:last-child { border-bottom: none; }
+#np-candidates .np-candidate:hover { background: var(--ink-2); }
+
+.np-session-card {
+  background: var(--ink-1);
+  border: 1px solid var(--line-2);
+  border-left: 3px solid var(--copper);
+  border-radius: 8px;
+  padding: 14px;
+  transition: border-color 0.15s;
+}
+.np-session-card:hover { border-color: var(--line-2); }

@@ -27,11 +27,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from candle_aggregator import CandleAggregator, TIMEFRAME_SECONDS
-from pumpfun_client import DexScreenerPollClient, PumpFunWSClient, PumpSwapRPCClient, get_historical_candles, get_token_info, resolve_input, SUB_MINUTE_TFS
+from pumpfun_client import DexScreenerPollClient, PumpFunWSClient, PumpSwapRPCClient, get_historical_candles, get_token_info, resolve_input, get_ds_pair_by_mint, SUB_MINUTE_TFS
 from forward_tester import ForwardTester
 from live_trader import LiveTrader, keypair_from_private_key, SOLANA_RPC_PRIMARY
 from autofeed import AutoFeed, AutofeedConfig, Candidate
+from newpairs import NewPairsFeed, NewPairsConfig, NewPairCandidate
 import data_store
+import newpairs_store
 from backtester import run_backtest, run_backtest_batch
 from holder_flow import HolderFlowMonitor, get_shared_monitor
 
@@ -707,7 +709,7 @@ async def chart_ws(
     if mint == "autofeed":
         await _autofeed_ws_handler(websocket)
         return
-    _RESERVED = {"live"}
+    _RESERVED = {"live", "newpairs"}
     if mint in _RESERVED:
         await websocket.accept()
         await websocket.close(code=4004, reason=f"Use /ws/{mint} dedicated endpoint")
@@ -1497,6 +1499,413 @@ class _LiveSession:
             )
 
 
+# ── New Pairs state ─────────────────────────────────────────────────────────
+# New-pair sessions are SERVER-SIDED pure recorders for newly-born pump.fun
+# tokens (pre-migration / bonding-curve phase).  They mirror _LiveSession's
+# detachable-viewer architecture exactly — sessions survive tab closes, tabs
+# attach as viewers over /ws/newpairs/{mint} — with three deliberate
+# differences:
+#   1. NO strategy engine is attached anywhere (no LiveTrader, no ForwardTester,
+#      no engine_factory): the runner is stream → CandleAggregator → DB.
+#   2. Recordings persist to a SEPARATE database (newpairs_data.db via
+#      newpairs_store) so the newborn-token regime never contaminates the
+#      migrated-token research corpus in price_data.db.
+#   3. Termination policy is the NO-MOTION stop only (default 120 s without a
+#      price change).  There is NO market-cap floor — newborn tokens routinely
+#      sit below any floor while still printing valid price action.
+
+# Silence-gated DexScreener fallback: PumpPortal per-mint trades can be
+# IP-throttled for hours while the birth feed keeps flowing (measured
+# 2026-08-30).  When no price change has been seen for this many seconds, the
+# fallback poller (below) takes over at a 5 s cadence until trades return.
+NP_FALLBACK_AFTER_S = 20.0   # PumpPortal silence gate
+NP_FALLBACK_POLL_S = 5.0     # poll cadence once engaged
+
+_active_newpair_sessions: dict[str, "_NewPairSession"] = {}   # keyed by mint
+_newpair_session_lock = asyncio.Lock()
+_completed_newpair_sessions: list[dict] = []
+
+
+class _NewPairSession:
+    """Server-side recording session for a newly-born pump.fun token.
+
+    Same viewer fan-out / control-socket contract as _LiveSession, minus the
+    trading: every candle is broadcast to viewers and persisted to
+    newpairs_data.db; the session ends on manual stop, stream end, or the
+    no-motion stop (2 minutes without a price change — the ONLY stop policy).
+    """
+
+    def __init__(self, *, real_mint: str, token_name: str, token_symbol: str,
+                 timeframe: str, token_info: Optional[dict],
+                 no_motion_stop_seconds: float = 120.0,
+                 birth_meta: Optional[dict] = None):
+        self.real_mint = real_mint
+        self.token_name = token_name
+        self.token_symbol = token_symbol
+        self.timeframe = timeframe
+        self.token_info = token_info
+        self.no_motion_stop_seconds = no_motion_stop_seconds
+        self.cancelled = asyncio.Event()
+        self.warmed = asyncio.Event()      # set once the (empty) warmup phase passed
+        self.subscribers: set[asyncio.Queue] = set()
+        self.task: Optional[asyncio.Task] = None
+        self.rec_id: Optional[int] = None
+        self.warmup_candles: list[dict] = []
+        self.stop_reason: str = ""
+        # Price-action state surfaced to viewers
+        self.last_price: float = 0.0
+        self.first_price: float = 0.0
+        self.last_candle: Optional[dict] = None
+        self.trade_count: int = 0
+        self.peak_price: float = 0.0
+        self.candle_count: int = 0
+        self._last_motion_ts: float = time.time()
+        self._last_motion_price: float = 0.0
+        self.birth_meta = birth_meta or {}
+
+    # ── viewer fan-out (identical contract to _LiveSession) ────────────────
+
+    def subscribe(self) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        self.subscribers.add(q)
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        self.subscribers.discard(q)
+
+    def broadcast(self, obj) -> None:
+        for q in list(self.subscribers):
+            try:
+                q.put_nowait(obj)
+            except asyncio.QueueFull:
+                pass
+
+    def stop(self, reason: str = "manual_stop") -> None:
+        if not self.cancelled.is_set():
+            self.stop_reason = reason
+            self.cancelled.set()
+
+    # ── session runner ────────────────────────────────────────────────────
+
+    async def run(self) -> None:
+        real_mint = self.real_mint
+        timeframe = self.timeframe
+        logger.info(
+            f"[NEWPAIR] Session start  mint={real_mint[:8]}…  tf={timeframe}  "
+            f"no_motion_stop={self.no_motion_stop_seconds:.0f}s"
+        )
+
+        # Newborn tokens are on the pump.fun bonding curve by definition —
+        # PumpPortal's token-trade stream is the only correct live source
+        # (PumpSwap RPC requires a migrated pool; DexScreener rarely indexes
+        # second-old tokens).
+        ws_client = PumpFunWSClient(real_mint)
+        aggregator = CandleAggregator(timeframe)
+
+        # ── Birth-candle seed ───────────────────────────────────────────────
+        # The creation event carries the token's first real price and volume
+        # (the dev's create-buy).  Emit it as the first candle so every
+        # recording starts at birth, even for stillborn tokens that never
+        # print another trade.
+        _b = self.birth_meta or {}
+        _b_price = 0.0
+        try:
+            _v_sol = float(_b.get("pool_sol", 0.0) or 0.0)
+            _b_mcap_sol = float(_b.get("market_cap_sol", 0.0) or 0.0)
+            if _b_mcap_sol > 0:
+                _b_price = _b_mcap_sol / 1_000_000_000.0
+            elif _v_sol > 0:
+                _b_price = _v_sol / 793.1   # pump.fun curve: 793.1 SOL fill ≈ $69k graduation
+        except (TypeError, ValueError):
+            _b_price = 0.0
+        if _b_price > 0:
+            _b_ts = float(_b.get("first_seen", 0) or time.time())
+            candle, is_new = aggregator.process_trade(
+                _b_price, float(_b.get("initial_sol", 0.0) or 0.0), _b_ts,
+                synthetic=False, is_buy=True,
+                pool_sol=_v_sol,
+                market_cap_usd=float(_b.get("market_cap_usd", 0.0) or 0.0),
+            )
+            _cd = candle.to_dict()
+            newpairs_store.insert_candle(
+                self.rec_id, _cd["time"],
+                _cd["open"], _cd["high"], _cd["low"], _cd["close"],
+                _cd.get("volume", 0), _cd.get("buy_volume", 0.0),
+                _cd.get("sell_volume", 0.0), _cd.get("pool_sol", 0.0),
+                _cd.get("market_cap_usd", 0.0),
+            )
+            self.first_price = _cd["close"]
+            self.last_price = _cd["close"]
+            self.peak_price = _cd["close"]
+            self.trade_count += 1
+            self.candle_count += 1
+            self.last_candle = _cd
+            self._last_motion_ts = time.time()
+            self._last_motion_price = _cd["close"]
+            self.broadcast({
+                "type": "candle",
+                "candle": _cd,
+                "is_new": True,
+                "market_cap_sol": _b.get("market_cap_sol", 0.0),
+                "market_cap_usd": _b.get("market_cap_usd", 0.0),
+                "trade": None,
+            })
+            logger.info(f"[NEWPAIR] Birth candle seeded at {_b_price:.3e} SOL for {real_mint[:8]}…")
+
+        # ── No-motion stop (the ONLY termination policy) ────────────────────
+        # Fires when no price change has been observed for
+        # no_motion_stop_seconds.  Time-driven (not tick-driven) so a token
+        # whose trade stream goes completely silent still terminates — a
+        # tick-loop-only check would starve exactly when it is needed.
+        async def _no_motion_watch():
+            while not self.cancelled.is_set():
+                await asyncio.sleep(5.0)
+                if self.cancelled.is_set():
+                    return
+                if (time.time() - self._last_motion_ts) > self.no_motion_stop_seconds:
+                    logger.warning(
+                        f"[NEWPAIR] No-motion stop for {real_mint[:8]}… — "
+                        f"no price change for {self.no_motion_stop_seconds:.0f}s, ending session"
+                    )
+                    self.stop("no_motion")
+                    return
+
+        nm_task = asyncio.ensure_future(_no_motion_watch())
+
+        # ── Silence-gated DexScreener fallback poller ───────────────────────
+        # Newborns appear on DexScreener ~45–70 s after birth.  This poller
+        # only speaks when PumpPortal's trade stream has been silent for
+        # _NP_FALLBACK_AFTER_S seconds, so it adds zero overhead whenever
+        # PumpPortal delivers trades normally — but when the per-mint trade
+        # stream is throttled (measured: births flow while trades deliver
+        # nothing), the recording still captures price action.
+        async def _ds_fallback_loop():
+            import aiohttp
+            async with aiohttp.ClientSession() as http:
+                while not self.cancelled.is_set():
+                    await asyncio.sleep(NP_FALLBACK_POLL_S)
+                    if self.cancelled.is_set():
+                        return
+                    # Gate: only when PumpPortal has been silent.
+                    if (time.time() - self._last_motion_ts) < NP_FALLBACK_AFTER_S:
+                        continue
+                    try:
+                        pair = await get_ds_pair_by_mint(http, real_mint)
+                        if not pair:
+                            continue  # not indexed yet — common for newborns
+                        price = float(pair.get("priceNative") or 0)
+                        mcap_usd = float(pair.get("marketCap") or pair.get("fdv") or 0)
+                        if price <= 0:
+                            continue
+                        candle, is_new = aggregator.process_trade(
+                            price, 0.0, time.time(),
+                            synthetic=True, is_buy=None,
+                            market_cap_usd=mcap_usd,
+                        )
+                        _cd = candle.to_dict()
+                        newpairs_store.insert_candle(
+                            self.rec_id, _cd["time"],
+                            _cd["open"], _cd["high"], _cd["low"], _cd["close"],
+                            _cd.get("volume", 0), _cd.get("buy_volume", 0.0),
+                            _cd.get("sell_volume", 0.0), _cd.get("pool_sol", 0.0),
+                            _cd.get("market_cap_usd", 0.0),
+                        )
+                        if is_new:
+                            self.candle_count += 1
+                        if self.first_price <= 0:
+                            self.first_price = price
+                        self.last_price = price
+                        self.peak_price = max(self.peak_price, price)
+                        self.last_candle = _cd
+                        # A REAL price change (even from a poll) is motion —
+                        # it refreshes the no-motion clock, because it is the
+                        # token's price actually moving.
+                        if price != self._last_motion_price:
+                            self._last_motion_price = price
+                            self._last_motion_ts = time.time()
+                        self.broadcast({
+                            "type": "candle",
+                            "candle": _cd,
+                            "is_new": is_new,
+                            "market_cap_sol": 0,
+                            "market_cap_usd": mcap_usd,
+                            "trade": None,
+                        })
+                    except asyncio.CancelledError:
+                        return
+                    except Exception:
+                        pass  # transient network blip — retry next cycle
+
+        ds_task = asyncio.ensure_future(_ds_fallback_loop())
+
+        # No historical warmup for newborns: second-old tokens have no
+        # candlestick history (and none is needed — no engine to warm).
+        self.warmed.set()
+
+        try:
+            async def _process_stream(client) -> bool:
+                got_trade = False
+                async for trade in client.stream():
+                    if self.cancelled.is_set():
+                        break
+                    got_trade = True
+                    is_synthetic = bool(trade.get("synthetic"))
+                    is_buy_np: Optional[bool] = None
+                    if not is_synthetic:
+                        tx_np = trade.get("tx_type", "")
+                        if tx_np == "buy":
+                            is_buy_np = True
+                        elif tx_np == "sell":
+                            is_buy_np = False
+                        self.trade_count += 1
+                    candle, is_new = aggregator.process_trade(
+                        trade["price"], trade["sol_amount"], trade["timestamp"],
+                        synthetic=is_synthetic,
+                        is_buy=is_buy_np,
+                        pool_sol=trade.get("pool_sol", 0.0),
+                        market_cap_usd=trade.get("market_cap_usd", 0.0),
+                    )
+                    candle_dict = candle.to_dict()
+                    current_price = candle_dict["close"]
+
+                    # Persist every tick to the auto-recording (same contract
+                    # as the live recorder so backtests replay exactly this).
+                    ct = candle_dict["time"]
+                    newpairs_store.insert_candle(
+                        self.rec_id, ct,
+                        candle_dict["open"], candle_dict["high"],
+                        candle_dict["low"], candle_dict["close"],
+                        candle_dict.get("volume", 0),
+                        candle_dict.get("buy_volume", 0.0),
+                        candle_dict.get("sell_volume", 0.0),
+                        candle_dict.get("pool_sol", 0.0),
+                        candle_dict.get("market_cap_usd", 0.0),
+                    )
+
+                    # Motion tracking (price CHANGE, not mere tick arrival).
+                    if self._last_motion_price != current_price:
+                        self._last_motion_price = current_price
+                        self._last_motion_ts = time.time()
+
+                    # Price-action state for the viewer cards.
+                    if self.first_price <= 0:
+                        self.first_price = current_price
+                    self.last_price = current_price
+                    self.peak_price = max(self.peak_price, current_price)
+                    self.last_candle = candle_dict
+                    if is_new:
+                        self.candle_count += 1
+
+                    self.broadcast({
+                        "type": "candle",
+                        "candle": candle_dict,
+                        "is_new": is_new,
+                        "market_cap_sol": trade.get("market_cap_sol", 0),
+                        "market_cap_usd": trade.get("market_cap_usd", 0),
+                        "trade": None if is_synthetic else {
+                            "price": trade["price"],
+                            "sol_amount": trade["sol_amount"],
+                            "tx_type": trade["tx_type"],
+                            "trader": trade["trader"],
+                            "tx_hash": trade["tx_hash"],
+                        },
+                    })
+                return got_trade
+
+            async def _shutdown():
+                await self.cancelled.wait()
+                ws_client.stop()
+
+            await asyncio.gather(_process_stream(ws_client), _shutdown())
+            if not self.cancelled.is_set():
+                # Stream died on its own (source disconnect).
+                logger.warning(f"[NEWPAIR] Stream ended for {real_mint[:8]}… — ending session")
+                self.stop("stream_ended")
+        except asyncio.CancelledError:
+            if not self.cancelled.is_set():
+                self.stop_reason = "server_shutdown"
+        except Exception:
+            logger.exception(f"[NEWPAIR] Session runner crashed  mint={real_mint[:8]}…")
+            if not self.cancelled.is_set():
+                self.stop_reason = "runner_error"
+        finally:
+            ws_client.stop()
+            for t in (nm_task, ds_task):
+                t.cancel()
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            # Finalize the recording (no position cleanup — nothing was ever
+            # traded; recording finalisation is the whole teardown).
+            newpairs_store.stop_recording(self.rec_id)
+
+            self.broadcast({"type": "session_ended", "reason": self.stop_reason or "session_ended"})
+            _completed_newpair_sessions.append({
+                "mint": real_mint,
+                "token_name": self.token_name,
+                "token_symbol": self.token_symbol,
+                "rec_id": self.rec_id,
+                "candles": self.candle_count,
+                "trades": self.trade_count,
+                "ended_at": time.time(),
+                "stop_reason": self.stop_reason or "session_ended",
+            })
+            if _active_newpair_sessions.get(real_mint) is self:
+                del _active_newpair_sessions[real_mint]
+            logger.info(
+                f"[NEWPAIR] Session ended  mint={real_mint[:8]}…  reason={self.stop_reason or 'session_ended'}"
+            )
+
+
+async def _get_or_create_newpair_session(
+    *,
+    real_mint: str,
+    timeframe: str = "1s",
+    token_name: str = "",
+    token_symbol: str = "",
+    token_info: Optional[dict] = None,
+    birth_meta: Optional[dict] = None,
+) -> tuple[Optional["_NewPairSession"], bool]:
+    """Get an existing new-pair recording session or create a new one.
+
+    Returns (session, created_flag).  Unlike live sessions, NO private key and
+    NO buy size are required — nothing is traded.  Backpressure (max concurrent
+    sessions + per-mint cooldown) is enforced by the caller (feed wrapper or
+    the manual-start endpoint).
+    """
+    async with _newpair_session_lock:
+        session = _active_newpair_sessions.get(real_mint)
+        if session is not None and not session.cancelled.is_set():
+            return session, False
+
+        no_motion = _newpairs_feed.config.no_motion_stop_seconds
+        session = _NewPairSession(
+            real_mint=real_mint,
+            token_name=token_name,
+            token_symbol=token_symbol,
+            timeframe=timeframe,
+            token_info=token_info,
+            no_motion_stop_seconds=no_motion if no_motion > 0 else 120.0,
+            birth_meta=birth_meta,
+        )
+        meta = birth_meta or {}
+        session.rec_id = newpairs_store.create_recording(
+            real_mint, timeframe, token_name, token_symbol,
+            creator=meta.get("creator", ""),
+            twitter=meta.get("twitter", ""),
+            telegram=meta.get("telegram", ""),
+            website=meta.get("website", ""),
+            initial_sol=float(meta.get("initial_sol", 0.0) or 0.0),
+            market_cap_sol0=float(meta.get("market_cap_sol", 0.0) or 0.0),
+        )
+        logger.info(f"[NEWPAIR] Auto-recording candles → recording {session.rec_id}")
+        _active_newpair_sessions[real_mint] = session
+        session.task = asyncio.create_task(session.run())
+        return session, True
+
+
 @app.get("/api/live/status")
 async def live_status():
     traders = []
@@ -2047,6 +2456,399 @@ async def autofeed_stop():
     _autofeed.config.enabled = False
     await _autofeed.stop()
     return JSONResponse({"status": "stopped", "snapshot": _autofeed.snapshot()})
+
+
+# ── New Pairs feed & API ────────────────────────────────────────────────────
+# Discovery-only loop over PumpPortal's subscribeNewToken stream.  Every
+# accepted newborn token is auto-recorded (NO engine, NO trading) with a
+# no-motion-only stop; price action lands in newpairs_data.db.
+
+_newpairs_feed: NewPairsFeed = NewPairsFeed(NewPairsConfig())
+_newpairs_clients: set[asyncio.Queue] = set()   # /ws/newpairs/feed viewer queues
+
+
+def _newpairs_active_count() -> int:
+    """Number of currently-recording new-pair sessions (backpressure)."""
+    return len(_active_newpair_sessions)
+
+
+async def _newpairs_forward(cand: NewPairCandidate):
+    """Feed callback: broadcast the birth event to viewers and auto-spawn a
+    recording session for the newborn token."""
+    payload = {
+        "type": "newpair_candidate",
+        "candidate": cand.to_dict(),
+        "timestamp": time.time(),
+    }
+    for q in list(_newpairs_clients):
+        try:
+            q.put_nowait(payload)
+        except asyncio.QueueFull:
+            pass
+
+    if not _newpairs_feed.config.enabled:
+        return  # feed toggled off mid-flight — broadcast only
+
+    # Backpressure: max concurrent sessions + per-mint cooldown.
+    if not _newpairs_feed.can_spawn_session(cand.mint):
+        return
+    try:
+        session, created = await _get_or_create_newpair_session(
+            real_mint=cand.mint,
+            timeframe=_newpairs_feed.config.session_timeframe,
+            token_name=cand.name or "",
+            token_symbol=cand.symbol or "",
+            token_info=None,
+            birth_meta=cand.to_dict(),
+        )
+        if created:
+            _newpairs_feed.note_spawned(cand.mint)
+            logger.info(
+                f"[NewPairs] Recording ${cand.symbol} ({cand.mint[:8]}…) "
+                f"dev_buy={cand.initial_sol:.2f} SOL mcap≈${cand.market_cap_usd:.0f}"
+            )
+            for q in list(_newpairs_clients):
+                try:
+                    q.put_nowait({
+                        "type": "session_started",
+                        "mint": session.real_mint,
+                        "token_name": session.token_name,
+                        "token_symbol": session.token_symbol,
+                        "timeframe": session.timeframe,
+                        "timestamp": time.time(),
+                    })
+                except asyncio.QueueFull:
+                    pass
+    except Exception as e:
+        logger.error(f"[NewPairs] Error auto-starting session for {cand.mint[:8]}…: {e}")
+
+
+@app.get("/api/newpairs/status")
+async def newpairs_status():
+    snap = _newpairs_feed.snapshot()
+    snap["clients_connected"] = len(_newpairs_clients)
+    snap["active_sessions"] = len(_active_newpair_sessions)
+    snap["sessions"] = [{
+        "mint": mint,
+        "token_name": s.token_name,
+        "token_symbol": s.token_symbol,
+        "timeframe": s.timeframe,
+        "status": "recording" if not s.cancelled.is_set() else "stopping",
+        "recording_id": s.rec_id,
+        "viewers": len(s.subscribers),
+        "trade_count": s.trade_count,
+        "last_price": s.last_price,
+        "first_price": s.first_price,
+        "change_pct": (
+            ((s.last_price - s.first_price) / s.first_price * 100.0)
+            if s.first_price > 0 and s.last_price > 0 else 0.0
+        ),
+        "last_motion_ts": s._last_motion_ts,
+    } for mint, s in _active_newpair_sessions.items()]
+    snap["completed"] = _completed_newpair_sessions[-50:]
+    return JSONResponse(snap)
+
+
+@app.post("/api/newpairs/config")
+async def newpairs_config(body: dict = Body(...)):
+    """Hot-update any NewPairs config keys. `enabled` is NOT honored here —
+    use /api/newpairs/start + /stop for that gate."""
+    safe = {k: v for k, v in body.items() if k != "enabled"}
+    changed = _newpairs_feed.set_config(safe)
+    return JSONResponse({"status": "updated", "changed": changed, "snapshot": _newpairs_feed.snapshot()})
+
+
+@app.post("/api/newpairs/start")
+async def newpairs_start(body: dict = Body(default={})):
+    """Turn ON the new-pairs discovery feed.  No wallet key is required —
+    this tab never trades, it only records newborn price action."""
+    if body:
+        _newpairs_feed.set_config({k: v for k, v in body.items() if k != "enabled"})
+    _newpairs_feed.config.enabled = True
+    _newpairs_feed.start(forward_fn=_newpairs_forward, active_count_fn=_newpairs_active_count)
+    return JSONResponse({"status": "started", "snapshot": _newpairs_feed.snapshot()})
+
+
+@app.post("/api/newpairs/stop")
+async def newpairs_stop():
+    """Stop the discovery feed.  Already-recording sessions keep running until
+    their own no-motion stop / manual stop — by design, they are decoupled."""
+    _newpairs_feed.config.enabled = False
+    await _newpairs_feed.stop()
+    return JSONResponse({"status": "stopped", "snapshot": _newpairs_feed.snapshot()})
+
+
+@app.post("/api/newpairs/session/start")
+async def newpairs_session_start(body: dict = Body(...)):
+    """Manually start a recording session for a specific newborn token
+    (no feed required).  Same filters as feed-spawned sessions: per-mint
+    cooldown + max-concurrent backpressure, no engine, no-motion-only stop."""
+    mint = (body.get("mint") or "").strip()
+    if not mint:
+        return JSONResponse({"error": "mint is required"}, status_code=400)
+    timeframe = body.get("timeframe") or _newpairs_feed.config.session_timeframe
+    if timeframe not in TIMEFRAME_SECONDS:
+        return JSONResponse({"error": f"Unknown timeframe: {timeframe}"}, status_code=400)
+    if not _newpairs_feed.can_spawn_session(mint):
+        return JSONResponse({"error": "Session cap reached or mint in cooldown"}, status_code=409)
+
+    # Resolve token info best-effort (newborns often have none).
+    try:
+        async with _resolve_sem:
+            real_mint, token_info = await asyncio.wait_for(
+                resolve_input(mint), timeout=20.0
+            )
+    except Exception:
+        real_mint, token_info = mint, None
+    token_name = (token_info or {}).get("name", "")
+    token_symbol = (token_info or {}).get("symbol", "")
+
+    session, created = await _get_or_create_newpair_session(
+        real_mint=real_mint,
+        timeframe=timeframe,
+        token_name=token_name,
+        token_symbol=token_symbol,
+        token_info=token_info,
+    )
+    if session is None:
+        return JSONResponse({"error": "Failed to create session"}, status_code=500)
+    if created:
+        _newpairs_feed.note_spawned(real_mint)
+    return JSONResponse({
+        "status": "recording" if created else "already_recording",
+        "mint": real_mint,
+        "recording_id": session.rec_id,
+        "timeframe": timeframe,
+    })
+
+
+@app.post("/api/newpairs/session/stop")
+async def newpairs_session_stop(body: dict = Body(...)):
+    mint = (body.get("mint") or "").strip()
+    session = _active_newpair_sessions.get(mint)
+    if not mint or session is None:
+        return JSONResponse({"error": "No active new-pair session for this mint"}, status_code=404)
+    session.stop("manual_stop")
+    return JSONResponse({"status": "stopping", "mint": mint})
+
+
+@app.post("/api/newpairs/session/stop_all")
+async def newpairs_session_stop_all():
+    n = 0
+    for session in list(_active_newpair_sessions.values()):
+        session.stop("manual_stop")
+        n += 1
+    return JSONResponse({"status": "all_stopped", "count": n})
+
+
+# ── New Pairs recordings REST (separate-DB mirror of /api/recordings) ───────
+
+@app.get("/api/newpairs/recordings")
+async def newpairs_list_recordings():
+    return JSONResponse(newpairs_store.list_recordings())
+
+
+@app.get("/api/newpairs/recordings/{recording_id}")
+async def newpairs_get_recording(recording_id: int):
+    rec = newpairs_store.get_recording(recording_id)
+    if not rec:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(rec)
+
+
+@app.get("/api/newpairs/recordings/{recording_id}/candles")
+async def newpairs_get_recording_candles(recording_id: int):
+    return JSONResponse(newpairs_store.get_recording_candles(recording_id))
+
+
+@app.delete("/api/newpairs/recordings/{recording_id}")
+async def newpairs_delete_recording(recording_id: int):
+    newpairs_store.delete_recording(recording_id)
+    return JSONResponse({"status": "deleted"})
+
+
+@app.post("/api/newpairs/recordings/cleanup")
+@app.delete("/api/newpairs/recordings/cleanup")
+async def newpairs_cleanup_recordings(min_candles: int = Query(default=30)):
+    """Delete new-pair recordings with fewer than min_candles candles.
+    Newborns die fast — the default cleanup threshold is lower than the
+    migrated-token store's 100."""
+    deleted = newpairs_store.cleanup_small_recordings(min_candles=min_candles)
+    return JSONResponse({"status": "cleaned", "deleted_count": deleted, "min_candles": min_candles})
+
+
+# ── New Pairs WebSockets ────────────────────────────────────────────────────
+
+@app.websocket("/ws/newpairs/feed")
+async def newpairs_feed_ws(websocket: WebSocket):
+    """Status/candidate stream for the New Pairs tab: snapshot on connect,
+    then every birth event + session-started push."""
+    await websocket.accept()
+    q: asyncio.Queue = asyncio.Queue(maxsize=200)
+    _newpairs_clients.add(q)
+    logger.info(f"[NewPairs WS] Feed client connected (total={len(_newpairs_clients)})")
+    try:
+        await websocket.send_json({"type": "newpairs_status", "data": _newpairs_feed.snapshot()})
+        for cand in list(_newpairs_feed._seen.values())[-5:]:
+            await websocket.send_json({
+                "type": "newpair_candidate",
+                "candidate": cand.to_dict(),
+                "timestamp": time.time(),
+            })
+        while True:
+            try:
+                msg = await asyncio.wait_for(q.get(), timeout=30.0)
+                await websocket.send_json(msg)
+            except asyncio.TimeoutError:
+                await websocket.send_json({"type": "ping"})
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning(f"[NewPairs WS] Feed error: {e}")
+    finally:
+        _newpairs_clients.discard(q)
+        logger.info(f"[NewPairs WS] Feed client disconnected (total={len(_newpairs_clients)})")
+
+
+@app.websocket("/ws/newpairs/{mint}")
+async def newpairs_session_ws(
+    websocket: WebSocket,
+    mint: str,
+    timeframe: str = Query(default="1s"),
+):
+    """Viewer socket for a new-pair recording session — the exact
+    /ws/live/{mint} viewer contract minus trading: attach to the running
+    session (creating one if none exists; no key, no buy size — nothing to
+    trade), then replay recorded candles + stream live ones."""
+    if mint == "feed":
+        await newpairs_feed_ws(websocket)
+        return
+    if timeframe not in TIMEFRAME_SECONDS:
+        await websocket.close(code=4000, reason="Unknown timeframe")
+        return
+
+    # Fast path: attach to a running session without any resolver calls.
+    session = _active_newpair_sessions.get(mint)
+    created = False
+    if session is None:
+        # Resolve best-effort, then create (manual viewer-initiated start).
+        try:
+            async with _resolve_sem:
+                real_mint, token_info = await asyncio.wait_for(
+                    resolve_input(mint), timeout=20.0
+                )
+        except Exception:
+            real_mint, token_info = mint, None
+        token_name = (token_info or {}).get("name", "")
+        token_symbol = (token_info or {}).get("symbol", "")
+        if not _newpairs_feed.can_spawn_session(real_mint):
+            await websocket.close(
+                code=4009,
+                reason="Session cap reached or mint in cooldown",
+            )
+            return
+        session, created = await _get_or_create_newpair_session(
+            real_mint=real_mint,
+            timeframe=timeframe,
+            token_name=token_name,
+            token_symbol=token_symbol,
+            token_info=token_info,
+        )
+        if created:
+            _newpairs_feed.note_spawned(real_mint)
+
+    if session is None:
+        await websocket.close(code=4001, reason="Failed to create session")
+        return
+
+    await websocket.accept()
+    logger.info(
+        f"[NEWPAIR] {'Start' if created else 'Attach'} viewer  mint={session.real_mint[:8]}…  "
+        f"tf={session.timeframe}  viewers={len(session.subscribers) + 1}"
+    )
+
+    q = session.subscribe()
+
+    async def send(obj: dict) -> bool:
+        try:
+            await websocket.send_json(obj)
+            return True
+        except Exception:
+            return False
+
+    try:
+        if session.cancelled.is_set():
+            await send({"type": "session_ended", "reason": session.stop_reason or "session_ended"})
+            return
+
+        if session.token_info:
+            await send({"type": "token_info", "data": session.token_info})
+        await send({
+            "type": "session_info",
+            "real_mint": session.real_mint,
+            "token_name": session.token_name,
+            "token_symbol": session.token_symbol,
+            "timeframe": session.timeframe,
+            "recording_id": session.rec_id,
+            "no_motion_stop_seconds": session.no_motion_stop_seconds,
+            "created": created,
+        })
+
+        # Replay everything recorded so far (engine-free: no strategy array).
+        try:
+            candles = newpairs_store.get_recording_candles(session.rec_id) if session.rec_id else []
+        except Exception:
+            candles = []
+        if candles:
+            await send({"type": "historical", "candles": candles, "strategy": []})
+            logger.info(f"[NEWPAIR] Sent {len(candles)} historical candles for {session.real_mint[:8]}")
+
+        async def viewer():
+            while True:
+                try:
+                    msg = await asyncio.wait_for(q.get(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    if not await send({"type": "ping"}):
+                        return
+                    continue
+                try:
+                    if isinstance(msg, str):
+                        await websocket.send_text(msg)
+                    else:
+                        await websocket.send_json(msg)
+                except Exception:
+                    return
+
+        async def listen():
+            # Control channel (detach-only semantics; pong handling).  There is
+            # deliberately NO manual_trade — nothing can be traded here.
+            while True:
+                data = await websocket.receive_text()
+                try:
+                    msg = json.loads(data)
+                except Exception:
+                    continue
+                # No control messages modify a recording session; only pongs.
+
+        v_task = asyncio.ensure_future(viewer())
+        l_task = asyncio.ensure_future(listen())
+        try:
+            await asyncio.gather(v_task, l_task)
+        except (WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
+            pass
+        finally:
+            for t in (v_task, l_task):
+                if not t.done():
+                    t.cancel()
+    except (WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
+        pass
+    finally:
+        # Detach only — never terminates the session.
+        session.unsubscribe(q)
+        logger.info(
+            f"[NEWPAIR] Detach viewer  mint={session.real_mint[:8]}…  "
+            f"remaining={len(session.subscribers)}"
+        )
 
 
 @app.get("/api/live/private_key")

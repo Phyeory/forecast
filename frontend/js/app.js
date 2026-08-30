@@ -573,6 +573,7 @@ function switchPage(pageId) {
   if (pageId === "recorder") { loadRecordingsList("recordings-list"); checkRecorderStatus(); }
   if (pageId === "viewer") loadRecordingsList("viewer-recordings-list", true);
   if (pageId === "backtest") { loadBacktestsList(); loadRecordingsDropdown(); }
+  if (pageId === "new-pairs") { npRefreshPage(); }
 }
 
 navTabs.forEach(tab => tab.addEventListener("click", () => switchPage(tab.dataset.page)));
@@ -2835,3 +2836,837 @@ setInterval(() => {
   if (!page || !page.classList.contains("active")) return;
   loadPortfolio();
 }, 5000);
+
+
+/* ══════════════════════════════════════════════════════════════════════════
+   NEW PAIRS — auto-feed & record newly-born pump.fun tokens (pre-migration)
+   ══════════════════════════════════════════════════════════════════════════
+   Mirrors the Execution tab's session architecture (server-sided sessions
+   survive tab closes; this tab attaches as viewers over /ws/newpairs/{mint})
+   with three deliberate differences:
+     1. NO strategy engine anywhere — sessions are pure price-action recorders.
+     2. Recordings live in a SEPARATE database (newpairs_data.db).
+     3. Termination is the NO-MOTION stop only (default 120 s) — there is no
+        market-cap floor and no trading, so no wallet key is ever needed.
+
+   Discovery: PumpPortal's subscribeNewToken feed (every pump.fun birth in
+   real time) pushed over /ws/newpairs/feed.  Each accepted birth auto-opens
+   a recording session server-side; this tab surfaces it as a viewer card —
+   the exact same flow the gmgn AutoFeed uses for Execution.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+const NP_FEED_WS_BASE = `${WS_PROTO}//${location.host}/ws/newpairs/feed`;
+const NP_SESSION_WS_BASE = `${WS_PROTO}//${location.host}/ws/newpairs`;
+
+/* ── State ────────────────────────────────────────────────────────────── */
+
+const npActiveSessions = {};   // mint -> { ws, info, events[], candles, lastPrice, firstPrice }
+let npWS = null;               // feed WS
+
+/* ── DOM refs ─────────────────────────────────────────────────────────── */
+
+const npToggle = $("np-toggle");
+const npSettingsWrap = $("np-settings");
+const npStatusDot = $("np-status-dot");
+const npStatusText = $("np-status-text");
+const npCandidates = $("np-candidates");
+const npStatSeen = $("np-stat-seen");
+const npStatFed = $("np-stat-fed");
+const npStatActive = $("np-stat-active");
+const npStatLastPoll = $("np-stat-lastpoll");
+const npSaveConfigBtn = $("np-save-config");
+const npPreview = $("np-preview");
+const npTradersGrid = $("np-traders-grid");
+const npAddBtn = $("np-add-btn");
+const npTokenInput = $("np-token-input");
+const npStopAllBtn = $("np-stop-all-btn");
+
+/* ── Status helpers ───────────────────────────────────────────────────── */
+
+function npSetStatus(state, text) {
+  if (state === "running") npStatusDot.className = "dot connected";
+  else if (state === "connected") npStatusDot.className = "dot connected";
+  else npStatusDot.className = "dot error";
+  if (text) npStatusText.textContent = text;
+}
+
+/* ── Feed WS lifecycle ─────────────────────────────────────────────────── */
+
+function npConnectWS() {
+  if (npWS && npWS.readyState === WebSocket.OPEN) return;
+  try {
+    npWS = new WebSocket(NP_FEED_WS_BASE);
+  } catch (e) { console.warn("[NewPairs WS] connect failed", e); return; }
+
+  npWS.onopen = () => npSetStatus("connected", "Connected");
+  npWS.onclose = () => {
+    npSetStatus("off", "Disconnected");
+    npWS = null;
+    // Reconnect in 5s only if the feed is supposed to be on
+    if (npToggle.checked) setTimeout(npConnectWS, 5000);
+  };
+  npWS.onerror = () => npSetStatus("off", "WS error");
+
+  npWS.onmessage = async (ev) => {
+    let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg.type === "newpairs_status") {
+      npHandleStatus(msg.data || {});
+    } else if (msg.type === "newpair_candidate") {
+      npHandleCandidate(msg.candidate || {});
+    } else if (msg.type === "session_started") {
+      // A recording session just started server-side — attach a viewer card.
+      npAttachSession(msg.mint, { timeframe: msg.timeframe, tokenName: msg.token_name, tokenSymbol: msg.token_symbol });
+    } else if (msg.type === "ping") {
+      try { npWS.send(JSON.stringify({ type: "pong" })); } catch { /* ignore */ }
+    }
+  };
+}
+
+function npDisconnectWS() {
+  if (npWS) { try { npWS.close(); } catch { /* ignore */ } npWS = null; }
+}
+
+/* ── Incoming from backend ────────────────────────────────────────────── */
+
+function npHandleStatus(snap) {
+  // Populate form fields from backend
+  npPopulateForm(snap);
+
+  // Stats
+  npStatSeen.textContent = snap.total_seen || 0;
+  npStatFed.textContent = snap.total_fed || 0;
+  npStatActive.textContent = snap.active_sessions ?? (snap.active_tracked || 0);
+  if (snap.last_event_at && snap.last_event_at > 0) {
+    npStatLastPoll.textContent = new Date(snap.last_event_at * 1000).toLocaleTimeString();
+  } else {
+    npStatLastPoll.textContent = "—";
+  }
+
+  npRenderCandidates(snap.recent_candidates || []);
+
+  // Running state — no wallet gate on this tab (nothing is traded).
+  if (snap.is_running) {
+    npSetStatus("running", "Running — auto-recording newborns");
+    $("np-source-status").textContent = "PumpPortal subscribeNewToken: ✅ live";
+    $("np-source-status").style.color = "var(--green, #26a69a)";
+  } else {
+    npSetStatus("off", "Idle");
+    $("np-source-status").textContent = "Feed off";
+    $("np-source-status").style.color = "var(--dim)";
+  }
+
+  // Session summary card
+  npUpdateSessionStats(snap);
+
+  // Re-attach viewer cards for sessions already running (page reload, feed
+  // spawned while another tab was open…).  The periodic poll also covers this.
+  if (Array.isArray(snap.sessions)) {
+    for (const s of snap.sessions) {
+      if (s.status !== "recording") continue;
+      if (npActiveSessions[s.mint]) continue;
+      npAttachSession(s.mint, {
+        attach: true,
+        timeframe: s.timeframe,
+        tokenName: s.token_name,
+        tokenSymbol: s.token_symbol,
+      });
+    }
+  }
+}
+
+function npHandleCandidate(cand) {
+  npAddCandidateRow(cand);
+}
+
+/* ── Session stats bar (deck-zone aggregate) ──────────────────────────── */
+
+function npUpdateSessionStats(snap) {
+  const el = $("np-session-card");
+  if (!el) return;
+  const active = snap.active_sessions || 0;
+  const seen = snap.total_seen || 0;
+  const fed = snap.total_fed || 0;
+  if (active === 0 && seen === 0 && fed === 0 && Object.keys(npActiveSessions).length === 0) {
+    el.style.display = "none";
+    return;
+  }
+  el.style.display = "";
+  $("nps-recording").textContent = active;
+  $("nps-seen").textContent = seen;
+  $("nps-fed").textContent = fed;
+  let candles = 0;
+  for (const ctx of Object.values(npActiveSessions)) candles += ctx.candleCount || 0;
+  $("nps-candles").textContent = candles;
+}
+
+/* ── Birth candidate rows ─────────────────────────────────────────────── */
+
+function npRenderCandidates(list) {
+  if (!Array.isArray(list) || list.length === 0) {
+    npCandidates.innerHTML = `<div class="empty-state" style="font-size:11px;padding:14px">No births yet. Toggle the feed on to auto-record new pump.fun tokens.</div>`;
+    return;
+  }
+  npCandidates.innerHTML = list.slice(0, 30).map(npRenderRowHTML).join("");
+}
+
+function npAddCandidateRow(cand) {
+  const empty = npCandidates.querySelector(".empty-state");
+  if (empty) empty.remove();
+  npCandidates.insertAdjacentHTML("afterbegin", npRenderRowHTML(cand));
+  const rows = npCandidates.querySelectorAll(".np-candidate");
+  if (rows.length > 30) rows[rows.length - 1].remove();
+}
+
+function npRenderRowHTML(c) {
+  const mintShort = (c.mint || "").slice(0, 8) + "…";
+  const fmtSol = (n) => (n != null && n > 0) ? n.toFixed(2) + " SOL" : "—";
+  const fmtUsd = (n) => {
+    if (!n || n <= 0) return "—";
+    if (n > 1e6) return `$${(n / 1e6).toFixed(2)}M`;
+    if (n > 1e3) return `$${(n / 1e3).toFixed(1)}k`;
+    return `$${n.toFixed(0)}`;
+  };
+  const social = [c.twitter && "𝕏", c.telegram && "✈", c.website && "🌐"].filter(Boolean).join(" ") || "—";
+  return `
+    <div class="np-candidate af-candidate" data-mint="${c.mint}">
+      <div>
+        <span class="af-name">${c.symbol || mintShort}</span>
+        <span class="af-sub"> / ${c.name || "—"}</span>
+        <div class="af-sub">${c.mint}</div>
+      </div>
+      <div>
+        <div class="af-sub">Dev Buy</div>
+        <div class="af-metric">${fmtSol(c.initial_sol)}</div>
+        <div class="af-sub">MCap: ${fmtUsd(c.market_cap_usd)}</div>
+      </div>
+      <div>
+        <div class="af-sub">Social</div>
+        <div class="af-metric">${social}</div>
+      </div>
+      <div>
+        <div class="af-sub">Curve SOL</div>
+        <div class="af-metric">${fmtSol(c.pool_sol)}</div>
+      </div>
+      <div>
+        <div class="af-sub">Age</div>
+        <div class="af-metric">${c.first_seen ? Math.max(0, Math.round((Date.now() / 1000 - c.first_seen))) + "s" : "—"}</div>
+      </div>
+      <div>
+        <div class="af-sub">Action</div>
+        <button class="btn btn-xs btn-primary" style="margin-top:4px"
+          onclick="npManualStart('${c.mint}')">● Record</button>
+      </div>
+    </div>
+  `;
+}
+
+function npManualStart(mint) {
+  const tf = $("np-timeframe").value || "1s";
+  apiFetch("/api/newpairs/session/start", { method: "POST", body: JSON.stringify({ mint, timeframe: tf }) })
+    .then(r => {
+      if (r.error) return alert(r.error);
+      npAttachSession(r.mint, { timeframe: r.timeframe });
+    })
+    .catch(e => alert("Failed to start recording: " + e));
+}
+window.npManualStart = npManualStart;
+
+/* ── Session viewer cards (mirror updateTraderCard, minus trading) ────── */
+
+function npUpdateSessionCard(mint) {
+  const ctx = npActiveSessions[mint];
+  if (!ctx) return;
+
+  let card = document.querySelector(`.np-session-card[data-mint="${mint}"]`);
+  if (!card) {
+    card = document.createElement("div");
+    card.className = "np-session-card";
+    card.dataset.mint = mint;
+
+    const empty = npTradersGrid.querySelector(".empty-state");
+    if (empty) empty.remove();
+
+    card.innerHTML = `
+      <div class="lt-card-header">
+        <div><span class="lt-card-name" id="nph-name-${mint}"></span><span class="lt-card-symbol" id="nph-sym-${mint}"></span></div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <span class="engine-badge" title="Recording mode (no engine)">REC</span>
+          <div id="nph-change-${mint}" class="direction-badge" style="font-size:10px; padding:2px 6px;"></div>
+          <div id="nph-status-${mint}"></div>
+        </div>
+      </div>
+      <div class="lt-card-stats" id="np-stats-${mint}"></div>
+      <div class="np-card-chart-container" id="np-chart-${mint}" style="height:250px; margin:10px 0; border:1px solid var(--border); border-radius:6px; background:#0d1117"></div>
+      <div class="lt-event-log" id="np-events-${mint}"></div>
+      <div class="lt-card-actions" style="display:flex; gap:8px;">
+        <button class="btn btn-danger btn-xs" onclick="npStopSession('${mint}')" style="margin-left:auto;">⏹ Stop</button>
+      </div>
+    `;
+    npTradersGrid.appendChild(card);
+
+    const chart = LightweightCharts.createChart(document.getElementById(`np-chart-${mint}`), {
+      layout: { background: { type: 'solid', color: 'transparent' }, textColor: '#8b949e', fontSize: 11 },
+      grid: { vertLines: { color: '#30363d33' }, horzLines: { color: '#30363d33' } },
+      rightPriceScale: { borderVisible: false },
+      timeScale: { borderVisible: false, timeVisible: true, secondsVisible: true, rightBarStaysOnScroll: true, shiftVisibleRangeOnNewBar: true, rightOffset: 5, barSpacing: 6 },
+      crosshair: { mode: 0 }
+    });
+    const cSeries = chart.addCandlestickSeries({
+      upColor: '#26a69a', downColor: '#ef5350', borderVisible: false,
+      wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+      priceFormat: { type: 'custom', minMove: 1, formatter: p => formatMcap(p) }
+    });
+    const vSeries = chart.addHistogramSeries({
+      color: '#5865f222', priceFormat: { type: 'volume' }, priceScaleId: 'vol'
+    });
+    chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
+
+    ctx.chart = chart;
+    ctx.candleSeries = cSeries;
+    ctx.volSeries = vSeries;
+
+    new ResizeObserver(() => {
+      const el = document.getElementById(`np-chart-${mint}`);
+      if (el) chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
+    }).observe(document.getElementById(`np-chart-${mint}`));
+  }
+
+  const name = ctx.info?.token_name || ctx.tokenName || mint.slice(0, 8);
+  const symbol = (ctx.info?.token_symbol || ctx.tokenSymbol) ? "$" + (ctx.info?.token_symbol || ctx.tokenSymbol) : "";
+  document.getElementById(`nph-name-${mint}`).textContent = name;
+  document.getElementById(`nph-sym-${mint}`).textContent = symbol;
+
+  const changePct = ctx.firstPrice > 0 && ctx.lastPrice > 0
+    ? (ctx.lastPrice - ctx.firstPrice) / ctx.firstPrice * 100 : 0;
+  const changeEl = document.getElementById(`nph-change-${mint}`);
+  changeEl.textContent = `${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%`;
+  changeEl.style.color = changePct >= 0 ? CANDLE_UP : CANDLE_DOWN;
+
+  document.getElementById(`nph-status-${mint}`).innerHTML =
+    `<span class="lt-card-status running"><span class="lt-live-dot"></span>RECORDING</span>`;
+
+  document.getElementById(`np-stats-${mint}`).innerHTML = `
+    <div class="bt-stat"><span class="bt-stat-label">Trades</span><span class="bt-stat-value">${ctx.tradeCount || 0}</span></div>
+    <div class="bt-stat"><span class="bt-stat-label">Candles</span><span class="bt-stat-value">${ctx.candleCount || 0}</span></div>
+    <div class="bt-stat"><span class="bt-stat-label">Last Price</span><span class="bt-stat-value">${ctx.lastPrice ? ctx.lastPrice.toExponential(3) : "—"}</span></div>
+  `;
+
+  document.getElementById(`np-events-${mint}`).innerHTML = ctx.events.slice(0, 5).map(e =>
+    `<div class="${e.type}">${e.ts} — ${e.msg}</div>`).join("");
+}
+
+function npAddSessionEvent(ctx, type, msg) {
+  const ts = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  ctx.events.unshift({ type, msg, ts });
+  if (ctx.events.length > 50) ctx.events.pop();
+  npUpdateSessionCard(ctx.mint);
+}
+
+/* ── Attach to a server-side recording session (viewer card) ───────────── */
+
+function npAttachSession(mint, opts = {}) {
+  if (!mint) return;
+  if (npActiveSessions[mint]) return;
+  const timeframe = opts.timeframe || $("np-timeframe").value || "1s";
+
+  const ctx = {
+    mint,
+    ws: null,
+    info: null,
+    tokenName: opts.tokenName || null,
+    tokenSymbol: opts.tokenSymbol || null,
+    timeframe,
+    events: [],
+    tradeCount: 0,
+    candleCount: 0,
+    lastPrice: 0,
+    firstPrice: 0,
+    baseMcap: null,
+    basePrice: null,
+    lastClose: null,
+    lastTime: null,
+    manualStop: false,
+  };
+  npActiveSessions[mint] = ctx;
+  npStopAllBtn.style.display = "inline-flex";
+  npAddSessionEvent(ctx, "info", opts.attach ? "Re-attaching to recording session…" : "Connecting…");
+  npUpdateSessionCard(mint);
+
+  const ws = new WebSocket(`${NP_SESSION_WS_BASE}/${mint}?timeframe=${encodeURIComponent(timeframe)}`);
+  ctx.ws = ws;
+
+  ctx.wsOpenTimer = setTimeout(() => {
+    if (ctx.ws && ctx.ws.readyState === WebSocket.CONNECTING) {
+      npAddSessionEvent(ctx, "error", "Connection timed out — retrying…");
+      try { ctx.ws.close(); } catch (e) { /* ignore */ }
+    }
+  }, 25000);
+
+  ws.onopen = () => {
+    clearTimeout(ctx.wsOpenTimer);
+    npAddSessionEvent(ctx, "info", "Connected — recording price action…");
+  };
+
+  ws.onmessage = async (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+
+    if (msg.type === "session_info") {
+      if (msg.token_name && !ctx.tokenName) ctx.tokenName = msg.token_name;
+      if (msg.token_symbol && !ctx.tokenSymbol) ctx.tokenSymbol = msg.token_symbol;
+      if (msg.no_motion_stop_seconds) ctx.noMotionStop = msg.no_motion_stop_seconds;
+      npUpdateSessionCard(mint);
+    }
+
+    if (msg.type === "session_ended") {
+      ctx.manualStop = true;
+      npAddSessionEvent(ctx, "error", `🛑 Session ended (${msg.reason || "stopped"})`);
+      const card = document.querySelector(`.np-session-card[data-mint="${mint}"]`);
+      if (card) { card.style.borderColor = "var(--red)"; card.style.opacity = "0.7"; }
+      setTimeout(() => npDetachSession(mint), 8000);
+    }
+
+    if (msg.type === "token_info") {
+      ctx.info = msg.data;
+      npAddSessionEvent(ctx, "info", `Token: ${msg.data.name || mint.slice(0, 8)}`);
+      npUpdateSessionCard(mint);
+    }
+
+    if (msg.type === "historical") {
+      npAddSessionEvent(ctx, "info", `Loaded ${msg.candles?.length || 0} recorded candles`);
+      if (ctx.candleSeries && msg.candles) {
+        const res = await npFormatCandles(msg.candles, ctx);
+        ctx.candleSeries.setData(res.candles);
+        ctx.volSeries.setData(res.candles.map(c => ({ time: c.time, value: c.volume || 0, color: c.color })));
+        if (ctx.chart) ctx.chart.timeScale().scrollToRealTime();
+      }
+    }
+
+    if (msg.type === "candle" && msg.candle) {
+      const candle = msg.candle;
+      if (ctx.candleSeries) {
+        if (!ctx.baseMcap) {
+          ctx.baseMcap = msg.market_cap_usd || (candle.close * 1e9 * 150);
+          ctx.basePrice = candle.close;
+        }
+        if (msg.is_new) ctx.candleCount++;
+        if (ctx.firstPrice <= 0) ctx.firstPrice = candle.close;
+        ctx.lastPrice = candle.close;
+
+        const close = ctx.baseMcap * (candle.close / ctx.basePrice);
+        let open = ctx.lastClose !== null && ctx.lastClose !== undefined
+          ? ctx.lastClose : ctx.baseMcap * (candle.open / ctx.basePrice);
+        let high = ctx.baseMcap * (candle.high / ctx.basePrice);
+        let low = ctx.baseMcap * (candle.low / ctx.basePrice);
+        low = Math.min(open, low, close);
+        high = Math.max(open, high, close);
+
+        let color = CANDLE_FLAT;
+        if (close > open) color = CANDLE_UP;
+        else if (close < open) color = CANDLE_DOWN;
+        else if (ctx.lastClose !== null && ctx.lastClose !== undefined) {
+          if (close > ctx.lastClose) color = CANDLE_UP;
+          else if (close < ctx.lastClose) color = CANDLE_DOWN;
+        }
+
+        ctx.candleSeries.update({ time: candle.time, open, high, low, close, color, borderColor: color, wickColor: color });
+        ctx.volSeries.update({ time: candle.time, value: candle.volume || 0, color });
+        ctx.lastClose = close;
+        ctx.lastTime = candle.time;
+        if (ctx.chart) ctx.chart.timeScale().scrollToRealTime();
+      }
+      if (msg.trade) ctx.tradeCount++;
+      npUpdateSessionCard(mint);
+    }
+
+    if (msg.type === "ping") {
+      ws.send(JSON.stringify({ type: "pong" }));
+    }
+  };
+
+  ws.onerror = () => { npAddSessionEvent(ctx, "error", "WebSocket error"); };
+  ws.onclose = () => {
+    clearTimeout(ctx.wsOpenTimer);
+    npAddSessionEvent(ctx, "info", "Disconnected");
+    // The backend session keeps recording independently of this tab.  Probe
+    // and re-attach if it is still alive (mirrors the live-tab contract).
+    if (!ctx.manualStop && npActiveSessions[mint] === ctx) {
+      setTimeout(async () => {
+        if (ctx.manualStop || npActiveSessions[mint] !== ctx) return;
+        try {
+          const st = await apiFetch("/api/newpairs/status");
+          const t = (st.sessions || []).find(s => s.mint === mint && s.status === "recording");
+          if (t) {
+            npDetachSession(mint);
+            npAttachSession(mint, { attach: true, timeframe: t.timeframe, tokenName: t.token_name, tokenSymbol: t.token_symbol });
+          } else {
+            npDetachSession(mint);
+          }
+        } catch (e) {
+          npDetachSession(mint);
+        }
+      }, 3000);
+    }
+  };
+}
+
+/* ── Candle formatting for newborn charts ──────────────────────────────── */
+
+async function npFormatCandles(rawCandles, ctx) {
+  // Newborn tokens have no USD price history — chart in SOL mcap space
+  // (price SOL × 1e9 supply), which is the natural scale for bonding-curve
+  // tokens and matches formatOfflineCandles' SOL fallback.
+  if (!rawCandles || !rawCandles.length) return { candles: [] };
+  let basePrice = 0;
+  for (const c of rawCandles) {
+    if (c.open > 0) { basePrice = c.open; break; }
+    if (c.close > 0) { basePrice = c.close; break; }
+  }
+  if (!basePrice || basePrice <= 0) basePrice = 1;
+  const baseMcap = basePrice * 1e9;
+  const tfSec = timeframeToSeconds(ctx.timeframe);
+  const formatted = [];
+  let lastTime = null, lastClose = null;
+  const seenTimes = new Set();
+  for (const c of rawCandles) {
+    if (lastTime !== null && lastClose !== null && c.time > lastTime + tfSec) {
+      const gap = Math.floor((c.time - lastTime) / tfSec) - 1;
+      if (gap <= 15) {
+        for (let t = lastTime + tfSec; t < c.time; t += tfSec) {
+          if (!seenTimes.has(t)) {
+            seenTimes.add(t);
+            formatted.push({ time: t, open: lastClose, high: lastClose, low: lastClose, close: lastClose, volume: 0, color: CANDLE_FLAT, borderColor: CANDLE_FLAT, wickColor: CANDLE_FLAT });
+            lastTime = t;
+          }
+        }
+      }
+    }
+    if (seenTimes.has(c.time)) continue;
+    seenTimes.add(c.time);
+    const closeVal = baseMcap * (c.close / basePrice);
+    if (!closeVal || closeVal <= 0) continue;
+    let open = lastClose !== null ? lastClose : baseMcap * (c.open / basePrice);
+    let high = baseMcap * (c.high / basePrice);
+    let low = baseMcap * (c.low / basePrice);
+    high = Math.max(open, high, closeVal);
+    low = Math.min(open, low, closeVal);
+    let color = CANDLE_FLAT;
+    if (closeVal > open) color = CANDLE_UP;
+    else if (closeVal < open) color = CANDLE_DOWN;
+    formatted.push({ time: c.time, open, high, low, close: closeVal, volume: c.volume || 0, color, borderColor: color, wickColor: color });
+    lastTime = c.time;
+    lastClose = closeVal;
+  }
+  return { candles: formatted, baseMcap, basePrice, lastClose, lastTime };
+}
+
+/* ── Stop / detach sessions ────────────────────────────────────────────── */
+
+function npDetachSession(mint) {
+  delete npActiveSessions[mint];
+  const card = document.querySelector(`.np-session-card[data-mint="${mint}"]`);
+  if (card) card.remove();
+  if (Object.keys(npActiveSessions).length === 0) {
+    npTradersGrid.innerHTML = '<div class="empty-state">No active recordings. Toggle the feed on or add a newborn mint above.</div>';
+    npStopAllBtn.style.display = "none";
+  }
+}
+
+function npStopSession(mint) {
+  const ctx = npActiveSessions[mint];
+  if (!ctx) return;
+  ctx.manualStop = true;
+  if (ctx.ws) ctx.ws.close();
+  apiFetch("/api/newpairs/session/stop", { method: "POST", body: JSON.stringify({ mint }) }).catch(() => { });
+  npDetachSession(mint);
+}
+
+function npStopAllSessions() {
+  for (const mint of Object.keys(npActiveSessions)) npStopSession(mint);
+  apiFetch("/api/newpairs/session/stop_all", { method: "POST" }).catch(() => { });
+}
+
+window.npStopSession = npStopSession;
+window.npStopAllSessions = npStopAllSessions;
+
+/* ── Form read/write ──────────────────────────────────────────────────── */
+
+const NP_FIELD_MAP = [
+  ["np-min-dev-buy", "min_initial_buy_sol", "float"],
+  ["np-max-dev-buy", "max_initial_buy_sol", "float"],
+  ["np-min-mcap", "min_mcap_usd", "float"],
+  ["np-max-mcap", "max_mcap_usd", "float"],
+  ["np-req-social", "require_social", "bool"],
+  ["np-exclude", "exclude_mints", "str"],
+  ["np-max-concurrent", "max_concurrent_sessions", "int"],
+  ["np-timeframe", "session_timeframe", "str"],
+  ["np-no-motion", "no_motion_stop_seconds", "float"],
+  ["np-cooldown", "cooldown_seconds", "float"],
+];
+
+function npPopulateForm(snap) {
+  for (const [id, key, type] of NP_FIELD_MAP) {
+    const el = $(id);
+    if (!el || snap[key] === undefined || snap[key] === null) continue;
+    if (type === "bool") el.checked = !!snap[key];
+    else el.value = snap[key];
+  }
+}
+
+function npReadForm() {
+  const out = {};
+  for (const [id, key, type] of NP_FIELD_MAP) {
+    const el = $(id);
+    if (!el) continue;
+    if (type === "bool") out[key] = !!el.checked;
+    else if (type === "int") out[key] = parseInt(el.value, 10) || 0;
+    else if (type === "float") out[key] = parseFloat(el.value) || 0;
+    else out[key] = el.value.trim();
+  }
+  return out;
+}
+
+/* ── Toggle / buttons ─────────────────────────────────────────────────── */
+
+npToggle.addEventListener("change", async () => {
+  if (npToggle.checked) {
+    localStorage.setItem("np_feed_enabled", "true");
+    try {
+      await apiFetch("/api/newpairs/config", {
+        method: "POST",
+        body: JSON.stringify(npReadForm()),
+      });
+      await apiFetch("/api/newpairs/start", { method: "POST", body: "{}" });
+      npSettingsWrap.style.display = "block";
+      npConnectWS();
+    } catch (e) {
+      npToggle.checked = false;
+      localStorage.setItem("np_feed_enabled", "false");
+      npSettingsWrap.style.display = "none";
+      console.error("[NewPairs] start failed", e);
+      alert("New Pairs feed start failed: " + e.message);
+    }
+  } else {
+    localStorage.setItem("np_feed_enabled", "false");
+    npSettingsWrap.style.display = "none";
+    try {
+      await apiFetch("/api/newpairs/stop", { method: "POST" });
+      npSetStatus("off", "Stopped");
+    } catch (e) { /* ignore */ }
+    npDisconnectWS();
+  }
+});
+
+npSaveConfigBtn.addEventListener("click", async () => {
+  const cfg = npReadForm();
+  try {
+    const r = await apiFetch("/api/newpairs/config", {
+      method: "POST",
+      body: JSON.stringify(cfg),
+    });
+    npPreview.textContent = `Saved ${r.changed?.length || 0} field(s) ✓`;
+    setTimeout(() => npPreview.textContent = "", 3000);
+  } catch (e) {
+    npPreview.textContent = "Save error: " + e.message;
+    npPreview.style.color = "var(--red, #ef5350)";
+  }
+});
+
+npAddBtn.addEventListener("click", () => {
+  const mint = npTokenInput.value.trim();
+  if (!mint) return alert("Enter a newborn token address");
+  npManualStart(mint);
+  npTokenInput.value = "";
+});
+npTokenInput.addEventListener("keydown", e => { if (e.key === "Enter") npAddBtn.click(); });
+npStopAllBtn.addEventListener("click", npStopAllSessions);
+
+/* ── Recordings list (separate newpairs DB) ────────────────────────────── */
+
+function npRenderRecordingCard(rec) {
+  const statusClass = rec.status === "recording" ? "status-recording" : "status-completed";
+  const stopBtn = rec.status === "recording"
+    ? `<button class="btn btn-danger btn-xs" style="margin-right:4px;" onclick="npStopRecordingById(${rec.id}, event)">⏹ Stop</button>`
+    : "";
+  return `
+    <div class="recording-card" data-id="${rec.id}">
+      <div class="rec-card-header">
+        <div><span class="rec-card-name">${rec.token_name || 'Unknown'}</span> <span class="rec-card-symbol">${rec.token_symbol ? '$' + rec.token_symbol : ''}</span></div>
+        <div class="rec-card-badges">
+          <span class="rec-card-badge">AGE 0</span>
+          <span class="rec-card-badge">${rec.timeframe}</span>
+          <span class="rec-card-badge ${statusClass}">${rec.status}</span>
+        </div>
+      </div>
+      <div class="rec-card-details">
+        <span>🕐 ${fmtTs(rec.started_at)}</span>
+        <span>📊 ${rec.candle_count} candles</span>
+        ${rec.stopped_at ? `<span>⏱ ${fmtDuration(rec.started_at, rec.stopped_at)}</span>` : ''}
+      </div>
+      <div class="rec-card-mint">${rec.mint || ''}</div>
+      <div class="rec-card-actions">${stopBtn}
+        <button class="btn btn-primary btn-sm" onclick="npLoadViewer(${rec.id})">📊 View Chart</button>
+        <button class="btn btn-danger btn-xs" style="margin-left:4px;" onclick="npDeleteRecording(${rec.id}, event)">🗑</button>
+      </div>
+    </div>`;
+}
+
+async function npLoadRecordingsList() {
+  const list = await apiFetch("/api/newpairs/recordings");
+  const el = document.getElementById("np-recordings-list");
+  if (!el) return;
+  if (!list.length) {
+    el.innerHTML = `<div class="empty-state">No newborn-token recordings yet.</div>`;
+    return;
+  }
+  // New-pair recordings accumulate at ~1k+/day — cap the rendered cards
+  // (newest first, matching the backend's ORDER BY) so the DOM stays light.
+  const MAX_CARDS = 150;
+  const shown = list.slice(0, MAX_CARDS);
+  el.innerHTML = shown.map(npRenderRecordingCard).join("") +
+    (list.length > MAX_CARDS
+      ? `<div class="empty-state" style="grid-column: 1/-1">Showing newest ${MAX_CARDS} of ${list.length} recordings — use Clean Up to prune dead stillborns.</div>`
+      : "");
+}
+
+async function npStopRecordingById(id, e) {
+  if (e) e.stopPropagation();
+  const rec = await apiFetch(`/api/newpairs/recordings/${id}`);
+  if (rec && rec.mint) {
+    await apiFetch("/api/newpairs/session/stop", { method: "POST", body: JSON.stringify({ mint: rec.mint }) });
+    const ctx = npActiveSessions[rec.mint];
+    if (ctx) { ctx.manualStop = true; npDetachSession(rec.mint); }
+  }
+  npLoadRecordingsList();
+}
+
+async function npDeleteRecording(id, e) {
+  if (e) e.stopPropagation();
+  if (!confirm("Delete this newborn recording?")) return;
+  await apiFetch(`/api/newpairs/recordings/${id}`, { method: "DELETE" });
+  npLoadRecordingsList();
+}
+
+async function npCleanupRecordings() {
+  if (!confirm("Clean up all new-pair recordings with fewer than 30 candles?")) return;
+  const res = await apiFetch("/api/newpairs/recordings/cleanup", { method: "POST" });
+  if (res.error) return alert(res.error);
+  alert(`Cleaned up ${res.deleted_count || 0} recording(s) with < 30 candles.`);
+  npLoadRecordingsList();
+}
+
+window.npStopRecordingById = npStopRecordingById;
+window.npDeleteRecording = npDeleteRecording;
+window.npCleanupRecordings = npCleanupRecordings;
+
+/* ── New-pair recording viewer (chart from the separate DB) ───────────── */
+
+let npViewerChart = null;
+
+async function npLoadViewer(recordingId) {
+  const rec = await apiFetch(`/api/newpairs/recordings/${recordingId}`);
+  const candles = await apiFetch(`/api/newpairs/recordings/${recordingId}/candles`);
+  if (!candles.length) return alert("No candles in this recording");
+
+  document.getElementById("np-recordings-list").classList.add("hidden");
+  document.getElementById("np-viewer-area").classList.remove("hidden");
+  document.getElementById("np-viewer-token-name").textContent = rec.token_name || "Unknown";
+  document.getElementById("np-viewer-token-symbol").textContent = rec.token_symbol ? `$${rec.token_symbol}` : "";
+  document.getElementById("np-viewer-meta-tf").textContent = rec.timeframe;
+  document.getElementById("np-viewer-meta-candles").textContent = `${candles.length} candles`;
+
+  const wrapper = document.getElementById("np-viewer-chart");
+  wrapper.innerHTML = "";
+  if (npViewerChart) { npViewerChart.remove(); npViewerChart = null; }
+  npViewerChart = LightweightCharts.createChart(wrapper, {
+    layout: { background: { color: "#0d0f12" }, textColor: "#5a6071" },
+    grid: { vertLines: { color: "#1e2330" }, horzLines: { color: "#1e2330" } },
+    timeScale: { borderColor: "#1e2330", timeVisible: true, secondsVisible: true },
+    rightPriceScale: { borderColor: "#1e2330" },
+    width: wrapper.clientWidth, height: wrapper.clientHeight,
+  });
+
+  const res = await npFormatCandles(candles, { timeframe: rec.timeframe });
+
+  const cs = npViewerChart.addCandlestickSeries({
+    upColor: CANDLE_UP, downColor: CANDLE_DOWN,
+    borderUpColor: CANDLE_UP, borderDownColor: CANDLE_DOWN,
+    wickUpColor: CANDLE_UP, wickDownColor: CANDLE_DOWN,
+    priceFormat: { type: 'custom', minMove: 1, formatter: p => formatMcap(p) }
+  });
+  cs.setData(res.candles);
+
+  const vs = npViewerChart.addHistogramSeries({ color: "#5865f222", priceFormat: { type: "volume" }, priceScaleId: "vol" });
+  npViewerChart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
+  vs.setData(res.candles.map(c => ({ time: c.time, value: c.volume || 0, color: c.close >= c.open ? "#26a69a33" : "#ef535033" })));
+
+  npViewerChart.timeScale().fitContent();
+  new ResizeObserver(() => npViewerChart.applyOptions({ width: wrapper.clientWidth, height: wrapper.clientHeight })).observe(wrapper);
+}
+
+document.getElementById("np-viewer-back-btn").addEventListener("click", () => {
+  document.getElementById("np-recordings-list").classList.remove("hidden");
+  document.getElementById("np-viewer-area").classList.add("hidden");
+  if (npViewerChart) { npViewerChart.remove(); npViewerChart = null; }
+});
+
+window.npLoadViewer = npLoadViewer;
+
+/* ── Page-level refresh & lifecycle ───────────────────────────────────── */
+
+function npRefreshPage() {
+  // Pull latest status (attaches viewer cards for feed-spawned sessions)
+  apiFetch("/api/newpairs/status")
+    .then(snap => { if (snap && !snap.error) npHandleStatus(snap); })
+    .catch(() => { });
+  npLoadRecordingsList();
+  // Keep the feed WS alive while the tab is open
+  if (npToggle.checked) npConnectWS();
+}
+
+// Periodic status poll while the New Pairs tab is visible (sessions spawn
+// server-side with no browser involvement — this is how the grid finds them).
+setInterval(() => {
+  if (document.hidden) return;
+  const page = document.getElementById("page-new-pairs");
+  if (!page || !page.classList.contains("active")) return;
+  apiFetch("/api/newpairs/status")
+    .then(snap => { if (snap && !snap.error) npHandleStatus(snap); })
+    .catch(() => { });
+}, 5000);
+
+// Restore persisted feed toggle state on load (no wallet gate — recording
+// never trades).
+(async function npRestoreState() {
+  try {
+    const snap = await apiFetch("/api/newpairs/status");
+    if (snap && !snap.error) npHandleStatus(snap);
+    const savedEnabled = localStorage.getItem("np_feed_enabled") === "true";
+    if (snap.is_running || savedEnabled) {
+      npToggle.checked = true;
+      npSettingsWrap.style.display = "block";
+      localStorage.setItem("np_feed_enabled", "true");
+      if (!snap.is_running) {
+        try {
+          await apiFetch("/api/newpairs/config", {
+            method: "POST",
+            body: JSON.stringify(npReadForm()),
+          });
+          await apiFetch("/api/newpairs/start", { method: "POST", body: "{}" });
+        } catch (err) {
+          console.warn("[NewPairs] Failed to auto-start backend feed", err);
+        }
+      }
+      npConnectWS();
+    } else {
+      npToggle.checked = false;
+      npSettingsWrap.style.display = "none";
+    }
+  } catch (e) {
+    console.warn("[NewPairs] Restore state failed", e);
+  }
+})();
+
+window.addEventListener("beforeunload", () => {
+  try { npDisconnectWS(); } catch { /* ignore */ }
+});
