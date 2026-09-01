@@ -8477,3 +8477,61 @@ A+s2 < B′+s2 < B′+s2@0.060-on-PnL — but the PnL-best stack fails the era g
 ### Verdict
 
 **No parameter change.** B′ (`v2_msm_enable=1.0, v2_msm_occupancy_floor=0.0, v2_msm_entry_blocklist="0:idle;2:idle,trend"`, s2 OFF, 300s bins, full 7-feature HMM) is now verified as the optimum across: 4 blocklist brackets, 5 σ floors, 3 alternative bin sizes, 3 feature ablations, and the full 2×2 — 16 configurations total, each full-engine on the complete 1,525-recording cohort. The σ-axis rejection is the sharp finding of this battery: the s2 gate cannot be made both-era-positive at any floor — its information content is era-conditional, the same structural result that iter74d found for every fleet-observable threshold rule.
+
+## Iter 76 — Regime-Consistent Sizing battery (Kelly-coupled + fleet-state-keyed notional scaling): ALL 6 CELLS REJECTED at pre-registered gates; the engine's Kelly MAGNITUDE is measured anti-information; sizing joins the bounded-below surfaces
+
+**Date:** 2026-09-01. Pre-registered in `analysis/iter76_PREREGISTRATION.md` BEFORE any cell was scored. User mandate: "stop the losses … consistent winrate and pnl … the physics should remain working, just differently" — iter74e flagged sizing as the one untested conservation class; this battery closes it.
+
+### Method — exact counterfactual on the adopted B′ batch
+
+Pure size scaling is trade-sequence-invariant in this pipeline (instant fills are size-independent — slippage is a fixed pct and the legacy `_fill_fraction` size penalty is not consumed in instant mode; the engine never observes trade size; every exit threshold keys off `entry_price` only). Therefore re-accounting on the per-trade logs is EXACT, no engine burn:
+
+  pnl′(f) = f·(pnl + F) − F,   F = 0.0001 SOL (fixed per-side fee; the BUY fee hits the balance path, not pnl_sol)
+
+Cohort: the adopted B′ production batch `iter75sw_bl_noI1_1788222692` (425 traded recordings, 997 trades, +1.3196 SOL, 66.0% WR). Fleet state at entry: `fmap[entry_time//300 − 1]` from `fleet_filtered_states.json` (exact `_PanelStateSource.state_at` semantics). Unknown bin / null n* → f = 1.0 (safe degradation).
+
+**Exactness audit:** implied size `pnl_sol/(pnl_pct/100)` reconstructs as 0.100000 on ALL 951 trades with |pct| ≥ 1% (min 0.099951, max 0.100038) and the worst per-recording cumulative PnL is −0.1186 SOL — the `min(buy_size, balance−fee)` clip NEVER binds on this cohort (the 351 trades appearing "clipped" are rounding noise in the log's 6-dp `pnl_sol` on sub-1% moves; med depth 4e-06 SOL). f ≤ 1 makes the candidate strictly less binding, so exactness carries to every cell.
+
+**Diagnostics (`analysis/iter76_kelly_sizing.py --diagnose`) — the information audit first:**
+
+* **n* ANTI-RANKS future PnL in both eras.** r(n*, pnl) = −0.024 OLD / −0.062 DEAD / −0.027 ALL (log-PnL r −0.02..−0.06). High-n* half: 499 trades, 68.9% WR, **+0.208 SOL**; low-n* half: 498 trades, 63.1% WR, **+1.111 SOL**. The engine's Kelly magnitude is measured anti-information once the E*>0 entry gate has fired: the binary decision already extracts what the posterior knows; scaling by its magnitude concentrates capital on the worse half. (n* distribution: OLD median 2.34 [IQR 1.49, 3.69], DEAD 1.84 [1.17, 2.79] — era-shifted level, so n_med must be era-disclosed; the cohort constant 2.129 is an era blend.)
+* **Fleet-state economics after B′:** state 0 n=469/WR 66.7%/+1.032; state 1 n=252/64.7%/+0.230; state 2 (dump) n=275/66.2%/**+0.080** — the surviving dump-state trades are no longer the bleed (B′ blocked the conservable part); per-era split shows the remaining state-2 bleed is DEAD-era only (OLD +0.430 vs DEAD −0.350).
+
+### Battery — all 6 pre-registered cells REJECTED
+
+| cell | mechanism | PnL | Δ vs B′ | Wilcoxon p | era OLD / DEAD | neg-days | tail ≤−15% SOL |
+|---|---|---|---|---|---|---|---|
+| K25 | f=clip(n*/n_med, 0.25, 1) | +0.8051 | **−0.5145** | 0.9498 | −0.356 / −0.159 | 14 | −7.086 → −5.664 |
+| K50 | f=clip(n*/n_med, 0.50, 1) | +0.9060 | **−0.4536** | 0.9431 | −0.284 / −0.130 | 13 | −7.086 → −5.836 |
+| S50 | f=0.50 in dump-state bins | +1.2657 | −0.0538 | 0.4896 | **−0.224 / +0.170** | 13 | −7.086 → −6.029 |
+| S75 | f=0.75 in dump-state bins | +1.2927 | −0.0269 | 0.4896 | **−0.112 / +0.085** | 14 | −7.086 → −6.557 |
+| KS50 | K50 × S50 | +0.8475 | −0.4721 | 0.9396 | −0.413 / −0.06 | 14 | −7.086 → −5.202 |
+| KS75 | K50 × S75 | +0.8830 | −0.4366 | 0.9352 | −0.334 / −0.102 | 14 | −7.086 → −5.577 |
+
+No cell passes even the first gate (PnL ≥ baseline); none is both-era positive; every p ≥ 0.49. Holdout (last 100 traded recordings, info only): K cells stay negative there too (−0.23/−0.17); S50 +0.09 / S75 +0.05 — consistent with the DEAD-era-only concentration of state-2 bleed, not a global win.
+
+### Autopsy — why every down-sizing set fails
+
+1. **Anti-informative Kelly magnitude.** Any n*-coupled factor pays the r(n*,pnl) < 0 tax immediately: K25 costs −0.51 SOL. There is no monotone re-mapping (floor, cap, blend) that fixes a NEGATIVE correlation without inverting the factor — and inverting (f ∝ 1/n*) is post-hoc overfitting on the same cohort (the iter64/75 disclosure discipline), not physics.
+2. **Era inversion on the sizing surface** (same signature that killed every fleet-observable threshold rule, iter74d): state-keyed down-sizing trades OLD-era recovery (+0.22..+0.44) for DEAD-era savings (+0.09..+0.17). The K cells lose in BOTH eras. The one net-negative subset that exists — DEAD-era high-n* half (Σ −0.3198 < −nF, "net-neg beyond fees: True") — is a post-hoc interaction cell (era × n*-half), exactly the class of 2-dimensional fishing the iter61/75x discipline rejects; its cell would also cost the OLD-era high-n* half (+0.3735).
+3. **Fixed-fee drag makes down-sizing strictly worse for scratches.** At f=0.5, relative fee load doubles (0.0002 of 0.05 vs 0.0001 of 0.1 per side); pnl′ = f·(pnl+F)−F < f·pnl for every pnl > 0. This is why S50's worst day got WORSE (−0.1954 → −0.2097) while saving tail elsewhere.
+4. **The conservable tail is already gone.** The ≤−15% tail after B′ is −7.086 SOL, but only ~1 SOL of it rides in dump-state bins; the rest is evenly spread (entry-selection error — the iter74e structural conclusion, now measured on the sizing surface too).
+
+### The structural conclusion — sizing joins the bounded surfaces
+
+Every conservation lever reachable from inside the engine's decision or notional stream is now tested and bounded below baseline: entry blocks (iter74/74c/74d), exit-side caps/stops (iter22/26/37/55/74e), coefficient conditioning (iter59), re-entry gates (iter60 oracle bound), and now notional scaling keyed on the engine's own posterior (n*) or the fleet regime state. **The physics DOES remain working in every regime — the measured per-era economics show the engine is net-positive in both eras on the entries it takes after B′ (OLD +1.325 / DEAD −0.005); what changes across regimes is only the size of the residual bleed, which is dead-coin entry-selection error, not a sizing error.** Consistent WR across all conditions is statistically unreachable on this data (binomial band); consistent PnL across regimes is bounded by the DEAD-era −0.35 SOL state-2/1 bleed that no observable separates from the winners it would also cut (the 26th entry-side inseparability result).
+
+### The one lever that moves daily consistency (portfolio level, measured)
+
+Per-day fleet kill-switch counterfactual on the B′ daily paths (stop new entries when the UTC day's running PnL crosses −T; open trade kept to natural exit):
+
+| T | stopped days | PnL | neg-days | worst day | recovery foregone |
+|---|---|---|---|---|---|
+| −0.05 | 19/31 | +1.4288 (**Δ+0.109**) | **19** | **−0.046** | +0.783 |
+| −0.10 | 9/31 | +1.2492 (Δ−0.070) | 15 | −0.099 | +0.530 |
+| −0.15 | 6/31 | +1.3429 (Δ+0.023) | 14 | −0.149 | +0.144 |
+| −0.20 | 2/31 | +1.3140 (Δ−0.006) | 14 | −0.199 | +0.039 |
+
+This is USER POLICY, not an engine param (iter74e option (a)): T=−0.05 halves the worst day (−0.195→−0.046) and is PnL-POSITIVE on this cohort (+0.11 — the B′ stack's bad days keep bleeding past −0.05 without mean-reverting), at the cost of 19 stopped days and +0.78 foregone recovery. It cannot be an engine gate (entry-block family, bounded), but it IS implementable in `main.py` as a session-level entry veto for the LIVE fleet — flag if wanted. T=−0.05 is recommended as the policy candidate; it moves exactly the consistency metric the user prioritises (worst-day loss) without costing PnL on this cohort.
+
+**No engine change. No production default change.** Artifacts: `analysis/iter76_PREREGISTRATION.md`, `analysis/iter76_kelly_sizing.py`. Engine source byte-identical to B′ HEAD.
