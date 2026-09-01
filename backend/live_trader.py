@@ -69,6 +69,79 @@ class _SessionTagFilter(logging.Filter):
 
 logger.addFilter(_SessionTagFilter())
 
+
+# ── Fleet share registry (iter77 multi-engine live trading) ──────────────────
+# When several LiveTrader instances (one per strategy engine) share ONE wallet
+# and trade the SAME mint, the wallet's single token account holds the SUM of
+# their positions.  The sell path quotes "the wallet balance" — without a
+# registry, trader A's sell would quote B's tokens too (single-engine sessions
+# are unaffected: a sole trader always claims the full balance).
+#
+# Mechanics: each trader registers its CLAIMED token units (the buy's exact
+# on-chain delivery, updated on buy settle).  A selling trader clamps its
+# sell amount to its claimed share; unclaimed residue (dust, pre-registry
+# positions, adopt-orphan tokens) stays sellable by any sole claimant.
+# Registry entries are cleaned on session close (claims fall back to 0, and a
+# sole remaining trader's claim share naturally returns to the full balance).
+import threading as _threading
+
+_fleet_share_lock = _threading.Lock()
+# {(wallet_pubkey, mint): {trader_id: claimed_tokens}}
+_fleet_claims: dict[tuple[str, str], dict[int, int]] = {}
+
+
+def _fleet_claim_key(wallet_pubkey: str, mint: str) -> tuple[str, str]:
+    return (str(wallet_pubkey), str(mint))
+
+
+def fleet_register_claim(trader: "LiveTrader", claimed_tokens: int) -> None:
+    """Register/refresh this trader's claimed token units for its (wallet, mint)."""
+    if claimed_tokens < 0:
+        claimed_tokens = 0
+    with _fleet_share_lock:
+        key = _fleet_claim_key(trader.wallet_pubkey, trader.token_mint)
+        _fleet_claims.setdefault(key, {})[id(trader)] = int(claimed_tokens)
+
+
+def fleet_release_claim(trader: "LiveTrader") -> None:
+    """Drop this trader's claim (session close / position fully sold)."""
+    with _fleet_share_lock:
+        key = _fleet_claim_key(trader.wallet_pubkey, trader.token_mint)
+        _fleet_claims.get(key, {}).pop(id(trader), None)
+        if key in _fleet_claims and not _fleet_claims[key]:
+            del _fleet_claims[key]
+
+
+def fleet_sell_cap(trader: "LiveTrader", wallet_balance: int) -> int:
+    """Max tokens THIS trader may sell given the wallet's balance.
+
+    Sole-trader case (nobody else claims, or all other claims are 0):
+    the full balance.  Fleet case: the trader's proportional claim of the
+    balance, capped by the balance itself.  Claims sum can exceed the
+    balance slightly (quote inflation is clamped at buy settle), so the
+    proportional rule keeps every trader sellable while never exceeding
+    the wallet."""
+    with _fleet_share_lock:
+        key = _fleet_claim_key(trader.wallet_pubkey, trader.token_mint)
+        claims = dict(_fleet_claims.get(key, {}))
+    others = sum(v for v in claims.values() if v != claims.get(id(trader)))
+    mine = claims.get(id(trader), 0)
+    if others <= 0:
+        return wallet_balance
+    if mine <= 0 or wallet_balance <= 0:
+        return 0
+    total = mine + others
+    # Proportional allocation of the actual wallet balance.
+    return max(0, min(wallet_balance, int(wallet_balance * (mine / total))))
+
+
+def fleet_trader_count(wallet_pubkey: str, mint: str) -> int:
+    """How many traders hold claims on this (wallet, mint) — diagnostics."""
+    with _fleet_share_lock:
+        return sum(1 for v in _fleet_claims.get(
+            _fleet_claim_key(wallet_pubkey, mint), {}).values() if v > 0)
+
+
 # ── Jupiter & Solana constants ────────────────────────────────────────────────
 # NOTE: Using the newer Swap API v1 (lite-api.jup.ag) instead of the V6 API
 # (public.jupiterapi.com). The V6 on-chain program (JUP6L...) does NOT handle
@@ -624,6 +697,9 @@ class LiveTrader:
     async def close(self):
         """Stop the watchdog, cache tasks and close the HTTP session."""
         self._alive = False
+        # iter77 fleet: drop this trader's token claim first — sibling
+        # traders' sell caps unclamp immediately even if close is aborted.
+        fleet_release_claim(self)
         for task_attr in ("_watchdog_task", "_balance_cache_task", "_blockhash_task"):
             task = getattr(self, task_attr, None)
             if task is not None and not task.done():
@@ -1818,6 +1894,7 @@ class LiveTrader:
         self._token_balance = 0
         self._cached_token_balance = 0
         self._token_balance_verified = False
+        fleet_release_claim(self)   # iter77 fleet: failed buy ⇒ no claim
         self._buy_tx_in_flight = False
         self._pending_buy = False
         self._pending_buy_reason = ""
@@ -1871,6 +1948,7 @@ class LiveTrader:
             self._token_balance = settled
             self._cached_token_balance = settled
             self._token_balance_verified = True
+            fleet_register_claim(self, settled)   # iter77 fleet share registry
             ct = self.current_trade
             if ct and ct.tx_hash_buy == sig:
                 ct.size_tokens = settled / (10 ** self._token_decimals)
@@ -1920,6 +1998,9 @@ class LiveTrader:
             self._buy_tx_in_flight = False
             self._token_balance = balance
             self._cached_token_balance = balance
+            # iter77 fleet: register this trader's claim so a sibling engine's
+            # sell can never quote these tokens (shared-wallet isolation).
+            fleet_register_claim(self, balance)
             ct = self.current_trade
             if ct is not None and ct.tx_hash_buy == sig:
                 ct.status = "open"
@@ -2484,6 +2565,37 @@ class LiveTrader:
             logger.info(
                 f"[SELL] Authoritative balance: {token_balance} units (on-chain={fresh_bal > 0})"
             )
+
+            # ── iter77 fleet clamp: shared wallet, per-engine positions ──────
+            # With multiple engines on one wallet+mint, the on-chain balance
+            # is the SUM of every trader's position.  Clamp this trader's
+            # sell amount to its proportional claim so it can never sell a
+            # sibling engine's tokens.  Sole-trader sessions are unaffected:
+            # with no sibling claims the cap is the full balance (verified
+            # by unit test).  A claimed 0 with siblings holding means this
+            # trader has nothing to sell — arm the watchdog as below.
+            fleet_cap = fleet_sell_cap(self, token_balance)
+            if fleet_cap < token_balance:
+                logger.info(
+                    f"[SELL] Fleet clamp: wallet {token_balance} units, this "
+                    f"trader's share {fleet_cap} units ({fleet_trader_count(self.wallet_pubkey, self.token_mint)} engines)"
+                )
+                token_balance = fleet_cap
+                self._token_balance = fleet_cap
+                self._cached_token_balance = fleet_cap
+
+            if token_balance <= 0:
+                # This trader holds no claim while siblings own the wallet's
+                # tokens — nothing for THIS engine to sell.  Stay flat and
+                # keep monitoring (the sibling sells its own share).
+                logger.warning(
+                    f"[SELL] No fleet share for this engine on {mint_str[:8]}… "
+                    f"(siblings hold the wallet balance) — sell skipped"
+                )
+                self._journal_event(
+                    "sell_skipped_no_fleet_share", reason=reason,
+                )
+                return None
 
             # 6024 probe-trim floor: blind 2% trims stop once the sell amount
             # falls below 95% of the resolved balance — below that the
@@ -3845,6 +3957,9 @@ class LiveTrader:
             self.stats.win_rate = self.stats.winning_trades / self.stats.total_trades * 100
 
         self.stats.current_balance += trade.pnl_sol
+        # iter77 fleet: this trader's position is gone — release its token
+        # claim so sibling traders' sell caps unclamp to the real balance.
+        fleet_release_claim(self)
         if self.stats.current_balance > self.stats.peak_balance:
             self.stats.peak_balance = self.stats.current_balance
         drawdown = (

@@ -309,12 +309,21 @@ let engineParamsV3 = {
    3 = V3 (newborn dump-bottom on the V2 math) */
 let engineVersion = 1;
 
-/* Live-trader engine version — independent from the chart engine toggle.
-   Persisted across page loads; defaults to V2 (production engine) unless an
-   explicit "1" is stored. */
+/* Live-trader engine selection (iter77: primary + multi-engine fleet) —
+   independent from the chart engine toggle.  Persisted across page loads.
+   PRIMARY (plain click): the engine whose strategy drives the chart.
+   FLEET (ctrl/⌘-click): additional engines run together with the primary
+   on the same token — one wallet, shared stream, buy size split equally;
+   positions isolated by the backend fleet share registry. */
 let ltEngineVersion = (() => {
   const v = parseInt(localStorage.getItem("lt_engine_version") || "2", 10);
-  return (v === 1 || v === 3) ? v : 2;
+  return [1, 2, 3, 4, 6].includes(v) ? v : 2;
+})();
+let ltEngineFleet = (() => {
+  try {
+    const arr = JSON.parse(localStorage.getItem("lt_engine_fleet") || "[]");
+    return Array.isArray(arr) ? arr.filter(v => [1, 2, 3, 4, 6].includes(v)) : [];
+  } catch { return []; }
 })();
 
 /* Active params getter — returns the params for the current engine version */
@@ -684,24 +693,60 @@ document.querySelectorAll("#settings-engine-toggle .engine-ver-btn").forEach(btn
   btn.addEventListener("click", () => setEngineVersion(parseInt(btn.dataset.ver, 10)));
 });
 
-/* ── Live-trader engine version switching ─────────────────────────────── */
+/* Apply selection → button classes.  Active engines (primary + fleet) all
+   show `active`; the primary additionally shows the `primary` marker. */
+function renderLtEngineToggle() {
+  document.querySelectorAll("#lt-engine-toggle .engine-ver-btn").forEach(btn => {
+    const v = parseInt(btn.dataset.ver, 10);
+    const isActive = (v === ltEngineVersion) || ltEngineFleet.includes(v);
+    const isPrimary = v === ltEngineVersion;
+    btn.classList.toggle("active", isActive);
+    btn.classList.toggle("primary", isPrimary);
+    btn.title = isPrimary
+      ? "Primary engine (drives the chart)"
+      : (isActive ? "Fleet engine (running together with the primary)" : "");
+  });
+}
 
+/* Set the PRIMARY engine (plain click).  If the chosen engine was in the
+   fleet it is promoted to primary and removed from the fleet; the previous
+   primary is NOT auto-added (a one-click swap, no surprise positions). */
 function setLtEngineVersion(v) {
   ltEngineVersion = v;
+  ltEngineFleet = ltEngineFleet.filter(x => x !== v);
   localStorage.setItem("lt_engine_version", String(v));
-  for (const n of [1, 2, 3]) {
-    const btn = document.getElementById(`lt-engine-v${n}`);
-    if (btn) btn.classList.toggle("active", v === n);
+  localStorage.setItem("lt_engine_fleet", JSON.stringify(ltEngineFleet));
+  renderLtEngineToggle();
+}
+
+/* ctrl/⌘-click toggles an engine in the fleet (never the primary). */
+function toggleLtFleetEngine(v) {
+  if (v === ltEngineVersion) return;             // primary can't join its own fleet
+  if (ltEngineFleet.includes(v)) {
+    ltEngineFleet = ltEngineFleet.filter(x => x !== v);
+  } else {
+    ltEngineFleet.push(v);
   }
+  localStorage.setItem("lt_engine_fleet", JSON.stringify(ltEngineFleet));
+  renderLtEngineToggle();
+}
+
+/* The full ordered engine list sent to the backend: primary first. */
+function ltEngineList() {
+  return [ltEngineVersion, ...ltEngineFleet.filter(v => v !== ltEngineVersion)];
 }
 
 document.querySelectorAll("#lt-engine-toggle .engine-ver-btn").forEach(btn => {
-  btn.addEventListener("click", () => setLtEngineVersion(parseInt(btn.dataset.ver, 10)));
+  btn.addEventListener("click", (e) => {
+    const v = parseInt(btn.dataset.ver, 10);
+    if (e.ctrlKey || e.metaKey) toggleLtFleetEngine(v);
+    else setLtEngineVersion(v);
+  });
 });
 
-// Restore the persisted live-trader engine version selection (default V2).
-// Re-applies the active classes so the toggle matches the stored value.
-setLtEngineVersion(ltEngineVersion);
+// Restore the persisted live-trader engine selection (default: V2 primary,
+// no fleet — single-engine behaviour identical to pre-iter77).
+renderLtEngineToggle();
 
 /* ════════════════════════════════════════════════════════════════════════
    NEW PAGES: Navigation + Recorder + Viewer + Backtest
@@ -1782,7 +1827,7 @@ function updateTraderCard(mint) {
       <div class="lt-card-header">
         <div><span class="lt-card-name" id="lth-name-${mint}"></span><span class="lt-card-symbol" id="lth-sym-${mint}"></span></div>
         <div style="display:flex;gap:6px;align-items:center">
-          <span class="engine-badge${ctx.engineVersion >= 2 ? ` v${ctx.engineVersion}` : ''}" title="Strategy engine">${ctx.engineVersion ? `V${ctx.engineVersion}` : 'V1'}</span>
+          <span class="engine-badge${ctx.engineVersion >= 2 ? ` v${ctx.engineVersion}` : ''}" title="Strategy engine${(ctx.engineVersions || []).length > 1 ? ' (fleet: ' + (ctx.engineVersions || []).map(v => 'V' + v).join(' + ') + ', buy size split)' : ''}">${ctx.engineVersion ? `V${ctx.engineVersion}` : 'V1'}${(ctx.engineVersions || []).length > 1 ? `+${(ctx.engineVersions || []).length - 1}` : ''}</span>
           <div id="lth-trend-${mint}" class="direction-badge" style="font-size:10px; padding:2px 6px; display:none"></div>
           <div id="lth-regime-${mint}" class="regime-badge" style="font-size:10px; padding:2px 6px; display:none"></div>
           <div id="lth-status-${mint}"></div>
@@ -1940,9 +1985,13 @@ function startLiveTrader(mint, _delayOverride = null, opts = {}) {
   // The buy_size param is only included when the field holds a valid value —
   // the backend refuses to create a session without one (no default).
   const buySizeParam = config.buySize > 0 ? `&buy_size=${config.buySize}` : "";
+  // iter77 fleet: additional engines beyond the primary (comma-separated).
+  // Absent/empty = single-engine session, byte-identical to pre-iter77.
+  const fleetParam = ltEngineFleet.length
+    ? `&engine_versions=${encodeURIComponent(ltEngineFleet.join(","))}` : "";
   const wsUrl = attach
-    ? `${LT_WS_BASE}/${mint}?timeframe=${encodeURIComponent(opts.timeframe || config.timeframe)}${buySizeParam}&slippage_bps=${config.slippageBps}&params=${paramsStr}&engine_version=${opts.engineVersion || ltEngineVersion}`
-    : `${LT_WS_BASE}/${mint}?timeframe=${config.timeframe}&private_key=${encodeURIComponent(_privateKey)}${buySizeParam}&slippage_bps=${config.slippageBps}&params=${paramsStr}&engine_version=${ltEngineVersion}`;
+    ? `${LT_WS_BASE}/${mint}?timeframe=${encodeURIComponent(opts.timeframe || config.timeframe)}${buySizeParam}&slippage_bps=${config.slippageBps}&params=${paramsStr}&engine_version=${opts.engineVersion || ltEngineVersion}${fleetParam}`
+    : `${LT_WS_BASE}/${mint}?timeframe=${config.timeframe}&private_key=${encodeURIComponent(_privateKey)}${buySizeParam}&slippage_bps=${config.slippageBps}&params=${paramsStr}&engine_version=${ltEngineVersion}${fleetParam}`;
 
   // Register the card immediately so the UI shows "Connecting…" right away
   const ctx = {
@@ -1958,6 +2007,7 @@ function startLiveTrader(mint, _delayOverride = null, opts = {}) {
     direction: "none",
     sVal: 0,
     engineVersion: opts.engineVersion || ltEngineVersion,
+    engineVersions: [ltEngineVersion, ...ltEngineFleet],  // full fleet (primary first)
     timeframe: opts.timeframe || config.timeframe,
     realMint: null,     // resolved on-chain mint (from session_info)
     manualStop: false,  // true once the user (or session_ended) closed this card — blocks reconnect

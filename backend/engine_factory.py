@@ -6,11 +6,15 @@ the FastAPI layer in `main.py` all build a strategy engine via
 `create_engine(engine_version, **engine_kwargs)`.  This is the single
 indirection point that decides V1 vs V2.
 
-Contract:
-    eng = create_engine(engine_version=1, **kwargs)   # → V1 StrategyEngine
-    eng = create_engine(engine_version=2, **kwargs)   # → V2 StrategyEngineV2Adapter
-    eng = create_engine(engine_version=3, **kwargs)   # → V3 StrategyEngineV3Adapter
-        (V3 = newborn-coin dump-bottom engine on the V2 mathematical core)
+    Contract:
+        eng = create_engine(engine_version=1, **kwargs)   # → V1 StrategyEngine
+        eng = create_engine(engine_version=2, **kwargs)   # → V2 StrategyEngineV2Adapter
+        eng = create_engine(engine_version=3, **kwargs)   # → V3 StrategyEngineV3Adapter
+            (V3 = newborn-coin dump-bottom engine on the V2 mathematical core)
+        eng = create_engine(engine_version=4, **kwargs)   # → V4 StrategyEngineV4Adapter
+            (V4 = post-nuke reversion: bounce-confirmed flush harvest, iter77)
+        eng = create_engine(engine_version=6, **kwargs)   # → V6 StrategyEngineV6Adapter
+            (V6 = insider-dump absorption entry, iter77)
 
 Both V1 and V2 expose the EXACT same call surface used by the pipelines:
     eng.update(time, o, h, l, c, volume, buy_volume, sell_volume, ...)
@@ -40,6 +44,11 @@ _V2_IMPORT_LOCK = False
 # the same way.
 _V3Adapter = None
 
+# V4 (post-nuke reversion) / V6 (insider-dump absorption) — iter77 archetype
+# engines; pure-Python standalone machines, cached the same way.
+_V4Adapter = None
+_V6Adapter = None
+
 
 def _load_v2_adapter():
     """Import `StrategyEngineV2Adapter` lazily and cache the class ref."""
@@ -67,6 +76,26 @@ def _load_v3_adapter():
     from strategy_engineV3 import StrategyEngineV3Adapter  # noqa: WPS433
     _V3Adapter = StrategyEngineV3Adapter
     return _V3Adapter
+
+
+def _load_v4_adapter():
+    """Import `StrategyEngineV4Adapter` lazily and cache the class ref."""
+    global _V4Adapter
+    if _V4Adapter is not None:
+        return _V4Adapter
+    from strategy_engineV4 import StrategyEngineV4Adapter  # noqa: WPS433
+    _V4Adapter = StrategyEngineV4Adapter
+    return _V4Adapter
+
+
+def _load_v6_adapter():
+    """Import `StrategyEngineV6Adapter` lazily and cache the class ref."""
+    global _V6Adapter
+    if _V6Adapter is not None:
+        return _V6Adapter
+    from strategy_engineV6 import StrategyEngineV6Adapter  # noqa: WPS433
+    _V6Adapter = StrategyEngineV6Adapter
+    return _V6Adapter
 
 
 def create_engine(engine_version: int = 1, **engine_kwargs: Any):
@@ -111,8 +140,16 @@ def create_engine(engine_version: int = 1, **engine_kwargs: Any):
         Adapter = _load_v3_adapter()
         return Adapter(**engine_kwargs)
 
+    if engine_version == 4:
+        Adapter = _load_v4_adapter()
+        return Adapter(**engine_kwargs)
+
+    if engine_version == 6:
+        Adapter = _load_v6_adapter()
+        return Adapter(**engine_kwargs)
+
     raise ValueError(
-        f"Unknown engine_version={engine_version!r} (expected 1, 2 or 3)"
+        f"Unknown engine_version={engine_version!r} (expected 1, 2, 3, 4 or 6)"
     )
 
 

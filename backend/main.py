@@ -1166,14 +1166,23 @@ class _LiveSession:
 
     def __init__(self, *, real_mint: str, token_name: str, token_symbol: str,
                  timeframe: str, trader: LiveTrader, token_info: Optional[dict],
-                 engine_version: int = 2):
+                 engine_version: int = 2,
+                 extra_traders: Optional[list[LiveTrader]] = None,
+                 engine_versions: Optional[list[int]] = None):
         self.real_mint = real_mint
         self.token_name = token_name
         self.token_symbol = token_symbol
         self.timeframe = timeframe
         self.trader = trader
-        self.token_info = token_info
+        # iter77 multi-engine fleet: `traders[0]` is the primary (back-compat
+        # `self.trader`); extra_traders are sibling engines on the SAME
+        # wallet/stream, each with its own engine + position + journal, sized
+        # buy_size/len(traders).  Shared-wallet token isolation is enforced
+        # by the fleet share registry in live_trader.py.
+        self.traders: list[LiveTrader] = [trader] + list(extra_traders or [])
         self.engine_version = engine_version
+        self.engine_versions: list[int] = list(
+            engine_versions or ([engine_version] * len(self.traders)))
         self.cancelled = asyncio.Event()
         self.warmed = asyncio.Event()      # set once historical warmup finished
         self.subscribers: set[asyncio.Queue] = set()
@@ -1185,6 +1194,10 @@ class _LiveSession:
         self.stop_reason: str = ""
         # LiveTrader pushes trade_update JSON strings here → fanned out to viewers
         trader.broadcast_fn = self.broadcast_text
+        # iter77 fleet: sibling traders broadcast through the same fan-out;
+        # their payloads carry per-engine tags (set in _get_or_create_live_session).
+        for _tr in self.traders[1:]:
+            _tr.broadcast_fn = self.broadcast_text
 
     # ── viewer fan-out ────────────────────────────────────────────────────
 
@@ -1234,11 +1247,15 @@ class _LiveSession:
 
     async def run(self) -> None:
         real_mint = self.real_mint
-        live_trader = self.trader
+        live_trader = self.trader          # primary (back-compat references)
+        traders = self.traders             # iter77: full fleet (≥1 trader)
         timeframe = self.timeframe
         token_info = self.token_info or {}
         rec_id = self.rec_id
-        logger.info(f"[LIVE] Session start  mint={real_mint[:8]}…  wallet={self.wallet()[:8]}…  tf={timeframe}")
+        logger.info(
+            f"[LIVE] Session start  mint={real_mint[:8]}…  wallet={self.wallet()[:8]}…  "
+            f"tf={timeframe}  engines={self.engine_versions}"
+        )
 
         # Resolve live data source
         live_source = token_info.get("_live_source", "pumpportal")
@@ -1300,15 +1317,19 @@ class _LiveSession:
                         _new = data_store.get_holder_flow_since(rec_id, _hf_last_id["id"])
                         if _new:
                             _hf_last_id["id"] = _new[-1]["id"]
-                            try:
-                                live_trader.engine.append_holder_flow_events(_new)
-                                # Immediately check if this triggers an immediate dev_sell_exit
-                                exit_reason = live_trader.check_immediate_holder_flow_exit()
-                                if exit_reason:
-                                    logger.info(f"[HOLDER FLOW] Immediate exit triggered: {exit_reason}")
-                                    live_trader.immediate_holder_flow_exit(exit_reason)
-                            except AttributeError:
-                                pass  # V1 engine has no holder-flow surface
+                            # iter77 fleet: deliver to EVERY engine — each
+                            # trader's engine consumes the same event stream,
+                            # exactly as separate backtests would.
+                            for _tr in traders:
+                                try:
+                                    _tr.engine.append_holder_flow_events(_new)
+                                    # Immediately check if this triggers an immediate dev_sell_exit
+                                    exit_reason = _tr.check_immediate_holder_flow_exit()
+                                    if exit_reason:
+                                        logger.info(f"[HOLDER FLOW] Immediate exit triggered: {exit_reason}")
+                                        _tr.immediate_holder_flow_exit(exit_reason)
+                                except AttributeError:
+                                    pass  # V1 engine has no holder-flow surface
                 except Exception:
                     pass
                 # Realtime delivery: wake the instant the shared monitor
@@ -1352,10 +1373,11 @@ class _LiveSession:
             # row and would otherwise be re-delivered by the pump.)
             _existing_hf = data_store.get_holder_flow(rec_id)
             if _existing_hf:
-                try:
-                    live_trader.engine.set_holder_flow_events(_existing_hf)
-                except AttributeError:
-                    pass  # V1 engine has no holder-flow surface
+                for _tr in traders:
+                    try:
+                        _tr.engine.set_holder_flow_events(_existing_hf)
+                    except AttributeError:
+                        pass  # V1 engine has no holder-flow surface
             _hf_last_id["id"] = max((r["id"] for r in _existing_hf), default=0)
             _hf_pump_task = asyncio.ensure_future(_holder_flow_pump())
 
@@ -1383,7 +1405,11 @@ class _LiveSession:
                                     qmap = (_json_gr.load(f) or {}).get("q_by_date") or {}
                                 _gr_state["mtime"] = mtime
                                 if qmap:
-                                    live_trader.engine.set_global_regime_map(qmap)
+                                    for _tr in traders:
+                                        try:
+                                            _tr.engine.set_global_regime_map(qmap)
+                                        except AttributeError:
+                                            pass  # engine without regime surface
                     except AttributeError:
                         pass  # V1 engine has no regime surface
                     except Exception:
@@ -1405,13 +1431,16 @@ class _LiveSession:
             async def _no_motion_watch():
                 while not self.cancelled.is_set():
                     await asyncio.sleep(5.0)
-                    if live_trader.no_motion_stop_triggered:
-                        logger.warning(
-                            f"[LIVE] No-motion stop triggered for {real_mint[:8]}… — "
-                            f"session idle, shutting down"
-                        )
-                        self.stop("no_motion")
-                        return
+                    # iter77 fleet: ANY trader's no-motion stop ends the
+                    # session (a motionless coin means every engine is idle).
+                    for _tr in traders:
+                        if _tr.no_motion_stop_triggered:
+                            logger.warning(
+                                f"[LIVE] No-motion stop triggered for {real_mint[:8]}… — "
+                                f"session idle, shutting down"
+                            )
+                            self.stop("no_motion")
+                            return
 
             _nm_watch_task = asyncio.ensure_future(_no_motion_watch())
 
@@ -1430,16 +1459,21 @@ class _LiveSession:
 
                 strategy_results = []
                 for candle in hist:
-                    result = live_trader.update_historical_candle(
-                        time_val=int(candle["time"]),
-                        o=candle["open"], h=candle["high"],
-                        l=candle["low"], c=candle["close"],
-                        volume=candle.get("volume", 0),
-                        buy_volume=candle.get("buy_volume", 0.0),
-                        sell_volume=candle.get("sell_volume", 0.0),
-                        market_cap_usd=candle.get("market_cap_usd", 0.0),
-                        pool_sol=candle.get("pool_sol", 0.0),
-                    )
+                    # iter77 fleet: every engine warms up on the same tape —
+                    # identical to N separate sessions' warmups.
+                    for _tr in traders:
+                        _tr.update_historical_candle(
+                            time_val=int(candle["time"]),
+                            o=candle["open"], h=candle["high"],
+                            l=candle["low"], c=candle["close"],
+                            volume=candle.get("volume", 0),
+                            buy_volume=candle.get("buy_volume", 0.0),
+                            sell_volume=candle.get("sell_volume", 0.0),
+                            market_cap_usd=candle.get("market_cap_usd", 0.0),
+                            pool_sol=candle.get("pool_sol", 0.0),
+                        )
+                    # The chart/UI consumes the PRIMARY engine's result stream.
+                    result = live_trader._last_engine_result or {}
                     strategy_results.append(result)
 
                 self.warmup_candles = hist
@@ -1505,17 +1539,34 @@ class _LiveSession:
                     # tick) carried the full volume the backtester replays.
                     # Only the *UI broadcast* is throttled to price changes
                     # and candle boundaries.
-                    strategy_result = live_trader.update(
-                        time_val=candle_dict["time"],
-                        o=candle_dict["open"], h=candle_dict["high"],
-                        l=candle_dict["low"], c=candle_dict["close"],
-                        volume=candle_dict.get("volume", 0),
-                        buy_volume=candle_dict.get("buy_volume", 0.0),
-                        sell_volume=candle_dict.get("sell_volume", 0.0),
-                        is_new=is_new,
-                        market_cap_usd=candle_dict.get("market_cap_usd", 0.0),
-                        pool_sol=candle_dict.get("pool_sol", 0.0),
-                    )
+                    # iter77 fleet: EVERY trader's engine consumes the tick —
+                    # identical to N single-engine sessions on one stream.
+                    fleet_results = []
+                    for _tr in traders:
+                        fleet_results.append(_tr.update(
+                            time_val=candle_dict["time"],
+                            o=candle_dict["open"], h=candle_dict["high"],
+                            l=candle_dict["low"], c=candle_dict["close"],
+                            volume=candle_dict.get("volume", 0),
+                            buy_volume=candle_dict.get("buy_volume", 0.0),
+                            sell_volume=candle_dict.get("sell_volume", 0.0),
+                            is_new=is_new,
+                            market_cap_usd=candle_dict.get("market_cap_usd", 0.0),
+                            pool_sol=candle_dict.get("pool_sol", 0.0),
+                        ))
+                    # The chart consumes the PRIMARY engine's payload; when a
+                    # fleet is active, sibling engines' live_trade blocks are
+                    # attached under `fleet` (per-engine positions + stats).
+                    strategy_result = fleet_results[0]
+                    if len(traders) > 1:
+                        strategy_result = dict(strategy_result)
+                        strategy_result["fleet"] = [
+                            {
+                                "engine_version": ev,
+                                "live_trade": (fr.get("live_trade") or {}),
+                            }
+                            for ev, fr in zip(self.engine_versions, fleet_results)
+                        ]
                     self.last_strategy_result = strategy_result
 
                     # iter74: accumulate this tick into the process-wide
@@ -1556,18 +1607,26 @@ class _LiveSession:
                     # is empty and it is safe to terminate immediately — no
                     # grace sleep needed.
                     mcap_usd = trade.get("market_cap_usd", 0)
-                    if mcap_usd and await live_trader.update_market_cap(float(mcap_usd)):
-                        logger.warning(
-                            f"[LIVE] Market cap floor triggered for {real_mint[:8]}… — "
-                            f"emergency sell settled, stopping session"
-                        )
-                        self.stop("mcap_floor")
-                        break
+                    if mcap_usd:
+                        _mcap_stop = False
+                        for _tr in traders:
+                            # iter77 fleet: every engine sees the same mcap
+                            # floor; the FIRST breach stops the session after
+                            # ALL engines' positions are emergency-sold.
+                            if await _tr.update_market_cap(float(mcap_usd)):
+                                _mcap_stop = True
+                        if _mcap_stop:
+                            logger.warning(
+                                f"[LIVE] Market cap floor triggered for {real_mint[:8]}… — "
+                                f"emergency sell settled, stopping session"
+                            )
+                            self.stop("mcap_floor")
+                            break
 
                     # ── No-motion stop check ─────────────────────────────────
                     # Only fires when idle (no position, no pending signals) —
                     # never interrupts an active position.
-                    if live_trader.no_motion_stop_triggered:
+                    if any(_tr.no_motion_stop_triggered for _tr in traders):
                         logger.warning(
                             f"[LIVE] No-motion stop triggered for {real_mint[:8]}… — "
                             f"session idle, shutting down"
@@ -1645,7 +1704,13 @@ class _LiveSession:
             # ── Emergency position cleanup before session teardown ──────────
             # If a position is still open when the session ends, execute an
             # emergency sell to avoid leaving positions unattended.
-            await live_trader.cleanup(reason=self.stop_reason or "session_ended")
+            # iter77 fleet: cleanup every trader (each may hold its own open
+            # position; sell-amount isolation keeps them independent).
+            for _tr in traders:
+                try:
+                    await _tr.cleanup(reason=self.stop_reason or "session_ended")
+                except Exception:
+                    logger.exception("[LIVE] trader cleanup failed")
 
             # Finalize the auto-recording so it's available for backtesting
             data_store.stop_recording(rec_id)
@@ -1653,11 +1718,23 @@ class _LiveSession:
 
             # Wake up any remaining viewers so their UIs reflect the end
             self.broadcast({"type": "session_ended", "reason": self.stop_reason or "session_ended"})
+            # iter77 fleet: completed-session stats aggregate every engine.
+            _fleet_stats = {
+                "total_trades": 0, "total_pnl_sol": 0.0,
+                "winning_trades": 0, "losing_trades": 0, "engines": [],
+            }
+            for ev, _tr in zip(self.engine_versions, traders):
+                _s = _tr.stats.to_dict()
+                _fleet_stats["total_trades"] += int(_s.get("total_trades", 0))
+                _fleet_stats["total_pnl_sol"] += float(_s.get("total_pnl_sol", 0.0))
+                _fleet_stats["winning_trades"] += int(_s.get("winning_trades", 0))
+                _fleet_stats["losing_trades"] += int(_s.get("losing_trades", 0))
+                _fleet_stats["engines"].append({"engine_version": ev, "stats": _s})
             _completed_live_sessions.append({
                 "mint": real_mint,
                 "token_name": self.token_name,
                 "token_symbol": self.token_symbol,
-                "stats": live_trader.stats.to_dict(),
+                "stats": _fleet_stats,
                 "rec_id": rec_id,
                 "ended_at": time.time(),
             })
@@ -2394,6 +2471,7 @@ async def _get_or_create_live_session(
     skip_sim: bool = True,
     engine_params: Optional[dict] = None,
     engine_version: int = 2,
+    engine_versions: Optional[list[int]] = None,
     timeframe: str = "1s",
     token_name: str = "",
     token_symbol: str = "",
@@ -2461,13 +2539,45 @@ async def _get_or_create_live_session(
         token_name = token_name or (token_info or {}).get("name", "")
         token_symbol = token_symbol or (token_info or {}).get("symbol", "")
 
+        # ── iter77 multi-engine fleet construction ─────────────────────────
+        # `engine_versions` (comma-separated or list from the dashboard) runs
+        # N engines together on this token: one LiveTrader per engine, all
+        # sharing the wallet/stream/recording, each sized buy_size/N so the
+        # TOTAL notional matches the dashboard field.  Duplicates collapse;
+        # an empty/invalid list falls back to the single `engine_version`.
+        fleet_versions = []
+        if engine_versions:
+            if isinstance(engine_versions, str):
+                fleet_versions = [
+                    int(v) for v in engine_versions.split(",")
+                    if str(v).strip().isdigit()
+                ]
+            else:
+                fleet_versions = [
+                    int(v) for v in engine_versions
+                    if str(v).strip().isdigit()
+                ]
+        seen = set()
+        fleet_versions = [v for v in fleet_versions
+                          if not (v in seen or seen.add(v))]
+        # Only KNOWN engine versions may join the fleet (1/2/3/4/6) — an
+        # unknown digit must fail session creation loudly at the factory,
+        # not produce a confusing ValueError inside the runner.
+        fleet_versions = [v for v in fleet_versions if v in (1, 2, 3, 4, 6)]
+        # The primary engine must appear exactly ONCE — strip it from the
+        # fleet list (a duplicate primary would create two same-version
+        # traders on split capital).
+        fleet_versions = [v for v in fleet_versions if v != engine_version]
+        n_engines = 1 + len(fleet_versions)
+
+        primary_kwargs = dict(engine_params or {})
         live_trader = LiveTrader(
             token_mint=real_mint,
             keypair=keypair,
-            buy_size_sol=buy_size,
+            buy_size_sol=buy_size / n_engines,
             slippage_bps=slippage_bps,
             priority_fee_lamports=100_000,
-            engine_kwargs=engine_params or {},
+            engine_kwargs=primary_kwargs,
             skip_simulation=skip_sim,
             engine_version=engine_version,
             # User policy (2026-08-26): terminate motionless coins to free
@@ -2476,11 +2586,28 @@ async def _get_or_create_live_session(
             # auto-recording is finalised by the normal session teardown.
             no_motion_stop_seconds=120.0,
         )
+        extra_traders: list[LiveTrader] = []
+        for ev in fleet_versions:
+            extra_traders.append(LiveTrader(
+                token_mint=real_mint,
+                keypair=keypair,
+                buy_size_sol=buy_size / n_engines,
+                slippage_bps=slippage_bps,
+                priority_fee_lamports=100_000,
+                engine_kwargs=dict(primary_kwargs),   # fresh dict per engine
+                skip_simulation=skip_sim,
+                engine_version=ev,
+                no_motion_stop_seconds=120.0,
+            ))
         live_trader.start_watchdog()
-        # iter74: hand the shared fleet-regime filter to this session's
+        for _tr in extra_traders:
+            _tr.start_watchdog()
+        # iter74: hand the shared fleet-regime filter to every session's
         # engine when v2_msm_enable=1.0 (no-op for every other config)
-        _fleet_filter_for_engine(live_trader.engine)
+        for _tr in [live_trader] + extra_traders:
+            _fleet_filter_for_engine(_tr.engine)
 
+        all_versions = [engine_version] + fleet_versions
         session = _LiveSession(
             real_mint=real_mint,
             token_name=token_name,
@@ -2489,6 +2616,8 @@ async def _get_or_create_live_session(
             trader=live_trader,
             token_info=token_info,
             engine_version=engine_version,
+            extra_traders=extra_traders,
+            engine_versions=all_versions,
         )
 
         session.rec_id = data_store.create_recording(
@@ -3164,6 +3293,7 @@ async def live_trading_ws(
     skip_sim: bool = Query(default=True),
     params: str = Query(default="{}"),
     engine_version: int = Query(default=2),
+    engine_versions: str = Query(default=""),
 ):
     """Viewer/control socket for a live session.
 
@@ -3220,6 +3350,7 @@ async def live_trading_ws(
         skip_sim=skip_sim,
         engine_params=engine_params,
         engine_version=engine_version,
+        engine_versions=engine_versions,
         timeframe=timeframe,
         token_info=token_info,
     )
@@ -3267,6 +3398,7 @@ async def live_trading_ws(
             "token_symbol": session.token_symbol,
             "timeframe": session.timeframe,
             "engine_version": session.engine_version,
+            "engine_versions": session.engine_versions,
             "recording_id": session.rec_id,
             "created": created,
         })
