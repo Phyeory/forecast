@@ -39,6 +39,9 @@ def main():
     ap.add_argument("--buy-size-sol", type=float, default=0.1)
     ap.add_argument("--max-workers", type=int, default=8,
                     help="worker processes (default: 8)")
+    ap.add_argument("--engine-version", type=int, default=2,
+                    help="strategy engine version (default: 2; 4=V4 post-nuke "
+                         "reversion, 6=V6 insider-dump absorption)")
     ap.add_argument("--recording-ids", nargs="*", type=int, default=None,
                     help="restrict to a subset of recording IDs")
     ap.add_argument("--recording-ids-file", default=None,
@@ -53,10 +56,11 @@ def main():
     batch_id = args.label + "_" + str(int(time.time()))
     t0 = time.time()
     max_workers = args.max_workers
-    print(f"Running backtest batch (engine_version=2, batch_id={batch_id})...", flush=True)
+    print(f"Running backtest batch (engine_version={args.engine_version}, "
+          f"batch_id={batch_id})...", flush=True)
 
     results = run_backtest_batch(
-        engine_version=2,
+        engine_version=args.engine_version,
         engine_params=params,
         buy_size_sol=args.buy_size_sol,
         max_workers=max_workers,

@@ -8535,3 +8535,60 @@ Per-day fleet kill-switch counterfactual on the B′ daily paths (stop new entri
 This is USER POLICY, not an engine param (iter74e option (a)): T=−0.05 halves the worst day (−0.195→−0.046) and is PnL-POSITIVE on this cohort (+0.11 — the B′ stack's bad days keep bleeding past −0.05 without mean-reverting), at the cost of 19 stopped days and +0.78 foregone recovery. It cannot be an engine gate (entry-block family, bounded), but it IS implementable in `main.py` as a session-level entry veto for the LIVE fleet — flag if wanted. T=−0.05 is recommended as the policy candidate; it moves exactly the consistency metric the user prioritises (worst-day loss) without costing PnL on this cohort.
 
 **No engine change. No production default change.** Artifacts: `analysis/iter76_PREREGISTRATION.md`, `analysis/iter76_kelly_sizing.py`. Engine source byte-identical to B′ HEAD.
+
+---
+
+## Iter 77 — The Consistency Mandate, Door A (archetype portfolio V4 post-nuke reversion + V6 insider-dump absorption): BOTH NEW ENTRY FAMILIES REJECTED (V4 = one-token lottery; V6 = full-population negative, screen positive was a sampling artifact); V4/V6 shipped as non-default engines with a validated LIVE MULTI-ENGINE fleet feature (N engines on one token, shared wallet, isolated positions)
+
+**Date:** 2026-09-01. Pre-registered in `analysis/iter77_PREREGISTRATION.md` BEFORE any result was read. Mandate (user, verbatim): "as close as possible to a consistent 70%+ win rate and positive PnL every single day" — the iter76 impossibility conclusion treated as a hypothesis about ONE engine on ONE data channel.
+
+### 0. Step Zero load-bearing discovery: the dev-event channel is EMPTY
+
+The V6 build prompt's premise — "dev events have FULL holder_flow coverage pre-iter72" — is **empirically false on this DB**: the `holder_flow` table contains ZERO `tag='dev'` SELL events in the entire history (dev appears only on 22 buys). The verified-insider SELL classes that actually exist (the engine's `_DEV_TAGS`): `bundler` 5,555 sells (206 OLD / 336 DEAD / 6 Mayhem recordings — full coverage both eras via GMGN registry tags), `rat_trader` 43, `sniper` 15. Anonymous `whale` sells (16,462 events) rode the ~6.7%-coverage artifact pre-08-29 and are NOT a qualifying class. **V6 was re-specified to key on the bundler-led insider-sell stream** (dev/rat_trader/sniper accepted when present) — the honest, measured version of the prompt's intent.
+
+### 1. Raw-event screen (before any engine burn) — genuine signal
+
+Forward-drift proxy on ALL 2,520 qualifying insider sells (entry at the event price p0, TP+25%/scratch−2%>20s/600s close): **A-hold (dump absorbed within 8%): mean +0.42% OLD / +1.08% DEAD (n=399/752) vs A-fail (cascade): −9.15% / −9.49% (n=521/848)** — the absorption conditional discriminates strongly in both eras, stronger in the dead one. Reclaim-availability: 70.7% of A-holds reclaim +1% within 120 s. This validated burning the engine.
+
+### 2. V4 (post-nuke reversion) — REJECTED at screen (one-token lottery)
+
+Engine shipped (`strategy_engineV4.py`, machine: WARMUP → arm at D≥dd_min off a ≥$20k peak → WAIT_BOUNCE/WAIT_FLAT → IN with mechanical nuke_tp/jeet_scratch/nuke_time_stop exits; graveyaard-compliant: no deep SL (iter07), no cooldown (iter10), short-lifecycle cap (iter55)). Screen: 150 recordings stratified both eras (75/75), 113 traded, 314 trades, **−0.7197 SOL (WR 11.5%)**.
+
+- Exit-rule CF on V4's OWN entries showed the raw drift cell (no exits, 1800 s horizon, recording-end bounded) at **+4.13 SOL** — but the concentration audit killed it: **top-1 token (`cc`) = +3.40 SOL = 82% of the total; ex-top-3 the cohort is NEGATIVE (−2.13)**; per-token median −0.032. The "edge" is a single V-shaped recovery token that ran ~10× after the flush — a lottery, not an entry family.
+- The jeet-scratch at −2% costs ~4.1% net per scratch (2% level + ~2.1pp round-trip slippage on 1 s bars); 277/314 trades scratched. No exit configuration salvages a negative-median entry.
+- **Verdict: REJECTED at the pre-registered screen gate (broad both-era raw edge).** V4 remains shipped as a non-default engine (reachable only via `engine_version=4`) — zero trades at defaults unless a ≥40% flush arms it, parity-safe.
+
+### 3. V6 (insider-dump absorption) — REJECTED at full cohort (screen positive was sampling + a CF fill-bug artifact)
+
+Engine shipped (`strategy_engineV6.py`, event-driven machine: IDLE → ABSORB (45 s window: A = price ≥ p0×(1−8%); B = post-event sell volume ≤ mult× event size) → READY → reclaim BUY → mechanical absorb_tp/dev_resell_exit/absorb_scratch/absorb_time_stop; parity-neutral on recordings with no qualifying events). **B-mult recalibrated from the prompt's 2.0 to 10.0** — measured post-45s sell flow is a MEDIAN 9.9× a single insider print (normal tape flow dwarfs one dump); 2.0 rejects 85% of A-holds. That calibration is outcome-independent (measured on tape flow).
+
+- Screen (240 event-rich recs, 120/era) at spec exits: −0.287. Exit-rule CF on the screen's 242 entries suggested s0.5/g30/t25 at +0.218 both-era — **but the CF filled at the scratch LEVEL while the engine fills at the gapping close** (fast-dump candles blow through −0.5% in one tick; close-fill CF = −0.375, reconciling with the engine's realized −0.220 on the same recordings). **CF-bug disclosure: exit-rule counterfactuals on this repo's 1 s tapes MUST fill at the crossing state's close, never at the level.**
+- The screen cohort itself was a lucky DEAD slice: the full-cohort burn on the same recordings runs −0.22, and out-of-screen event recordings run −0.56 (DEAD −0.52).
+- **Full cohort (2,092 recs, `iter77_v6_full`): 289 recordings traded, 507 trades, WR 14.0%, −0.7853 SOL; era split OLD −0.017 / DEAD −0.769; exits: scratch 420 (−1.4 SOL), tp 42 (+0.68), dev_resell_exit 34 (+0.07), time_stop 9, rec_ended 2; tail ≤−30%: 21 trades.**
+- Root cause vs the raw screen: the raw proxy entered AT p0 (the event price, pre-absorption); the engine enters at RECLAIM (p0×1.01, post-bounce) and pays per-side slippage — the p0-basis mean is tail-dominated (median −0.78% OLD) and the +25%-TP harvesting the tail is exactly what the scratch-cost structure eats. On the full population the entry family is net-negative in every exit configuration tested (close-fill CF): best cell −0.91 vs raw-drift −2.16 (600 s).
+- **Verdict: REJECTED.** Defaults reverted to the build-prompt spec (scratch 2.0 / grace 20 / B-mult 10.0). V6 remains shipped non-default (`engine_version=6` only); it cannot trade without a qualifying insider sell event (parity-neutral, unit-tested).
+
+### 4. Portfolio / Consistency Score — NOT EVALUATED (no surviving engine to merge)
+
+Per the pre-registered order of execution, the portfolio merge (per-day N-engine split of capital) and the Door-B fleet-heat throttle are contingent on a screen-passing family. Both V4 and V6 were rejected at their gates, so the Consistency Score comparison collapses to B′ alone. **No production engine change; no baseline change.**
+
+### 5. Fresh same-session B′ baseline (the current-DB reference)
+
+`iter77_base_full` (2,092 recs, 0 errors, instant fills, B′ defaults): **1,029 trades / 65.1% WR / +0.9531 SOL / PF 1.12**; era split **OLD +1.212 (68.0%) / DEAD −0.249 (59.8%) / Mayhem −0.011**; 31 trading days, 16 negative, worst −0.195, day-σ 0.164, tail ≤−30% = 123. Consistent with the frozen-1,525 B′ numbers (+1.3196/66.0%) under the grown DB + instant-fill re-basing documented at iter73/76 — **WR 65-66% and the DEAD-era bleed shape are the cross-era invariants.** The mandate scorecard therefore stands exactly where iter76 left it (worst-day −0.195, neg-days 14-16/31); the one measured lever remains the per-day kill-switch (T=−0.05: worst-day −0.046, +0.11 PnL, 19 stopped days) — user policy, not built.
+
+### 6. The LIVE MULTI-ENGINE fleet (user-requested feature, SHIPPED)
+
+User directive: "for live trader make it so that I can select having multiple engines running together." Implemented as a **fleet of independent LiveTrader instances** — one per engine — on one session:
+
+- **UI** (`index.html` + `app.js`): the Engine toggle gains V4/V6 buttons; plain click sets the PRIMARY engine (drives the chart), **ctrl/⌘-click toggles additional engines into the fleet** (persisted in `localStorage.lt_engine_fleet`; card badge shows `V2+2`-style fleet tags). Buy size is split equally across active engines — the dashboard field remains the TOTAL notional.
+- **Backend** (`main.py`): `/ws/live/{mint}` accepts `engine_versions` (comma-separated); `_get_or_create_live_session` builds N `LiveTrader`s (each with its own engine, journal, and `buy_size/N`), dedupes/validates versions (1/2/3/4/6), strips the primary from the fleet list. The session runner feeds EVERY trader the same candle stream, warmup tape, holder-flow pump, global-regime pump, and mcap/no-motion checks; the broadcast carries the primary's strategy plus a per-engine `fleet` block; teardown emergency-sells and closes every trader.
+- **Shared-wallet isolation** (`live_trader.py` fleet share registry): the wallet holds ONE token account, so a naive sell quotes the SUM of all engines' positions. Each trader registers its exact delivered token units on buy settle; `execute_sell` clamps its sell amount to its proportional claim (`fleet_sell_cap`) — a sibling engine's `dev_resell`/TP can never sell another's tokens. Claims release on trade close, session close, and failed buy. **Sole-trader parity: with no sibling claims the cap IS the full balance — `test_live_parity.py` 10/10 green (single-engine sessions byte-identical).**
+- **Tests**: `analysis/test_iter77_fleet.py` 7/7 (sole-trader full-balance parity, proportional allocation, release-restores-survivor, zero-claim cannot sell, wallet/mint isolation, claim refresh, version parsing incl. duplicate-primary elimination); `test_engineV4V6.py` 18/18; full green suite **128 passed** (live-parity 10/10, MSM 12/12, EVR, hf-silence, exec-model, regime-adapt all green). The 22 known pre-existing failures (mcap_floor/sodt/whale_dump/whale_stream_wiring + 2 collection errors) are unchanged.
+- **Usage note**: the fleet makes the ARCHETYPE PORTFOLIO operational in live (e.g. V2 primary + V4 reversion on nuked days) even though the backtest verdicts are REJECTED for standalone PnL — the feature is an instrument (capital-at-risk splitting + independent decision streams on one token), not an endorsement of any rejected engine's edge. Restart `main.py` after deploy.
+
+### 7. Disposition / escape hatches
+
+- **No production engine default changes.** V1/V2/V3 byte-identical; V4/V6 reachable only via `engine_version=4|6` (`--engine-version` on `run_iteration.py`, factory-registered, UI-selectable).
+- V4: rejected as a strategy; retained as a live/backtest-selectable archetype for future re-gating (it needs ≥40% flushes — a regime that may broaden; re-run the screen when the cohort grows).
+- V6: rejected as a strategy; the bundler-led insider event stream + absorption conditional is RECORDED as the raw-edge channel (A-hold +0.42/+1.08 vs cascade −9) — any future V6 revival must solve the p0-vs-reclaim basis gap (enter at p0 with a cascade stop, rather than at the reclaim) and fill CF at crossing closes.
+- The consistency mandate's remaining door: portfolio-level mechanisms (kill-switch policy lever, fleet-heat throttle) — quantified at iter76 §"the one lever", untested here because no surviving engine existed to merge.
