@@ -1,7 +1,9 @@
 import asyncio
 import json
 import logging
+import math
 import os
+import statistics
 import time
 from pathlib import Path
 
@@ -149,6 +151,9 @@ async def startup_load_live_key():
             logger.info(f"[LIVE] Restored server-side private key for wallet {str(kp.pubkey())[:8]}…")
         except Exception as e:
             logger.warning(f"[LIVE] Saved private key file invalid: {e}")
+    # iter74: bring the shared Markov-switching fleet-regime filter online
+    # (no-op when model artifacts are missing — the gate then never blocks)
+    _init_fleet_filter()
 
 
 @app.get("/")
@@ -958,6 +963,150 @@ async def chart_ws(
         logger.info(f"Disconnect  mint={real_mint[:8]}…")
 
 
+# ── iter74: shared fleet-regime filter (Markov-switching, realtime) ───────
+# One process-wide forward filter fed by EVERY live session's candles
+# (the same fleet observables the historical panel was built from — see
+# analysis/iter74_fleet_regime.py).  5-minute bins; a background closer task
+# seals each bin at its boundary and feeds the filter.  V2 engines created
+# with v2_msm_enable=1.0 consume the filter's causal posterior through the
+# entry gate; every other configuration is untouched.
+_fleet_filter = None            # FleetRegimeFilter | None
+_fleet_bin_state = None         # {"bin": int, "first": {mint: close}, "last": {...},
+                                 #  "buy": {mint: v}, "sell": {mint: v}, "toks": set}
+_fleet_vov_hist: list[float] = []   # iter75: trailing bin med_ret series for vol-of-vol
+_fleet_lock = asyncio.Lock()
+
+
+def _fleet_obsserve_tick(mint: str, close: float, buy_vol: float, sell_vol: float,
+                        ts: float) -> None:
+    """Record one tick's contribution to the currently-open fleet bin.
+    Called from every live session's tick loop (cheap dict updates)."""
+    global _fleet_bin_state
+    if _fleet_filter is None or _fleet_bin_state is None:
+        return
+    b = int(ts) // 300
+    st = _fleet_bin_state
+    if st["bin"] != b:
+        return          # closer task rotates; drops ticks racing rotation
+    if mint not in st["first"]:
+        st["first"][mint] = close
+        st["toks"].add(mint)
+    st["last"][mint] = close
+    st["buy"][mint] = st["buy"].get(mint, 0.0) + (buy_vol or 0.0)
+    st["sell"][mint] = st["sell"].get(mint, 0.0) + (sell_vol or 0.0)
+
+
+def _fleet_close_and_rotate() -> None:
+    """Seal the current bin (if it has ≥2 tokens), feed the filter, rotate.
+    Runs every 5 s — bins seal exactly at their 300 s boundary."""
+    global _fleet_bin_state
+    if _fleet_filter is None or _fleet_bin_state is None:
+        return
+    now = time.time()
+    b = int(now) // 300
+    st = _fleet_bin_state
+    if st["bin"] == b:
+        return          # current bin still open
+    sealed = st
+    # rotate to the new (still-open) bin
+    _fleet_bin_state = {"bin": b, "first": {}, "last": {}, "buy": {}, "sell": {},
+                        "toks": set()}
+    if len(sealed["toks"]) < 2:
+        return          # sparse bin — the HMM only ever saw multi-token bins
+    rets = []
+    for m in sealed["toks"]:
+        f = sealed["first"].get(m)
+        l = sealed["last"].get(m)
+        if f and l is not None and f > 0:
+            r = (l / f) - 1.0
+            if r == r:
+                rets.append(max(-5.0, min(5.0, r)))
+    if not rets:
+        return
+    rets.sort()
+    vol_buy = sum(sealed["buy"].values())
+    vol_sell = sum(sealed["sell"].values())
+    vol = vol_buy + vol_sell
+    obs = {
+        "n_tok": len(sealed["toks"]),
+        "med_ret": statistics.median(rets),
+        "p25_ret": rets[max(0, len(rets) // 4 - 1)],
+        "buy_share": (vol_buy / vol) if vol > 0 else 0.5,
+        "flow": math.log1p(vol),
+        "pump_rate": sum(1 for r in rets if r >= 0.10) / len(rets),
+        "dump_rate": sum(1 for r in rets if r <= -0.20) / len(rets),
+    }
+    try:
+        _fleet_filter.feed_bin(sealed["bin"], obs)
+    except Exception:
+        logger.exception("[MSM] fleet filter feed failed")
+    # iter75: realtime fleet-medium turbulence (vol-of-vol of med_ret over
+    # the trailing 6 closed bins vs the FIXED OLD-trained ceiling 0.00955 —
+    # the causal-validated regime key, see analysis/iter75_PREREGISTRATION.md)
+    # — pushed to every V2 engine carrying the s2 gate.  Non-lagging.
+    try:
+        _fleet_vov_hist.append(obs["med_ret"])
+        if len(_fleet_vov_hist) > 300:
+            del _fleet_vov_hist[: len(_fleet_vov_hist) - 300]
+        if len(_fleet_vov_hist) >= 6:
+            _mr = _fleet_vov_hist[-6:]
+            _vov = statistics.pstdev(_mr)
+            _low = _vov < 0.00955
+            for _sess in list(_active_live_traders.values()):
+                try:
+                    _eng = _sess.trader.engine
+                    if float(getattr(_eng, "_v2_s2_gate_enable", 0.0)) > 0.0:
+                        _eng.set_fleet_medium_state(_low)
+                except AttributeError:
+                    pass      # V1 engine / teardown race
+    except Exception:
+        logger.exception("[iter75] fleet medium update failed")
+
+
+def _fleet_filter_for_engine(engine):
+    """iter74: hand the shared filter to a fresh V2 engine if its params
+    enable the MSM gate.  The engine's state_at() shim reads the filter's
+    CURRENT posterior (filtered, causal)."""
+    if _fleet_filter is None:
+        return
+    try:
+        if float(getattr(engine, "_v2_msm_enable", 0.0)) > 0.0:
+            engine.set_fleet_regime_states(_fleet_filter)
+    except AttributeError:
+        pass       # V1 engine has no MSM surface
+
+
+async def _fleet_bin_closer_loop():
+    """Background task: seal fleet bins at 300 s boundaries."""
+    while True:
+        try:
+            await asyncio.sleep(5.0)
+            _fleet_close_and_rotate()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("[MSM] fleet bin closer failed")
+
+
+def _init_fleet_filter() -> None:
+    """Startup hook: build the shared filter (best-effort; the gate
+    never blocks when the model artifacts are missing)."""
+    global _fleet_filter, _fleet_bin_state
+    if _fleet_filter is not None:
+        return
+    try:
+        from fleet_regime_online import FleetRegimeFilter
+        _fleet_filter = FleetRegimeFilter()
+        _fleet_bin_state = {"bin": int(time.time()) // 300, "first": {},
+                            "last": {}, "buy": {}, "sell": {}, "toks": set()}
+        asyncio.ensure_future(_fleet_bin_closer_loop())
+        logger.info("[MSM] fleet regime filter online "
+                    f"(worst_state={_fleet_filter.worst_state})")
+    except Exception:
+        logger.warning("[MSM] fleet regime filter unavailable — "
+                       "v2_msm_enable gate will never block")
+
+
 # ── Live trading state ───────────────────────────────────────────────────
 # Live sessions are SERVER-SIDED: they own the trader, the market stream, the
 # auto-recording and the holder-flow pump, and keep running independently of
@@ -1368,6 +1517,16 @@ class _LiveSession:
                         pool_sol=candle_dict.get("pool_sol", 0.0),
                     )
                     self.last_strategy_result = strategy_result
+
+                    # iter74: accumulate this tick into the process-wide
+                    # fleet-regime bin (5-min cross-token observables).
+                    if not is_synthetic:
+                        _fleet_obsserve_tick(
+                            real_mint, current_price,
+                            candle_dict.get("buy_volume", 0.0),
+                            candle_dict.get("sell_volume", 0.0),
+                            float(candle_dict["time"]),
+                        )
 
                     trade_payload = None if is_synthetic else {
                         "price": trade["price"],
@@ -2318,6 +2477,9 @@ async def _get_or_create_live_session(
             no_motion_stop_seconds=120.0,
         )
         live_trader.start_watchdog()
+        # iter74: hand the shared fleet-regime filter to this session's
+        # engine when v2_msm_enable=1.0 (no-op for every other config)
+        _fleet_filter_for_engine(live_trader.engine)
 
         session = _LiveSession(
             real_mint=real_mint,

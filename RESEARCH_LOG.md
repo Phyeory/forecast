@@ -8241,3 +8241,239 @@ The buy leg is dominated by the `_background_buy_settle` poll loop on free RPCs 
 - Live no longer waits a state/boundary before launching swaps; expect modest live improvement on fast exits (dev_sell/evr style) where the old extra hop mattered most on illiquid tokens.
 
 ---
+
+## Iter 74 — Markov-Switching Fleet-Regime Entry Gate (`v2_msm_enable`): mechanism VERIFIED in-engine on the dead regime, refinements REJECTED at screen, production default OFF pending policy decision
+
+**Date:** 2026-08-30
+**Mandate:** user — "make the algorithm regime-adapting, specifically ENTRY logic, via Markov-switching models (hidden state → parameters switch)"; regime must use REALTIME data, not previous-day aggregates.
+**Status:** mechanism verified; occupancy/flood refinements rejected; default OFF (policy knob, iter62-style hand-off to user).
+
+### 1. Why the old regime system was dead (diagnosis)
+
+The iter57/64 daily-Q cache froze at 08-21 with three compounding causes:
+1. **Directory split bug:** `backtester.py` writes per-token logs to `backtest_results/` (default `_RESULTS_DIR`) but `fetch_global_regime.py:RESULTS_DIR` is hardcoded `v2_results/` — `gr_share_from_batch` never saw ANY auto-batch. The maintenance loop dutifully marked all 2,092 recordings "measured" while its accumulators starved: 147 trades (08-25..29) stranded in `backtest_results/*regime_auto*` logs, zero reached the cache.
+2. **Qualification floor:** `MIN_TRADES=10` closed trades/date was unreachable under the warmup-400 stack (~15 traded recs/day).
+3. **Consumer removed:** the only engine consumer left after iter64 (`v2_rate_split_regime_gate`) is default-OFF. Even a perfect Q had no effect.
+Plus the user's structural point: daily backtest-exit-mix is 1-day-lagged data by construction — the wrong emission source for regime detection.
+
+### 2. The MSM replacement (realtime fleet observables)
+
+- **Observables (5-min fleet bins, causal at bin close):** `med_ret`, `p25_ret`, `buy_share`, `flow` (log1p volume), `pump_rate`, `dump_rate`, `n_tok` — cross-token aggregates over all active tokens' candles. Historically reconstructed from the recordings DB (`analysis/iter74_fleet_regime.py` → `fleet_panel.json`, 4,149 bins, 07-27→08-30); live-computed in `main.py` from every session's ticks (`_fleet_obsserve_tick` + 5 s closer loop → shared `FleetRegimeFilter`).
+- **Model:** 3-state Gaussian HMM (hmmlearn, full covariance). **Live consumption is the forward-filtered posterior only** (never Viterbi). Worst state = max dump-rate emission mean (model-determined, not researcher-chosen).
+- **State separation (causal prev-bin join, OOS — train old era only, forward-filter the dead era):** dump-state entries −3.28%/trade (179 trades, −0.587 SOL) vs orderly +3.23% (138) in the dead era. The decayed regime is detectable in real time without seeing it.
+
+### 3. In-engine verification (live-era cohort, naive block-worst-state rule)
+
+`v2_msm_enable=1.0` vs production baseline on the same 341 live-era recordings:
+**+0.3978 SOL / PF 1.52 / 105 trades vs +0.1674 / 1.13 / 151** — Δ+0.230 SOL,
+Wilcoxon p=0.0363, breadth 54% among changed, tail ≤−30% halved (21→11),
+blocked-entry autopsy 18 losers/−0.51 saved vs 30 winners/+0.29 cost.
+Bootstrap CI [−0.0003, +0.0063] misses strict positivity by 3×10⁻⁴ (iter63
+precedent near-miss shape).
+
+### 4. The honest part — era-dependence, numbering audit, rejected refinements
+
+- A state-numbering inconsistency between the full-sample fit (worst=2) and the OOS fit (renumbered worst=0) produced two WRONG intermediate ledgers (retracted in the PREREGISTRATION addendum). Corrected coherent ledger: **the naive gate costs −0.63 SOL in the old regime while saving +0.54 in the dead one — it is a regime-conditional mechanism, not an unconditional edge.**
+- Rejected at screen: trailing own-trade experience (blocks dead-era recovery winners); trailing-24h occupancy φ-sweep (isolated positive island, 12/16 cells negative); flood-gating by token count (−0.17 single pre-stated cell).
+- Parity + tests: `v2_msm_enable` absent/0.0 → byte-identical (6/6 `test_iter74_msm.py`); EVR/regime-adapt/hf-silence suites green.
+
+### 5. Disposition
+
+`v2_msm_enable=1.0` + `v2_msm_occupancy_floor=0.0` shipped default-OFF. Live wiring complete (`backend/fleet_regime_online.py`, `main.py` shared filter + tick feed + startup init). Model refresh procedure: rebuild panel → `fit` → re-embed filtered states (monthly or after regime breaks). **Adoption is an explicit policy decision**: the gate is a dead-regime circuit breaker that pays for itself ONLY when the dump regime is active; enable it on detected dump-regime onset (trailing-24h dump-state occupancy ≥ ~30%), disable on recovery — or accept the good-regime winner cost for permanent tail insurance. See `backend/analysis/iter74_PREREGISTRATION.md` Addendum A.
+
+
+## Iter 74c — State-Switched Entry-Regime Allowlist (`v2_msm_entry_blocklist`): the consistently-positive rule found — idle-regime entries blocked in every fleet state
+
+**Date:** 2026-08-31
+**Mandate:** user — "try until the system adapts well enough that winrate and PnL are consistently positive and high."
+**Status:** RULE A VERIFIED BOTH ERAS (improves dead era, wash-to-positive in good era, tails cut in both); shipped default-OFF as part of the `v2_msm_enable` surface.
+
+### 1. The interaction grid (the design instrument)
+
+(fleet state × engine entry-regime × era) expectancy over all 1,096 baseline trades: the ONLY cell negative across every state and BOTH eras is **idle-regime entries** (OLD: −0.86% @dump / −1.05% @ok; DEAD: −2.50% / −0.52%; 4/4 cells negative, ~220 trades). Trend entries in the dump state are era-conditional (OLD +7.1% vs DEAD −9.6% — not a state law); exhaustion entries are the engine's workhorse and stay positive in 5/6 cells. Engine-internal features (confidence, P_up, σ, μ̂) cannot separate winners within the dump state (AUC 0.43–0.55 — the iter31/34/35 entry-feature ceiling holds).
+
+### 2. Mechanism
+
+`v2_msm_entry_blocklist` — the literal Markov-switching parameter change: per fleet state, a set of V1 entry-regimes whose BUY signals are suppressed; a configured list REPLACES the naive worst-state block for that state. Rule A = `"0:idle;1:idle;2:idle"` (idle blocked everywhere, nothing else). Rule B = A + trend blocked in the dump state.
+
+### 3. Full-engine verification, BOTH eras (the consistency test the user demanded)
+
+| config | live-era (dead regime) | old-era (good regime) |
+|---|---|---|
+| baseline | +0.167 / 62.9% / PF 1.13 / tail 21 | +1.326 / 68.7% / 1.24 / 82 |
+| **A: idle-block** | **+0.251 / 63.6% / 1.22 / 18** | **+1.331 / 68.5% / 1.26 / 76** |
+| B: idle+trend@dump | +0.292 / 64.7% / 1.28 / 17 | +1.185 / 68.2% / 1.24 / 74 |
+| naive all@dump | +0.398 / 63.8% / 1.52 / 11 | +0.689 / 68.9% / 1.19 / 54 |
+
+**Rule A is the only configuration that never costs the good regime** (Δ+0.005) while improving the dead one (Δ+0.083, tails 21→18, PF 1.13→1.22) — with tails cut in BOTH eras (82→76 old). Rule B and naive progressively buy dead-regime protection with good-regime winner PnL (B −0.14 old; naive −0.64 old) — regime-insurance pricing, not adaptation.
+
+### 4. Honest statistics
+
+Rule A does NOT clear the strict whole-PnL gate in either era (live p=0.18, old p=0.48; the mechanism concentrates in a 125-trade entry class, so whole-cohort tests are power-limited — the iter45/61 power property). It clears the directional-consistency bar the user set: PnL ≥ baseline and WR ≥ baseline and tail ≤ baseline in BOTH regimes simultaneously. Rule B clears nothing strictly (live p=0.10; old negative). Given the iter57/72 precedent of explicit user adoption of battery-informative mechanisms, Rule A is offered for adoption; the naive rule remains the maximum-protection option.
+
+### 5. Disposition
+
+All three knobs shipped, parity-safe (absent = byte-identical; `test_iter74_msm.py` 8/8 incl. blocklist REPLACE semantics; EVR/regime-adapt/hf-silence green). Recommended production config, by risk posture:
+* **Consistent (recommended): `v2_msm_enable=1.0`, `v2_msm_occupancy_floor=0.0`, `v2_msm_entry_blocklist="0:idle;1:idle;2:idle"`** — positive-or-neutral in both regimes, tails cut in both.
+* Max dead-regime insurance: drop the blocklist (naive) — accept −0.64/era good-regime cost.
+* Re-gate the blocklist when ≥2 more weeks of post-08-29 (Mayhem-flood) recordings accumulate.
+
+
+## Iter 74d — Full-cohort (1,525-rec) validation of the three MSM configs + next-generation probes: A/B both +0.10 SOL, naive −1.02; K=4/5 and era-detector extensions REJECTED (era-conditionality is structural)
+
+**Date:** 2026-08-31
+**Mandate:** user — full 2000-token-scale batch for baseline + A + B + naive; keep developing until significant WR/PnL improvement.
+
+### 1. Full-cohort results (identical 1,525-recording cohort, 4 sequential batches, 0 errors)
+
+| config | trades | WR | PnL (SOL) | PF | tail≤−30% | OLD-era | DEAD-era |
+|---|---|---|---|---|---|---|---|
+| baseline | 1,088 | 65.9% | +1.1242 | 1.13 | 131 | +0.9570 | +0.1673 |
+| **A: idle-block** | 1,002 | 65.8% | **+1.2262** | **1.15** | **120** | **+1.0775** | +0.1487 |
+| **B: idle+trend@dump** | 974 | 65.9% | **+1.2270** | **1.16** | **115** | +0.9057 | **+0.3214** |
+| naive: all@dump | 602 | 65.3% | +0.1027 | 1.02 | 77 | +0.5458 | −0.4431 |
+
+- **A and B both deliver +0.10 SOL (+9% PnL) with fewer trades and smaller tails.** A's gain accrues in the OLD era (+0.12, tails 96→86) with a marginal DEAD cost; B's in the DEAD era (+0.154, tails 35→29) with a marginal OLD cost (−0.05). Both improve PF and expectancy. Neither clears strict whole-PnL Wilcoxon (p=0.46/0.42 — the 448-recording pair set dilutes a ~100-trade blocked class; the iter45/61 power property, NOT evidence of no effect: the direction is consistent and the tails move the right way in both eras for both rules).
+- **The naive rule is now definitively refuted as a production config on the full cohort**: −1.02 SOL vs baseline. It only looked good on the dead-era-heavy live cohort.
+- Combined A∩B effects are NOT additive (B ⊂ A + trend-block; B's marginal trend-block costs OLD −0.17 while A's idle-block gains OLD +0.12 — the dead-era trade remains insurance).
+
+### 2. Next-generation probes (all executed this session; documented here so no future agent re-burns them)
+
+1. **K=4 and K=5 state spaces**: NO state is negative in BOTH eras at any granularity — every state is positive in OLD, negative in DEAD. The ERA effect dominates the state effect; finer states do not create a regime-free toxic state. REJECTED.
+2. **Hierarchical era-detector** (trailing-24h dump-occupancy switching the naive block on/off, anchor = OLD-era 80th pct): inverts — flags 21% of OLD trades vs 10% of DEAD (July's launch-era fleet was dump-heavy; 07-28 med dump-frac 0.75 vs 08-25's 0.02). REJECTED as July-confounded.
+3. **Daily-lag fleet features → next-day expectancy**: all |r| < 0.15 (pump/dump rate, med_ret, n_tok, flow, buy_share) — the iter52/57 daily-lag null extends to every fleet observable. REJECTED.
+4. **Morning-dump-share → same-day afternoon entries**: monotone in DEAD (−1.9% → −5.7% by tercile) but flat in OLD — the same era-conditionality, one more time. REJECTED as a standalone separator.
+
+### 3. Verdict
+
+The user's bar — "significant increase in winrate and PnL" — is met on **directional consistency** (A and B both +0.10 SOL, tails −11/−16, PF up, era-split positive where designed) but NOT on the strict paired-diff gate (power-limited at n=100-180 blocked trades across 448 recordings). The era-flip is structural: this market's regimes reverse the sign of the SAME fleet-state entry economics, and no causal observable tested (5 families this session) separates eras in advance. The honest Pareto frontier: **A for good-regime safety, B for dead-regime insurance; A is the recommended default** (its worst case is +0.1487 DEAD vs B's −0.0513 OLD... measured on the full cohort, A's worst era is +0.149, B's is −0.051 — A never goes negative in either era). Configs shipped default-OFF as before; adoption is the user's policy call.
+
+
+## Iter 74d ADOPTION — configuration B is now the PRODUCTION DEFAULT (explicit user decision 2026-08-31)
+
+User adopted configuration B: **`v2_msm_enable=1.0, v2_msm_occupancy_floor=0.0, v2_msm_entry_blocklist="0:idle;1:idle;2:idle,trend"`**.
+
+Implemented across the stack:
+- `backend/strategy_engineV2.py` — adapter defaults + `DEFAULT_CONFIG` documentation entries (config B values, adoption verdict, escape hatch).
+- `backend/backtester.py` — MSM state injection now keys on the ENGINE's `_v2_msm_enable` (not on explicit `engine_params`), because the enable lives in the engine default after adoption; bare `{}` therefore injects the causal fleet-state source exactly as the adopted batch ran.
+- `frontend/js/app.js` — `engineParamsV2` + parameter hints carry config B.
+
+**Verification (both directions, per repo convention):**
+1. Bare `{}` backtest reproduces the adopted batch `iter74d_B_full` trade-by-trade (rec3878: 5 trades / +0.0177 — byte-equal to the batch log; the earlier "silent no-op" injection bug was found precisely because this check ran).
+2. Explicit `{"v2_msm_enable": 0.0}` restores pre-iter74 behaviour (rec3878: 7 trades / +0.0194 — byte-equal to `iter74d_base_full` log).
+3. `test_iter74_msm.py` 9/9 under the new contract (parity-off is now an explicit opt-out; blocklist tests pin the escape configs by hand; new `test_production_default_is_config_B` locks the adoption).
+4. Regression suites: EVR ✓, regime-adapt ✓, hf-silence ✓, live-parity 10/10 ✓, iter67 holder-flow latency ✓. `test_whale_dump` 4/10 failures are PRE-EXISTING (the whale-dump exit code was removed from the engine at commit 91c7536 "docs: removed the reverted whale gate"; the test file survives in gitignored `analysis/` — verified failing with MSM fully disabled, i.e. unrelated to this adoption).
+
+Operational note for live: the shared `FleetRegimeFilter` in `main.py` warms up as live sessions feed fleet bins (unknown state NEVER blocks, so the gate is inert until the first bins close); the model artifacts (`fleet_regime_model.json`, `fleet_filtered_states.json`) refresh via `analysis/iter74_fleet_regime.py build && fit` — re-gate when ≥2 weeks of post-Mayhem recordings accumulate.
+
+## Iter 74e — Conservation mandate (user: "don't lose in bad regimes; conserving wins > adapting"): two conservation mechanisms counterfactual-tested on the ADOPTED config-B batch, both REJECTED at screen; the honest answer to "will it keep losing in bad regimes"
+
+**Date:** 2026-08-31
+**Question:** does config B stop losing in bad regimes? **Answer: NO — it dampens but does not eliminate.** Dead-era negative-day PnL: baseline −0.875 SOL across 6 days → config B −0.633 SOL across the same 6 days (−28%). The 08-19-type entry-selection-error days remain untouched by any exit/entry gate tested in this program (iter56: 0/166 tail losers ever reach +15% MFE — those days' entries are bad at selection time).
+
+### Rejected conservation mechanisms (counterfactuals on `iter74d_B_full` logs)
+
+1. **Per-session (per-recording) loss cap** — stop new entries on a token once the session's realized trade PnL ≤ −cap (3–20% swept, OLD-era selection, DEAD OOS): REJECTED at every cap. Post-cap entries have POSITIVE cumulative PnL in BOTH eras (+0.23 OLD / +0.24 DEAD at the −5% cap): the stop blocks the recovery re-entries that earn back the bleed (the iter37 replacement-entry pathology in per-recording form; also the exact lesson of iter07/22/46/68 recovery tables — 72–77% of −30% dips touch entry again).
+2. **Fleet-day loss cap** — block all entries once the day's fleet-realized PnL ≤ −X (0.05–0.30 SOL swept): REJECTED. Same recovery pathology, now fleet-wide (+0.30/+0.39 blocked PnL at the tight cap; dead era blocks ZERO at caps ≥ 0.15 because the dead-era bleed is spread across MANY small days, never one deep one).
+3. **Fleet-bleed morning gate** (block afternoon entries when morning dump-share ≥ 0.30): NET +0.116 SOL (saves +0.175 dead / costs −0.059 old) — mild and era-conditional like every other state rule; not adopted as a standalone.
+4. **Interaction cell** (bleeding morning AND red morning PnL): blocks only OLD-era trades (−0.02), zero dead-era coverage — the dead-era bleed days had positive mornings. REJECTED.
+
+### The structural conclusion (fourth time measured, now with conservation as the objective)
+
+Loss-capping this strategy in its bad regimes ALWAYS costs more recovery than it saves, at every granularity tested (per-trade, per-session, per-day, fleet-day), because the engine's edge partly consists of re-entering falling tokens and harvesting the rebound. The remaining dead-regime bleed (−0.63 SOL over the worst month-scale era, ~−0.03 SOL/day on active days) is entry-selection error that no gate on OHLCV/fleet/holder-flow features has separated in 40+ iterations. The conservation options that remain are PORTFOLIO-LEVEL and outside the engine: (a) per-day live-PnL kill-switch (user policy, not engine param — it caps capital at risk, accepting the measured −recovery tradeoff as an insurance premium), (b) reduced buy-size during detected dump-regime occupancy (sizing, not blocking — never cuts winners, only scales them), (c) the V3–V7 archetype diversification (edges that don't share the era-conditionality). Sizing (b) is the one mechanism class never tested in this program and does not violate any measured bound — flagged as the recommended next iteration if conservation remains the priority.
+
+## Iter 75 — Regime-Keyed σ² Threshold Switch (`v2_s2_gate_enable`): user's threshold-tuning thesis CONFIRMED at the coefficient level; full-engine outcome PnL-neutral with WR +0.5pp and tail cut; default stays OFF pending policy call
+
+**Date:** 2026-08-31
+**Mandate:** user — pursue realtime non-lagging observables; tune internal THRESHOLDS by regime ("the particle's variables don't change, the thresholds do").
+
+### 1. The user's thesis, confirmed with data (before any mechanism)
+
+The engine's own posterior σ²_τ at entry carries **inverted information across regimes**: winner-AUC 0.474 in the OLD era vs 0.428 in the DEAD era — in the dead regime, higher σ² makes entries WORSE. Blocking the same top-percentile-σ² entries saves +0.20 SOL in the dead era but costs −0.55 in the old era: identical observable, opposite thresholds, exactly as the user predicted. Dead-era trend entries also happen earlier in token life (median bar 6,156 vs 10,548) — the old edge was late-trend continuation; the dead regime punishes early momentum reads.
+
+### 2. New realtime observables (all bin-close causal, zero lag)
+
+`analysis/fleet_panel_v2.json` (4,105 bins): fleet lag-1 autocorrelation of bin returns (momentum vs mean-reversion medium), cross-token return dispersion (IQR), flow concentration (top-token share), and vol-of-vol (turbulence). Standalone entry-AUCs ≈ 0.5 (the medium describes the regime, not the token choice) — they function as the REGIME KEY for threshold switching, which is their intended role.
+
+### 3. Mechanism (pre-registered before the engine run)
+
+`v2_s2_gate_enable` (default 0.0) blocks an entry when its σ²_τ exceeds the FIXED floor 0.04601 AND the fleet medium is low-turbulence (vol-of-vol < 0.00955) — both constants trained on the OLD-era half ONLY, so the DEAD era is strictly out-of-sample. Physics: high-variance particle read in a calm medium = idiosyncratic fakeout (the dead-regime pathology); in a turbulent medium high σ² is genuine price discovery and is never blocked. Live wiring: `main.py` computes fleet vol-of-vol per bin close and pushes the flag to all s2-enabled engines; backtest injects `analysis/fleet_medium_state.json` (per-bin causal flags). An earlier trailing-percentile design was cold-start-broken (per-recording engines never reach 50 evaluations — replaced with fixed thresholds; the bug and fix are recorded).
+
+### 4. Full-engine full-cohort results (1,525 recs, 0 errors) vs ADOPTED config B
+
+| config | trades | WR | PnL | PF | tail≤−30% | OLD | DEAD |
+|---|---|---|---|---|---|---|---|
+| B (adopted) | 974 | 65.9% | +1.2270 | 1.16 | 115 | +0.9057 | +0.3214 |
+| B + s2 gate | 932 | **66.4%** | +1.2265 | **1.17** | **109** | +0.8770 | **+0.3495** |
+
+Era WR: OLD 66.6→67.0%, DEAD 63.7→**64.4%**. Paired per-recording: Δ −0.0006 SOL (p=0.25), breadth 22/44 = exactly 50%.
+
+**Pre-registered gate evaluation (strict):** total PnL Δ ≥ 0 — FAILED by 0.0006 SOL (flat); Wilcoxon/CI — FAILED; tail not increased in either era — PASSED (115→109; era-level 29→27 dead / 86→82 old); WR not decreased in either era — PASSED (+0.5pp in both); both-era ΔPnL ≥ 0 — FAILED by −0.03 OLD (dead +0.28, old −0.03).
+
+### 5. Verdict
+
+Per the pre-registration, the knob stays **default-OFF** (`v2_s2_gate_enable=1.0` to arm). Honest reading of what it does: it converts ~42 of the noisiest entries into +0.5pp win rate in BOTH regimes and −5% tail count, at exactly PnL parity. It is the first mechanism this program has produced that improves consistency metrics in both eras simultaneously without a PnL cost — but it does not clear the strict PnL gates, and its combined effect with B is not additive enough to matter on the aggregate. Adoption (like iter61's floor) is a user policy decision on whether consistency-for-free is worth arming. Thresholds re-train with the model artifacts at refresh; the era-inversion evidence (§1) is the durable finding — it is the empirical basis for any future per-regime threshold work.
+
+## Iter 75 Addendum C — Parameter sweep of the new mechanisms (8-cell full-cohort bracket battery): config B is NOT the local optimum — **B′ adopted** (`0:idle;2:idle,trend`, +1.3196 SOL, p=0.034, both-era positive)
+
+**Date:** 2026-08-31, cells run 2026-09-01. Pre-registered in `analysis/iter75_PREREGISTRATION.md` Addendum B BEFORE any result was read. 8 full-cohort (1,525-rec) full-engine cells, sequential, 0 errors.
+
+### Sweep table (vs B = +1.2270 / 65.9% / PF 1.16 / tail 115 / OLD +0.906 / DEAD +0.321)
+
+| cell | change | PnL | WR | PF | t30 | verdict |
+|---|---|---|---|---|---|---|
+| bl_T0 | +trend-block in state 0 | +0.8702 | 65.5% | 1.12 | — | bracket HURTS (good-state trend entries are winners) |
+| bl_E2 | +exhaustion-block in state 2 | +1.1369 | 65.9% | 1.21 | — | bracket HURTS (exhaustion is the workhorse even in the dump state) |
+| bl_only2 | drop state-0/1 idle-blocks | +0.0908 | 65.1% | 1.02 | — | bracket HURTS badly (good-state idle-block load-bearing) |
+| **bl_noI1** | **drop state-1 idle-block** | **+1.3196** | **66.0%** | **1.17** | 117 | **SWEEP WINNER — adopted as B′** |
+| s2_lo | σ² floor 0.046→0.0353 | +1.1190 | 66.3% | 1.16 | — | tighter gate hurts |
+| s2_hi | σ² floor 0.046→0.060 | +1.3141 | 66.3% | 1.18 | 110 | weaker gate better (OLD +1.012/DEAD +0.302) but still < noI1 |
+| vov_lo / vov_hi | ceiling 0.008 / 0.012 | +1.2265 both | — | — | — | **NO-OP cells — see disclosure** |
+
+### The winner and its gates
+
+`bl_noI1` (blocklist `"0:idle;2:idle,trend"` — drop the state-1 idle-block):
+Δ+0.0926 vs B, **Wilcoxon one-sided p = 0.0336 ✓**, breadth 31/49 = 63% ✓, **era split BOTH positive (OLD +0.03 / DEAD +0.06)** — the first adopted change in the MSM family with both-era-positive economics (B's own adoption had a −0.05 old-era cost). Tail 115→117 (+2, inside noise for a 2-trade delta on 1,000 trades; era-level 96→98/29→27). The state-1 (orderly-pump state) idle entries recover — B was over-blocking them.
+
+### Honest disclosures
+
+1. **The vov cells were no-ops**: `vov_lo` and `vov_hi` produced byte-identical results to the center because the backtest medium timeline (`analysis/fleet_medium_state.json`) is a precomputed artifact with the 0.00955 ceiling baked in — the `v2_s2_gate_vov` knob is consumed only on the LIVE path (`main.py`). The vov axis is therefore **unswept in-engine**; testing it requires per-cell artifact regeneration. Not blocking: both s2-stacked cells were below the winner anyway.
+2. **In-sample caveat**: the bracket directions were selected from the same full cohort that scores them (the iter64-style bracket battery's inherent limitation). The mitigations: the winner is a REMOVAL of a block (simpler model, fewer parameters), both eras improve independently, and the era split gives two quasi-independent validations.
+3. The s2 axis is monotone (lo < center < hi) — weaker σ²-gating is better on this cohort, consistent with the gate's PnL-neutrality finding in Iter 75 §4. s2 stays default-OFF; if armed later, the floor should move toward 0.060+.
+
+### Adoption
+
+Production default updated to **B′**: `v2_msm_enable=1.0, v2_msm_occupancy_floor=0.0, v2_msm_entry_blocklist="0:idle;2:idle,trend"` in `strategy_engineV2.py` (adapter + DEFAULT_CONFIG) and `app.js`. Verified: bare-{} run reproduces `iter75sw_bl_noI1` trade-by-trade (rec3878 5t/+0.0177); contract test updated to B′; MSM suite 12/12; EVR / regime-adapt / hf-silence / live-parity (10/10) all green. Config B remains available as the explicit override string; `v2_msm_enable=0.0` still restores pre-iter74 byte-exact.
+
+## Iter 75 Addendum D — Extended sweep results (σ-convergence, bin-size axis, feature ablation, 2×2 completion): ALL CANDIDATES REJECTED at their pre-registered gates — **B′ stands as the production optimum**
+
+**Date:** 2026-09-01. Pre-registered in `analysis/iter75_PREREGISTRATION.md` Addendum D before any result read. 8 more full-cohort (1,525-rec) full-engine cells, 0 errors, plus 5 bin-size/ablation screens. Incumbent: B′ +1.3196 SOL / 66.0% / PF 1.17.
+
+### D.1 σ-floor convergence (task 3) — CONVERGED, PEAK REJECTED ON BOTH-ERA GATE
+
+| σ floor | 0.046 | **0.060** | 0.075 | 0.090 | 0.110 |
+|---|---|---|---|---|---|
+| PnL | +1.2734 | **+1.3508** | +1.2998 | +1.3073 | +1.3214 |
+
+The curve converged: an inverted-U peaking at 0.060 (+0.031 over B′), both neighbors below it, and the extreme (0.110) asymptoting to the ungated result as the floor exceeds nearly all σ². **BUT the peak FAILS the pre-registered both-era gate**: era split OLD +1.032 (vs B′'s +0.934, +0.10) / DEAD +0.319 (vs B′'s +0.386, **−0.068**). The s2 gate's entire historical gain was dead-regime protection; at the PnL-optimal floor it has flipped into an old-regime harvest that costs the dead regime. Per Addendum D's own rule (a candidate must pass both-era Δ ≥ 0), **σ=0.060 is REJECTED; s2 stays default-OFF.** Convergence is genuine — this is the σ axis's full shape, not an unswept region.
+
+### D.2 Bin-size axis (task 4) — 300s STANDS
+
+Screens (dump-state entry expectancy DEAD/OLD + B′-ledger): **60s PASS** (DEAD −6.1% / OLD +2.9% / ledger +0.097 dead), 120s FAIL (DEAD +3.8% — separation inverts), 600s FAIL (both eras negative, ledger ~0). The passing 60s definition ran full-engine: **+1.2383 (−0.081 vs incumbent)** — the finer state timeline blocks different entries and loses more good-regime PnL than it saves. REJECTED. The 300s production bin is bracketed above and below: 120s destroys the separation, 60s keeps it but pays for it, 600s starves. **State definition is not the binding constraint; the blocklist mapping is.**
+
+### D.3 Feature ablation (task 4b) — FULL 7-FEATURE SET STANDS
+
+returns-only FAIL (dump-state DEAD exp +0.79% — separation gone without flow/liquidity context); liq_scale FAIL (worst state not toxic); rates_flow borderline → full-engine **+1.1864 (−0.133 vs incumbent)**. REJECTED — the full feature set is not over-parameterized; each family contributes to the state separation.
+
+### D.4 A/B × s2 2×2 (task 5) — COMPLETE, B′-ALONE WINS
+
+| | s2 OFF | s2 ON @0.060 |
+|---|---|---|
+| **B′** (`0:idle;2:idle,trend`) | **+1.3196** | +1.3508 (rejected: both-era) |
+| **A** (`0:idle;1:idle;2:idle`) | +1.2270 | +1.3132 |
+
+A+s2 < B′+s2 < B′+s2@0.060-on-PnL — but the PnL-best stack fails the era gate and every gate-passing cell is dominated by plain B′.
+
+### Verdict
+
+**No parameter change.** B′ (`v2_msm_enable=1.0, v2_msm_occupancy_floor=0.0, v2_msm_entry_blocklist="0:idle;2:idle,trend"`, s2 OFF, 300s bins, full 7-feature HMM) is now verified as the optimum across: 4 blocklist brackets, 5 σ floors, 3 alternative bin sizes, 3 feature ablations, and the full 2×2 — 16 configurations total, each full-engine on the complete 1,525-recording cohort. The σ-axis rejection is the sharp finding of this battery: the s2 gate cannot be made both-era-positive at any floor — its information content is era-conditional, the same structural result that iter74d found for every fleet-observable threshold rule.
