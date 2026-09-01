@@ -76,6 +76,21 @@ _RESULTS_DIR = os.environ.get(
 
 _pool: ProcessPoolExecutor | None = None
 
+
+class _MediumSource:
+    """iter75: causal fleet-medium lookup for backtest replay (bin-level
+    low-turbulence flags from analysis/fleet_medium_state.json).  Reads the
+    LAST CLOSED bin before ts — the same prev-bin rule as the fleet-state
+    gate.  Unknown/missing bin → None (gate never blocks)."""
+
+    def __init__(self, timeline: list[dict]):
+        self.fmap = {o["bin"]: o["low_turbulence"] for o in timeline
+                     if o.get("low_turbulence") is not None}
+
+    def medium_at(self, ts: float):
+        return self.fmap.get(int(ts) // 300 - 1)
+
+
 def _get_pool(max_workers: int) -> ProcessPoolExecutor:
     global _pool
     if multiprocessing.current_process().name != 'MainProcess':
@@ -326,6 +341,36 @@ def run_backtest(
         entry_latency_seconds=entry_latency_seconds,
         exit_latency_seconds=exit_latency_seconds,
     )
+
+    # iter74: MSM fleet-regime entry gate — inject the precomputed causal
+    # fleet-state lookup whenever the ENGINE has the MSM gate enabled
+    # (configuration B is the production DEFAULT since 2026-08-31, so this
+    # fires on bare {} too; explicit v2_msm_enable=0.0 leaves the engine
+    # gate off and no source is injected = byte-exact pre-iter74).
+    # Missing artifacts → loud log + gate never blocks (safe degradation).
+    # iter75: also inject the causal fleet-MEDIUM timeline (low-turbulence
+    # flag per bin) when the s2 gate is enabled — same pattern, same parity.
+    if engine_version == 2:
+        try:
+            if float(getattr(ft.engine, "_v2_msm_enable", 0.0)) > 0.0:
+                from fleet_regime_online import FleetRegimeFilter
+                # iter75sw: env override lets bin-size / ablation sweep cells
+                # point at their own state artifacts; default = production.
+                _states_path = os.environ.get("V2_MSM_STATES_PATH", "")
+                if not _states_path:
+                    _states_path = os.path.join(os.path.dirname(__file__), "fleet_filtered_states.json")
+                if not os.path.exists(_states_path):
+                    _states_path = os.path.join(os.path.dirname(__file__), "analysis", "fleet_filtered_states.json")
+                ft.engine.set_fleet_regime_states(FleetRegimeFilter.from_panel(_states_path))
+            if float(getattr(ft.engine, "_v2_s2_gate_enable", 0.0)) > 0.0:
+                _medium_path = os.path.join(os.path.dirname(__file__), "analysis",
+                                             "fleet_medium_state.json")
+                with open(_medium_path) as f:
+                    _mt = json.load(f)
+                ft.engine.set_fleet_medium_state(_MediumSource(_mt))
+        except Exception as _msm_err:
+            print(f"[iter74/75] fleet state injection FAILED for rec {recording_id}: "
+                  f"{_msm_err} — gates will not block")
 
     # Saving full candle series is useful for an interactive single backtest,
     # but it dominates SQLite I/O in iteration batches.  Batch runs keep the

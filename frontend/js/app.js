@@ -224,6 +224,26 @@ let engineParamsV2 = {
   v2_rate_split_theta:          0.55,  // sustained stationary-split threshold
   v2_rate_split_persist:          12,  // consecutive 4-state ticks (≈3 s)
   v2_rate_split_min_peak_age_ticks: 0, // runner-immunity veto REJECTED (0 = off)
+
+  // ── iter74 MSM fleet-regime entry gate — PRODUCTION configuration B′ ──
+  // (sweep winner adopted 2026-08-31; RESEARCH_LOG Iter 75 Addendum C).
+  // Realtime 3-state Gaussian HMM over 5-min cross-token fleet bins
+  // (med/p25 returns, buy share, flow, pump/dump rates, token count);
+  // forward-filtered posterior ONLY (never smoothed).  Blocks idle-regime
+  // entries in fleet states 0 and 2 + trend entries in the dump state (2).
+  // Full-cohort verdict: +1.3196 SOL / 66.0% / PF 1.17 vs config B's
+  // +1.2270 (Δ+0.093, p=0.034, both-era positive — the state-1 idle-block
+  // over-blocked).  Escape hatch: v2_msm_enable=0.0 restores pre-iter74.
+  v2_msm_enable:                1.0,  // 1.0 = ON (production config B′)
+  v2_msm_occupancy_floor:        0.0,  // trailing-24h dump-occupancy refinement REJECTED (0 = off)
+  v2_msm_entry_blocklist: "0:idle;2:idle,trend", // per-state suppressed entry-regimes
+
+  // ── iter75 regime-keyed σ² threshold switch (default OFF — PnL-neutral,
+  // +0.5pp win rate in BOTH regimes, tail 115→109; arm for consistency;
+  // see RESEARCH_LOG Iter 75) ──
+  v2_s2_gate_enable:            0.0,  // 1.0 = arm the σ² × calm-medium gate
+  v2_s2_gate_sigma:         0.04601,  // OLD-era-trained σ²_τ floor
+  v2_s2_gate_vov:           0.00955,  // fleet vol-of-vol ceiling (low-turbulence medium)
 };
 
 /* Strategy Engine Parameters — V3 (newborn-coin dump-bottom recovery).
@@ -467,6 +487,12 @@ function renderSettings() {
     v2_whale_dump_max_peak_pct:           "Never-armed condition: peak gain since entry must stay ≤ this %",
     v2_whale_dump_confirm_s:              "Candles of price persistence below the print close required to confirm the dump",
     v2_whale_dump_confirm_g:              "Confirmation give-back %: confirm close ≤ print close × (1 − g/100)",
+    v2_msm_enable:                       "1.0 = ON: Markov-switching fleet-regime entry gate (realtime 3-state HMM, iter74; 0.0 restores pre-iter74)",
+    v2_msm_occupancy_floor:              "Trailing-24h dump-state occupancy floor for the worst-state block (0.0 = off — refinement REJECTED)",
+    v2_msm_entry_blocklist:              "Per-fleet-state suppressed entry-regimes, e.g. '0:idle;2:idle,trend' (config B′)",
+    v2_s2_gate_enable:                   "1.0 = regime-keyed σ² threshold switch: block high-σ² entries in calm fleet media (iter75; PnL-neutral, +0.5pp WR both regimes)",
+    v2_s2_gate_sigma:                    "σ²_τ floor for the s2 gate (OLD-era-trained 0.04601)",
+    v2_s2_gate_vov:                      "Fleet vol-of-vol ceiling defining the low-turbulence medium (OLD-era-trained 0.00955)",
   };
 
   // ── V3 parameter hints (newborn dump-bottom engine) ──

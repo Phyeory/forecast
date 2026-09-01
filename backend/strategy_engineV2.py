@@ -259,6 +259,36 @@ DEFAULT_CONFIG = {
     "v2_rate_split_theta": 0.55,          # sustained stationary-split threshold
     "v2_rate_split_persist": 12,          # consecutive 4-state ticks (≈3 s)
     "v2_rate_split_min_peak_age_ticks": 0,  # runner-immunity veto — REJECTED (0 = off)
+
+    # ── iter74 MSM fleet-regime entry gate — PRODUCTION configuration B ──
+    # (adopted 2026-08-31 by explicit user decision; RESEARCH_LOG Iter 74c/74d)
+    # Realtime 3-state Gaussian HMM over 5-min fleet bins; forward-filtered
+    # posterior only.  Config B = idle-regime entries blocked in every fleet
+    # state + trend-regime entries blocked in the dump state only.
+    # Full-cohort (1,525-rec) verdict: +1.2270 SOL / 65.9% / PF 1.16 /
+    # tail≤−30% 131→115 vs baseline +1.1242 / 1.13.  The adapter pops these
+    # keys from engine_kwargs with the SAME defaults, so this dict is the
+    # documentation surface; setting v2_msm_enable=0.0 is the escape hatch
+    # restoring byte-exact pre-iter74 behaviour.
+    "v2_msm_enable": 1.0,
+    "v2_msm_occupancy_floor": 0.0,        # occupancy refinement REJECTED at screen
+    # B′ (sweep winner iter75sw_bl_noI1): +1.3196 vs B's +1.2270, p=0.034,
+    # both-era positive.  The state-1 idle-block over-blocked.
+    "v2_msm_entry_blocklist": "0:idle;2:idle,trend",
+
+    # ── iter75 regime-keyed σ² threshold switch — default OFF ──────────────
+    # Full-cohort verdict vs config B alone: PnL −0.0006 (flat), WR +0.5pp in
+    # BOTH eras (65.9→66.4% / DEAD 63.7→64.4%), tail≤−30% 115→109, PF 1.17.
+    # The strictly-highest-PnL configuration measured is config B ALONE
+    # (+1.2270 vs +1.2265) — the s2 gate is a consistency instrument
+    # (PnL-neutral), kept OFF by default per the pre-registered strict-PnL
+    # gate.  Arm via v2_s2_gate_enable=1.0 if consistency is preferred
+    # (iter61-precedent policy call).  Thresholds are OLD-era-trained ONLY —
+    # DEAD-era performance is strictly out-of-sample.  See RESEARCH_LOG
+    # Iter 75 + analysis/iter75_PREREGISTRATION.md.
+    "v2_s2_gate_enable": 0.0,
+    "v2_s2_gate_sigma": 0.04601,           # OLD-era σ²_τ p80
+    "v2_s2_gate_vov": 0.00955,             # OLD-era fleet-vov p30 (low turb)
 }
 
 
@@ -3304,6 +3334,87 @@ class StrategyEngineV2Adapter:
         if (self._v2_rate_split_enable > 0.0
                 and self._v2_rate_split_regime_gate > 0.0):
             self._load_global_regime_cache()
+        # ── iter74 Markov-switching fleet-regime ENTRY gate ──────────────
+        # A 3-state Gaussian HMM over REALTIME fleet observables (5-min
+        # cross-token bins: med/p25 returns, buy_share, flow, pump/dump
+        # rates, n_tok) — see analysis/iter74_fleet_regime.py (offline fit)
+        # and analysis/fleet_regime_online.py (live forward filter).
+        # Blocks ALL V2 entries while the causal FILTERED posterior's
+        # argmax equals the worst (highest dump-rate) state.  Replaces the
+        # removed iter57/64 daily-Q machinery: no backtest replays, no
+        # daily qualification floor, no 1-day lag — the posterior updates
+        # every 5 minutes from live candles.  The state source is
+        # injected via set_fleet_regime_states() (backtest: precomputed
+        # causal panel states; live: FleetRegimeFilter.state_now()).
+        # Unknown state (no data yet / missing bin) NEVER blocks.
+        # PRODUCTION DEFAULT = configuration B′ (sweep winner, adopted
+        # 2026-08-31 after the iter75 8-cell bracket sweep; RESEARCH_LOG
+        # Iter 75 Addendum C): v2_msm_enable=1.0,
+        # v2_msm_occupancy_floor=0.0, v2_msm_entry_blocklist=
+        # "0:idle;2:idle,trend".  vs config B ("0:idle;1:idle;2:idle,trend")
+        # on the 1,525-rec full cohort: +1.3196 vs +1.2270 SOL (Δ+0.093,
+        # Wilcoxon p=0.034, breadth 63%), era split BOTH positive
+        # (OLD +0.03 / DEAD +0.06) — the state-1 idle-block was
+        # over-blocking.  All other brackets below both.  Escape hatch:
+        # v2_msm_enable=0.0 restores byte-exact pre-iter74 behaviour.
+        self._v2_msm_enable = float(engine_kwargs.pop("v2_msm_enable", 1.0))
+        # iter74b: occupancy refinement — block worst-state entries ONLY
+        # when the trailing 24 h (288 bins) of fleet bins was dump-state
+        # dominated (occupancy > floor).  REJECTED at screen (isolated
+        # positive island, 12/16 cells negative — noise); production
+        # default 0.0 = the state-switched blocklist alone decides.
+        self._v2_msm_occupancy_floor = float(
+            engine_kwargs.pop("v2_msm_occupancy_floor", 0.0))
+        # iter74c: STATE-SWITCHED ENTRY-REGIME ALLOWLIST — the literal
+        # Markov-switching parameter change: per fleet state, a comma
+        # separated list of V1 regimes (trend/exhaustion/idle/reversal)
+        # whose BUY signals are suppressed.  Format:
+        #   "<state_idx>:<regime,regime>;<state_idx>:<regime,regime>"
+        # e.g. "0:idle;2:idle,trend" — in fleet state 0 suppress idle
+        # entries, in state 2 suppress idle AND trend entries.
+        # PRODUCTION DEFAULT = configuration B (user adoption 2026-08-31):
+        # idle entries blocked in every state + trend entries blocked in
+        # the dump state only.  Config A ("0:idle;1:idle;2:idle") is the
+        # never-negative fallback.  Empty string = no blocks.
+        self._v2_msm_entry_blocklist = str(engine_kwargs.pop(
+            "v2_msm_entry_blocklist", "0:idle;2:idle,trend"))
+        # ── iter75: regime-keyed σ² THRESHOLD switch (user thesis: same
+        # variables, thresholds change with the medium).  Block entries
+        # whose engine-posterior σ²_τ exceeds its own causal trailing
+        # percentile (default 0.80 = top-20%) — but ONLY when the fleet
+        # medium is LOW-turbulence (fleet vol-of-vol below its trailing
+        # median, injected via set_fleet_medium_state).  Physics: a high-
+        # variance particle read in a calm medium = idiosyncratic fakeout
+        # (the dead-regime pathology, measured era-inverted σ² information:
+        # OLD AUC 0.474 vs DEAD 0.428); in a turbulent medium high σ² is
+        # genuine price discovery and MUST NOT be blocked.  Default 0.0 =
+        # OFF (pre-registered iter75; see analysis/iter75_PREREGISTRATION.md).
+        self._v2_s2_gate_enable = float(engine_kwargs.pop("v2_s2_gate_enable", 0.0))
+        # Fixed regime thresholds, TRAINED ON THE OLD-ERA HALF ONLY (the
+        # causal-validated configuration — DEAD-era performance is strictly
+        # out-of-sample; both eras positive +0.047/+0.041).  Refresh these
+        # constants at model-refresh time alongside the HMM artifacts.
+        self._v2_s2_gate_sigma = float(engine_kwargs.pop(
+            "v2_s2_gate_sigma", 0.04601))   # OLD-era σ²_τ p80
+        self._v2_s2_gate_vov = float(engine_kwargs.pop(
+            "v2_s2_gate_vov", 0.00955))     # OLD-era fleet-vov p30 (low turb)
+        # causal σ² history (per-tick entry evaluations only, bounded)
+        self._s2_hist: list[float] = []
+        self._S2_HIST_MAX = 2000
+        self._fleet_low_turbulence: bool | None = None   # live direct flag
+        self._fleet_medium_source = None                 # backtest lookup
+        self._fleet_regime_states = None      # _PanelStateSource or None
+        self._msm_block_count = 0
+        # parse the blocklist once at construction
+        self._msm_block_map: dict[int, set[str]] = {}
+        for _part in filter(None, self._v2_msm_entry_blocklist.split(";")):
+            try:
+                _st, _regs = _part.split(":", 1)
+                self._msm_block_map[int(_st)] = {
+                    r.strip().lower() for r in _regs.split(",") if r.strip()}
+            except Exception:
+                pass
+
         # ── Market-cap bound trade block ────────────────────────────────────
         # Block all BUY entries when the USD market cap is below mcap_low_usd
         # or above mcap_high_usd.  Both default to 0 = deactivated.
@@ -3463,6 +3574,78 @@ class StrategyEngineV2Adapter:
         if q is None:
             return self._v2_rate_split_unknown_q_enable > 0.0
         return q < self._v2_rate_split_q_max
+
+    def set_fleet_regime_states(self, source) -> None:
+        """iter74: inject the fleet-regime state source (backtest panel
+        states or live filter).  None (default) disables the gate."""
+        self._fleet_regime_states = source
+
+    def set_fleet_medium_state(self, low_turbulence) -> None:
+        """iter75: inject the REALTIME fleet-medium turbulence state.
+        Accepts either a direct bool (live path, pushed every bin close by
+        main.py) or a lookup source with .medium_at(ts) (backtest path,
+        from analysis/fleet_medium_state.json).  None / unknown →
+        the σ² gate never blocks (safe degradation)."""
+        if hasattr(low_turbulence, "medium_at"):
+            self._fleet_medium_source = low_turbulence
+            self._fleet_low_turbulence = None
+            return
+        self._fleet_medium_source = None
+        self._fleet_low_turbulence = low_turbulence
+
+    def _medium_low_turbulence_now(self) -> bool | None:
+        """Current medium turbulence, reading the backtest source if
+        present (prev-closed-bin rule, same as the fleet-state gate)."""
+        src = getattr(self, "_fleet_medium_source", None)
+        if src is not None:
+            return src.medium_at(getattr(self, "_current_time", 0))
+        return self._fleet_low_turbulence
+
+    def _passes_s2_gate(self, sigma2_tau: float) -> bool:
+        """iter75: regime-keyed σ² threshold switch (user thesis: same
+        variables, thresholds change with the medium).  FIXED thresholds
+        trained on the OLD-era half: block the entry when σ²_τ exceeds
+        `v2_s2_gate_sigma` AND the fleet medium is low-turbulence (vov <
+        `v2_s2_gate_vov`, injected via set_fleet_medium_state / the
+        backtest medium timeline which already applies the ceiling).
+        Unknown medium never blocks (safe degradation)."""
+        if self._v2_s2_gate_enable <= 0.0:
+            return True
+        if self._medium_low_turbulence_now() is not True:
+            return True
+        return sigma2_tau <= self._v2_s2_gate_sigma
+
+    def _passes_fleet_regime_gate(self) -> bool:
+        """iter74 MSM entry gate.  iter74c semantics: when a per-state
+        ENTRY-REGIME blocklist is configured for the CURRENT fleet state,
+        it REPLACES the naive worst-state block for that state (the
+        blocklist is the refined, state-switched parameter set); the
+        naive all-entry block applies only in states with no blocklist
+        entry.  iter74b: the worst-state block can additionally require
+        trailing-24h occupancy above the floor."""
+        if self._v2_msm_enable <= 0.0:
+            return True
+        src = self._fleet_regime_states
+        if src is None:
+            return True   # no state source configured → never block
+        st = src.state_at(getattr(self, "_current_time", 0),
+                          occupancy_floor=self._v2_msm_occupancy_floor)
+        if st is None:
+            return True   # unknown / missing bin → never block
+        # iter74c: state-switched entry-regime allowlist — if this state
+        # has a configured blocklist, ONLY the listed regimes are blocked
+        if self._msm_block_map and int(st["state"]) in self._msm_block_map:
+            blocked_regs = self._msm_block_map[int(st["state"])]
+            _regime_attr = getattr(self, "regime", None)
+            _reg = str(getattr(_regime_attr, "value", _regime_attr) or "").lower()
+            if _reg in blocked_regs:
+                self._msm_block_count += 1
+                return False
+            return True    # state has a refined blocklist — naive rule OFF here
+        if st["blocked"]:
+            self._msm_block_count += 1
+            return False
+        return True
 
     def _passes_order_flow_imbalance_gate(self) -> bool:
         """Check if the trailing order-flow taker buy ratio passes the minimum threshold."""
@@ -4385,6 +4568,10 @@ class StrategyEngineV2Adapter:
         # iter45: pre-entry taker order-flow imbalance gate
         if not self._passes_order_flow_imbalance_gate():
             return False
+        # iter74: Markov-switching fleet-regime gate (blocks the worst
+        # realtime fleet state; default OFF)
+        if not self._passes_fleet_regime_gate():
+            return False
         # Need both confidence above threshold and Kramers upward prob.
         if self.trend_confidence < self.entry_confidence_high:
             return False
@@ -4428,4 +4615,15 @@ class StrategyEngineV2Adapter:
         s_min = float(getattr(self, "iter05_s_effective_min", 0.0))
         if s_min > 0.0 and float(getattr(self, "s_effective", 0.0)) < s_min:
             return False
+        # iter75: regime-keyed σ² threshold switch (user thesis: same
+        # variables, regime-changed thresholds).  σ² history is recorded
+        # at EVERY entry evaluation (before the gate read) so the
+        # percentile is always causal.  Default OFF.
+        if self._v2_s2_gate_enable > 0.0:
+            _s2 = float(decision.get("sigma2_tau", 0.0) or 0.0)
+            self._s2_hist.append(_s2)
+            if len(self._s2_hist) > self._S2_HIST_MAX:
+                del self._s2_hist[: len(self._s2_hist) - self._S2_HIST_MAX]
+            if not self._passes_s2_gate(_s2):
+                return False
         return True
