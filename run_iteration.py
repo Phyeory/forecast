@@ -46,6 +46,12 @@ def main():
                     help="restrict to a subset of recording IDs")
     ap.add_argument("--recording-ids-file", default=None,
                     help="JSON file containing a list of recording_ids to restrict to")
+    # iter78: exec-latency overlay cells (iter73's pending first study) —
+    # additive, default 0.0 = instant-fill baseline, byte-identical.
+    ap.add_argument("--entry-latency-seconds", type=float, default=0.0,
+                    help="defer entry fills to t_signal + N s on the recorded path (iter73 overlay)")
+    ap.add_argument("--exit-latency-seconds", type=float, default=0.0,
+                    help="defer exit fills to t_signal + N s on the recorded path (iter73 overlay)")
     args = ap.parse_args()
 
     params = _engine_params_from_file(args.params)
@@ -66,6 +72,8 @@ def main():
         max_workers=max_workers,
         batch_id=batch_id,
         recording_ids=recording_ids,
+        entry_latency_seconds=args.entry_latency_seconds,
+        exit_latency_seconds=args.exit_latency_seconds,
     )
     elapsed = time.time() - t0
     errors_total = sum(1 for r in results if "error" in r)

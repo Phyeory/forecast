@@ -1174,6 +1174,7 @@ class _LiveSession:
         self.token_symbol = token_symbol
         self.timeframe = timeframe
         self.trader = trader
+        self.token_info = token_info
         # iter77 multi-engine fleet: `traders[0]` is the primary (back-compat
         # `self.trader`); extra_traders are sibling engines on the SAME
         # wallet/stream, each with its own engine + position + journal, sized

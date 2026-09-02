@@ -244,6 +244,29 @@ let engineParamsV2 = {
   v2_s2_gate_enable:            0.0,  // 1.0 = arm the σ² × calm-medium gate
   v2_s2_gate_sigma:         0.04601,  // OLD-era-trained σ²_τ floor
   v2_s2_gate_vov:           0.00955,  // fleet vol-of-vol ceiling (low-turbulence medium)
+
+  // ── iter78 Door 2: whale-dump confirmed exit (re-implemented iter72
+  // mechanism, default OFF pending the grown-DB re-gate; RESEARCH_LOG
+  // Iter 78).  A ≥min_usd sell print on a never-armed (peak ≤ +5%) trade
+  // ≥8% offside, confirmed by price holding ≤ print-close×0.97 for 5
+  // distinct candles → immediate exit.  Escape hatch: enable 0.0 = B′. ──
+  v2_whale_dump_exit_enable:     0.0,  // 1.0 = ON (re-gate pending)
+  v2_whale_dump_min_usd:       200.0,  // qualifying print size (USD)
+  v2_whale_dump_offside_pct:     8.0,  // offside % at the print close
+  v2_whale_dump_max_peak_pct:    5.0,  // never-armed guard
+  v2_whale_dump_confirm_s:         5,  // distinct candles below print floor
+  v2_whale_dump_confirm_g:       3.0,  // floor depth %
+
+  // ── iter78 ADOPTION: deferred-entry execution cell (2026-09-02, user
+  // decision).  Entries execute N seconds after the BUY signal — live
+  // holds the queued swap and fills at the then-current price; backtests
+  // price the fill on the recorded path at t_signal+N.  The adopted 5 s
+  // cell (batch iter78_lat5): Δ+1.178 SOL vs instant fills, both eras
+  // positive, tail ≤−30% 123→104, negative days 17→12.  The 5 s fill buys
+  // the transient micro-dip after the signal; 10 s+ buys the bounce
+  // (era-inverted) — do NOT move off 5.0 without re-gating.
+  // 0.0 restores the pre-iter78 signal-instant fill. ──
+  v2_entry_delay_seconds:       5.0,  // seconds to defer entry execution
 };
 
 /* Strategy Engine Parameters — V3 (newborn-coin dump-bottom recovery).
@@ -502,6 +525,13 @@ function renderSettings() {
     v2_s2_gate_enable:                   "1.0 = regime-keyed σ² threshold switch: block high-σ² entries in calm fleet media (iter75; PnL-neutral, +0.5pp WR both regimes)",
     v2_s2_gate_sigma:                    "σ²_τ floor for the s2 gate (OLD-era-trained 0.04601)",
     v2_s2_gate_vov:                      "Fleet vol-of-vol ceiling defining the low-turbulence medium (OLD-era-trained 0.00955)",
+    v2_whale_dump_exit_enable:           "1.0 = enable whale-dump confirmed exit: candle sell print ≥ min_usd on a never-armed, offside trade, confirmed by price holding under the print close (iter72 spec re-implemented, iter78 re-gate pending)",
+    v2_whale_dump_min_usd:               "Whale-dump print size floor in USD (candle sell_volume × SOL/USD learned from mcap/close)",
+    v2_whale_dump_offside_pct:            "Offside % at the print close required to arm the whale-dump exit",
+    v2_whale_dump_max_peak_pct:           "Never-armed guard: pre-print peak gain must be ≤ this % for the print to arm",
+    v2_whale_dump_confirm_s:              "Distinct candles below the print-close floor required to confirm the dump",
+    v2_whale_dump_confirm_g:              "Print-close floor depth %: price must stay ≤ print close × (1 − g/100)",
+    v2_entry_delay_seconds:              "Seconds to defer entry execution after the BUY signal (iter78 adopted cell = 5.0; 0.0 = pre-iter78 signal-instant fill). Live holds the queued swap and fills at the then-current price; backtests price the fill on the recorded path at t_signal+N. The 5 s fill buys the ~5 s micro-dip (Δ+1.178 SOL, both eras positive, tail 123→104 vs instant); 10 s+ buys the bounce and era-inverts — do not move off 5.0 without re-gating",
   };
 
   // ── V3 parameter hints (newborn dump-bottom engine) ──

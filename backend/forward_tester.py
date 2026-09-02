@@ -265,6 +265,24 @@ class ForwardTester:
         self._stashed_entry_params: dict = {}
         self._stashed_exit_params: dict = {}
 
+    def enable_entry_latency(self, seconds: float) -> None:
+        """iter78 adoption hook: switch an instant-mode tester into latency
+        mode with a deferred-entry fill of `seconds` (the adopted 5 s cell).
+
+        Called by backtester.run_backtest AFTER construction, keyed on the
+        ENGINE's `v2_entry_delay_seconds` knob (default 5.0 since the
+        2026-09-02 adoption) so bare {} runs the adopted execution model.
+        Never called for the legacy exec model; an explicit positive
+        `entry_latency_seconds` constructor argument keeps precedence
+        (run_backtest only calls this when its own explicit argument is 0).
+        """
+        seconds = max(0.0, float(seconds))
+        if seconds <= 0.0 or self._exec_mode == "legacy":
+            return
+        self.entry_latency_seconds = seconds
+        self.exec_model = "latency"
+        self._exec_mode = "latency"
+
     @property
     def total_fees_per_trade(self) -> float:
         return self.priority_fee + self.bribe_fee
