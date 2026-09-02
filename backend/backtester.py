@@ -77,20 +77,6 @@ _RESULTS_DIR = os.environ.get(
 _pool: ProcessPoolExecutor | None = None
 
 
-class _MediumSource:
-    """iter75: causal fleet-medium lookup for backtest replay (bin-level
-    low-turbulence flags from analysis/fleet_medium_state.json).  Reads the
-    LAST CLOSED bin before ts — the same prev-bin rule as the fleet-state
-    gate.  Unknown/missing bin → None (gate never blocks)."""
-
-    def __init__(self, timeline: list[dict]):
-        self.fmap = {o["bin"]: o["low_turbulence"] for o in timeline
-                     if o.get("low_turbulence") is not None}
-
-    def medium_at(self, ts: float):
-        return self.fmap.get(int(ts) // 300 - 1)
-
-
 def _get_pool(max_workers: int) -> ProcessPoolExecutor:
     global _pool
     if multiprocessing.current_process().name != 'MainProcess':
@@ -377,12 +363,6 @@ def run_backtest(
                 if not os.path.exists(_states_path):
                     _states_path = os.path.join(os.path.dirname(__file__), "analysis", "fleet_filtered_states.json")
                 ft.engine.set_fleet_regime_states(FleetRegimeFilter.from_panel(_states_path))
-            if float(getattr(ft.engine, "_v2_s2_gate_enable", 0.0)) > 0.0:
-                _medium_path = os.path.join(os.path.dirname(__file__), "analysis",
-                                             "fleet_medium_state.json")
-                with open(_medium_path) as f:
-                    _mt = json.load(f)
-                ft.engine.set_fleet_medium_state(_MediumSource(_mt))
         except Exception as _msm_err:
             print(f"[iter74/75] fleet state injection FAILED for rec {recording_id}: "
                   f"{_msm_err} — gates will not block")

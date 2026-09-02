@@ -152,19 +152,6 @@ let engineParamsV2 = {
   no_long_exit_bars:     60,   // consecutive no-long-E_long ticks to fire kelly_flat
   no_long_offside_pct:   40,   // require ≥ 40% underwater to fire kelly_flat (winner-cut guard)
   no_long_mu_neg_frac:   0,    // iter21 hypothesis K REJECTED — μ-persistence guard (off)
-  // ── iter45: Pre-entry taker order-flow imbalance gate (TAIL-ACCEPTED) ──
-  // Blocks long entries when the trailing taker buy-volume ratio is below
-  // `buy_ratio_min` over the last `window_seconds` (only when window volume
-  // ≥ `volume_min_sol`; below that the gate passes — parity-safe on
-  // low-volume recordings).  Validated r28_w10: 607-recording cohort cuts
-  // big losers <-30% 33→23 (Wilcoxon p=0.0054), saves +0.465 SOL total loss
-  // drag (p=0.0002), +0.181 SOL whole-cohort PnL, 0 added tail trades ≤-10%.
-  // Standard whole-PnL paired_diff REJECTS (p=0.476) — tail-extermination
-  // mechanism, judged by tail-focused tests (see RESEARCH_LOG.md Iter 45).
-  v2_order_flow_imbalance_gate: 0.0,   // 1.0 = ON (iter45-validated default), 0.0 = OFF
-  v2_order_flow_buy_ratio_min:  0.28,  // min taker buy-volume ratio in window
-  v2_order_flow_window_seconds: 10,    // trailing window (s)
-  v2_order_flow_volume_min_sol: 1.0,   // window volume floor (SOL); below → gate passes
 
   // Entry-Validation Response triage exit (iter48).  Post-entry evidence: the
   // market's taker-flow response to the engine's own entry.  Exits an
@@ -204,7 +191,6 @@ let engineParamsV2 = {
   v2_holder_flow_exit_window_seconds:   15,   // Lookback window (s) in-position for dev/whale sell exit
   // iter56: holder-flow silence gate.  Block entry when tracked wallets have
   // been silent for >= this many seconds (2700.0 = ACCEPTED default; 0 = OFF).
-  v2_hf_silence_gate_seconds:          0.0,
 
   // iter63/64: stationary Kramers rate-split early-harvest exit
   // ("rate_split_flip") — PRODUCTION ON (user decision 2026-08-25 after the
@@ -216,9 +202,6 @@ let engineParamsV2 = {
   // s = k_down/(k_up+k_down) ≥ theta for `persist` consecutive 4-state ticks.
   // See RESEARCH_LOG.md Iters 63/64.
   v2_rate_split_enable:         1.0,   // 1.0 = ON (production default)
-  v2_rate_split_regime_gate:    0.0,   // 0.0 = OFF (measured better than gated)
-  v2_rate_split_q_max:          0.6,   // Q(today) >= this → normal day → inert when gated
-  v2_rate_split_unknown_q_enable: 1.0, // unknown/missing Q dates → ON
   v2_rate_split_arm_pct:       10.0,   // arm profit-lock trigger at +10% peak
   v2_rate_split_offside_pct:    0.0,   // offside scope REJECTED by CF/screen (0)
   v2_rate_split_theta:          0.55,  // sustained stationary-split threshold
@@ -235,27 +218,7 @@ let engineParamsV2 = {
   // +1.2270 (Δ+0.093, p=0.034, both-era positive — the state-1 idle-block
   // over-blocked).  Escape hatch: v2_msm_enable=0.0 restores pre-iter74.
   v2_msm_enable:                1.0,  // 1.0 = ON (production config B′)
-  v2_msm_occupancy_floor:        0.0,  // trailing-24h dump-occupancy refinement REJECTED (0 = off)
   v2_msm_entry_blocklist: "0:idle;2:idle,trend", // per-state suppressed entry-regimes
-
-  // ── iter75 regime-keyed σ² threshold switch (default OFF — PnL-neutral,
-  // +0.5pp win rate in BOTH regimes, tail 115→109; arm for consistency;
-  // see RESEARCH_LOG Iter 75) ──
-  v2_s2_gate_enable:            0.0,  // 1.0 = arm the σ² × calm-medium gate
-  v2_s2_gate_sigma:         0.04601,  // OLD-era-trained σ²_τ floor
-  v2_s2_gate_vov:           0.00955,  // fleet vol-of-vol ceiling (low-turbulence medium)
-
-  // ── iter78 Door 2: whale-dump confirmed exit (re-implemented iter72
-  // mechanism, default OFF pending the grown-DB re-gate; RESEARCH_LOG
-  // Iter 78).  A ≥min_usd sell print on a never-armed (peak ≤ +5%) trade
-  // ≥8% offside, confirmed by price holding ≤ print-close×0.97 for 5
-  // distinct candles → immediate exit.  Escape hatch: enable 0.0 = B′. ──
-  v2_whale_dump_exit_enable:     0.0,  // 1.0 = ON (re-gate pending)
-  v2_whale_dump_min_usd:       200.0,  // qualifying print size (USD)
-  v2_whale_dump_offside_pct:     8.0,  // offside % at the print close
-  v2_whale_dump_max_peak_pct:    5.0,  // never-armed guard
-  v2_whale_dump_confirm_s:         5,  // distinct candles below print floor
-  v2_whale_dump_confirm_g:       3.0,  // floor depth %
 
   // ── iter78 ADOPTION: deferred-entry execution cell (2026-09-02, user
   // decision).  Entries execute N seconds after the BUY signal — live
@@ -478,11 +441,6 @@ function renderSettings() {
     warmup:             "Full candles to warmup indicators before emitting signals (100 full candles = 400 intra-candle states)",
     warmup_bars:        "Bars (sub-state intakes) before any signal is emitted — allows the RBPF state to stabilise (400 = 100 full candles)",
     sigma_floor:        "Numerical σ floor to prevent division-by-zero in degenerate low-vol regimes",
-    // iter45 order-flow gate
-    v2_order_flow_imbalance_gate: "iter45 taker order-flow gate — 1.0 = block long entries while taker buy-ratio is below the min (validated r28_w10: big losers <-30% cut 33→23, +0.465 SOL loss-drag saved, p<0.01)",
-    v2_order_flow_buy_ratio_min:  "Minimum required taker buy-volume ratio over the trailing window (Σbuy/(Σbuy+Σsell)) — lower = gate fires less often",
-    v2_order_flow_window_seconds: "Trailing window (s) over which the taker buy-ratio is computed",
-    v2_order_flow_volume_min_sol: "Window volume floor (SOL) — below this the gate passes (parity-safe on low-volume recordings)",
     // iter48/50 EVR triage
     v2_evr_enable:                "1.0 = enable post-entry taker-flow triage (EVR); exits unconfirmed, flow-invalidated offside positions",
     v2_evr_confirm_pct:           "Gain confirmation threshold (% above entry); positions reaching this peak are immune to EVR",
@@ -502,35 +460,15 @@ function renderSettings() {
     v2_holder_flow_min_usd:              "Minimum sell amount in USD to qualify as a significant sell (filters dust transactions)",
     v2_holder_flow_entry_window_seconds: "Pre-entry lookback window in seconds to check for dev/insider sell activity",
     v2_holder_flow_exit_window_seconds:  "In-position lookback window in seconds for dev/insider sell exit triggers",
-    v2_hf_silence_gate_seconds:          "Silence entry gate (s): block entry if tracked wallets have been silent for ≥ this many seconds (e.g. 2700 = 45m; 0 = disabled)",
     // iter63/64 Kramers rate-split exit
     v2_rate_split_enable:                "1.0 = enable stationary Kramers rate-split early-harvest exit (rate_split_flip)",
-    v2_rate_split_regime_gate:           "1.0 = gate rate-split exit to weak market regimes only (Q < q_max); 0.0 = always active",
-    v2_rate_split_q_max:                 "Global regime Q threshold below which weak regime is declared when regime gate is active",
-    v2_rate_split_unknown_q_enable:      "1.0 = keep rate-split active on dates with unknown or missing global regime Q",
     v2_rate_split_arm_pct:               "Peak gain % required to arm the rate-split profit-lock trigger",
     v2_rate_split_offside_pct:           "Offside threshold % (0.0 = disabled, profit-taking only)",
     v2_rate_split_theta:                 "Sustained downward escape rate split threshold s = k_down / (k_up + k_down)",
     v2_rate_split_persist:               "Required consecutive 4-state intra-candle ticks (≈ persist / 4 seconds) with split ≥ theta",
     v2_rate_split_min_peak_age_ticks:    "Minimum ticks elapsed since peak price before firing (0 = disabled)",
-    v2_whale_dump_exit_enable:           "1.0 = enable whale-dump confirmed exit: candle sell print ≥ min_usd on a never-armed, offside trade, confirmed by price staying under the print close (iter72)",
-    v2_whale_dump_min_usd:               "Whale-dump print size floor in USD (candle sell_volume × SOL/USD)",
-    v2_whale_dump_offside_pct:            "Offside % at the print close required to arm the whale-dump exit",
-    v2_whale_dump_max_peak_pct:           "Never-armed condition: peak gain since entry must stay ≤ this %",
-    v2_whale_dump_confirm_s:              "Candles of price persistence below the print close required to confirm the dump",
-    v2_whale_dump_confirm_g:              "Confirmation give-back %: confirm close ≤ print close × (1 − g/100)",
     v2_msm_enable:                       "1.0 = ON: Markov-switching fleet-regime entry gate (realtime 3-state HMM, iter74; 0.0 restores pre-iter74)",
-    v2_msm_occupancy_floor:              "Trailing-24h dump-state occupancy floor for the worst-state block (0.0 = off — refinement REJECTED)",
     v2_msm_entry_blocklist:              "Per-fleet-state suppressed entry-regimes, e.g. '0:idle;2:idle,trend' (config B′)",
-    v2_s2_gate_enable:                   "1.0 = regime-keyed σ² threshold switch: block high-σ² entries in calm fleet media (iter75; PnL-neutral, +0.5pp WR both regimes)",
-    v2_s2_gate_sigma:                    "σ²_τ floor for the s2 gate (OLD-era-trained 0.04601)",
-    v2_s2_gate_vov:                      "Fleet vol-of-vol ceiling defining the low-turbulence medium (OLD-era-trained 0.00955)",
-    v2_whale_dump_exit_enable:           "1.0 = enable whale-dump confirmed exit: candle sell print ≥ min_usd on a never-armed, offside trade, confirmed by price holding under the print close (iter72 spec re-implemented, iter78 re-gate pending)",
-    v2_whale_dump_min_usd:               "Whale-dump print size floor in USD (candle sell_volume × SOL/USD learned from mcap/close)",
-    v2_whale_dump_offside_pct:            "Offside % at the print close required to arm the whale-dump exit",
-    v2_whale_dump_max_peak_pct:           "Never-armed guard: pre-print peak gain must be ≤ this % for the print to arm",
-    v2_whale_dump_confirm_s:              "Distinct candles below the print-close floor required to confirm the dump",
-    v2_whale_dump_confirm_g:              "Print-close floor depth %: price must stay ≤ print close × (1 − g/100)",
     v2_entry_delay_seconds:              "Seconds to defer entry execution after the BUY signal (iter78 adopted cell = 5.0; 0.0 = pre-iter78 signal-instant fill). Live holds the queued swap and fills at the then-current price; backtests price the fill on the recorded path at t_signal+N. The 5 s fill buys the ~5 s micro-dip (Δ+1.178 SOL, both eras positive, tail 123→104 vs instant); 10 s+ buys the bounce and era-inverts — do not move off 5.0 without re-gating",
   };
 
@@ -620,11 +558,9 @@ function renderSettings() {
     ema_fast:                     "📀 EMA / ATR  (V1 indicator pass-through)",
     max_entry_bar_count:          "⏰ Bar-Count Gates",
     v2_p_up_min:                  "🎯 V2 Bayesian & Tail Exit Overlays",
-    v2_order_flow_imbalance_gate: "⚡ Taker Order-Flow Gate (iter45)",
     v2_evr_enable:                "🩺 Entry-Validation Response (EVR, iter48/50)",
     v2_holder_flow_entry_block:   "👥 Holder-Flow & Dev Sell Monitoring (iter36/43/56/66)",
     v2_rate_split_enable:         "⚡ Kramers Rate-Split Exit (iter63/64)",
-    v2_whale_dump_exit_enable:    "🐋 Whale-Dump Confirmed Exit (iter72)",
   };
 
   const paramHints = engineVersion === 2 ? v2Hints
