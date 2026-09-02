@@ -205,14 +205,6 @@ DEFAULT_CONFIG = {
     # Default 0.0 = iter21_k60_offs40 production parity.  Sweep [0.0, 0.1,
     # 0.3, 0.5].  REJECTED at smoke test (causes iter09-style churn).
     "v2_drift_work_fraction": 0.0,
-    # Pre-entry Taker Order-Flow Imbalance Gate (iter45)
-
-
-    # See RESEARCH_LOG.md Iter 45.
-    "v2_order_flow_imbalance_gate": 0.0,      # 1.0 = ON, 0.0 = OFF
-    "v2_order_flow_buy_ratio_min": 0.28,      # Minimum required taker buy volume ratio
-    "v2_order_flow_window_seconds": 10,       # Trailing window in seconds (r28_w10 validated)
-    "v2_order_flow_volume_min_sol": 1.0,      # Minimum total volume in SOL to activate gate
     # Entry-Validation Response triage exit (iter48) — see RESEARCH_LOG.md Iter 48.
     # evr9 config validated on 953-recording full cohort: +1.142 SOL kelly_flat saving,
     # catastrophics ≤−30% cut 87→76 (p=0.0038), PnL +1.724→+1.753 SOL.
@@ -239,47 +231,19 @@ DEFAULT_CONFIG = {
     "v2_holder_flow_min_usd":            100.0,   # Min sell USD threshold to filter dust
     "v2_holder_flow_entry_window_seconds":  30,   # Lookback window (s) before entry for dev/whale sell
     "v2_holder_flow_exit_window_seconds":   15,   # Lookback window (s) in-position for dev/whale sell exit
-    "v2_hf_silence_gate_seconds":          0.0,   # Silence entry gate (s): 0 = OFF, 2700 = 45m
     # ── iter64: stationary Kramers rate-split exit (PRODUCTION ON) ──────
     # REPLACES the iter57/58 give-back adaptation and the iter61
     # participation floor (removed 2026-08-24 by explicit user decision).
     # Sweep + full-cohort battery (2026-08-25, RESEARCH_LOG.md Iter 64 §6):
     # θ=0.55 / K=12 / arm=10 verified as the local optimum on all seven
-    # perturbed directions; the regime gate was measured NET-NEGATIVE on the
-    # current cohort (ungated: +2.0739 SOL / 71.8% WR / 1,108 trades vs gated
-    # +1.8596; paired Δ+0.155, Wilcoxon p=0.001, breadth 83%) →
-    # v2_rate_split_regime_gate DEFAULT 0.0 = OFF (ungated), adopted by
-    # explicit user decision.  1.0 re-enables the weak-days-only gate.
-    "v2_rate_split_enable": 1.0,          # 1.0 = ON (production default)
-    "v2_rate_split_regime_gate": 0.0,     # 0.0 = OFF (measured better)
-    "v2_rate_split_q_max": 0.6,           # Q(today) >= this → normal regime → inert
-    "v2_rate_split_unknown_q_enable": 1.0,  # missing/unknown Q dates → treat as ON
+    # perturbed directions; the regime Q-gate was measured NET-NEGATIVE and
+    # its Q machinery (cache/load/gate) removed in the 2026-09-02 dead-code
+    # cleanup — the flip is ungated (iter64 production semantics).
     "v2_rate_split_arm_pct": 10.0,        # arm at +10% peak gain
     "v2_rate_split_offside_pct": 0.0,     # offside scope exists but REJECTED (0 = off)
     "v2_rate_split_theta": 0.55,          # sustained stationary-split threshold
     "v2_rate_split_persist": 12,          # consecutive 4-state ticks (≈3 s)
     "v2_rate_split_min_peak_age_ticks": 0,  # runner-immunity veto — REJECTED (0 = off)
-
-    # ── iter78 Door 2: whale-dump confirmed exit (re-implementation of the ──
-    # iter72 mechanism, removed from the working tree at 91c7536-era cleanup;
-    # the unit-test spec in analysis/test_whale_dump.py is the mechanism
-    # definition — spec cell: min_usd 200 / offside 8 / peak ≤ 5 / confirm 5
-    # candles / g 3%).  A candle whose sell volume ≥ min_usd (USD via
-    # mcap/(close×1e9), no external feed, ~100% candle coverage, no
-    # holder_flow dependency) landing on a NEVER-ARMED (peak ≤ +max_peak%)
-    # trade ≥ offside% offside at the print close, whose price STAYS ≤
-    # print-close×(1−g/100) for `confirm_s` DISTINCT CANDLES, is a confirmed
-    # distribution dump — exit at the confirming candle.  The 5-candle
-    # persistence is the causal dump/absorbed-sweep discriminator (iter72:
-    # every un-confirmed print-exit variant was class-(D) net-negative).
-    # DEFAULT OFF (0.0): re-gated at iter78 on the grown 2,127-rec DB with
-    # a Mayhem-split gate; bare-{} runs remain byte-identical to B′.
-    "v2_whale_dump_exit_enable": 0.0,   # 0.0 = OFF (iter78 re-gate pending); 1.0 = ON
-    "v2_whale_dump_min_usd":      200.0,   # qualifying print size floor (USD)
-    "v2_whale_dump_offside_pct":   8.0,   # offside % at print close required to arm
-    "v2_whale_dump_max_peak_pct":  5.0,   # never-armed guard: pre-print peak ≤ +this
-    "v2_whale_dump_confirm_s":     5,     # distinct candles below the print floor
-    "v2_whale_dump_confirm_g":     3.0,   # floor depth: print close × (1−g/100)
 
     # ── iter78 ADOPTION: 5-second deferred-entry execution cell ────────────
     # (user decision 2026-09-02; the only both-era-positive cell of the
@@ -317,24 +281,10 @@ DEFAULT_CONFIG = {
     # documentation surface; setting v2_msm_enable=0.0 is the escape hatch
     # restoring byte-exact pre-iter74 behaviour.
     "v2_msm_enable": 1.0,
-    "v2_msm_occupancy_floor": 0.0,        # occupancy refinement REJECTED at screen
     # B′ (sweep winner iter75sw_bl_noI1): +1.3196 vs B's +1.2270, p=0.034,
     # both-era positive.  The state-1 idle-block over-blocked.
     "v2_msm_entry_blocklist": "0:idle;2:idle,trend",
 
-    # ── iter75 regime-keyed σ² threshold switch — default OFF ──────────────
-    # Full-cohort verdict vs config B alone: PnL −0.0006 (flat), WR +0.5pp in
-    # BOTH eras (65.9→66.4% / DEAD 63.7→64.4%), tail≤−30% 115→109, PF 1.17.
-    # The strictly-highest-PnL configuration measured is config B ALONE
-    # (+1.2270 vs +1.2265) — the s2 gate is a consistency instrument
-    # (PnL-neutral), kept OFF by default per the pre-registered strict-PnL
-    # gate.  Arm via v2_s2_gate_enable=1.0 if consistency is preferred
-    # (iter61-precedent policy call).  Thresholds are OLD-era-trained ONLY —
-    # DEAD-era performance is strictly out-of-sample.  See RESEARCH_LOG
-    # Iter 75 + analysis/iter75_PREREGISTRATION.md.
-    "v2_s2_gate_enable": 0.0,
-    "v2_s2_gate_sigma": 0.04601,           # OLD-era σ²_τ p80
-    "v2_s2_gate_vov": 0.00955,             # OLD-era fleet-vov p30 (low turb)
 }
 
 
@@ -347,151 +297,6 @@ def _merge_config(user: dict) -> dict:
         # accept user passing the 16 names verbatim
         cfg[k] = v
     return cfg
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Futures market second param-set
-# ─────────────────────────────────────────────────────────────────────────────
-#
-# The V2 engine was tuned on 1-second memecoin recordings (tick dynamics, 60-bar
-# warmup, tight confidence floor 0.79, memecoin slippage s_0=1.11%).  On CEX
-# perp majors (1h / 15m bars) those defaults are miscalibrated: the engine
-# clears warmup into a choppy macro chart and refuses all entries.
-#
-# FUTURES_DEFAULT_CONFIG is a *named, converged* alternate param set for the
-# futures pipeline.  It is applied by naming it via engine_params:
-#       engine_params = {"v2_futures_overrides": FUTURES_DEFAULT_CONFIG}
-#   -- or equivalently via the helper `with_futures_preset(engine_params)`.
-# The futures backtest script applies it automatically unless
-# engine_params["v2_futures_overrides"] == {} (explicit opt-out) or the
-# caller already supplied their own set.
-#
-# All entries below are *new state* for the futures pipeline only — spot
-# runs NEVER see FUTURES_DEFAULT_CONFIG unless explicitly requested, so
-# iter31_canonical spot parity is preserved.
-FUTURES_DEFAULT_CONFIG: dict = {
-    # Macro-bar warmup: 10 bars of engine intake (4 per candle) is plenty
-    # for the RBPF to localise; the adapter's max(warmup, 60) signal floor
-    # raises the effective warmup to 60 bars ≈ 15 of 1h candles.  Spot
-    # default is 60 bars (V1 parity: max(30, 60) signal floor).
-    "warmup": 10,
-    "warmup_bars": 10,
-    # Macro volatility periods are longer; hold the confidence floor where
-    # the espaço-modulado Bayesian posterior needs it but not higher, or
-    # trending 15-30% macro moves never qualify.
-    "confidence_high": 0.62,
-    "entry_confidence_high": 0.60,
-    "confidence_low": 0.15,
-    "entry_confidence_low": 0.15,
-    "v2_p_up_min": 0.55,          # spot: 0.62 (memecoin pump gate)
-    # Macro σ_t (posterior vol) is naturally ~0.003-0.006 on 1h major bars
-    # after volume scale-rim; the spot 0.021 σ_t floor was calibrated for
-    # 1s memecoin realised variance (σ²_t ≈ 5e-5 input).  Future-stack is
-    # 10-30× smaller ⟨σ_t⟩, so a 0.002 floor catches the churn-equivalent
-    # barrier crossings without rejecting legitimate macro trends.
-    "v2_sigma_t_min": 0.002,
-    # Drift/vol process re-tuned for τ=1h bars (spot is 1s).
-    "lambda_mu": 0.05,            # slower μ mean-reversion on 1h
-    "kappa_mu": 0.08,             # stronger flow→drift coupling
-    "sigma_mu": 0.06,             # tighter drift shocks
-    "eta": 0.05,                  # slower h mean-reversion
-    "sigma_h": 0.10,              # tighter vol shocks
-    # CEX cost model: 0.045% taker round-trip (vs 1.11% memecoin slip).
-    # The Kelly EV gate is scale-sensitive to `s_0`, so it must be tuned.
-    "s_0": 0.0009,                # 0.09% one-way (taker fee + slippage)
-    "s_1": 0.0,                   # no size-scaled microslip at 100 USDC margins
-    "fee_fraction": 0.00045,
-    # Kramers exits tuned for longer positions (days not minutes).
-    "no_long_exit_bars": 30,      # 30-tick persistence on 1h ≈ 7.5 h no-long
-    "no_long_offside_pct": 25.0,  # don't cash a healthy −30% macro pullback
-    # Gain-retrace trail wider: spot 10% / 50% giveback; majors move smoother
-    # so lock earlier, ride further.
-    "gain_retrace_arm_pct": 8.0,
-    "gain_retrace_give_frac": 0.55,
-    "breakeven_arm_dd_pct": 18.0,
-    "reversal_exit_bars": 3,      # 3-tick reversal sustain ≈ 45 min
-    # CEX futures bars carry USD turnover.  The engine's liquidity OU is
-    # tuned for SOL-scale memecoin tapes (~1e-3..50 SOL/bar); USD/1h bars
-    # saturate `ell` at its clamp and freeze the whole latent state.
-    # 1e-7 ⇒ $100M/1h bar → ~10 SOL-equivalent units, well inside the OU
-    # corridor.  Spot default = 1.0 (passthrough) — see engine ctor.
-    "v2_volume_scale_fut": 1e-7,
-    # Target aggregate bar volume passed to the engine after vscale (USD
-    # equivalent of ~1 SOL of memecoin tape).  The backtester derives
-    # `v2_volume_scale_fut` per symbol from `median(turnover)` and this
-    # target so all majors land in the same OU corridor regardless of
-    # per-symbol liquidity.  Spot keeps 1.0 (passthrough).
-    "v2_target_bar_volume_usd": 1.0,
-    # ── KDE / Kramers macro-bar re-tuning ─────────────────────────────────
-    # The KDE buffer time is `now_t = float(self._bar_count)` — bar-count, not
-    # seconds.  Setting `T_w=14econds ≈ 1_209_600` makes the KDE never decay
-    # (it never ages-out a single entry because every bar is "instant"), and
-    # the grid span `5·σ_t·√T_w_seconds` blows out to span ≈ 31 log-price
-    # units while the actual KDE price range is ≈ 0.1 — ρ is a single
-    # spike.  Use `T_w=100` (bar-count) instead: KDE ages over ~100 bars
-    # (~4 days of 1h, ~25 h of 15m), and the grid spans ≈ 0.05–0.15 in
-    # log-price — matching the actual KDE price occupancy.
-    "tw_window_seconds": 100.0,
-    "lambda_0":          1.0 / 100.0,
-    # The 5–30 s Kramers horizon is sized for 1-s memecoin ticks; on 1h bars
-    # we want 24–96 h horizons (a "macro trend-day" horizon).  Tau is the
-    # horizon over which the Bayesian escape probabilities are integrated.
-    "tau_min":  24.0,
-    "tau_max":  96.0,
-    "tau_step": 24.0,
-    # The KDE grid half-width is in σ_t·√T_w log-price units; on majors σ_t
-    # is naturally ~10× larger than memecoin σ_t.  Doubling the extent keeps
-    # the barriers within the grid instead of clipping at the edges.
-    "grid_sigma_extent": 10.0,
-    # ── SDE rates & macro-bar re-tuning ────────────────────────────────────
-    # The V2 default SDE rates are in `per-tick` (= 1 s memecoin tape)
-    # units: lambda_mu=0.15 ⇒ μ mean-reverts every ~7 ticks (~7 s spot).
-    # 1h bars fed via 4-sub-tick expansion see only "4 ticks" per bar of OU
-    # evolution — same rates ⇒ μ mean-reverts every ~7 sub-ticks ≈ 2 bars
-    # of macro-side evolution = ~2 h.  That's TOO FAST — real μ on a 1h
-    # chart should mean-revert over a half-day to a day (12-24 bars).
-    # Scale all OU rates DOWN by ~10× so reversion takes ~70 sub-ticks ≈ 17
-    # bars ≈ 17 h — matches macro drift persistence.  The diffusion shocks
-    # `sigma·√dt` are bar-period variances (sqrt_dt-scaled), so they're
-    # already correctly larger at 1h cadence.
-    "lambda_mu":  0.015,    # 10× slower than spot (μ mean-reverts ~17 sub-ticks)
-    "kappa_mu":   0.005,
-    "eta":        0.010,
-    "alpha":      0.020,
-    "theta":      0.010,
-    "kappa_J":    0.005,
-    # ── Kramers P_down persistence for futures ─────────────────────────────
-    # On 1h bars the KDE posterior `P_down ≥ 0.5` flips on transient
-    # geometry noise ~5–10×/day regardless of price direction.  Require 6
-    # consecutive sub-ticks (~1.5 h on 1h 4-state) of `P_down ≥ 0.5`
-    # before the kramers down exit fires.  Spot path leaves this at 0
-    # (legacy one-tick exit on memecoin tapes where P_down snaps to 1 on
-    # a real crash).
-    "v2_kramers_down_persist_fut": 6,
-}
-
-
-def with_futures_preset(engine_params: dict | None) -> dict:
-    """
-    Layer FUTURES_DEFAULT_CONFIG into `engine_params` under
-    `v2_futures_overrides`.  Callers who want explicit control (e.g. sweeps)
-    should build their own `v2_futures_overrides` dict and skip this helper.
-    """
-    out = dict(engine_params or {})
-    out.setdefault("v2_futures_overrides", dict(FUTURES_DEFAULT_CONFIG))
-    return out
-
-
-# Recommended futures market params (converged preset-batch — see
-# RESEARCH_LOG.md iter42).  Use as the default `market_params` for any
-# futures run that does not pass an explicit override.
-FUTURES_MARKET_DEFAULTS: dict = {
-    "leverage": 1.5,            # lev=1.5 is the Pareto frontier (lev≥3 DD↗)
-    "buy_size_sol": 100.0,      # USDC margin / trade
-    "starting_balance": 1000.0,
-    "timeframe": "1h",
-    "futures_days": 30,         # 30-day window; 60d increases recording_ended drag
-}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2861,24 +2666,6 @@ class StrategyEngineV2Adapter:
     # We assign instances of V1 enums so adapter.regime.value matches V1.
 
     def __init__(self, **engine_kwargs):
-        # ── Futures market second param-set (user requirement). ───────────
-        # `v2_futures_overrides` is a dict that carries a self-contained set
-        # of engine params applied only when the caller is running the
-        # leveraged-perp pipeline (futures backtest / futures paper).
-        # Semantics: every key/value pair inside the dict is merged back into
-        # `engine_kwargs` BEFORE any other parsing, so the futures set can
-        # carry any param below (warmup, confidence_high, s_0, tau_*, etc).
-        # Precedence (highest last): spot defaults < engine_kwargs <
-        # v2_futures_overrides.  Spot runs never pass this key; when the key
-        # is absent or empty the engine state must be byte-identical to the
-        # pre-flag engine (parity invariant).
-        _fut_ov = engine_kwargs.pop("v2_futures_overrides", None)
-        if _fut_ov:
-            for _k, _v in dict(_fut_ov).items():
-                if _v is not None:
-                    engine_kwargs[_k] = _v
-        self._is_futures_engine = bool(_fut_ov)
-
         # Pull V1 TPSL params if provided (passed through engine_kwargs).
         self._v1_takeprofit_low  = float(engine_kwargs.pop("takeprofit_pct_low", 30.0))
         self._v1_takeprofit_high = float(engine_kwargs.pop("takeprofit_pct_high", 300.0))
@@ -3015,13 +2802,11 @@ class StrategyEngineV2Adapter:
         # path now reproduces iter17a exactly on a full batch).  All
         # knobs remain overridable via engine_kwargs for sweeps:
         #   v2_sigma_t_min:        entry gate on posterior σ_t (vol floor)
-        #   v2_require_past_peak:  entry gate on _momentum_past_peak (iter17b REJECTED — default off)
         #   gain_retrace_arm_pct:  arm profit-lock at +A% peak gain
         #   gain_retrace_give_frac: exit when gain retraces to peak_gain*(1-g)
         #   breakeven_arm_dd_pct:  arm scratch exit after -X% drawdown
         #   breakeven_buffer_pct:  scratch exit level (entry*(1+buf))
         self._v2_sigma_t_min       = float(engine_kwargs.pop("v2_sigma_t_min", 0.021))
-        self._v2_require_past_peak = float(engine_kwargs.pop("v2_require_past_peak", 0.0))
         # iter18b_opt optimized exit parameters
         self._gain_retrace_arm_pct  = float(engine_kwargs.pop("gain_retrace_arm_pct", 10.0))
         # iter27: give_frac default 0.4 → 0.5.  Post-exit regret analysis on the
@@ -3043,19 +2828,6 @@ class StrategyEngineV2Adapter:
         self._v2_debug_tick_log = str(engine_kwargs.pop("v2_debug_tick_log", "") or "")
         self._breakeven_arm_dd_pct  = float(engine_kwargs.pop("breakeven_arm_dd_pct", 25.0))
         self._breakeven_buffer_pct  = float(engine_kwargs.pop("breakeven_buffer_pct", 2.5))
-        # iter18a: posterior-drift persistence exit params.
-        # mu_exit_neg_thresh: fraction of the last 60 ticks (sliding window)
-        #   for which EMA-smoothed mu_t < 0 must exceed before exit is
-        #   eligible.  0.75 means 45/60 ticks; conservative enough that
-        #   normal intra-trend pullbacks (mu oscillates but averages positive)
-        #   do not trigger.  Crashers and slow bleeds maintain mu_EMA < 0
-        #   for > 85% of ticks post-entry.
-        # mu_exit_persist_bars: legacy alias (iter18a-0) -- deprecated, use neg_thresh.
-        # mu_exit_offside_pct: minimum drawdown from entry (%) before the
-        #   window exit can fire — guards normal winner pullbacks.
-        self._mu_exit_persist_bars  = int(engine_kwargs.pop("mu_exit_persist_bars", 30))
-        self._mu_exit_offside_pct   = float(engine_kwargs.pop("mu_exit_offside_pct", 5.0))
-        self._mu_exit_neg_thresh    = float(engine_kwargs.pop("mu_exit_neg_thresh", 0.75))
         # iter18b: reversal-regime persistence guard.  Number of consecutive
         # REVERSAL-regime bars required before the reversal_exit fires.
         # Default 2 (optimized in iter18b_opt): requires 2s of sustained
@@ -3096,29 +2868,6 @@ class StrategyEngineV2Adapter:
         # (preserves iter21_k60_offs40 production parity).
         # 0.75 means 75% of last 60 ticks had EMA-mu < 0.
         self._no_long_mu_neg_frac   = float(engine_kwargs.pop("no_long_mu_neg_frac", 0.0))
-        # Futures USDC / USDT perp bars carry USD-scale turnover.  The
-        # engine's OU processes (ell, phi, mu) were tuned around SOL-scale
-        # memecoin tapes and clamp at x=±1e6 / ell=±15 / mu=±50; USD-scale
-        # input saturates them all into frozen clamps.  `v2_volume_scale_fut`
-        # multiplies `volume / signed_delta / bid_depth / ask_depth` before
-        # they reach the core observer, mapping per-bar USD turnover back to
-        # SOL-like units.  Default 1.0 = passthrough (spot parity).
-        self._v2_volume_scale_fut = float(engine_kwargs.pop("v2_volume_scale_fut", 1.0))
-        # Intra-bar SDE dt for futures (seconds per sub-state).  Default 1.0
-        # = spot parity (4 sub-states × 1 s = 1 candle).  For 1h bars with a
-        # 4-state expansion, set this to 900.0 so the OU lambdas mean-revert
-        # on real macro time.  For 15m bars use 225.0.  The adapter does not
-        # derive this from anywhere; the caller (backtester / futures preset)
-        # supplies it.
-        self._v2_dt_per_state_fut = float(engine_kwargs.pop("v2_dt_per_state_fut", 1.0))
-        # Kramers P_down persistence guard for futures (default 0 = OFF /
-        # spot parity).  On 1h macro bars the posterior flips on transient
-        # KDE wiggle geometry — single-tick `P_down ≥ 0.5` causes most of
-        # the trade churn.  Setting this to ≥ 2 requires N consecutive sub-
-        # ticks above the threshold before exiting.  The streak stays at
-        # zero when not in position; the adapter ctor initialises it.
-        self._v2_kramers_down_persist_fut = int(engine_kwargs.pop("v2_kramers_down_persist_fut", 0))
-        self._v2_kramers_down_streak = 0
         self._no_long_streak        = 0
         self._entry_E_star = 0.0
         self.confidence_w1 = 0.3
@@ -3173,18 +2922,6 @@ class StrategyEngineV2Adapter:
         self.forbidden_bc_hi       = int(engine_kwargs.pop("forbidden_bc_hi", 3000))
         self.trail_floor_pct       = float(engine_kwargs.pop("trail_floor_pct", 13.0))
         self.reversal_exit_bars_max = int(engine_kwargs.pop("reversal_exit_bars_max", 20))
-        # ── iter05 leading-decline exit knobs (configurable for sweeping). ──
-        # `iter05_decay_persist_bars`: how many consecutive state-updates
-        #   with EMA-smoothed posterior μ̇ < 0 must accrue before the
-        #   leading-decline exit is eligible (default 6 — about 1.5s of
-        #   4-state-expanded candles).  Too low → noise exit; too high →
-        #   misses the leading signal.
-        # `iter05_decay_offside_pct`: minimum underwater % vs entry for
-        #   the exit to fire (default 8.0).  A winning pullback rarely
-        #   exceeds 6%, and the catastrophic iter04 losses all occurred
-        #   with double-digit intra-trade downside.
-        self.iter05_decay_persist_bars = int(engine_kwargs.pop("iter05_decay_persist_bars", 6))
-        self.iter05_decay_offside_pct  = float(engine_kwargs.pop("iter05_decay_offside_pct", 8.0))
         # `iter05_decay_window` (default 60): sliding-window size for the
         # decay prevalence counter — the(rbish)rolling-fraction signal.
         # 60 ticks ≈ 15 candles under 4-state expansion.  Empirically the
@@ -3196,14 +2933,6 @@ class StrategyEngineV2Adapter:
         # window for which sma must be negative to declare the trajectory
         # "locked downward" and gate new entries.
         self.iter05_decay_window_thresh = float(engine_kwargs.pop("iter05_decay_window_thresh", 0.8))
-        # `iter05_decay_exit_enable` (default 0.0 = OFF): toggle the
-        # leading_decay EXIT.  Smoke-test 2026-07-21 showed the exit
-        # alone causes net-negative re-entry churn on KISUNLAF5 rec1194
-        # (10 trades / 50% WR / -0.014 SOL vs iter04 5 trades / 80% WR /
-        # +0.041 SOL) because it fires AT 8% offside — late relative to
-        # the kramers_down exit (~-26%) — so the entry churn it
-        # triggers more than offsets its loss-saving.
-        self.iter05_decay_exit_enable  = float(engine_kwargs.pop("iter05_decay_exit_enable", 0.0))
         # `iter05_decay_entry_block` (default 1.0 = ON): toggle the
         # entry-side decay BLOCK.  When ≥ `iter05_decay_window_thresh`
         # of the last `iter05_decay_window` state-updates had sma<0,
@@ -3218,20 +2947,6 @@ class StrategyEngineV2Adapter:
         # `kramers_down_exit` on a token whose μ̇ has been continuously
         # declining.
         self.iter05_decay_entry_block  = float(engine_kwargs.pop("iter05_decay_entry_block", 1.0))
-        # `iter05_s_effective_min` (default 0.0 = OFF): minimum
-        # `s_effective` required for the entry gate to admit a new BUY.
-        # `s_effective` is the V2 barrier-ANCHORED signal-strength proxy;
-        # analysis of iter04-full (RESEARCH_LOG iter05) shows monotone
-        # quintiles of `s_effective` map to WR 70%/80%/80%/81%/87% —
-        # filtering s ≥ 1e8 keeps 1904 of 2547 trades and lifts
-        # expectancy from +0.00730 SOL/trade (baseline) to +0.00866
-        # (+18.6% gain) while removing 1 of 30 catastrophic worst-trades.
-        # The remaining 14 worst-trade removals at s ≥ 5e8 cost too
-        # much profit (cuts to +10.56 SOL).  Mathematical interpretation:
-        # higher s_effective ⇒ either stronger m_hat/ATR momentum or
-        # closer to U(x) barrier — both correspond to high-confidence
-        # Kramers-escape foundations per spec §3.6.
-        self.iter05_s_effective_min   = float(engine_kwargs.pop("iter05_s_effective_min", 0.0))
         # V2 only — used by ForwardTester when it generates the cfg dict
         # via the V1 attr names; defaults = spec defaults
         self.lambda_mu = self.cfg["lambda_mu"]
@@ -3281,23 +2996,7 @@ class StrategyEngineV2Adapter:
         self._v2_holder_flow_require_tag = float(engine_kwargs.pop("v2_holder_flow_require_tag", 0.0))
         self._v2_holder_flow_min_usd     = float(engine_kwargs.pop("v2_holder_flow_min_usd", 100.0))
         self._v2_holder_flow_entry_window_seconds = int(engine_kwargs.pop("v2_holder_flow_entry_window_seconds", 30))
-        # `v2_hf_silence_gate_seconds` (iter56 ACCEPTED at 2700.0 on the 2026-08
-        # dataset; DEFAULT 0.0 = OFF since 2026-08-25 — the user's production
-        # baseline (their 1,623-rec full batch) and the iter64 sweep both ran
-        # with the gate disabled; production parity now tracks that state.
-        # Re-enable with an explicit >0 value).  When > 0,
-        #   block NEW entries when holder-flow events exist for this recording
-        #   but the most recent event is >= this many seconds old (tracked
-        #   wallets have gone silent = nobody is watching the token).  The
-        #   gate never arms on recordings with no events at all (absence of
-        #   coverage is indistinguishable from dead flow).
-        self._v2_hf_silence_gate_seconds = float(engine_kwargs.pop("v2_hf_silence_gate_seconds", 0.0))
         self._v2_holder_flow_exit_window_seconds  = int(engine_kwargs.pop("v2_holder_flow_exit_window_seconds", 15))
-        # ── Pre-entry Taker Order-Flow Imbalance Gate (iter45) ─────────────
-        self._v2_order_flow_imbalance_gate = float(engine_kwargs.pop("v2_order_flow_imbalance_gate", 0.0))
-        self._v2_order_flow_buy_ratio_min  = float(engine_kwargs.pop("v2_order_flow_buy_ratio_min", 0.28))
-        self._v2_order_flow_window_seconds = int(engine_kwargs.pop("v2_order_flow_window_seconds", 10))
-        self._v2_order_flow_volume_min_sol = float(engine_kwargs.pop("v2_order_flow_volume_min_sol", 1.0))
         self._candle_volume_history: list[dict] = []
         # ── Entry-Validation Response triage exit (iter48) ──────────────────
         # Post-entry evidence channel: the market's taker-flow RESPONSE to the
@@ -3321,24 +3020,6 @@ class StrategyEngineV2Adapter:
         self._v2_evr_skip_sell_conc_min = float(engine_kwargs.pop("v2_evr_skip_sell_conc_min", 0.25))
         self._v2_evr_skip_conc_window   = int(engine_kwargs.pop("v2_evr_skip_conc_window", 60))
         self._evr_entry_time: int = 0
-        self._evr_conc_vetoed: bool = False
-        # ── iter78 Door 2: whale-dump confirmed exit (re-implementation of
-        # the iter72 mechanism; see DEFAULT_CONFIG note).  All knobs pop with
-        # the same defaults as DEFAULT_CONFIG so bare-{} and explicit dicts
-        # behave identically; enable defaults 0.0 = OFF = byte-parity.
-        self._v2_whale_dump_enable      = float(engine_kwargs.pop("v2_whale_dump_exit_enable", 0.0))
-        self._v2_whale_dump_min_usd     = float(engine_kwargs.pop("v2_whale_dump_min_usd", 200.0))
-        self._v2_whale_dump_offside_pct = float(engine_kwargs.pop("v2_whale_dump_offside_pct", 8.0))
-        self._v2_whale_dump_max_peak_pct = float(engine_kwargs.pop("v2_whale_dump_max_peak_pct", 5.0))
-        self._v2_whale_dump_confirm_s  = int(engine_kwargs.pop("v2_whale_dump_confirm_s", 5))
-        self._v2_whale_dump_confirm_g  = float(engine_kwargs.pop("v2_whale_dump_confirm_g", 3.0))
-        # Print state: None, or (print_close, confirm_count, print_usd).
-        # USD context (SOL/USD) is learned from the latest mcap/close pair —
-        # the same closed-form the engine already uses for mcap bounds; a
-        # missing/zero context disarms the mechanism (safe degradation).
-        self._whale_dump_pending = None
-        self._whale_dump_sol_usd = 0.0
-        self._current_candle_sell_volume = 0.0
         # ── iter78 ADOPTION: 5-second deferred-entry execution cell ─────────
         # Popped here so every pipeline can read the adopted default off the
         # engine object (the backtester keys its ForwardTester
@@ -3379,33 +3060,8 @@ class StrategyEngineV2Adapter:
         # Δ+0.115/−0.070 vs unfiltered +0.284).  0 = no veto (default).
         self._v2_rate_split_min_peak_age_ticks = int(engine_kwargs.pop(
             "v2_rate_split_min_peak_age_ticks", 0))
-        # ── iter64 regime gate — replaces the iter57/58 give-back ──────
-        # adaptation and iter61 participation floor (removed 2026-08-24 by
-        # explicit user decision; see RESEARCH_LOG.md Iter 64).  When gated
-        # (default), the rate-split flip fires only on weak-regime days —
-        # causal Q(today) < q_max — because the iter63 date-segmented
-        # analysis found the mechanism's entire gain concentrated on weak
-        # days (+0.263 SOL / 13 weak days vs +0.010 / 7 strong days).  The Q
-        # infrastructure (causal cache + live pump) is retained; ONLY the
-        # consumption changed.  Unknown/missing Q dates default to ON
-        # (unknown days were net-positive +0.091 in the iter63 pairing).
-        self._v2_rate_split_regime_gate      = float(engine_kwargs.pop(
-            "v2_rate_split_regime_gate", 0.0))
-        self._v2_rate_split_q_max            = float(engine_kwargs.pop(
-            "v2_rate_split_q_max", 0.6))
-        self._v2_rate_split_unknown_q_enable = float(engine_kwargs.pop(
-            "v2_rate_split_unknown_q_enable", 1.0))
         self._rate_split_streak = 0
         self._last_peak_tick = 0
-        if self._is_futures_engine:
-            # spot-scoped tick-noise calibration (4 ticks/s); futures engines
-            # keep the existing kramers-persistence machinery instead.
-            self._v2_rate_split_enable = 0.0
-        self._global_regime_map: dict[str, float] = {}
-        self._global_regime_cache_warned = False
-        if (self._v2_rate_split_enable > 0.0
-                and self._v2_rate_split_regime_gate > 0.0):
-            self._load_global_regime_cache()
         # ── iter74 Markov-switching fleet-regime ENTRY gate ──────────────
         # A 3-state Gaussian HMM over REALTIME fleet observables (5-min
         # cross-token bins: med/p25 returns, buy_share, flow, pump/dump
@@ -3422,8 +3078,8 @@ class StrategyEngineV2Adapter:
         # PRODUCTION DEFAULT = configuration B′ (sweep winner, adopted
         # 2026-08-31 after the iter75 8-cell bracket sweep; RESEARCH_LOG
         # Iter 75 Addendum C): v2_msm_enable=1.0,
-        # v2_msm_occupancy_floor=0.0, v2_msm_entry_blocklist=
-        # "0:idle;2:idle,trend".  vs config B ("0:idle;1:idle;2:idle,trend")
+        # v2_msm_entry_blocklist="0:idle;2:idle,trend".  vs config B
+        # ("0:idle;1:idle;2:idle,trend")
         # on the 1,525-rec full cohort: +1.3196 vs +1.2270 SOL (Δ+0.093,
         # Wilcoxon p=0.034, breadth 63%), era split BOTH positive
         # (OLD +0.03 / DEAD +0.06) — the state-1 idle-block was
@@ -3433,10 +3089,9 @@ class StrategyEngineV2Adapter:
         # iter74b: occupancy refinement — block worst-state entries ONLY
         # when the trailing 24 h (288 bins) of fleet bins was dump-state
         # dominated (occupancy > floor).  REJECTED at screen (isolated
-        # positive island, 12/16 cells negative — noise); production
-        # default 0.0 = the state-switched blocklist alone decides.
-        self._v2_msm_occupancy_floor = float(
-            engine_kwargs.pop("v2_msm_occupancy_floor", 0.0))
+        # positive island, 12/16 cells negative — noise); removed in the
+        # 2026-09-02 dead-code cleanup — the state-switched blocklist alone
+        # decides (the state_at occupancy_floor argument is fixed at 0.0).
         # iter74c: STATE-SWITCHED ENTRY-REGIME ALLOWLIST — the literal
         # Markov-switching parameter change: per fleet state, a comma
         # separated list of V1 regimes (trend/exhaustion/idle/reversal)
@@ -3450,31 +3105,6 @@ class StrategyEngineV2Adapter:
         # never-negative fallback.  Empty string = no blocks.
         self._v2_msm_entry_blocklist = str(engine_kwargs.pop(
             "v2_msm_entry_blocklist", "0:idle;2:idle,trend"))
-        # ── iter75: regime-keyed σ² THRESHOLD switch (user thesis: same
-        # variables, thresholds change with the medium).  Block entries
-        # whose engine-posterior σ²_τ exceeds its own causal trailing
-        # percentile (default 0.80 = top-20%) — but ONLY when the fleet
-        # medium is LOW-turbulence (fleet vol-of-vol below its trailing
-        # median, injected via set_fleet_medium_state).  Physics: a high-
-        # variance particle read in a calm medium = idiosyncratic fakeout
-        # (the dead-regime pathology, measured era-inverted σ² information:
-        # OLD AUC 0.474 vs DEAD 0.428); in a turbulent medium high σ² is
-        # genuine price discovery and MUST NOT be blocked.  Default 0.0 =
-        # OFF (pre-registered iter75; see analysis/iter75_PREREGISTRATION.md).
-        self._v2_s2_gate_enable = float(engine_kwargs.pop("v2_s2_gate_enable", 0.0))
-        # Fixed regime thresholds, TRAINED ON THE OLD-ERA HALF ONLY (the
-        # causal-validated configuration — DEAD-era performance is strictly
-        # out-of-sample; both eras positive +0.047/+0.041).  Refresh these
-        # constants at model-refresh time alongside the HMM artifacts.
-        self._v2_s2_gate_sigma = float(engine_kwargs.pop(
-            "v2_s2_gate_sigma", 0.04601))   # OLD-era σ²_τ p80
-        self._v2_s2_gate_vov = float(engine_kwargs.pop(
-            "v2_s2_gate_vov", 0.00955))     # OLD-era fleet-vov p30 (low turb)
-        # causal σ² history (per-tick entry evaluations only, bounded)
-        self._s2_hist: list[float] = []
-        self._S2_HIST_MAX = 2000
-        self._fleet_low_turbulence: bool | None = None   # live direct flag
-        self._fleet_medium_source = None                 # backtest lookup
         self._fleet_regime_states = None      # _PanelStateSource or None
         self._msm_block_count = 0
         # parse the blocklist once at construction
@@ -3574,118 +3204,10 @@ class StrategyEngineV2Adapter:
                     return event
         return None
 
-    def _hf_silence_blocks_entry(self, time: int) -> bool:
-        """iter56 silence gate: True when holder-flow events exist for this
-        recording but the stream has been silent for
-        >= `v2_hf_silence_gate_seconds` before `time`.  Recordings with no
-        events before `time` never arm the gate (no coverage != dead flow)."""
-        if self._v2_hf_silence_gate_seconds <= 0.0:
-            return False
-        if not self._holder_flow_timestamps:
-            return False
-        idx = bisect.bisect_right(self._holder_flow_timestamps, time)
-        if idx == 0:
-            return False
-        age = time - self._holder_flow_timestamps[idx - 1]
-        return age >= self._v2_hf_silence_gate_seconds
-
-    # ── Global regime cache (causal per-date Q map) ─────────────────────
-
-    def _load_global_regime_cache(self) -> None:
-        """Load the causal per-date regime score map {date: Q} from
-        backend/data/global_regime_cache.json (built by
-        backend/fetch_global_regime.py).  Missing/corrupt file → empty map,
-        which keeps the iter64 rate-split gate in its unknown-Q default."""
-        try:
-            import json as _json57
-            import os as _os57
-            path = _os57.path.join(_os57.path.dirname(_os57.path.abspath(__file__)),
-                                   "data", "global_regime_cache.json")
-            with open(path) as f:
-                cache = _json57.load(f)
-            qmap = cache.get("q_by_date") or {}
-            self._global_regime_map = {str(k): float(v) for k, v in qmap.items()}
-        except Exception as exc:  # missing file / bad JSON → unknown-Q default
-            if not self._global_regime_cache_warned:
-                self._global_regime_cache_warned = True
-                print(f"[v2_rate_split] global_regime_cache.json unavailable "
-                      f"({exc}); rate-split gate uses unknown-Q default")
-            self._global_regime_map = {}
-
-    def set_global_regime_map(self, qmap: dict) -> None:
-        """Live path: inject/refresh the per-date regime map (mirrors
-        set_holder_flow_events).  Values are fully determined by data
-        strictly prior to each date, so backtest and live converge on the
-        same cache."""
-        if qmap:
-            self._global_regime_map = {str(k): float(v) for k, v in qmap.items()}
-
-    def _regime_q_today(self):
-        """Causal global regime score Q for the current candle's UTC date,
-        or None when unknown (no map loaded / date missing / time unset)."""
-        if not self._global_regime_map:
-            return None
-        try:
-            import datetime as _dt57
-            day = _dt57.datetime.fromtimestamp(
-                int(getattr(self, "_current_time", 0)),
-                tz=_dt57.timezone.utc).strftime("%Y-%m-%d")
-        except Exception:
-            return None
-        q = self._global_regime_map.get(day)
-        return None if q is None else float(q)
-
-    def _rate_split_regime_allows(self) -> bool:
-        """iter64 replacement for the removed give-back adaptation / floor:
-        the rate-split flip fires only on weak-regime days.  Returns True
-        when the gate is off (backtest/live unchanged), when Q(today) is
-        unknown and unknown_q_enable is set, or when Q(today) < q_max."""
-        if self._v2_rate_split_regime_gate <= 0.0:
-            return True
-        q = self._regime_q_today()
-        if q is None:
-            return self._v2_rate_split_unknown_q_enable > 0.0
-        return q < self._v2_rate_split_q_max
-
     def set_fleet_regime_states(self, source) -> None:
         """iter74: inject the fleet-regime state source (backtest panel
         states or live filter).  None (default) disables the gate."""
         self._fleet_regime_states = source
-
-    def set_fleet_medium_state(self, low_turbulence) -> None:
-        """iter75: inject the REALTIME fleet-medium turbulence state.
-        Accepts either a direct bool (live path, pushed every bin close by
-        main.py) or a lookup source with .medium_at(ts) (backtest path,
-        from analysis/fleet_medium_state.json).  None / unknown →
-        the σ² gate never blocks (safe degradation)."""
-        if hasattr(low_turbulence, "medium_at"):
-            self._fleet_medium_source = low_turbulence
-            self._fleet_low_turbulence = None
-            return
-        self._fleet_medium_source = None
-        self._fleet_low_turbulence = low_turbulence
-
-    def _medium_low_turbulence_now(self) -> bool | None:
-        """Current medium turbulence, reading the backtest source if
-        present (prev-closed-bin rule, same as the fleet-state gate)."""
-        src = getattr(self, "_fleet_medium_source", None)
-        if src is not None:
-            return src.medium_at(getattr(self, "_current_time", 0))
-        return self._fleet_low_turbulence
-
-    def _passes_s2_gate(self, sigma2_tau: float) -> bool:
-        """iter75: regime-keyed σ² threshold switch (user thesis: same
-        variables, thresholds change with the medium).  FIXED thresholds
-        trained on the OLD-era half: block the entry when σ²_τ exceeds
-        `v2_s2_gate_sigma` AND the fleet medium is low-turbulence (vov <
-        `v2_s2_gate_vov`, injected via set_fleet_medium_state / the
-        backtest medium timeline which already applies the ceiling).
-        Unknown medium never blocks (safe degradation)."""
-        if self._v2_s2_gate_enable <= 0.0:
-            return True
-        if self._medium_low_turbulence_now() is not True:
-            return True
-        return sigma2_tau <= self._v2_s2_gate_sigma
 
     def _passes_fleet_regime_gate(self) -> bool:
         """iter74 MSM entry gate.  iter74c semantics: when a per-state
@@ -3701,7 +3223,7 @@ class StrategyEngineV2Adapter:
         if src is None:
             return True   # no state source configured → never block
         st = src.state_at(getattr(self, "_current_time", 0),
-                          occupancy_floor=self._v2_msm_occupancy_floor)
+                          occupancy_floor=0.0)  # iter74b refinement REJECTED; fixed 0.0
         if st is None:
             return True   # unknown / missing bin → never block
         # iter74c: state-switched entry-regime allowlist — if this state
@@ -3718,32 +3240,6 @@ class StrategyEngineV2Adapter:
             self._msm_block_count += 1
             return False
         return True
-
-    def _passes_order_flow_imbalance_gate(self) -> bool:
-        """Check if the trailing order-flow taker buy ratio passes the minimum threshold."""
-        if self._v2_order_flow_imbalance_gate <= 0.0:
-            return True
-        if not self._candle_volume_history:
-            return True
-        w = self._v2_order_flow_window_seconds
-        t_curr = getattr(self, "_current_time", 0)
-        cutoff = t_curr - w
-
-        tot_buy = 0.0
-        tot_sell = 0.0
-        for cd in reversed(self._candle_volume_history):
-            ct = cd["time"]
-            if ct < cutoff:
-                break
-            tot_buy += cd["buy_vol"]
-            tot_sell += cd["sell_vol"]
-
-        tot_vol = tot_buy + tot_sell
-        if tot_vol < self._v2_order_flow_volume_min_sol:
-            return True  # low volume window -> pass
-
-        ratio = tot_buy / (tot_vol + 1e-9)
-        return ratio >= self._v2_order_flow_buy_ratio_min
 
     def _evr_trailing_buy_ratio(self):
         """iter48 EVR: trailing taker buy-ratio over the last `_v2_evr_flow_window`
@@ -3848,8 +3344,6 @@ class StrategyEngineV2Adapter:
         self._evr_entry_time = int(getattr(self, "_current_time", 0))
         # iter50: per-trade EVR concentration veto latch reset.
         self._evr_conc_vetoed = False
-        # iter78: whale-dump print state reset per trade.
-        self._whale_dump_pending = None
         self._rate_split_streak = 0  # iter63: fresh evidence per trade
         self._last_peak_tick = self.bar_count  # iter63: entry is the initial peak
         # Seed EMA from the current posterior mu so the window starts calibrated.
@@ -3867,71 +3361,6 @@ class StrategyEngineV2Adapter:
         self._mu_post_neg_count = 0
         self._no_long_streak = 0  # iter21: reset on close
         self._rate_split_streak = 0  # iter63: reset on close
-        self._whale_dump_pending = None  # iter78: reset on close
-
-    # ── iter78 Door 2: whale-dump confirmed exit ─────────────────────────
-    def _whale_dump_track(self, c: float, sell_volume: float, mcap_usd: float) -> None:
-        """Per-candle whale-dump arming/confirmation walk (called from
-        `_check_exit_v2` on every intra-candle state; the CANDLE's sell
-        volume is carried by `_current_candle_sell_volume`, which the
-        pipeline sets on the candle's states — states 1–3 see the previous
-        candle's print, state 4 sees this candle's, matching iter72's
-        "~1 s arming" candle-faithful semantics).
-
-        USD context: SOL/USD = mcap_usd / (c × 1e9) (constant 1e9 supply,
-        the same closed form the engine's mcap bounds use).  mcap ≤ 0 or a
-        non-positive close disarms (safe degradation — no USD context, no
-        fire).  When disabled the method never latches (test spec:
-        `test_disabled_never_fires` calls `_whale_dump_track` directly).
-        """
-        if self._v2_whale_dump_enable <= 0.0 or not self.in_position:
-            return
-        if mcap_usd > 0.0 and c > 0.0:
-            self._whale_dump_sol_usd = mcap_usd / (c * 1.0e9)
-        if c <= 0.0 or self._whale_dump_sol_usd <= 0.0:
-            return
-        entry = self.entry_price
-        if entry <= 0.0:
-            return
-        print_usd = sell_volume * self._whale_dump_sol_usd
-        pending = self._whale_dump_pending
-        if print_usd >= self._v2_whale_dump_min_usd:
-            offside = 100.0 * (c / entry - 1.0)
-            # never-armed guard uses the pre-print peak (`_peak_price` is
-            # updated AFTER exit checks in update(), so it still holds the
-            # pre-state peak here — `test_armed_winner_print_ignored`).
-            peak_gain = 100.0 * (self._peak_price / entry - 1.0)
-            if (offside <= -self._v2_whale_dump_offside_pct
-                    and peak_gain <= self._v2_whale_dump_max_peak_pct):
-                # A NEW qualifying print (re-)arms.  Tuple layout:
-                # (print_close, confirm_count, last_confirm_time).
-                self._whale_dump_pending = (c, 0, -1)
-                return
-        if pending is not None:
-            floor = pending[0] * (1.0 - self._v2_whale_dump_confirm_g / 100.0)
-            if c <= floor:
-                # Count DISTINCT CANDLES below the floor: the 4-state
-                # expansion repeats each timestamp 4×, so the counter
-                # advances only on a NEW `_current_time` (one confirm per
-                # 1 s candle — iter72's `confirm_s` candle semantics; in
-                # unit tests each update is a fresh second, matching the
-                # test spec's "fire at step ≈ 6 = print + 5 confirm").
-                t_now = int(getattr(self, "_current_time", 0))
-                if pending[1] == 0 or t_now != pending[2]:
-                    self._whale_dump_pending = (pending[0], pending[1] + 1, t_now)
-            else:
-                # recovery above the print floor disarms the ORIGINAL print
-                # (a re-qualifying print is needed to re-arm — test spec:
-                # `test_recovery_disarms`).
-                self._whale_dump_pending = None
-
-    def _whale_dump_fired(self) -> bool:
-        """True when the pending print's confirmation counter reached the
-        required distinct-candle count."""
-        p = self._whale_dump_pending
-        if p is None:
-            return False
-        return p[1] >= self._v2_whale_dump_confirm_s
 
     def _update_peak_price(self, h: float, l: float):
         if not self.in_position:
@@ -4115,10 +3544,6 @@ class StrategyEngineV2Adapter:
     ) -> dict:
         self.bar_count += 1
         self._current_time = int(time)  # iter36: store for holder-flow checks
-        # iter78 Door 2: the CURRENT candle's sell volume (SOL) — the 4
-        # intra-candle states of one candle share one print; the whale-dump
-        # track consumes the candle-level flow at every state.
-        self._current_candle_sell_volume = float(sell_volume)
         # iter28: real pool liquidity depth (SOL in bonding curve), 0.0 when the
         # feed does not carry reserves.  Tracks the latest non-zero observation.
         if pool_sol > 0.0:
@@ -4159,33 +3584,8 @@ class StrategyEngineV2Adapter:
         bid_depth = max(float(buy_volume + 1.0), 1.0)
         ask_depth = max(float(sell_volume + 1.0), 1.0)
 
-        # ── Futures volume scale (second param-set, futures only) ─────────
-        # Spot memecoin volumes arrive in SOL units per second (≈0.001–50).
-        # CEX futures bars carry USD turnover and on majors routinely exceed
-        # 10⁸ USD/1h; log(volume) overflows the `ell` OU clamp (= 15), which
-        # then drags mu/h/phi into their own clamps and collapses the KDE.
-        # Remap any inbound volume units to SOL-equivalents before the core
-        # observer sees them.  Default 1.0 = passthrough (spot parity).
-        _vscale = float(getattr(self, "_v2_volume_scale_fut", 1.0))
-        if _vscale > 0.0 and _vscale != 1.0:
-            volume       = volume * _vscale
-            signed_delta = signed_delta * _vscale
-            bid_depth    = max(float(buy_volume + 1.0) * _vscale, 1.0)
-            ask_depth    = max(float(sell_volume + 1.0) * _vscale, 1.0)
-
-        # ── Futures intra-bar dt (second param-set, futures only) ──────────
-        # 1s memecoin tapes pass `dt=1.0` per state-update; the V2 SDE/OU
-        # rates (lambda_mu, eta, alpha, theta) are calibrated against that
-        # 1s × 4-state cadence.  CEX 1h bars fed via 4 intra-candle sub-state
-        # updates still accumulate only "4 s" of OU evolution per *hour* of
-        # price action — 900× too slow.  Setting dt to the physical time per
-        # sub-state (900 s for 1h bars, 225 s for 15m) lets the SDE rates
-        # mean-revert on real macro timescales instead of being effectively
-        # frozen.  Spot path leaves this at 1.0 (parity).
-        _dt_per_state_fut = float(getattr(self, "_v2_dt_per_state_fut", 1.0))
-
         obs = {
-            "dt": _dt_per_state_fut,
+            "dt": 1.0,
             "log_return": float(log_return),
             "volume": float(volume),
             "signed_delta": signed_delta,
@@ -4292,7 +3692,7 @@ class StrategyEngineV2Adapter:
 
         # Belt-and-suspenders: never emit a signal during the warmup window
         # (100 full candles = 400 intra-candle sub-state intakes).
-        _min_warmup_intakes = max(self._warmup_bars, 400) if not getattr(self, "_is_futures_engine", False) else self._warmup_bars
+        _min_warmup_intakes = max(self._warmup_bars, 400)
         if self.bar_count <= _min_warmup_intakes:
             v1_signal = _V1Signal.NONE
             self.exit_signal_reason = ""
@@ -4328,9 +3728,6 @@ class StrategyEngineV2Adapter:
                     sell_event = self._get_recent_dev_sell(getattr(self, "_current_time", 0), self._v2_holder_flow_entry_window_seconds)
                     # Suppress the BUY signal — log for debugging
                     self.exit_signal_reason = f"holder_flow_block:{sell_event.get('wallet','')[:8] if sell_event else 'unknown'}"
-                # ── Holder-flow silence gate (iter56): block entry when stream went silent ──
-                elif self._hf_silence_blocks_entry(getattr(self, "_current_time", 0)):
-                    self.exit_signal_reason = "hf_silence_block"
                 # Apply V1-style entry gate (confidence).
                 elif self._v2_passes_entry_gate(c, decision):
                     v1_signal = _V1Signal.BUY
@@ -4511,11 +3908,11 @@ class StrategyEngineV2Adapter:
                     self.exit_signal_reason = "breakeven_scratch"
                     return _V1Signal.EXIT
             # 2d. iter63/64 stationary Kramers rate-split early exit.
-            #     iter64: GATED to weak-regime days only (Q(today) < q_max;
-            #     see the ctor comment) — the mechanism replaces the removed
-            #     iter57/58 give-back adaptation as THE regime channel.
-            if (self._v2_rate_split_enable > 0.0 and entry > 0
-                    and self._rate_split_regime_allows()):
+            #     iter64: the regime Q-gate was measured NET-NEGATIVE and
+            #     removed with the Q machinery (2026-09-02 cleanup); the
+            #     flip is ungated (production semantics since iter64's
+            #     default-off gate).
+            if (self._v2_rate_split_enable > 0.0 and entry > 0):
                 _ku = float(decision.get("k_up", 0.0) or 0.0)
                 _kd = float(decision.get("k_down", 0.0) or 0.0)
                 _kt = _ku + _kd
@@ -4556,86 +3953,20 @@ class StrategyEngineV2Adapter:
             if self.regime == _V1Regime.REVERSAL and self.reversal_bar_count >= _rev_k:
                 self.exit_signal_reason = "reversal_exit"
                 return _V1Signal.EXIT
-            # 4. iter05 leading-decline exit:  fire BEFORE kramers_down_exit
-            #    when the EMA-smoothed posterior momentum derivative has
-            #    been negative for ≥ `iter05_decay_persist_bars` consecutive
-            #    state-updates AND the trade is deeper offside than
-            #    `iter05_decay_offside_pct`.  Mathematical motivation: the
-            #    SDE's deterministic drift is -λ_μ μ_t + κ_μ (φ_t - φ̄_t);
-            #    a sustained negative `μ̇` (one-step derivative of the
-            #    posterior μ) signals that the OU mean-reversion force has
-            #    reversed AND the order-flow pressure has turned against
-            #    the position.  The integral this represents over the KDE
-            #    memory window T_w has not yet accumulated enough
-            #    down-crossings to flip `P_down ≥ 0.5`, but its trajectory
-            #    is locked in.  The "offside" guard prevents premature
-            #    exits during normal noise (a winning pullback rarely
-            #    goes deeper than 6% from entry); 8% is the threshold
-            #    that isolates genuinely-bleeding trades.
-            #
-            #    DISABLED BY DEFAULT (iter05_decay_exit_enable = 0.0) —
-            #    the entry-side block (`iter05_decay_entry_block`) is the
-            #    preferred mechanism after the smoke test documented at
-            #    `backend/analysis/iter05_followups.md` showed exit-alone
-            #    produces net-negative re-entry churn.
-            if float(getattr(self, "iter05_decay_exit_enable", 0.0)) > 0.0:
-                decay_persist = int(getattr(self, "iter05_decay_persist_bars", 6))
-                decay_offside_pct = float(getattr(self, "iter05_decay_offside_pct", 8.0))
-                # Use windowed decay prevalence (true if ≥80% of last 60
-                # ticks had sma<0) — more robust than the tick-level
-                # persist counter which resets on a 1-tick bounce.
-                window = int(getattr(self, "iter05_decay_window", 60))
-                thresh = float(getattr(self, "iter05_decay_window_thresh", 0.8))
-                neg_count = int(getattr(self.core, "_mu_dot_post_sign_neg_count", 0))
-                sma = getattr(self.core, "_mu_dot_post_ema", 0.0)
-                if (sma < 0.0 and neg_count >= thresh * window and
-                    entry > 0 and c <= entry * (1.0 - decay_offside_pct / 100.0)):
-                    self.exit_signal_reason = "leading_decay_exit"
-                    return _V1Signal.EXIT
             # 5. Bayesian exit B: posterior downward escape majority.
             #    iter03 evidence: 23 trades, WR=69.6%, +0.317 SOL on a 30-token
             #    sample — the Bayesian escape-rate exit is the engine's crown logic.
             p_up   = float(decision.get("P_up",   0.0))
             p_down = float(decision.get("P_down", 0.0))
             p_zero = float(decision.get("P_zero", 0.0))
-            # Futures persistence guard (default OFF / spot parity): require N
-            # consecutive sub-ticks where `P_down ≥ 0.5` before the kramers
-            # exit fires.  On 1s memecoin tape the posterior collapses near
-            # instantaneously on a real crash (P_down → 1.0 within 2-3 s),
-            # so no guard is needed.  On 1h macro bars the posterior flips
-            # on transient KDE geometry noise in *both* directions — single-
-            # tick `P_down ≥ 0.5` causes ~60% of winning trades to exit in
-            # the first 0.2-4 h ("futures churn" pathology).  Requiring
-            # `v2_kramers_down_persist_fut` consecutive ticks (default 0=spot
-            # parity) eliminates the single-tick false flips.  The counter
-            # is maintained in `_v2_kramers_down_streak`.
             if p_down > p_up and p_down > p_zero and p_down >= 0.5:
-                self._v2_kramers_down_streak = int(getattr(self, "_v2_kramers_down_streak", 0)) + 1
-                _persist_fut = int(getattr(self, "_v2_kramers_down_persist_fut", 0))
-                if _persist_fut <= 1 or self._v2_kramers_down_streak >= _persist_fut:
-                    self.exit_signal_reason = "kramers_down_exit"
-                    return _V1Signal.EXIT
-            else:
-                self._v2_kramers_down_streak = 0
+                self.exit_signal_reason = "kramers_down_exit"
+                return _V1Signal.EXIT
             # 6. Bayesian exit A: direction has flipped away from +1 with
             #    positive counter-direction Kelly utility.
             if decision.get("direction", 0) != 1 and decision.get("E_star", -1.0) > 0:
                 self.exit_signal_reason = "bayesian_flip"
                 return _V1Signal.EXIT
-            # 6.5 iter78 Door 2: whale-dump confirmed exit (iter72 spec,
-            #     re-implemented; see DEFAULT_CONFIG note).  The track walk
-            #     runs on every state with the CURRENT CANDLE's sell volume
-            #     (4 states share one print; the confirm counter advances
-            #     once per new candle via the time-keyed arming tuple).  The
-            #     exit fires at the confirming state's close, placed BEFORE
-            #     kelly_flat/EVR so the confirmed-dump classification wins
-            #     the exit-reason race.  Default OFF (0.0) = B′ parity.
-            if self._v2_whale_dump_enable > 0.0:
-                self._whale_dump_track(c, self._current_candle_sell_volume,
-                                       self._market_cap_usd)
-                if self._whale_dump_fired():
-                    self.exit_signal_reason = "whale_dump_exit"
-                    return _V1Signal.EXIT
             # 7. iter21 sustained-no-long-Kelly exit ("kelly_flat").
             #    Bayesian decision theory: while in position, the engine's
             #    own per-tick Kelly utility for "continue holding long" is
@@ -4722,9 +4053,6 @@ class StrategyEngineV2Adapter:
 
     # ── V2 entry gate (uses V2 confidence + V1-style secondary gates) ──
     def _v2_passes_entry_gate(self, c: float, decision: dict) -> bool:
-        # iter45: pre-entry taker order-flow imbalance gate
-        if not self._passes_order_flow_imbalance_gate():
-            return False
         # iter74: Markov-switching fleet-regime gate (blocks the worst
         # realtime fleet state; default OFF)
         if not self._passes_fleet_regime_gate():
@@ -4744,8 +4072,8 @@ class StrategyEngineV2Adapter:
         # rate and 96% of the PnL on just 34% of the trades (the past-peak
         # flag marks a parabolic breakout/continuation rather than a knife
         # catch); past_peak=False entries were 28% hard-stop crashes vs 9%.
-        if self._v2_require_past_peak > 0.0 and not self._momentum_past_peak():
-            return False
+        # (iter17b require-past-peak gate REJECTED — removed in the
+        # 2026-09-02 dead-code cleanup; the flag stays informational.)
         # Long-only: drift must be positive.
         if float(decision.get("direction", 0)) != 1:
             return False
@@ -4765,22 +4093,5 @@ class StrategyEngineV2Adapter:
             # Only gate when window is fully populated; otherwise engine
             # would over-block at the cold-start of a token.
             if neg_count >= thresh * window:
-                return False
-        # iter05 s_effective gate — empirically grounded (see adapter
-        # docstring of iter05_s_effective_min).  Acts as a barrier-/SNR-
-        # quality floor; trades entered below this proxy lose more often.
-        s_min = float(getattr(self, "iter05_s_effective_min", 0.0))
-        if s_min > 0.0 and float(getattr(self, "s_effective", 0.0)) < s_min:
-            return False
-        # iter75: regime-keyed σ² threshold switch (user thesis: same
-        # variables, regime-changed thresholds).  σ² history is recorded
-        # at EVERY entry evaluation (before the gate read) so the
-        # percentile is always causal.  Default OFF.
-        if self._v2_s2_gate_enable > 0.0:
-            _s2 = float(decision.get("sigma2_tau", 0.0) or 0.0)
-            self._s2_hist.append(_s2)
-            if len(self._s2_hist) > self._S2_HIST_MAX:
-                del self._s2_hist[: len(self._s2_hist) - self._S2_HIST_MAX]
-            if not self._passes_s2_gate(_s2):
                 return False
         return True

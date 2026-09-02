@@ -491,87 +491,6 @@ async def stop_stale_scanner():
         t.cancel()
 
 
-# ── iter57: global harvest-regime cache maintenance (auto-refresh) ─────────
-    # Keeps backend/data/global_regime_cache.json current with zero manual
-    # steps: at startup and daily at 00:05 UTC it (1) backtests any recordings
-    # not yet measured — pinned to the UN-TRIGGERED engine
-    # (v2_rate_split_enable=0.0) so Q always tracks the market through the
-    # same fixed instrument (gain_retrace exit share under base exit
-    # semantics), with no mechanism feedback loop — and (2) merges
-    # the exit mix into the cache accumulators and rebuilds Q through today's
-    # live frontier (atomic write).  Running live sessions pick the new map up
-    # via the _global_regime_pump mtime check.  Kill switch: env
-    # ITER57_REGIME_AUTOREFRESH=0.
-REGIME_AUTOREFRESH = os.environ.get("ITER57_REGIME_AUTOREFRESH", "1") != "0"
-
-
-def _regime_cache_refresh_once() -> dict:
-    import sqlite3
-    import fetch_global_regime as fgr
-    cache = fgr.load_cache()
-    measured = set(cache.get("measured_rec_ids") or [])
-    conn = sqlite3.connect(str(data_store.PRICE_DB))
-    try:
-        rows = conn.execute(
-            "SELECT id FROM recordings WHERE status = 'completed'").fetchall()
-    finally:
-        conn.close()
-    new_ids = sorted(i for (i,) in rows if i not in measured)
-
-    new_per_date: dict = {}
-    if new_ids:
-        label = f"regime_auto_{int(time.time())}"
-        results = run_backtest_batch(
-            engine_version=2,
-            engine_params={"v2_rate_split_enable": 0.0},   # measurement semantics
-            max_workers=2,                              # gentle vs live trading
-            batch_id=label,
-            recording_ids=new_ids,
-        )
-        errors = sum(1 for r in results if "error" in r)
-        if errors:
-            logger.warning(f"[REGIME] measurement batch '{label}': "
-                           f"{errors}/{len(results)} recordings errored")
-        new_per_date = fgr.gr_share_from_batch(label)
-
-    out = fgr.merge_refresh(new_per_date, new_ids,
-                            source=f"auto-maintenance (+{len(new_ids)} recs)")
-    logger.info(f"[REGIME] cache refreshed: {len(out['q_by_date'])} Q dates, "
-                f"frontier {out['provenance'].get('live_frontier')}, "
-                f"{len(new_ids)} new recordings measured")
-    return out
-
-
-async def _regime_cache_maintenance_loop():
-    import datetime as _dt_gr
-    while True:
-        try:
-            await asyncio.to_thread(_regime_cache_refresh_once)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("[REGIME] cache maintenance failed")
-        now = _dt_gr.datetime.now(_dt_gr.timezone.utc)
-        nxt = (now + _dt_gr.timedelta(days=1)).replace(
-            hour=0, minute=5, second=0, microsecond=0)
-        await asyncio.sleep(max(60.0, (nxt - now).total_seconds()))
-
-
-@app.on_event("startup")
-async def start_regime_cache_maintenance():
-    if not REGIME_AUTOREFRESH:
-        logger.info("[REGIME] auto-refresh disabled (ITER57_REGIME_AUTOREFRESH=0)")
-        return
-    app.state._regime_maint_task = asyncio.create_task(_regime_cache_maintenance_loop())
-
-
-@app.on_event("shutdown")
-async def stop_regime_cache_maintenance():
-    t = getattr(app.state, "_regime_maint_task", None)
-    if t:
-        t.cancel()
-
-
 @app.delete("/api/recordings/{recording_id}")
 async def delete_recording_endpoint(recording_id: int):
     data_store.delete_recording(recording_id)
@@ -973,7 +892,6 @@ async def chart_ws(
 _fleet_filter = None            # FleetRegimeFilter | None
 _fleet_bin_state = None         # {"bin": int, "first": {mint: close}, "last": {...},
                                  #  "buy": {mint: v}, "sell": {mint: v}, "toks": set}
-_fleet_vov_hist: list[float] = []   # iter75: trailing bin med_ret series for vol-of-vol
 _fleet_lock = asyncio.Lock()
 
 
@@ -1040,29 +958,6 @@ def _fleet_close_and_rotate() -> None:
         _fleet_filter.feed_bin(sealed["bin"], obs)
     except Exception:
         logger.exception("[MSM] fleet filter feed failed")
-    # iter75: realtime fleet-medium turbulence (vol-of-vol of med_ret over
-    # the trailing 6 closed bins vs the FIXED OLD-trained ceiling 0.00955 —
-    # the causal-validated regime key, see analysis/iter75_PREREGISTRATION.md)
-    # — pushed to every V2 engine carrying the s2 gate.  Non-lagging.
-    try:
-        _fleet_vov_hist.append(obs["med_ret"])
-        if len(_fleet_vov_hist) > 300:
-            del _fleet_vov_hist[: len(_fleet_vov_hist) - 300]
-        if len(_fleet_vov_hist) >= 6:
-            _mr = _fleet_vov_hist[-6:]
-            _vov = statistics.pstdev(_mr)
-            _low = _vov < 0.00955
-            for _sess in list(_active_live_traders.values()):
-                try:
-                    _eng = _sess.trader.engine
-                    if float(getattr(_eng, "_v2_s2_gate_enable", 0.0)) > 0.0:
-                        _eng.set_fleet_medium_state(_low)
-                except AttributeError:
-                    pass      # V1 engine / teardown race
-    except Exception:
-        logger.exception("[iter75] fleet medium update failed")
-
-
 def _fleet_filter_for_engine(engine):
     """iter74: hand the shared filter to a fresh V2 engine if its params
     enable the MSM gate.  The engine's state_at() shim reads the filter's
@@ -1298,8 +1193,6 @@ class _LiveSession:
         # read makes the live engine's event stream identical to backtest.
         _hf_pump_task = None
         _hf_stop = asyncio.Event()
-        _gr_pump_task = None   # iter57 global-regime cache pump
-        _gr_stop = asyncio.Event()
         _nm_watch_task = None  # no-motion idle-session terminator
         # iter57 parity fix: holder-flow delivery cursor is the last DB row id
         # pushed into the engine (lossless, matches backtest replay exactly).
@@ -1382,42 +1275,6 @@ class _LiveSession:
             _hf_last_id["id"] = max((r["id"] for r in _existing_hf), default=0)
             _hf_pump_task = asyncio.ensure_future(_holder_flow_pump())
 
-            # ── Global harvest-regime pump (iter57) ─────────────────────────
-            # The engine self-loads backend/data/global_regime_cache.json at
-            # construction (same file the backtester uses); this light pump
-            # keeps a long-running live session in sync when the cache is
-            # refreshed (fetch_global_regime.py) or the session crosses a
-            # UTC midnight.  Q(date) is fully determined by data strictly
-            # prior to the date, so backtest and live converge identically.
-            _gr_state = {"mtime": 0.0}
-
-            async def _global_regime_pump():
-                import json as _json_gr
-                import os as _os_gr
-                cache_path = _os_gr.path.join(
-                    _os_gr.path.dirname(_os_gr.path.abspath(__file__)),
-                    "data", "global_regime_cache.json")
-                while not _gr_stop.is_set():
-                    try:
-                        if _os_gr.path.exists(cache_path):
-                            mtime = _os_gr.path.getmtime(cache_path)
-                            if mtime != _gr_state["mtime"]:
-                                with open(cache_path) as f:
-                                    qmap = (_json_gr.load(f) or {}).get("q_by_date") or {}
-                                _gr_state["mtime"] = mtime
-                                if qmap:
-                                    for _tr in traders:
-                                        try:
-                                            _tr.engine.set_global_regime_map(qmap)
-                                        except AttributeError:
-                                            pass  # engine without regime surface
-                    except AttributeError:
-                        pass  # V1 engine has no regime surface
-                    except Exception:
-                        pass
-                    await asyncio.sleep(60.0)
-
-            _gr_pump_task = asyncio.ensure_future(_global_regime_pump())
 
             # ── No-motion idle-session terminator ───────────────────────────
             # Companion to the in-stream check in _process_stream below: a
@@ -1674,15 +1531,6 @@ class _LiveSession:
                 _hf_pump_task.cancel()
                 try:
                     await _hf_pump_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-
-            # Stop the global-regime pump (iter57)
-            _gr_stop.set()
-            if _gr_pump_task is not None:
-                _gr_pump_task.cancel()
-                try:
-                    await _gr_pump_task
                 except (asyncio.CancelledError, Exception):
                     pass
 
