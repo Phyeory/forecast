@@ -260,6 +260,52 @@ DEFAULT_CONFIG = {
     "v2_rate_split_persist": 12,          # consecutive 4-state ticks (≈3 s)
     "v2_rate_split_min_peak_age_ticks": 0,  # runner-immunity veto — REJECTED (0 = off)
 
+    # ── iter78 Door 2: whale-dump confirmed exit (re-implementation of the ──
+    # iter72 mechanism, removed from the working tree at 91c7536-era cleanup;
+    # the unit-test spec in analysis/test_whale_dump.py is the mechanism
+    # definition — spec cell: min_usd 200 / offside 8 / peak ≤ 5 / confirm 5
+    # candles / g 3%).  A candle whose sell volume ≥ min_usd (USD via
+    # mcap/(close×1e9), no external feed, ~100% candle coverage, no
+    # holder_flow dependency) landing on a NEVER-ARMED (peak ≤ +max_peak%)
+    # trade ≥ offside% offside at the print close, whose price STAYS ≤
+    # print-close×(1−g/100) for `confirm_s` DISTINCT CANDLES, is a confirmed
+    # distribution dump — exit at the confirming candle.  The 5-candle
+    # persistence is the causal dump/absorbed-sweep discriminator (iter72:
+    # every un-confirmed print-exit variant was class-(D) net-negative).
+    # DEFAULT OFF (0.0): re-gated at iter78 on the grown 2,127-rec DB with
+    # a Mayhem-split gate; bare-{} runs remain byte-identical to B′.
+    "v2_whale_dump_exit_enable": 0.0,   # 0.0 = OFF (iter78 re-gate pending); 1.0 = ON
+    "v2_whale_dump_min_usd":      200.0,   # qualifying print size floor (USD)
+    "v2_whale_dump_offside_pct":   8.0,   # offside % at print close required to arm
+    "v2_whale_dump_max_peak_pct":  5.0,   # never-armed guard: pre-print peak ≤ +this
+    "v2_whale_dump_confirm_s":     5,     # distinct candles below the print floor
+    "v2_whale_dump_confirm_g":     3.0,   # floor depth: print close × (1−g/100)
+
+    # ── iter78 ADOPTION: 5-second deferred-entry execution cell ────────────
+    # (user decision 2026-09-02; the only both-era-positive cell of the
+    # 78-iteration program — RESEARCH_LOG.md Iter 78 §5).  The backtest cell
+    # `iter78_lat5` (entry fills deferred to t_signal+5 s on the recorded
+    # intra-candle path; ENGINE DECISIONS UNTOUCHED) measured +2.1237 SOL /
+    # 65.7% WR on the 2,127-rec DB vs the instant-fill baseline +0.9459 /
+    # 64.9%: Δ+1.178, Wilcoxon p=1.4e-4, CI strictly positive, BOTH eras
+    # positive (OLD +0.646 / DEAD +0.519), tail ≤−30% 123→104, negative
+    # days 17→12, day-σ 0.162→0.161.  Mechanism (978 matched pairs): the 5 s
+    # fill buys the transient micro-dip (mean −0.38% below the signal close,
+    # −6.2% on eventual-tail trades) — entries filled into the dip re-arm
+    # the +10% profit-lock on the bounce and exit as winners instead of
+    # riding kelly_flat/recording_ended to the tail.  The grid is NON-MONOTONE
+    # (10 s Δ−0.21 era-inverted, 15 s +0.03, 10 s×sell 2.3 s +0.04) — do NOT
+    # move the default off 5.0 without re-gating.
+    # Consumption: the pipelines read this knob and defer the BUY FILL by
+    # N seconds after the signal state — backtester.py passes it as
+    # ForwardTester(entry_latency_seconds=…), live_trader.py delays the swap
+    # launch by N seconds.  Setting it to 0.0 restores the signal-instant
+    # fill byte-exactly (the iter73 model).  It does NOT touch any engine
+    # decision, exit, or size — only the execution timing of entries.
+    "v2_entry_delay_seconds": 5.0,   # 0.0 = instant fill (pre-iter78); 5.0 = adopted cell
+
+
+
     # ── iter74 MSM fleet-regime entry gate — PRODUCTION configuration B ──
     # (adopted 2026-08-31 by explicit user decision; RESEARCH_LOG Iter 74c/74d)
     # Realtime 3-state Gaussian HMM over 5-min fleet bins; forward-filtered
@@ -3276,6 +3322,32 @@ class StrategyEngineV2Adapter:
         self._v2_evr_skip_conc_window   = int(engine_kwargs.pop("v2_evr_skip_conc_window", 60))
         self._evr_entry_time: int = 0
         self._evr_conc_vetoed: bool = False
+        # ── iter78 Door 2: whale-dump confirmed exit (re-implementation of
+        # the iter72 mechanism; see DEFAULT_CONFIG note).  All knobs pop with
+        # the same defaults as DEFAULT_CONFIG so bare-{} and explicit dicts
+        # behave identically; enable defaults 0.0 = OFF = byte-parity.
+        self._v2_whale_dump_enable      = float(engine_kwargs.pop("v2_whale_dump_exit_enable", 0.0))
+        self._v2_whale_dump_min_usd     = float(engine_kwargs.pop("v2_whale_dump_min_usd", 200.0))
+        self._v2_whale_dump_offside_pct = float(engine_kwargs.pop("v2_whale_dump_offside_pct", 8.0))
+        self._v2_whale_dump_max_peak_pct = float(engine_kwargs.pop("v2_whale_dump_max_peak_pct", 5.0))
+        self._v2_whale_dump_confirm_s  = int(engine_kwargs.pop("v2_whale_dump_confirm_s", 5))
+        self._v2_whale_dump_confirm_g  = float(engine_kwargs.pop("v2_whale_dump_confirm_g", 3.0))
+        # Print state: None, or (print_close, confirm_count, print_usd).
+        # USD context (SOL/USD) is learned from the latest mcap/close pair —
+        # the same closed-form the engine already uses for mcap bounds; a
+        # missing/zero context disarms the mechanism (safe degradation).
+        self._whale_dump_pending = None
+        self._whale_dump_sol_usd = 0.0
+        self._current_candle_sell_volume = 0.0
+        # ── iter78 ADOPTION: 5-second deferred-entry execution cell ─────────
+        # Popped here so every pipeline can read the adopted default off the
+        # engine object (the backtester keys its ForwardTester
+        # entry_latency_seconds on the ENGINE's knob — not on explicit
+        # engine_params — the exact injection pattern the iter74d MSM
+        # adoption used).  The engine itself never consumes this value: it is
+        # pure execution timing, applied by ForwardTester (backtest) and
+        # LiveTrader (live).  0.0 restores the signal-instant fill.
+        self.v2_entry_delay_seconds = float(engine_kwargs.pop("v2_entry_delay_seconds", 5.0))
         # ── iter63/64: stationary Kramers rate-split early exit ─────────
         # ("rate_split_flip").  The production kramers_down_exit (#5) asks
         #   P_down(τ) = (k_d/k)(1−e^{−kτ}) ≥ 0.5
@@ -3776,6 +3848,8 @@ class StrategyEngineV2Adapter:
         self._evr_entry_time = int(getattr(self, "_current_time", 0))
         # iter50: per-trade EVR concentration veto latch reset.
         self._evr_conc_vetoed = False
+        # iter78: whale-dump print state reset per trade.
+        self._whale_dump_pending = None
         self._rate_split_streak = 0  # iter63: fresh evidence per trade
         self._last_peak_tick = self.bar_count  # iter63: entry is the initial peak
         # Seed EMA from the current posterior mu so the window starts calibrated.
@@ -3793,6 +3867,71 @@ class StrategyEngineV2Adapter:
         self._mu_post_neg_count = 0
         self._no_long_streak = 0  # iter21: reset on close
         self._rate_split_streak = 0  # iter63: reset on close
+        self._whale_dump_pending = None  # iter78: reset on close
+
+    # ── iter78 Door 2: whale-dump confirmed exit ─────────────────────────
+    def _whale_dump_track(self, c: float, sell_volume: float, mcap_usd: float) -> None:
+        """Per-candle whale-dump arming/confirmation walk (called from
+        `_check_exit_v2` on every intra-candle state; the CANDLE's sell
+        volume is carried by `_current_candle_sell_volume`, which the
+        pipeline sets on the candle's states — states 1–3 see the previous
+        candle's print, state 4 sees this candle's, matching iter72's
+        "~1 s arming" candle-faithful semantics).
+
+        USD context: SOL/USD = mcap_usd / (c × 1e9) (constant 1e9 supply,
+        the same closed form the engine's mcap bounds use).  mcap ≤ 0 or a
+        non-positive close disarms (safe degradation — no USD context, no
+        fire).  When disabled the method never latches (test spec:
+        `test_disabled_never_fires` calls `_whale_dump_track` directly).
+        """
+        if self._v2_whale_dump_enable <= 0.0 or not self.in_position:
+            return
+        if mcap_usd > 0.0 and c > 0.0:
+            self._whale_dump_sol_usd = mcap_usd / (c * 1.0e9)
+        if c <= 0.0 or self._whale_dump_sol_usd <= 0.0:
+            return
+        entry = self.entry_price
+        if entry <= 0.0:
+            return
+        print_usd = sell_volume * self._whale_dump_sol_usd
+        pending = self._whale_dump_pending
+        if print_usd >= self._v2_whale_dump_min_usd:
+            offside = 100.0 * (c / entry - 1.0)
+            # never-armed guard uses the pre-print peak (`_peak_price` is
+            # updated AFTER exit checks in update(), so it still holds the
+            # pre-state peak here — `test_armed_winner_print_ignored`).
+            peak_gain = 100.0 * (self._peak_price / entry - 1.0)
+            if (offside <= -self._v2_whale_dump_offside_pct
+                    and peak_gain <= self._v2_whale_dump_max_peak_pct):
+                # A NEW qualifying print (re-)arms.  Tuple layout:
+                # (print_close, confirm_count, last_confirm_time).
+                self._whale_dump_pending = (c, 0, -1)
+                return
+        if pending is not None:
+            floor = pending[0] * (1.0 - self._v2_whale_dump_confirm_g / 100.0)
+            if c <= floor:
+                # Count DISTINCT CANDLES below the floor: the 4-state
+                # expansion repeats each timestamp 4×, so the counter
+                # advances only on a NEW `_current_time` (one confirm per
+                # 1 s candle — iter72's `confirm_s` candle semantics; in
+                # unit tests each update is a fresh second, matching the
+                # test spec's "fire at step ≈ 6 = print + 5 confirm").
+                t_now = int(getattr(self, "_current_time", 0))
+                if pending[1] == 0 or t_now != pending[2]:
+                    self._whale_dump_pending = (pending[0], pending[1] + 1, t_now)
+            else:
+                # recovery above the print floor disarms the ORIGINAL print
+                # (a re-qualifying print is needed to re-arm — test spec:
+                # `test_recovery_disarms`).
+                self._whale_dump_pending = None
+
+    def _whale_dump_fired(self) -> bool:
+        """True when the pending print's confirmation counter reached the
+        required distinct-candle count."""
+        p = self._whale_dump_pending
+        if p is None:
+            return False
+        return p[1] >= self._v2_whale_dump_confirm_s
 
     def _update_peak_price(self, h: float, l: float):
         if not self.in_position:
@@ -3976,6 +4115,10 @@ class StrategyEngineV2Adapter:
     ) -> dict:
         self.bar_count += 1
         self._current_time = int(time)  # iter36: store for holder-flow checks
+        # iter78 Door 2: the CURRENT candle's sell volume (SOL) — the 4
+        # intra-candle states of one candle share one print; the whale-dump
+        # track consumes the candle-level flow at every state.
+        self._current_candle_sell_volume = float(sell_volume)
         # iter28: real pool liquidity depth (SOL in bonding curve), 0.0 when the
         # feed does not carry reserves.  Tracks the latest non-zero observation.
         if pool_sol > 0.0:
@@ -4479,6 +4622,20 @@ class StrategyEngineV2Adapter:
             if decision.get("direction", 0) != 1 and decision.get("E_star", -1.0) > 0:
                 self.exit_signal_reason = "bayesian_flip"
                 return _V1Signal.EXIT
+            # 6.5 iter78 Door 2: whale-dump confirmed exit (iter72 spec,
+            #     re-implemented; see DEFAULT_CONFIG note).  The track walk
+            #     runs on every state with the CURRENT CANDLE's sell volume
+            #     (4 states share one print; the confirm counter advances
+            #     once per new candle via the time-keyed arming tuple).  The
+            #     exit fires at the confirming state's close, placed BEFORE
+            #     kelly_flat/EVR so the confirmed-dump classification wins
+            #     the exit-reason race.  Default OFF (0.0) = B′ parity.
+            if self._v2_whale_dump_enable > 0.0:
+                self._whale_dump_track(c, self._current_candle_sell_volume,
+                                       self._market_cap_usd)
+                if self._whale_dump_fired():
+                    self.exit_signal_reason = "whale_dump_exit"
+                    return _V1Signal.EXIT
             # 7. iter21 sustained-no-long-Kelly exit ("kelly_flat").
             #    Bayesian decision theory: while in position, the engine's
             #    own per-tick Kelly utility for "continue holding long" is

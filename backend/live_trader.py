@@ -469,6 +469,27 @@ class LiveTrader:
         # track staleness for the retry cap.
         self.pending_signal_max_age_seconds: float = pending_signal_max_age_seconds
         self._pending_buy_ts: float = 0.0
+        # iter78 adopted cell: deferred-entry execution.  `entry_delay_seconds`
+        # is read from the ENGINE's `v2_entry_delay_seconds` knob (default
+        # 5.0 s since the 2026-09-02 adoption) so live and backtest share one
+        # knob; explicit `{"v2_entry_delay_seconds": 0.0}` in engine_kwargs
+        # restores the pre-iter78 signal-instant launch.  The executor holds
+        # a queued BUY until `signal_ts + entry_delay_seconds`, then launches
+        # the swap at the then-current prices — the live mirror of the
+        # backtest's entry-latency overlay (batch iter78_lat5: Δ+1.178 SOL,
+        # both eras positive, tail 123→104; RESEARCH_LOG.md Iter 78 §5).
+        self.entry_delay_seconds: float = float(getattr(
+            self.engine, "v2_entry_delay_seconds", 0.0))
+        # Candle-time boundary before which the pending BUY must not
+        # launch (signal candle time + `entry_delay_seconds`).  Keyed on the
+        # ENGINE's candle clock (the `t` every executor call receives), not
+        # wall-clock — live 1 s candles are wall-aligned so the semantics are
+        # identical in production, while parity harnesses that replay
+        # recordings faster than real time still exercise the delay
+        # deterministically (the iter73 live-parity contract).
+        self._pending_buy_delay_until_t: float = 0.0
+        # One-shot log flag for the current held BUY (reset per signal).
+        self._delay_hold_logged: bool = False
         # Engine anchor captured at SIGNAL time (signal-state close × (1 +
         # engine slippage)) so a BUY that retries after a blocked launch
         # still notifies the engine on the same price basis the backtester's
@@ -3342,6 +3363,13 @@ class LiveTrader:
         the previous sell was still confirming (typically 1-5 s).  BUY
         retries expire after `pending_signal_max_age_seconds`; EXIT retries
         never expire (exits are risk-reducing).
+
+        iter78 adopted cell: a queued BUY is additionally held until
+        `_pending_buy_delay_until` (signal ts + the engine's
+        `v2_entry_delay_seconds`, default 5.0 s) — the live mirror of the
+        backtest's deferred-entry fill (batch iter78_lat5).  The swap then
+        launches at the CURRENT prices, buying the ~5 s micro-dip instead
+        of the signal-state close.
         """
         if self._warming_up:
             return
@@ -3354,6 +3382,23 @@ class LiveTrader:
                     and now >= self._buy_failed_until \
                     and not self.mcap_stop_triggered \
                     and not self.no_motion_stop_triggered:
+                # iter78 adopted cell: hold the queued BUY until the entry
+                # delay elapses on the CANDLE CLOCK (signal time +
+                # `entry_delay_seconds`).  The swap then launches at the
+                # CURRENT prices — the live mirror of the backtester's
+                # deferred fill at t_signal+5 s on the recorded path (batch
+                # iter78_lat5 — RESEARCH_LOG Iter 78).  Candle-time keying
+                # keeps the live-parity replay harnesses deterministic.
+                if t is not None and float(t) < self._pending_buy_delay_until_t:
+                    if not self._delay_hold_logged:
+                        logger.info(
+                            f"[ENTRY DELAY] holding BUY {self._pending_buy_reason} "
+                            f"until candle t>={self._pending_buy_delay_until_t:.0f} "
+                            f"(iter78 deferred-entry cell, "
+                            f"{self._pending_buy_delay_until_t - float(t):.0f}s to go)"
+                        )
+                        self._delay_hold_logged = True
+                    return
                 if now - self._pending_buy_ts > self.pending_signal_max_age_seconds:
                     logger.info(
                         f"[SIGNAL EXPIRY] Dropping stale BUY signal "
@@ -3363,16 +3408,25 @@ class LiveTrader:
                     self._pending_buy = False
                     self._pending_buy_reason = ""
                     self._pending_buy_anchor = None
+                    self._pending_buy_delay_until_t = 0.0
                 else:
                     buy_reason = self._pending_buy_reason
-                    # Engine anchor: the SIGNAL-instant price basis the
-                    # backtester registers for the same state (state close ×
-                    # (1 + engine slippage)).  Captured at queue time so a
-                    # delayed launch (sell still settling) still notifies the
-                    # engine on the identical basis as the backtester.  The
-                    # real on-chain fill overwrites entry_price at
-                    # confirmation.
-                    if self._pending_buy_anchor is not None:
+                    # Engine anchor basis.  Two regimes:
+                    #  • iter78 deferred-entry (the adopted cell): the
+                    #    backtester's latency model notifies the engine at
+                    #    the DEFERRED FILL (t_signal+5 s on the recorded
+                    #    path), so live must anchor on the LAUNCH state's
+                    #    close × (1 + engine slippage) — the signal-time
+                    #    anchor would desynchronise the engine's exit
+                    #    geometry (arm/retrace levels) from the backtest's.
+                    #  • instant launch (pre-iter78 / delay=0): the frozen
+                    #    signal-state anchor, so a launch blocked by guards
+                    #    (sell settling, swap in flight) still notifies on
+                    #    the backtester's instant basis.  The real on-chain
+                    #    fill overwrites entry_price at confirmation.
+                    if self.entry_delay_seconds > 0.0:
+                        fill = sc * (1.0 + self.engine_fill_slippage_pct / 100.0)
+                    elif self._pending_buy_anchor is not None:
                         fill = self._pending_buy_anchor
                     else:
                         fill = sc * (1.0 + self.engine_fill_slippage_pct / 100.0)
@@ -3481,15 +3535,38 @@ class LiveTrader:
                 self._pending_buy = True
                 self._pending_buy_reason = f"buy_{detected_regime}"
                 self._pending_buy_ts = time.time()
+                # iter78 adopted cell: defer the entry execution by
+                # `v2_entry_delay_seconds` (engine knob, default 5.0 s since
+                # the 2026-09-02 adoption) — the live mirror of the
+                # backtester's entry-latency overlay, which buys the
+                # transient micro-dip ~5 s after the signal instead of the
+                # signal-state close (batch `iter78_lat5`: Δ+1.178 SOL,
+                # both eras positive, tail 123→104 — RESEARCH_LOG Iter 78).
+                # The delay is enforced in `_execute_pending_signals` (the
+                # launch is gated on `now >= signal_ts + delay`), so it
+                # composes with the existing retry semantics: a guard that
+                # blocks during the window simply retries at the next state
+                # after the delay elapses, exactly like the backtester's
+                # deferred fill resolving on a later candle.  The engine
+                # anchor is still frozen at the SIGNAL state (the engine
+                # notify basis), while the real on-chain fill at t+5s
+                # overwrites entry_price at confirmation — the same split
+                # the backtest registers (entry_params snapshot at signal,
+                # fill at t+5 s).
+                self._pending_buy_delay_until_t = float(t or 0) + self.entry_delay_seconds
+                self._delay_hold_logged = False
                 # Freeze the engine anchor on the signal state's close so
-                # later retries (blocked launch → post-settle drain) notify
-                # the engine on the same basis the backtester used.
+                # later retries (blocked launch → post-settle drain) notify the
+                # engine on the same basis the backtester used.
                 if sc is not None:
                     self._pending_buy_anchor = sc * (1.0 + self.engine_fill_slippage_pct / 100.0)
                 self._pending_exit = False
-                # Instant execution: fire the buy on THIS state's prices.
-                # Falls through to the pending-retry path if a guard blocks.
-                self._execute_pending_signals(t, so, sh, sl, sc)
+                # Instant execution: fire the buy on THIS state's prices —
+                # unless the iter78 entry delay is armed, in which case the
+                # launch happens on the first executor pass at/after the
+                # delay boundary (next state / boundary / settle drain).
+                if self.entry_delay_seconds <= 0.0:
+                    self._execute_pending_signals(t, so, sh, sl, sc)
 
         elif detected_signal == Signal.EXIT.value and self.current_trade is not None:
             reason = result.get("exit_reason")

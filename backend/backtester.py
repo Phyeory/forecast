@@ -342,6 +342,21 @@ def run_backtest(
         exit_latency_seconds=exit_latency_seconds,
     )
 
+    # iter78 ADOPTION: 5-second deferred-entry execution cell.  The knob
+    # lives on the ENGINE (`v2_entry_delay_seconds`, default 5.0 since the
+    # 2026-09-02 adoption), so bare {} runs the adopted model — the same
+    # engine-keyed injection pattern the iter74d MSM adoption used.  An
+    # EXPLICIT entry_latency_seconds argument (run_iteration
+    # --entry-latency-seconds / the batch kwarg) overrides the engine knob;
+    # `{"v2_entry_delay_seconds": 0.0}` restores the pre-iter78
+    # signal-instant fill byte-exactly.  Only the instant/latency exec
+    # models consume it (ForwardTester.__init__ merges it into
+    # entry_latency_seconds); "legacy" is never altered.
+    if entry_latency_seconds <= 0.0 and exec_model != "legacy":
+        _eng_delay = float(getattr(ft.engine, "v2_entry_delay_seconds", 0.0))
+        if _eng_delay > 0.0:
+            ft.enable_entry_latency(_eng_delay)
+
     # iter74: MSM fleet-regime entry gate — inject the precomputed causal
     # fleet-state lookup whenever the ENGINE has the MSM gate enabled
     # (configuration B is the production DEFAULT since 2026-08-31, so this

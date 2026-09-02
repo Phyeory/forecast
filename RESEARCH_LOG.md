@@ -8592,3 +8592,88 @@ User directive: "for live trader make it so that I can select having multiple en
 - V4: rejected as a strategy; retained as a live/backtest-selectable archetype for future re-gating (it needs ≥40% flushes — a regime that may broaden; re-run the screen when the cohort grows).
 - V6: rejected as a strategy; the bundler-led insider event stream + absorption conditional is RECORDED as the raw-edge channel (A-hold +0.42/+1.08 vs cascade −9) — any future V6 revival must solve the p0-vs-reclaim basis gap (enter at p0 with a cascade stop, rather than at the reclaim) and fill CF at crossing closes.
 - The consistency mandate's remaining door: portfolio-level mechanisms (kill-switch policy lever, fleet-heat throttle) — quantified at iter76 §"the one lever", untested here because no surviving engine existed to merge.
+
+---
+
+## Iter 78 — The Consistency Mandate, Session 2: the tail is the mandate (measured structure + closed surfaces), and the first both-era-positive discovery of the program — the 5-second deferred-entry fill (+1.18 SOL, p=1.4e-4, tail 123→104, neg-days 17→12) — exec-model cell `iter78_lat5`
+
+**Date:** 2026-09-02. Pre-registered in `backend/analysis/iter78_PREREGISTRATION.md` BEFORE any burn; every cheap screen in §1–§4 there was computed on the frozen B′ logs before any engine ran. Mandate (user, verbatim): "as close as possible to a consistent 70%+ win rate and positive PnL every single day."
+
+**Status:** One mechanism cell clears every pre-registered gate — `entry_latency_seconds=5` (buy fills deferred to t_signal+5 s on the recorded intra-candle path; engine untouched). Everything else measured this session is negative/closed, honestly recorded below. **No production default changes were made by the agent** — the winning cell is an EXECUTION-model knob, and flipping the default backtest exec model is a user decision (§5 gives the exact command); the whale-dump exit was re-implemented and shipped default-OFF with parity proof.
+
+### 0. Fresh full-DB B′ baseline (Door 0, `iter78_base_full_1788309622`, 2,127 recs, 0 errors, 459 traded-recording logs)
+
+**1,032 trades / 64.9% WR / +0.9459 SOL / PF 1.12**; era **OLD +1.2122 (68.0%) / DEAD −0.2485 (59.8%) / Mayhem −0.0178**; tail ≤−30% = 123 trades / −5.4358 SOL; **32 trading days, 17 negative, worst −0.1954, day-σ 0.1615**; CS = 8.466 (pre-registered composite). Consistent with `iter77_base_full` (+0.9531) and the frozen-1,525 B′ (+1.3196/66.0%) under the documented instant-fill re-basing + cohort growth — **WR 65–66% and the tail structure are the cross-era invariants.**
+
+### 1. The measured structure of the consistency problem (all from the frozen B′ logs; the load-bearing diagnosis)
+
+* **The tail IS the mandate.** 117 trades ≤−30% carry −5.18 SOL; remove them and negative days collapse **14 → 2** (worst −0.050, Σ +6.50). Nothing else in the day distribution matters by comparison.
+* **The tail is NOT era-conditional.** 74/117 (−3.30 SOL) are OLD-era, 43 (−1.88) DEAD-era; 8 of 14 negative days are OLD-era. Tail mechanisms do not need an era key — the killer of every fleet-keyed rule does not apply here.
+* **The tail is diffuse:** 117 trades on 105 recordings; worst-15 recordings carry only −1.12 of −5.18. No token/session mechanism can amortise it.
+* **Re-confirmations:** 91/117 never reach +5% MFE, 0/117 +15% (entry-selection error, full notional — iter56's finding on B′); ex-ante separation dead on 10+ feature families re-measured this session (pre-60s cascade ret AUC 0.43–0.50, pullback-from-high 0.43–0.48, session age 0.41–0.47, bar_count 0.43–0.47, volume/buy-ratio/mcap/vol-per-mcap 0.38–0.58 era-inconsistent; holder-flow pre-entry sell presence non-discriminating — iter69 P1's winner-bias paradox).
+* **Post-tail re-entry is the engine's own edge:** after a first tail on a recording, remaining same-recording book +0.608 SOL @ 72% WR (110 trades); the 12 second-tails cost only −0.53.
+* **The holder-flow channel is EMPTY on the remaining tail:** the 9 tail trades with a qualifying (≥$100) in-position sell ALL already exited `dev_sell_exit`; the other 108 have zero qualifying in-position sells (dead tapes are quiet).
+* **Per-day WR is binomial-limited** at the day's trade count (n≥40 days sit within ±7 pp of 66% on 15/17 occurrences) — 70%+ daily WR requires removing losing classes (ex-tail WR = 74.8%), not re-weighting days.
+
+### 2. Closed surfaces (cheap CF screens on the frozen B′ logs — tables in the pre-registration §3–§4; do NOT re-test)
+
+1. **Depth-triggered exits at every depth/delay/arm-scope** (crossing-close fills, 1 s tape, 0.0002 round-trip): −20%@60…120 s NET −0.28…−0.41; −30%@60/120 NET −0.33/−0.37; −35%@90 −0.10; −40…−60%@600–900 s young-never-armed NET −0.03…−0.23. The deepest cells are ~costless but save ~nothing — the tape gaps through −50% in one print; the crossing close IS the catastrophic fill. iter07/22/37/46/68/70 bounds re-confirmed and closed at every cell.
+2. **EVR retune upper bound** (delay 60/90/120 × offside 15/20/25, no ratio/veto): NET −0.24…−0.62 even before the ratio/veto constraints (which only make cells worse) — iter70 fable6-1 re-confirmed.
+3. **First-qualifying-sell exits** (whale/verified/any/$250, H=60–600 s): Δ +0.001…+0.012, DEAD ≈ 0 — noise; the visible subset is already harvested.
+4. **Pre-entry sell-block windows** W=120 era-inverted (+0.14 OLD / −0.14 DEAD); W≥300 blocks net winners (+0.66…+1.01).
+5. **Session-run-PnL half-size** (X=0.02/0.03/0.05): Δ −0.04…−0.19, era-inverted at 0.02 — the iter74e/76 sizing closure extends to the run-PnL key.
+6. **Post-tail sizing variants** (all post-tail f=0.5/0.75; one-shot immediate; first-tail-recs-only): Δ −0.31/−0.15/−0.23/+0.017 — the last a 31-trade in-sample island, recorded, not pursued.
+7. **Event-keyed day partitions** (Door 4; K=2/3/4-th tail of day, f=0.5/0.75 on new-recording entries): Δ −0.06…−0.14, era-inverted at K=2, neg-days/worst-day never improved. Day-consistency via throttling is CLOSED.
+8. **Day-kill after first tail** (event-keyed): blocks +1.45 of harvest, day-Σ → −0.13. Same-recording stop after first tail: −0.61.
+
+### 3. Door 3 — V3 newborn re-arm screen: GATE FAIL (no burn)
+
+Candle-faithful CF walk (LAUNCH ≥+20% → DUMP ≥50% retrace + sell-dominance → BOTTOM recovery → ORGANIC gate br≥0.60/30 s/vol≥0.05 SOL/mcap 2–4k; strict ±250%/−30% + 7.5k band exits, crossing-close fills): **armed 5 of 2,119 recordings (0.2%)** — gate demanded ≥5% of DEAD recs. The 5 arms: DEAD 1 (+0.002), Mayhem 4 (−0.075). Newborn-band mcaps essentially do not exist in this DB (recordings start post-graduation at ~$10k+). **Zero-trade verdict is data-availability, not strategy.** Re-gate when newpairs recordings accumulate.
+
+### 4. Door 2 — whale-dump confirmed exit (iter72 re-implementation): mechanism SHIPPED default-OFF; both cells REJECTED
+
+The iter72 engine code was never committed (lost at the 91c7536-era working-tree cleanup; `test_whale_dump.py` pinned its spec). Re-implemented faithfully from the test spec (test = mechanism definition): `_whale_dump_track`/`_whale_dump_fired` in `strategy_engineV2.py` — candle sell print ≥ min_usd (USD via mcap/(close×1e9), no external feed) on a never-armed (peak ≤+5%) trade ≥8% offside at print close, confirmed by price holding ≤ print-close×0.97 for 5 DISTINCT candles (time-keyed counter across the 4-state expansion), exit at the confirming state's close. Knobs in DEFAULT_CONFIG + `app.js`; **default 0.0**.
+
+* **Parity proof:** bare `{}` on the current engine reproduces the pre-edit fresh-baseline batch trade-level byte-equal on recs {2762, 1019, 3814} (entry/exit times, prices, reasons exact; pnl_pct to the log's 4-dp rounding) — the OFF default is a true no-op. `test_whale_dump.py` 10/10 under the iter78 default-OFF contract; MSM/EVR/hf-silence/exec-model/regime-adapt/V4V6 suites 61 green.
+* **Spec cell (min_usd 200, `iter78_wd200`):** 6 fires on 6 recordings, **Δ −0.024** (p=0.62), era-inverted (OLD +0.008 / DEAD −0.032), tail counts unchanged at every band, worst day −0.195→−0.199. REJECTED.
+* **min_usd 100 cell (`iter78_wd100`):** 3 fires, Δ −0.007 (p=1.0), inert. REJECTED.
+* Verdict: iter72's power verdict ("2–3 fires/cohort, statistically unproven") extends to the grown 2,127-rec DB — the mechanism fires ~5× per cohort and its fires lose more than they save (replacement re-entries recoup part). The candle-tape print channel does not rescue the B′ tail: the tail's prints are small/diffuse, and the 6 fires' own books show the iter37 replacement-entry pathology in miniature.
+
+### 5. Door 1 — the exec-latency grid: the session's discovery (**5-second deferred-entry fills**)
+
+**What was run.** iter73's pending "first study" (RESEARCH_LOG Iter 73 §5): buy-fills deferred to t_signal+N s priced on the recorded intra-candle path (`entry_latency_seconds`, engine untouched; 4 pre-registered cells, each a full-DB burn vs the fresh baseline):
+
+| cell | trades | WR | PnL | Δ vs base | OLD Δ | DEAD Δ | Wilcoxon p | CI (10k) | tail≤−30 | neg-days | worst | day-σ |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| base (instant) | 1,032 | 64.9% | +0.9459 | — | — | — | — | — | 123 | 17 | −0.195 | 0.162 |
+| **buy 5 s** | **1,017** | **65.7%** | **+2.1237** | **+1.178** | **+0.646** | **+0.519** | **0.00014** | **[+0.00064,+0.00447]** | **104** | **12** | −0.193 | 0.161 |
+| buy 10 s | 990 | 63.6% | +0.7358 | −0.210 | −0.519 | +0.280 | 0.154 | spans 0 | 106 | 15 | −0.229 | 0.168 |
+| buy 15 s | 995 | 62.9% | +0.9750 | +0.029 | −0.120 | +0.135 | 0.122 | spans 0 | 107 | 15 | −0.239 | 0.153 |
+| 10 s × sell 2.3 s | 992 | 63.0% | +0.9850 | +0.039 | −0.238 | +0.290 | 0.104 | spans 0 | 109 | 17 | −0.226 | 0.169 | |
+
+**Gates (pre-registered): the 5 s cell passes ALL of them** — PnL ≥ base−0.05 ✓ (+1.18), both-era Δ ≥ 0 ✓ (OLD +0.65 / DEAD +0.52), tail ≤−30% strictly reduced ✓ (123→104, and every softer band down: 239→221/216→191/188→170), Wilcoxon one-sided p < 0.05 ✓ (1.4e-4), bootstrap CI strictly positive ✓, breadth ≥50% among changed ✓ (252/442 = 57%), negative days strictly reduced ✓ (17→12), day-σ ≤ base ✓ (0.161), no era inversion ✓, Mayhem segment not degraded ✓ (+0.013).
+
+**Robustness (beyond the gates):** temporal split-half stable (first-half Δ +0.68 / second-half +0.49 by recording-start order); per-recording MEDIAN Δ positive (+0.00048); 10%-trimmed mean +0.0019 (not an outlier artifact); 251/459 recordings improved.
+
+**Mechanism (measured, not conjectured).** Matched-trade fill-basis audit (978 one-to-one ±6 s pairs): the 5 s fill lands a **mean −0.38% below** the signal-state close (45% of fills below it), and **−6.2% below on eventual-tail trades**. The 10 s fill lands **+0.56% ABOVE** (the micro-dip has already bounced) — the surface is non-monotone because the memecoin 1 s tape prints dump→~5 s dip→bounce: **5 s buys the transient dip; 10 s chases the bounce.** Exit-reason migration on changed recordings: base `kelly_flat`/`recording_ended` loser rides become `gain_retrace`/`breakeven_scratch`/`rate_split_flip` exits (+0.63/0.55/0.05 SOL books) — entries filled lower re-arm (+10%) during the bounce and harvest the recovery instead of riding the flat to −40…−80%. This is the iter77 "different basis, different outcome" effect at portfolio scale, on the SAME signals — the user's "the physics should remain working, just differently" made literal: the physics (signal + exit geometry) is unchanged; only the fill basis moves, and it moves into the band where the exit stack's arm threshold catches the recovery.
+
+**Honest caveats.** (i) rec2935 reproduces iter73's negative spot-check locally (+0.0430 → +0.0238) — the effect is portfolio-broad, not universal; individual sessions lose. (ii) The 5 s optimum is measured on 1 s bars with ±8% intra-5 s dispersion; live fill timing (Jupiter routing, priority fees, RPC) does not guarantee the same dip harvest — this is a BACKTEST exec model, and its live analogue would be "delay swap submission ~5 s after signal", an execution-policy change (see §6). (iii) The grid brackets 5/10/15 — 3 s and 7 s cells were not burned; the peak's sharpness (both neighbors era-inverted) is itself a fragility disclosure. (iv) In-sample cell selection caveat (iter57 §5): mitigated by split-half stability, both-era positivity, and the rank-based Wilcoxon.
+
+### 6. Disposition / escape hatches
+
+**ADOPTION (user decision 2026-09-02, same session): `v2_entry_delay_seconds = 5.0` is the production default.** Implemented as a first-class engine knob (the 78-iteration program's first adopted EXECUTION-model default — the engine's decisions, exits, and sizing are untouched; only entry FILL TIMING moved):
+
+- `strategy_engineV2.py` — `v2_entry_delay_seconds` in `DEFAULT_CONFIG` (5.0) + adapter ctor pop; escape hatch `{"v2_entry_delay_seconds": 0.0}` restores the pre-iter78 signal-instant fill byte-exactly.
+- `backtester.py` — engine-keyed injection (the iter74d MSM pattern): `run_backtest` reads the ENGINE's knob and calls the new `ForwardTester.enable_entry_latency(5.0)`, so **bare-{} backtests run the adopted model**; an explicit `entry_latency_seconds` argument still overrides. Verified BOTH directions trade-level byte-equal on recs {2762, 1019, 3814}: bare-{} reproduces the adopted `iter78_lat5` batch; explicit 0.0 reproduces the `iter78_base_full` instant batch.
+- `live_trader.py` — the pending-BUY executor holds the queued signal on the CANDLE CLOCK until `t_signal + entry_delay_seconds` (candle-time keying keeps parity harnesses deterministic; live 1 s candles are wall-aligned so production semantics are wall-clock-identical), then launches the swap at the then-current state prices — the live mirror of the backtest's deferred path fill. The engine notify anchors on the LAUNCH state's close × (1+slippage) under the delay regime (matching the BT's notify-at-deferred-fill basis; the frozen signal anchor remains for guard-blocked retries in instant mode). A `[ENTRY DELAY]` hold line logs per held signal.
+- `frontend/js/app.js` + `index.html` — knob + hints mirrored, cache-buster v126.
+- `analysis/test_live_parity.py` — rewritten as a TWO-CONTRACT test: **Contract A (escape hatch): `v2_entry_delay_seconds=0.0` → EXACT decision parity** (the iter73 byte-level contract, 10/10); **Contract B (adopted default): 5.0 → window parity** (same trade count, entries within delay+1 state; exit-reason sequences can differ where the deferred entry clock shifts an age-clocked exit across a boundary — measured on rec2941: trade-2 `evr_triage` vs `gain_retrace` from a one-state entry offset in the one-tick-per-candle harness; recorded, not asserted). 10/10 green.
+- Suites: full run **145 passed / 12 failed** — identical to the pre-adoption baseline (the 12 = the documented pre-existing mcap_floor 11 + whale_stream_wiring 1; nothing new fails).
+- **Restart `main.py` after deploy** (pool workers + live sessions must reload the engine defaults); expect the `[ENTRY DELAY]` hold log on every live entry.
+* **Whale-dump exit shipped default-OFF** (`v2_whale_dump_exit_enable=0.0` + 5 params in DEFAULT_CONFIG + `app.js`; escape hatch = the same knobs; bare-{} parity proven). Restart `main.py` after deploy.
+* `run_iteration.py` gained `--entry/exit-latency-seconds` (additive, default 0.0 = byte-identical).
+* Re-gate markers: (a) lat grid around the peak (3/7 s) if the cohort grows; (b) whale-dump when ≥30 more fires would exist; (c) V3 when newpairs recordings accumulate.
+
+* **lat10×sell2.3 cell verdict:** Δ +0.039 (p=0.10, CI spans 0), era-inverted (OLD −0.238 / DEAD +0.290), WR −1.9 pp, tail ≤−30% 123→109 only via the DEAD era, worst day −0.226. REJECTED — the measured live sell-latency (2.3 s) does not rescue the 10 s buy cell; the 5 s buy cell stands alone as the grid's only gate-clearing configuration.
+
+**Artifacts:** `analysis/iter78_PREREGISTRATION.md` (written before any burn), `analysis/iter78_score.py` (paired/CS scorer), batches `iter78_base_full_1788309622` / `iter78_wd200_1788313144` / `iter78_wd100_1788317470` / `iter78_lat5_1788322150` / `iter78_lat10_1788326838` / `iter78_lat15_1788330569` (+ lat10s23 below) under `backend/v2_results/`, aggregates under `backend/analysis/`, run logs `iter78_*_run.log`. Tests: `analysis/test_whale_dump.py` 10/10 (iter78 contract), regression suites green (61), full-suite pre-existing failures unchanged (mcap_floor 11 / whale_dump 0 — now passing / whale_stream 1).
