@@ -490,6 +490,33 @@ class LiveTrader:
         self._pending_buy_delay_until_t: float = 0.0
         # One-shot log flag for the current held BUY (reset per signal).
         self._delay_hold_logged: bool = False
+        # ── iter80: deferred-EXIT execution (the sell-side basis) ──────────
+        # Read off the ENGINE's knobs (`v2_exit_delay_seconds` /
+        # `v2_exit_delay_armed_only`, defaults 0.0 = OFF = pre-iter80
+        # signal-instant exit launch).  When armed, a queued EXIT whose
+        # reason is in the armed/harvest set is held until
+        # `signal_ts + exit_delay_seconds` on the CANDLE CLOCK (the same
+        # keying as the entry delay), then the swap launches at the
+        # then-current prices — the live mirror of the backtester's
+        # exit-latency overlay (iter80 cells; the recorded path is +8.95%
+        # above armed exit fills in the 30s median — the give-back harvest
+        # fires at the bottom of its own micro-dip).  The LOSS book
+        # (kelly_flat / evr_triage / kramers_down_exit / dev_sell_exit /
+        # recording_ended) always launches instantly: its forward drift is
+        # NEGATIVE (E[Δp30] = −0.25%), deferral is poison there.  The
+        # engine notify (notify_trade_closed) moves WITH the launch — under
+        # deferral the backtester's latency model closes the trade at the
+        # deferred fill, so live must anchor the exit geometry the same way.
+        self.exit_delay_seconds: float = float(getattr(
+            self.engine, "v2_exit_delay_seconds", 0.0))
+        self.exit_delay_armed_only: bool = float(getattr(
+            self.engine, "v2_exit_delay_armed_only", 0.0)) > 0.0
+        self._ARMED_EXIT_REASONS = frozenset({
+            "gain_retrace", "rate_split_flip:armed", "tp_v2",
+            "breakeven_scratch", "reversal_exit",
+        })
+        self._pending_exit_delay_until_t: float = 0.0
+        self._exit_delay_hold_logged: bool = False
         # Engine anchor captured at SIGNAL time (signal-state close × (1 +
         # engine slippage)) so a BUY that retries after a blocked launch
         # still notifies the engine on the same price basis the backtester's
@@ -3461,6 +3488,23 @@ class LiveTrader:
 
         elif self._pending_exit and self.current_trade is not None \
                 and not self._swap_in_flight:
+            # iter80 deferred-exit hold: an armed exit whose delay boundary
+            # has not passed stays pending (exits never expire) until the
+            # candle clock reaches signal_ts + exit_delay_seconds.  The
+            # notify + swap launch move together — matching the backtester's
+            # latency model, which closes the trade at the deferred fill.
+            if self._pending_exit_delay_until_t > 0.0 and t is not None \
+                    and float(t) < self._pending_exit_delay_until_t:
+                if not self._exit_delay_hold_logged:
+                    logger.info(
+                        f"[EXIT DELAY] holding EXIT {self._pending_exit_reason} "
+                        f"until candle t>={self._pending_exit_delay_until_t:.0f} "
+                        f"(iter80 deferred-exit cell, "
+                        f"{self._pending_exit_delay_until_t - float(t):.0f}s to go)"
+                    )
+                    self._exit_delay_hold_logged = True
+                return
+            self._pending_exit_delay_until_t = 0.0
             exit_reason = self._pending_exit_reason
             self.current_trade.status = "closing"
             self.current_trade.exit_reason = exit_reason
@@ -3584,6 +3628,15 @@ class LiveTrader:
             self._pending_exit_reason = reason
             self._pending_buy = False
             self._pending_buy_anchor = None
+            # iter80: arm the deferred-exit hold boundary for armed/harvest
+            # reasons (loss-book reasons launch instantly either way).
+            if self.exit_delay_seconds > 0.0 and (
+                    not self.exit_delay_armed_only
+                    or reason in self._ARMED_EXIT_REASONS):
+                self._pending_exit_delay_until_t = float(t or 0) + self.exit_delay_seconds
+                self._exit_delay_hold_logged = False
+            else:
+                self._pending_exit_delay_until_t = 0.0
             # Instant execution: fire the sell on THIS state's prices.
             self._execute_pending_signals(t, so, sh, sl, sc)
 

@@ -268,6 +268,64 @@ DEFAULT_CONFIG = {
     # decision, exit, or size — only the execution timing of entries.
     "v2_entry_delay_seconds": 5.0,   # 0.0 = instant fill (pre-iter78); 5.0 = adopted cell
 
+    # ── iter80 ADOPTION: 20-second deferred-exit execution (armed-only) ────
+    # (user decision 2026-09-03; the sell-side mirror of the iter78 entry
+    # delay — RESEARCH_LOG.md Iter 80).  Ground truth on the frozen lat5
+    # book: after ARMED exit fires the recorded path is +8.95% above the
+    # fill in the 30s median (share ≥+2% = 68%) — the give-back harvest
+    # fires at the bottom of its own micro-dip; UNARMED exits average
+    # E[Δp30] = −0.25% so deferral is RESTRICTED to the armed/harvest exit
+    # classes (gain_retrace / rate_split_flip:armed / tp_v2 /
+    # breakeven_scratch / reversal_exit); the loss book (kelly_flat,
+    # evr_triage, kramers_down_exit, dev_sell_exit, recording_ended) fills
+    # at the signal instant exactly as before.  The full-DB cell
+    # `iter80_xa20` (1,003 trades / 61.8% WR / +3.1873 SOL / PF 1.41 vs
+    # base +2.1469 / 65.6% / 1.29): Δ+1.0405, Wilcoxon p=0.0038, CI
+    # [+0.00073,+0.00380], BOTH eras positive (OLD +0.59 / DEAD +0.51),
+    # expectancy/trade +48% (+0.00208→+0.00318), negative days 12→11,
+    # worst day −0.193→−0.129.  The uniform x15 cell (loss book deferred)
+    # was REJECTED (p=0.34; tail 105→118) — do NOT defer the loss book.
+    # Trade-count drops 1,032→1,003 (deferred closes push same-recording
+    # re-entry windows past their signal; the lost re-entries were net
+    # −0.155 SOL).  Escape hatch: `{"v2_exit_delay_seconds": 0.0}` restores
+    # the pre-iter80 signal-instant exit fill byte-exactly.
+    # Consumption: the pipelines read these knobs off the ENGINE and defer
+    # the EXIT FILL by N seconds — backtester.py keys ForwardTester
+    # enable_exit_latency(L, armed_only) on them; live_trader.py holds the
+    # queued armed EXIT on the candle clock then launches the sell.  The
+    # exit DECISIONS are untouched — only the fill timing of armed exits.
+    "v2_exit_delay_seconds":     20.0,  # 0.0 = instant exit fill (pre-iter80); 20.0 = adopted cell
+    "v2_exit_delay_armed_only":   1.0,  # 1.0 = defer armed/harvest classes only (ADOPTED)
+
+    # ── iter81 (prompt-labelled iter80): Kramers open-precipice boundary ──
+    # correction + Asymmetric Offside Escape (AOE).  See
+    # `backend/analysis/iter81_APOE_PREREGISTRATION.md` (the `iter80_*`
+    # label was already taken by the deferred-exit-fill cell, so this work
+    # is filed as iter81 with zero semantic change to the prompt spec).
+    # Both mechanisms are default-OFF and parity-preserving: bare `{}` is
+    # byte-identical to the current production defaults.
+    #  Mechanism A (precipice): when the left-barrier search clamps at the
+    #   grid edge (idx_down == 0) the "barrier" is a finite-KDE-window
+    #   artifact (rho -> 1e-12 floor => dU ~= 27.6*T), not a genuine
+    #   interior potential peak.  A particle sliding off the edge of support
+    #   falls down an OPEN precipice (dU <= 0), limited only by viscous
+    #   friction gamma = 1/L_t.  When `v2_precipice_correction_enable > 0`,
+    #   a positive clamped du_down is reset to 0 and the down-barrier
+    #   curvature to the basin curvature (k_down = omega0/(2*pi*gamma)),
+    #   restoring a finite P_down where the flaw forced P_down == 0.
+    #  Mechanism B (AOE): exit #6b in `_check_exit_v2` for unconfirmed
+    #   offside trades under sustained downward Kramers dominance —
+    #   `c <= entry*(1-offside/100)`, peak < arm% AND < max_peak%, and
+    #   (stationary split s = kd/(ku+kd) >= theta OR P_up <= p_up_max) for
+    #   `persist` consecutive 4-state ticks => `"aoe_exit"`.
+    "v2_precipice_correction_enable": 0.0,  # 0.0 = OFF (parity default)
+    "v2_aoe_enable":                  0.0,  # 0.0 = OFF (parity default)
+    "v2_aoe_offside_pct":            25.0,  # drawdown threshold (%)
+    "v2_aoe_theta":                  0.65,  # stationary downward split threshold
+    "v2_aoe_p_up_max":               0.10,  # max upward escape prob allowed
+    "v2_aoe_persist":                  16,  # consecutive 4-state ticks (~4 s)
+    "v2_aoe_max_peak_pct":            5.0,  # suppression if trade peaked above
+
 
 
     # ── iter74 MSM fleet-regime entry gate — PRODUCTION configuration B ──
@@ -2123,6 +2181,29 @@ def _kramers_escape_and_decision(
          grid, U, potential.last_rho, x_t,
      )
 
+    # ── iter81 Mechanism A: open-precipice boundary correction ─────────
+    # When the left-barrier search clamps at the grid edge (idx_down == 0)
+    # the "barrier" is a finite-KDE-window artifact, not a genuine interior
+    # potential peak: rho has decayed monotonically to the 1e-12 numerical
+    # floor, so dU_down = -T*ln(rho_min/rho(x_t)) ~= 27.6*T — an artificial
+    # wall forcing k_down -> 0 and P_down == 0.  Physically the particle is
+    # sliding off the edge of support (open precipice, dU <= 0) where escape
+    # is limited only by viscous friction gamma = 1/L_t.  When enabled, a
+    # positive clamped du is reset to 0 and the down-barrier curvature to
+    # the basin curvature, giving k_down = omega0/(2*pi*gamma).  Default
+    # OFF (0.0) => this block is a no-op => byte-exact parity.  A genuinely
+    # downhill edge (U_down <= U_basin) is left untouched — its escape rate
+    # is already large without correction.
+    if float(cfg.get("v2_precipice_correction_enable", 0.0) or 0.0) > 0.0:
+        try:
+            _is_edge_clamp = (int(idx_down) == 0)
+        except Exception:
+            _is_edge_clamp = False
+        if _is_edge_clamp and (float(U_down) - float(U_basin)) > 0.0:
+            U_down = float(U_basin)  # du_down = 0 (open precipice)
+            _om0 = float(omega0_sq)
+            omega_b_down = _om0 if _om0 > 0.0 else 1e-6
+
     # Barrier energies — KDE-native (iter16e):
     #   ΔU±_t = U(x±_t) - U(x_t)  =  -T_t · [ln ρ(x±) - ln ρ(x_t)]
     #
@@ -3029,6 +3110,26 @@ class StrategyEngineV2Adapter:
         # pure execution timing, applied by ForwardTester (backtest) and
         # LiveTrader (live).  0.0 restores the signal-instant fill.
         self.v2_entry_delay_seconds = float(engine_kwargs.pop("v2_entry_delay_seconds", 5.0))
+        # ── iter80 ADOPTED: deferred exit-fill execution (armed-only 20s) ──
+        # Popped here so every pipeline can read the knobs off the engine
+        # object (the backtester keys its ForwardTester
+        # exit_latency_seconds on the ENGINE's knobs — same injection
+        # pattern as the iter78 entry-delay adoption).  The engine itself
+        # never consumes this value: it is pure execution timing, applied
+        # by ForwardTester (backtest) and LiveTrader (live).  Measured
+        # ground truth (RESEARCH_LOG.md Iter 80): after ARMED exit fires
+        # the recorded path is +8.95% above the fill in the 30s median —
+        # the give-back harvest fires at the bottom of its own micro-dip;
+        # UNARMED exits average −0.25%/30s so deferral must be asymmetric
+        # (armed_only=1.0).  Defaults = the ADOPTED xa20 cell (user
+        # decision 2026-09-03); 0.0 = instant exit fill (the pre-iter80
+        # model, byte-exact escape hatch).
+        self.v2_exit_delay_seconds = float(engine_kwargs.pop("v2_exit_delay_seconds", 20.0))
+        # 1.0: defer only the armed/harvest exit classes (gain_retrace,
+        # rate_split_flip:armed, tp_v2, breakeven_scratch, reversal_exit);
+        # the loss book (kelly_flat, evr_triage, kramers_down_exit,
+        # dev_sell_exit, recording_ended) fills at the signal instant.
+        self.v2_exit_delay_armed_only = float(engine_kwargs.pop("v2_exit_delay_armed_only", 1.0))
         # ── iter63/64: stationary Kramers rate-split early exit ─────────
         # ("rate_split_flip").  The production kramers_down_exit (#5) asks
         #   P_down(τ) = (k_d/k)(1−e^{−kτ}) ≥ 0.5
@@ -3062,6 +3163,20 @@ class StrategyEngineV2Adapter:
             "v2_rate_split_min_peak_age_ticks", 0))
         self._rate_split_streak = 0
         self._last_peak_tick = 0
+        # ── iter81 (prompt-labelled iter80): Asymmetric Offside Escape ──
+        # Exit #6b in `_check_exit_v2` (between `bayesian_flip` and
+        # `kelly_flat`): unconfirmed offside trades under sustained
+        # downward Kramers dominance => `"aoe_exit"`.  All defaults are
+        # the prompt spec values; `v2_aoe_enable=0.0` = OFF => the exit
+        # branch is never entered and `_aoe_streak` is never mutated =>
+        # byte-exact parity with current production defaults.
+        self._v2_aoe_enable       = float(engine_kwargs.pop("v2_aoe_enable", 0.0))
+        self._v2_aoe_offside_pct  = float(engine_kwargs.pop("v2_aoe_offside_pct", 25.0))
+        self._v2_aoe_theta        = float(engine_kwargs.pop("v2_aoe_theta", 0.65))
+        self._v2_aoe_p_up_max     = float(engine_kwargs.pop("v2_aoe_p_up_max", 0.10))
+        self._v2_aoe_persist      = int(engine_kwargs.pop("v2_aoe_persist", 16))
+        self._v2_aoe_max_peak_pct = float(engine_kwargs.pop("v2_aoe_max_peak_pct", 5.0))
+        self._aoe_streak = 0
         # ── iter74 Markov-switching fleet-regime ENTRY gate ──────────────
         # A 3-state Gaussian HMM over REALTIME fleet observables (5-min
         # cross-token bins: med/p25 returns, buy_share, flow, pump/dump
@@ -3345,6 +3460,7 @@ class StrategyEngineV2Adapter:
         # iter50: per-trade EVR concentration veto latch reset.
         self._evr_conc_vetoed = False
         self._rate_split_streak = 0  # iter63: fresh evidence per trade
+        self._aoe_streak = 0  # iter81: fresh evidence per trade
         self._last_peak_tick = self.bar_count  # iter63: entry is the initial peak
         # Seed EMA from the current posterior mu so the window starts calibrated.
         _cur_mu = getattr(self, '_mu_post_ema', 0.0)  # keep current EMA value
@@ -3361,6 +3477,7 @@ class StrategyEngineV2Adapter:
         self._mu_post_neg_count = 0
         self._no_long_streak = 0  # iter21: reset on close
         self._rate_split_streak = 0  # iter63: reset on close
+        self._aoe_streak = 0  # iter81: reset on close
 
     def _update_peak_price(self, h: float, l: float):
         if not self.in_position:
@@ -3967,6 +4084,53 @@ class StrategyEngineV2Adapter:
             if decision.get("direction", 0) != 1 and decision.get("E_star", -1.0) > 0:
                 self.exit_signal_reason = "bayesian_flip"
                 return _V1Signal.EXIT
+            # 6b. iter81 Asymmetric Offside Escape ("aoe_exit").
+            #    For trades that FAILED to confirm upward momentum: offside
+            #    at `v2_aoe_offside_pct` (default 25%), never armed
+            #    (peak < gain_retrace_arm_pct AND < v2_aoe_max_peak_pct,
+            #    default 5%), under sustained downward Kramers dominance —
+            #    stationary split s = kd/(ku+kd) >= theta (default 0.65) OR
+            #    P_up <= p_up_max (default 0.10) — for `v2_aoe_persist`
+            #    consecutive 4-state ticks (~4 s at K=16).  Recovering
+            #    winners pull back -15..-20% but rarely sit below -25%
+            #    unconfirmed; severe bleeders submerge deeply with kup -> 0.
+            #    Placed AFTER the Bayesian majority exits (#5/#6) so it never
+            #    steals their attribution, and BEFORE `kelly_flat` (#7) so it
+            #    pre-empts the 60-tick bleed ride.  Default OFF (enable 0.0
+            #    or persist <= 0 => branch never entered, streak untouched).
+            if (self._v2_aoe_enable > 0.0 and self._v2_aoe_persist > 0
+                    and entry > 0):
+                _aoe_peak = float(self._peak_price or 0.0)
+                _aoe_peak_gain_pct = (
+                    (_aoe_peak / entry - 1.0) * 100.0 if _aoe_peak > 0.0
+                    else -100.0)
+                _aoe_offside = (
+                    c <= entry * (1.0 - self._v2_aoe_offside_pct / 100.0))
+                _aoe_unconfirmed = (
+                    _aoe_peak_gain_pct < float(self._gain_retrace_arm_pct)
+                    and _aoe_peak_gain_pct < self._v2_aoe_max_peak_pct)
+                if _aoe_offside and _aoe_unconfirmed:
+                    _aoe_ku = float(decision.get("k_up", 0.0) or 0.0)
+                    _aoe_kd = float(decision.get("k_down", 0.0) or 0.0)
+                    _aoe_kt = _aoe_ku + _aoe_kd
+                    _aoe_split = (_aoe_kd / _aoe_kt) if _aoe_kt > 0.0 else 0.0
+                    _aoe_has_k = (
+                        "k_up" in decision and "k_down" in decision
+                        and _aoe_kt > 0.0)
+                    _aoe_has_p = ("P_up" in decision)
+                    _aoe_p_up = float(decision.get("P_up", 1.0) or 0.0)
+                    _aoe_dom = (
+                        (_aoe_has_k and _aoe_split >= self._v2_aoe_theta)
+                        or (_aoe_has_p and _aoe_p_up <= self._v2_aoe_p_up_max))
+                    if _aoe_dom:
+                        self._aoe_streak += 1
+                    else:
+                        self._aoe_streak = 0
+                else:
+                    self._aoe_streak = 0
+                if self._aoe_streak >= self._v2_aoe_persist:
+                    self.exit_signal_reason = "aoe_exit"
+                    return _V1Signal.EXIT
             # 7. iter21 sustained-no-long-Kelly exit ("kelly_flat").
             #    Bayesian decision theory: while in position, the engine's
             #    own per-tick Kelly utility for "continue holding long" is

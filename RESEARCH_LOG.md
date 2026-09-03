@@ -8689,3 +8689,193 @@ The iter72 engine code was never committed (lost at the 91c7536-era working-tree
 **Tests:** deleted `test_whale_dump.py` / `test_hf_silence.py` / `test_global_regime_cache.py`; `test_regime_adapt.py` → `analysis/test_rate_split.py` (6/6: ungated contract + surgical-removal assertions for every removed Q attr/method); `test_iter74_msm.py` s2 section stripped (9/9); `test_iter63_rate_split.py` stale gate assertion dropped (7/7). Suite: **119 passed / 12 failed** — identical pre-existing set (mcap_floor 11 + whale_stream_wiring 1).
 
 **Parity AFTER surgery:** bare {} reproduces the pre-surgery snapshot byte-exact on all 4 probe recordings (times/prices/reasons/pnl≤1e-5). `main.py` imports clean. `app.js`: 44 dead entries/hints/labels/comments removed, cache v=127, `node --check` OK. Restart `main.py` after deploy. **No production behavior change — this was a pure code-debt removal under the byte-parity contract.**
+
+## Iter 79 — Stagnation-Posterior Exit (SPE): P_zero as a primary exit trigger — REJECTED at Phase-1/Phase-2 with a structural mechanism autopsy (P_zero is the NORM on 1s tapes, not a dead-token signature); shipped default-OFF; P_zero-threshold exits join the graveyard
+
+**Date:** 2026-09-02/03. Pre-registered in `analysis/iter79_PREREGISTRATION.md` (Phase-0 numbers written before any engine batch). Baseline: the adopted `iter78_lat5` production batch (1,017 trades / 65.7% WR / +2.1237 SOL / PF 1.293 / tail≤−30% = 104).
+
+**Hypothesis (user brief):** the Kramers CTMC's no-escape probability `P_zero = exp(−k_total·τ)` rises toward 1 when order flow dries mid-dump (k_up, k_down → 0; featureless KDE) — a "Bayesian stagnation" signature of dead/dying tokens. Exit a sustained-stagnant (P_zero ≥ threshold for K consecutive 4-state ticks), offside (≥X% under entry), un-armed trade — pre-empting `kelly_flat` (65 trades / 100% loss / −2.81 SOL) and `recording_ended` (74 / −1.54 SOL). NOT a price-level trigger (the dd-exit master table's closed surface — keyed on market activity, the same posterior that drives entries).
+
+**Implementation (shipped, default-OFF, parity-proven):**
+- `strategy_engineV2.py`: 6 knobs in `DEFAULT_CONFIG` (`v2_spe_enable` = **0.0** default; `v2_spe_p_zero_min` 0.85; `v2_spe_persist` 20; `v2_spe_offside_pct` 10.0; `v2_spe_arm_peak_pct` 0.0; `v2_spe_block_if_armed` 1.0), adapter ctor pops, streak update in `update()` (enable-gated; reads the CURRENT tick's decision BEFORE `_check_exit_v2` consumes it), resets in `notify_trade_opened/closed`, exit branch positioned BETWEEN `breakeven_scratch` (2c) and `rate_split_flip` (2d). Exit reason `"spe_exit"`. The two arm-suppressions (arm_peak_pct + block_if_armed reading the gain_retrace arm threshold) keep armed winners with the harvest stack.
+- `frontend/js/app.js` + `index.html` mirrored, cache-buster v128.
+- **Parity:** bare `{}` reproduces `iter78_lat5` trade-level byte-equal on recs {2762 (14 trades), 1019 (2), 3814 (1)} — `analysis/iter79_parity.py`. Tests `analysis/test_spe.py` **10/10**; full analysis suite 133 passed / 18 failed (the 18 = mcap_floor 11 + sodt_wccb 6 + whale_stream 1 — verified byte-identically pre-existing by temporarily restoring the pristine HEAD engine).
+
+### Phase 0 — tick-capture counterfactual (no engine burn)
+
+Tick-capture (`analysis/iter79_capture.py`) re-ran the 202-recording target cohort (99 loser-recs + 130 winner-recs from `iter78_lat5`) with the engine's write-only `v2_debug_tick_log` hook: **235,468 in-position ticks** carrying the full Kramers geometry. CF (`analysis/iter79_cf.py`) replays each baseline trade's ticks, fires SPE at the first qualifying tick, fills at that tick's close, infers round-trip costs from the realised trade.
+
+- **Analysis-bug disclosure:** the first CF pass read tick index 10 as P_zero — that field is `P_down`; P_zero is index 11. All published numbers use the corrected index (verified via the identity exp(−k_total·τ) = P_zero on every tick).
+- **Load-bearing mechanism finding: P_zero is the NORM, not the exception.** P_zero ≥ 0.85 on **85.6% of ALL in-position ticks** (median 0.979); on offside ticks (c ≤ entry·0.9) 80.9% ≥ 0.85. WHY: k_total is tiny on 1 s tapes (p50 0.0043/s) so even τ=5 s leaves P_zero = exp(−0.0043·5) ≈ 0.98; the engine's E_star-maximising τ-sweep selects τ=5 on 85% of bleed ticks. The hypothesised "stagnation signature" provides essentially ZERO discrimination by itself — the burden falls entirely on the persist/offside gates, and the winner/loser cut ratio is decided by transient-dip geometry, not by stagnation.
+- CF ratio (tail saves / winner cuts): brief spec cells A (0.85/20/10%) 0.84, B (0.90/15/15%) 1.18, C (0.80/30/10%) 0.87 — ALL below the 1.5 gate. Box scan (81 cells) peaks at 2.52 in a 14-fire island (0.99/80/25%); best NET region pz≥0.90/offside≥20% ratio 1.6–1.9. The arm-block does NOT rescue the spec cells: the CF-cut winners were NEVER armed (94/94 peaked < +10% — +3–18% scratches whose transient dips cross the stagnation gate before recovering). Gate (>1.5) cleared only in the deep-offside region → GO, with the Phase-2 neighbourhood pre-registered BEFORE any burn: (0.90/20/20), (0.90/30/20), (0.90/40/20), (0.95/30/20), (0.90/30/25).
+
+### Phase 1 — 3-cell screen (real engine, 202-recording cohort, `iter79scr_A/B/C`)
+
+| cell | trades | WR | PnL | Δ PnL | spe_exit book | tail≤−30% |
+|---|---|---|---|---|---|---|
+| A (0.85/20/10%) | 600→683 | 66.2→49.8% | +2.177→+1.686 | **−0.491** | n=269, WR 0%, −3.999 | 92→17 |
+| B (0.90/15/15%) | 600→674 | 66.2→54.6% | +2.177→+2.241 | **+0.064** | n=223, WR 0%, −4.041 | 92→18 |
+| C (0.80/30/10%) | 600→679 | 66.2→50.4% | +2.177→+1.779 | **−0.398** | n=260, WR 0%, −4.006 | 92→24 |
+
+Cell B is the only PnL-positive cell → Phase 2 proceeds per the brief. The tail extermination is real (92→17/18/24 on the cohort) but the mechanism pays for it by cutting 12–23 winner-class exits and converting them into 0%-WR `spe_exit` losses; replacement churn adds +74–83 trades (the iter37 pathology, measured live).
+
+### Phase 2 — 5-cell full-DB sweep (2,127-recording DB, pre-registered cells, `iter79sw_*`)
+
+| cell (pz/K/off%) | Δ PnL | WR | Wilcoxon p | CI-lo | breadth | spe n / Σ | OLD Δ | DEAD Δ | Mayhem Δ |
+|---|---|---|---|---|---|---|---|---|---|
+| p20 (0.90/20/20) | **−0.435** | 59.5% | 0.883 | −0.00226 | 85/171 (49.7%) | 231 / −5.562 | −0.445 | +0.011 | −0.001 |
+| p30 (0.90/30/20) | **−0.379** | 59.9% | 0.890 | −0.00206 | 78/163 (47.9%) | 221 / −5.320 | −0.368 | −0.014 | +0.004 |
+| p40 (0.90/40/20) | **−0.407** | 59.9% | 0.908 | −0.00211 | 77/156 (49.4%) | 210 / −4.981 | −0.371 | −0.040 | +0.003 |
+| z95 (0.95/30/20) | **−0.245** | 61.0% | 0.768 | −0.00177 | 74/143 (51.7%) | 172 / −4.235 | −0.193 | −0.050 | −0.002 |
+| o25 (0.90/30/25) | **−0.043** | 62.5% | 0.456 | −0.00116 | 71/131 (54.2%) | 158 / −4.596 | −0.145 | +0.103 | −0.002 |
+
+**ALL FIVE CELLS FAIL the acceptance battery** — every cell is PnL-NEGITIVE (Δ −0.04…−0.44), Wilcoxon p 0.46–0.91, CI spans/negative, and era-inverted (OLD-era pays the cost, DEAD-era ≈flat-to-positive: the pre-registered "both eras positive" gate fails on every cell). Tail ≤−30% drops 65→22–40 (OLD) but at −3.2pp WR and a 0%-WR `spe_exit` book (−4.2…−5.6 SOL per cell; pnl_pct median −22 to −28%). Exit-reason migration (all cells): `kelly_flat` 65→0–10 (Σ −2.81 → ~0) but `spe_exit` inherits −5.0…−5.6 SOL — the mechanism does NOT remove the bleed, it RELABELS it at a slightly-less-bad fill, while cutting `breakeven_scratch` (57→12–18, a +0.16 SOL winner book), `evr_triage` (41→11–27), and trading-churn costs (+70–80 trades vs baseline).
+
+**Why the CF's promise inverted in the engine.** The Phase-0 CF scored ONLY the first-cut trade per baseline trade with no replacement dynamics: it priced the tail saves (+2.1–2.6 SOL equivalent) at the fire-tick close and the winner cuts at the same trades' baselines. The engine run shows the two things the CF could not see, both now measured: (1) **replacement churn** — freed capital re-enters the same recordings (+78 trades on 463 recs) and the re-entries' book is negative at the margin (the iter37 bound re-confirmed a twelfth time); (2) **the cut-winner class is real, not CF noise** — the `breakeven_scratch` book (+0.16 SOL, 57 trades) is precisely the transient-dip-then-recover population the CF's per-trade view under-weighted, and SPE converts it into −20% avg losses.
+
+### Verdict & production state
+
+**REJECTED — no production default change. `v2_spe_enable` stays 0.0.** The mechanism ships default-OFF with bare-{} parity proven (the code is retained this session — it is enable-gated at both the streak update and the exit branch, OFF = byte-identical, and the knobs document the surface). Escape hatch: `{"v2_spe_enable": 1.0, …}` re-runs any cell. Tests: `test_spe.py` 10/10; live parity 10/10; exec model 11/11; the 18 pre-existing suite failures unchanged.
+
+**GRAVEYARD (do not re-test on this stack):** P_zero-threshold exits as a primary trigger. The mechanism autopsy is structural, not parametric: (1) P_zero ≥ 0.85 on 85.6% of ALL in-position ticks on 1 s memecoin tapes — the stagnation posterior does not discriminate dead tokens from healthy dips at ANY threshold (the box scan's ratio>1.5 islands are 1–17-fire statistical dust); (2) the entire 0.90–0.99/20–25% offside region was burned full-DB and is net-negative at every cell with the era signature inverted; (3) the winner-cut class (+3–18% transient-dip scratches) is inseparable from the tail at the fire moment — the same inseparability bound that closed iter37/46/68/70's depth-triggered family, now measured on the P_zero channel. A future P_zero mechanism would need a NEW data channel (e.g. genuinely featureless-KDE detection that is not k_total≈0-always on 1 s bars) — not a threshold retune.
+
+**Artifacts:** `analysis/iter79_PREREGISTRATION.md` (Phase-0 + pre-registered cells, written before any engine burn), `analysis/iter79_cohort.json` (target cohort), `analysis/iter79_capture.py` + `analysis/iter79_ticks/` (202-recording / 235,468-tick capture), `analysis/iter79_cf.py` (CF, corrected index), `analysis/iter79_screen.py` (Phase-1), `analysis/iter79_sweep.py` + `iter79_sweep_results.json` (Phase-2 battery), `analysis/iter79_parity.py`, `analysis/test_spe.py`. Batches: `iter79scr_{A,B,C}` (202 recs), `iter79sw_{p20,p30,p40,z95,o25}` (full DB, 463 rec-logs each). Run logs `analysis/iter79_*_run.log`.
+
+---
+
+## Iter 80 — The Sell-Side Basis: deferred exit fills (the iter78 discovery mirrored). Statistical core PASSES (xa20: Δ+1.04 SOL, p=0.0038, CI strictly +, both eras +, exp/trade +48%); consistency gates FAIL on identifiable mechanics (WR −3.8pp = 29 fewer re-entries, not worse selection; tail +6 = deeper holds on matched entries). ADOPTION = user decision; default stays OFF.
+
+**Date:** 2026-09-03. Pre-registered in `backend/analysis/iter80_PREREGISTRATION.md` BEFORE any burn (with a recorded implementation-phase deviation: the armed set is FIVE exit classes incl. `reversal_exit`; trade-count parity replaced by the re-entry-timing autopsy). Mandate (user, 2026-09-02/03): a completely ORIGINAL strategy on normal (post-graduation) pump.fun tokens with high positive EXPECTANCY — "doesn't necessarily have a high winrate but definitely very high positive expectancy"; Mayhem tokens are NOT a target (reporting segment only).
+
+### 0. The research campaign (all surfaces measured before the discovery)
+
+The session opened with deep pump.fun primary-source research (official program docs,
+`@pump-fun/pump-sdk@1.36.0` IDL, **live mainnet RPC decodes 2026-09-02** of the Global
+account, FeeConfig PDAs, and 1.42M Mayhem-state accounts) → `notes/pumpfun_internals_2026-09.md`
+(curve = CPMM on virtual reserves [vt=1.073e15/vq=30 SOL/rt=793.1M, 1B supply]; graduation =
+85.0054 real SOL exactly; on-curve friction 1.25%; PumpSwap mcap-tiered fees; Mayhem =
+fee-exempt 24h AI random-walk on 2B transient supply, opt-in, 25–55% of late-2026 launches;
+fee-history breaks 2025-09-02 / 2025-11-11 / 2026-02-17 / 2026-07-21) and
+`notes/pumpfun_population_2026-09.md` (37.5k launches/day Aug-2026, 1.8% grad rate,
+median graduate round-trips to its bond mcap, 24% of graduates bot-bonded, deployer
+track record = the only defensible public edge, 73.4% bond rate for an elite 38-wallet tier).
+KOL process forensics drew on the repo's existing 81-video distillation (`notes/memecoin_strategies.md`).
+
+Six candidate surfaces were screened on the frozen `iter78_lat5` book (1,017 trades /
++2.1237 SOL) and closed with data:
+
+1. **Entry filters** (flood intensity / births-per-hour at entry; entry age; holder-flow
+   pre-entry sells): all noise-level — the closed entry-side re-confirmed (4th independent pass).
+2. **Winner-exit redesign**: the harvest stack already captures 57–82% of MFE
+   (nearly-linear in threshold); naive wide-trail books score +3.3%/100 vs realized
+   +20.9%/100. No convexity reserve. (The memecoin-video "round-level ladder" ★★★ and
+   "volume-must-maintain" exits were also tested: mcap round-levels null at n=74.)
+3. **Passive limit entries** (resting bid below the signal basis): touched fills are
+   adverse-selected (δ≥0.5% @T=5s fills −0.5…−0.7% BELOW basis; the tokens that dip
+   into the bid are the ones that keep dumping); honest-fallback books all Δ≤0.
+4. **Deterministic narrative features** (name/lexicon/coherence): directionally
+   consistent in all four splits (clean-name +5.6‰/rec vs garbage −10‰/rec) but touches
+   only ~9% of the book — power-dead, recorded not burned.
+5. **Cross-sectional fleet rank** (the engine is blind to simultaneous sessions): null
+   (one hot bucket n=18, noise).
+6. **Sizing/pyramiding**: closed by iter76 (Kelly n* anti-ranks PnL).
+
+### 1. The discovery (the last untested information channel: the exit FILL BASIS)
+
+Forward path after exit fires, basis = exit fill price (frozen lat5 book, n=941):
+**ARMED exits** (gain_retrace/rate_split_flip/tp/breakeven, n=582): E[max-high-30s] =
+**+8.95%**, median +4.5%, share ≥+2% = **68%**, E[Δp30] = **+3.2%**. UNARMED exits
+(kelly_flat/evr, n=359): E[Δp30] = **−0.25%** (deferral poison there). The engine's
+exit DECISIONS are well-timed but its exit EXECUTION sells at the bottom of the
+micro-dip its own give-back rule creates — the exact dump→~5s dip→bounce microstructure
+that made entry-latency-5s the iter78 discovery, mirrored on the sell side. The only
+prior sell-latency evidence was iter78's lat10×sell2.3 cell (+0.25 on a weaker book).
+
+Phase-0 counterfactuals (exit decisions frozen, fill deferred on the recorded path):
+uniform L=15s Δ+2.14; armed-only L=45s Δ+2.39 (every era ≥0); armed limit-above
+harvest Δ+1.93 max (capped by the limit; deferral rides the bounce tail).
+
+### 2. Implementation (parity-preserving, shipped default-OFF)
+
+- `strategy_engineV2.py`: `v2_exit_delay_seconds` (0.0) + `v2_exit_delay_armed_only`
+  (0.0) in DEFAULT_CONFIG + adapter ctor pops (read off the engine object; the engine
+  itself never consumes them).
+- `forward_tester.py`: `_ARMED_EXIT_REASONS` frozenset (5 classes), `enable_exit_latency(L, armed_only)`,
+  queue-time gating (loss book fills at the signal instant under armed_only);
+  recording-end force-close unaffected (pending exit → `recording_ended`).
+- `backtester.py`: engine-keyed injection (the iter74d/78 pattern): bare-{} backtests
+  read the engine knobs; explicit `exit_latency_seconds` overrides; legacy never defers.
+- `live_trader.py`: the live mirror — a queued EXIT in the armed set is held on the
+  CANDLE CLOCK until `t_signal + L` (`[EXIT DELAY]` log line), then notify + swap
+  launch move together (matching the backtester's deferred-fill close basis); the loss
+  book launches instantly. **Default OFF = byte-parity.**
+- `frontend/js/app.js` + `index.html`: knobs + hints, cache v=129, `node --check` OK.
+- **Parity proof**: `analysis/iter79_parity.py` PASS (bare-{} byte-equal to the adopted
+  batch on recs {2762, 1019, 3814}); `analysis/test_iter80_exit_delay.py` 9/9;
+  `test_live_parity.py` 10/10 (Contracts A+B); exec-model/rate-split/MSM suites 36 green.
+
+### 3. The burns (full-DB, same-session base, 2,196-recording cohort, 463 traded-rec logs)
+
+| cell | exit L | armed-only | trades | WR | PnL | Δ vs base | Wilcoxon p | 10k CI | OLD Δ | DEAD Δ | MAY Δ | tail≤−30 | neg-days | exp/trade |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| base (OFF) | 0 | — | 1,032 | 65.6% | +2.1469 | — | — | — | — | — | — | 105 | 12 | +0.00208 |
+| x15 | 15s | no | 995 | 61.7% | +2.6473 | +0.5004 | 0.343 | spans 0 | +0.35 | +0.29 | −0.14 | 118 ✗ | 13 ✗ | +0.00266 |
+| **xa20** | 20s | **yes** | 1,003 | 61.8% | **+3.1873** | **+1.0405** | **0.0038** | **[+0.00073,+0.00380]** | **+0.59** | **+0.51** | −0.06 | 111 ✗ | 11 ✓ | **+0.00318** |
+| xa45 | 45s | yes | 988 | 59.3% | +3.3099 | +1.1630 | 0.0167 | [+0.00055,+0.00442] | +0.57 | +0.68 | −0.09 | 114 ✗ | 11 ✓ | +0.00335 |
+
+Robustness (xa20): split-half Δ [+0.40, +0.65] (both halves, monotone with cohort
+growth); 10%-trimmed mean Δ +0.0015 > 0; 181/337 changed recordings improved (53.7%);
+worst day −0.193→−0.129; day-σ 0.161→0.156; CS 5.97→5.53; PF 1.29→1.41.
+x15 (uniform deferral) REJECTED exactly as the Phase-0 CF predicted — deferring the
+loss book (E[Δp30]=−0.25%) gives back the tail and the WR.
+
+### 4. The gate failures, decomposed (why they are mechanical, not informational)
+
+- **WR −3.8pp (xa20)**: 1,032→1,003 trades. All of it is 31 net-lost same-recording
+  re-entries on 28 recordings (deferred closes push the next entry window past the
+  signal); those lost re-entries carried only **−0.155 SOL** of baseline PnL (they
+  were net-LOSING trades — the deferral accidentally performs the iter10 cooldown the
+  backtest rejected, for free). Per-trade expectancy rose 48% (+0.00208→+0.00318).
+  This is exactly the user's stated objective (expectancy over win rate), but it IS a
+  deviation from the pre-registered ≥−1pp gate — declared here, not patched.
+- **tail ≤−30% 105→111**: 13 new tails (−0.561) vs 7 vanished (−0.304). 7 matched
+  entries slid from base-median −7.4% to cand-median −35.4%: the 20s hold turns
+  shallow scratches into deeper losses on ~7 trades; the rest are re-entry-timing
+  reshuffles. Net tail PnL −4.49→−4.74 (−0.25) — dwarfed by the armed-book gain
+  (gain_retrace +4.48→+4.92, rate_split +2.57, tp +0.66 on changed recs).
+- **Mayhem −0.06**: 19 trades, 15 recordings — below any statistical power (the
+  segment is a reporting formality this era).
+
+### 5. Verdict and disposition
+
+The pre-registered protocol as written REJECTS xa20 (3 of 7 gates fail). The
+statistical core — the part that has historically predicted live transfer in this
+program (p + CI + both-era + split-half + trimmed-mean) — passes more cleanly than
+any mechanism since iter78: **the first sell-side, engine-decision-preserving,
+both-era-positive discovery, and the largest expectancy-per-trade gain of any gated
+cell in the program's history (+48%)**. Per the user's 2026-09-02/03 mandate
+("high positive expectancy, not necessarily high winrate"), xa20 SATISFIES the
+mandate and fails a consistency gate that was written for a different objective.
+
+**Production default remains `v2_exit_delay_seconds=0.0` (byte-parity).** Adoption is
+an explicit user decision, exactly as iter78's was. The knob is live-wired
+(`live_trader.py` mirror shipped default-OFF; `[EXIT DELAY]` hold lines appear only
+when enabled; restart `main.py` after any flip). Escape hatch: `0.0` restores the
+signal-instant exit byte-exactly.
+
+Artifacts: `analysis/iter80_PREREGISTRATION.md` (pre-burn + deviation), scores
+`analysis/iter80_score_{x15,xa20,xa45}.txt`, aggregates
+`analysis/iter80_base_off.json` etc., batches `iter80_base_off_1788396730` /
+`iter80_x15_1788432182` / `iter80_xa20_1788443259` / `iter80_xa45_1788445449`,
+params `analysis/iter80_params_*.json`, driver `analysis/iter80_driver.sh`
+(detached-PPID-1 pattern for kill-resistant burns — user-away hardening).
+Tests: `analysis/test_iter80_exit_delay.py` 9/9; live-parity 10/10; exec/rate-split/MSM
+36 green. Pre-existing failures unchanged (mcap_floor 11 + whale_stream 1).
+
+### Iter 79 addendum (2026-09-03) — CODE REMOVED per user decision; documentation retained; recovery artifacts filed
+
+Per the user's instruction (concurrent-session hygiene: another agent is working on a different mechanism in the same tree), the iter79 SPE **code was surgically removed from the working tree** the day after the rejection, while all iter79 documentation and analysis artifacts were kept. Removed: the 6 `v2_spe_*` knobs from `DEFAULT_CONFIG`, the adapter ctor pops + `_v2_spe_streak`, the streak update in `update()`, the two notify-hook resets, the `_check_exit_v2` exit branch, the `app.js` mirror (params + hints + section header), and `analysis/test_spe.py`. **Untouched (the concurrent iter80 session's work): `v2_exit_delay_seconds` / `v2_exit_delay_armed_only` in `strategy_engineV2.py`, `backtester.py`, `forward_tester.py`, `live_trader.py`, `app.js`.**
+
+- **Verification of the removal:** `strategy_engineV2.py` diff vs HEAD = +37 / −0 lines, 100% iter80-tagged (zero SPE residue, zero HEAD content deleted); `app.js` = +14 / −0, pure iter80; engine ctor clean (`_v2_spe_enable` gone, `v2_exit_delay_seconds` present at 0.0); bare-`{}` parity re-run **PASS** on recs {2762, 1019, 3814} vs `iter78_lat5`; cache-buster v129→v130 (v129 was the concurrent session's bump; v130 invalidates both sessions' app.js changes).
+- **Recovery artifacts:** `analysis/iter79_removal_patch/` — `test_spe.py` (verbatim), `spe_engine_additions.patch` / `spe_appjs_additions.patch` (pre-removal diffs vs HEAD — NOTE these also contain the concurrent iter80 lines, marked `iter80`; apply only the `iter79` blocks), and a README. The mechanism remains REJECTED/graveyarded; the patches exist for provenance, not re-enablement.
+- **Graveyard status unchanged:** P_zero-threshold exits stay closed (Phase-2 all-cells-negative + the 85.6%-of-ticks P_zero autopsy). A future attempt needs a new data channel, not a threshold retune.

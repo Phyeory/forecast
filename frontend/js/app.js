@@ -230,6 +230,20 @@ let engineParamsV2 = {
   // (era-inverted) — do NOT move off 5.0 without re-gating.
   // 0.0 restores the pre-iter78 signal-instant fill. ──
   v2_entry_delay_seconds:       5.0,  // seconds to defer entry execution
+
+  // ── iter80 ADOPTED (user decision 2026-09-03): deferred EXIT-fill
+  // execution, armed-only 20s (the sell-side basis).  The iter78 discovery
+  // mirrored: armed harvest exits (gain_retrace / rate_split_flip / tp_v2 /
+  // breakeven_scratch / reversal_exit) fill at the bottom of the bounce
+  // their own give-back rule creates — recorded path +8.95% above the fill
+  // in the 30s median, share ≥+2% = 68% (frozen lat5 book, n=582).
+  // Deferring the LOSS book is poison (E[Δp30] = −0.25%); the uniform x15
+  // cell was REJECTED.  Adopted cell `iter80_xa20`: Δ+1.0405 vs base,
+  // Wilcoxon p=0.0038, CI [+0.00073,+0.00380], both eras positive (OLD
+  // +0.59 / DEAD +0.51), expectancy/trade +48%, negative days 12→11,
+  // PF 1.41.  0.0 = instant exit fill (pre-iter80 byte-exact hatch). ──
+  v2_exit_delay_seconds:     20.0,  // seconds to defer armed exit execution
+  v2_exit_delay_armed_only:   1.0,  // 1.0 = defer armed/harvest exit classes only
 };
 
 /* Strategy Engine Parameters — V3 (newborn-coin dump-bottom recovery).
@@ -470,6 +484,8 @@ function renderSettings() {
     v2_msm_enable:                       "1.0 = ON: Markov-switching fleet-regime entry gate (realtime 3-state HMM, iter74; 0.0 restores pre-iter74)",
     v2_msm_entry_blocklist:              "Per-fleet-state suppressed entry-regimes, e.g. '0:idle;2:idle,trend' (config B′)",
     v2_entry_delay_seconds:              "Seconds to defer entry execution after the BUY signal (iter78 adopted cell = 5.0; 0.0 = pre-iter78 signal-instant fill). Live holds the queued swap and fills at the then-current price; backtests price the fill on the recorded path at t_signal+N. The 5 s fill buys the ~5 s micro-dip (Δ+1.178 SOL, both eras positive, tail 123→104 vs instant); 10 s+ buys the bounce and era-inverts — do not move off 5.0 without re-gating",
+    v2_exit_delay_seconds:               "ADOPTED default 20.0 (iter80 cell, user decision 2026-09-03): seconds to defer ARMED exit execution after the exit signal — the recorded path is +8.95% above armed exit fills in the 30s median (the give-back harvest fires at the bottom of its own micro-dip). Loss-book exits (kelly_flat/evr_triage/kramers_down/dev_sell/recording_ended) always fill instantly. 0.0 restores the pre-iter80 instant exit (byte-exact escape hatch)",
+    v2_exit_delay_armed_only:            "ADOPTED default 1.0: defer only the armed/harvest exit classes (gain_retrace, rate_split_flip, tp_v2, breakeven_scratch, reversal_exit). 0.0 defers every exit uniformly — the uniform cell was REJECTED (unarmed exits have NEGATIVE forward drift E[Δp30] = −0.25%; deferring the loss book is poison)",
   };
 
   // ── V3 parameter hints (newborn dump-bottom engine) ──

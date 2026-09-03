@@ -343,6 +343,18 @@ def run_backtest(
         if _eng_delay > 0.0:
             ft.enable_entry_latency(_eng_delay)
 
+    # iter80: deferred-exit-fill cell — same engine-keyed injection pattern
+    # as the entry block above.  The knob lives on the ENGINE
+    # (`v2_exit_delay_seconds`, default 0.0 = instant exit fill = pre-iter80
+    # byte parity; `v2_exit_delay_armed_only` restricts deferral to the
+    # armed/harvest exit classes).  An EXPLICIT exit_latency_seconds
+    # argument overrides the engine knob.  Never applied to "legacy".
+    if exit_latency_seconds <= 0.0 and exec_model != "legacy":
+        _eng_exit_delay = float(getattr(ft.engine, "v2_exit_delay_seconds", 0.0))
+        if _eng_exit_delay > 0.0:
+            _eng_exit_armed = float(getattr(ft.engine, "v2_exit_delay_armed_only", 0.0))
+            ft.enable_exit_latency(_eng_exit_delay, armed_only=_eng_exit_armed > 0.0)
+
     # iter74: MSM fleet-regime entry gate — inject the precomputed causal
     # fleet-state lookup whenever the ENGINE has the MSM gate enabled
     # (configuration B is the production DEFAULT since 2026-08-31, so this

@@ -155,6 +155,15 @@ class ForwardTester:
     LONG-ONLY: buys tokens and sells them back to SOL.
     """
 
+    # iter80: armed/harvest exit classes eligible for deferred fills under
+    # `exit_latency_armed_only` (the loss book stays instant — its forward
+    # drift after fire is NEGATIVE, E[Δp30] = −0.25%, so deferring it is
+    # poison; see analysis/iter80_PREREGISTRATION.md §2).
+    _ARMED_EXIT_REASONS = frozenset({
+        "gain_retrace", "rate_split_flip:armed", "tp_v2",
+        "breakeven_scratch", "reversal_exit",
+    })
+
     def __init__(
         self,
         starting_balance: float = 1.0,
@@ -205,6 +214,12 @@ class ForwardTester:
         self.exec_model = str(exec_model)
         self.entry_latency_seconds = max(0.0, float(entry_latency_seconds))
         self.exit_latency_seconds = max(0.0, float(exit_latency_seconds))
+        # iter80: when True, only armed/harvest exit reasons defer; the loss
+        # book (kelly_flat / evr_triage / kramers_down_exit / dev_sell_exit /
+        # recording_ended) fills at the signal instant.  Set by
+        # enable_exit_latency() (engine-keyed injection) — see DEFAULT_CONFIG
+        # `v2_exit_delay_armed_only`.
+        self.exit_latency_armed_only = False
         if self.exec_model == "legacy":
             self._exec_mode = "legacy"
         elif self.entry_latency_seconds > 0.0 or self.exit_latency_seconds > 0.0:
@@ -280,6 +295,24 @@ class ForwardTester:
         if seconds <= 0.0 or self._exec_mode == "legacy":
             return
         self.entry_latency_seconds = seconds
+        self.exec_model = "latency"
+        self._exec_mode = "latency"
+
+    def enable_exit_latency(self, seconds: float, armed_only: bool = False) -> None:
+        """iter80 hook: deferred EXIT fills (`seconds` after the exit signal
+        fires, priced on the recorded path), optionally restricted to the
+        armed/harvest exit classes (`_ARMED_EXIT_REASONS`) — the sell-side
+        mirror of `enable_entry_latency`.  Keyed on the ENGINE's
+        `v2_exit_delay_seconds` / `v2_exit_delay_armed_only` knobs by
+        backtester.run_backtest; an explicit positive `exit_latency_seconds`
+        constructor argument keeps precedence (run_backtest only calls this
+        when its own explicit argument is 0).  0.0 = no-op (byte parity).
+        """
+        seconds = max(0.0, float(seconds))
+        if seconds <= 0.0 or self._exec_mode == "legacy":
+            return
+        self.exit_latency_seconds = seconds
+        self.exit_latency_armed_only = bool(armed_only)
         self.exec_model = "latency"
         self._exec_mode = "latency"
 
@@ -943,12 +976,21 @@ class ForwardTester:
                 closed_trade = self._close_long(o, h, l, c, time, reason)
                 trade_action = "exit"
             elif self._exec_mode == "latency":
-                self._stashed_exit_params = self._capture_exit_params(c)
-                self._latency_pending = {
-                    "side": "exit",
-                    "target_ts": float(time) + self.exit_latency_seconds,
-                    "reason": reason,
-                }
+                # iter80: under armed_only, loss-book exits fill at the
+                # signal instant exactly as the pre-iter80 model did.
+                if self.exit_latency_armed_only and reason not in self._ARMED_EXIT_REASONS:
+                    self._pending_buy = False
+                    self._pending_buy_reason = ""
+                    self._stashed_exit_params = self._capture_exit_params(c)
+                    closed_trade = self._close_long(o, h, l, c, time, reason)
+                    trade_action = "exit"
+                else:
+                    self._stashed_exit_params = self._capture_exit_params(c)
+                    self._latency_pending = {
+                        "side": "exit",
+                        "target_ts": float(time) + self.exit_latency_seconds,
+                        "reason": reason,
+                    }
             else:  # legacy: queue for the next state's open
                 self._pending_exit = True
                 self._pending_exit_reason = reason
