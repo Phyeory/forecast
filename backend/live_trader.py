@@ -36,6 +36,7 @@ from solders.hash import Hash
 from strategy_engine import Signal, Direction, Regime
 from engine_factory import create_engine
 from live_session_logger import SessionJournal
+from signal_capture import SignalCaptureJournal
 
 # SPL Token / ATA program ids (used for deterministic ATA derivation and
 # Token-2022 detection without pulling in the heavyweight `spl-token` package).
@@ -442,6 +443,15 @@ class LiveTrader:
             f"[SESSION] Logging to {self.journal.dir} "
             f"(console.log + trades.jsonl)"
         )
+        # ── Signal-time parameter capture (2026-09-04) ─────────────────────
+        # One JSON record per BUY/EXIT signal: every decision value the
+        # engine computed at the signal instant vs the dashboard-set
+        # threshold it was gated against, plus the full coefficient set.
+        # Written to <session>/signals.jsonl; read-only on the engine so
+        # trading behaviour is untouched.
+        self.signal_capture = SignalCaptureJournal(
+            self.journal.dir, engine_version)
+        self._signal_capture_enabled: bool = True
         self.buy_size_sol = buy_size_sol
         self.slippage_bps = slippage_bps
         self.priority_fee_lamports = 100_000  # fixed: 0.0001 SOL per transaction
@@ -3579,6 +3589,20 @@ class LiveTrader:
                 self._pending_buy = True
                 self._pending_buy_reason = f"buy_{detected_regime}"
                 self._pending_buy_ts = time.time()
+                # Signal-time parameter capture: freeze every decision
+                # value + its dashboard threshold at the INSTANT the BUY
+                # was detected (the engine state is still the signal
+                # state's).  One record per detected signal, not per
+                # retry — retries reference the same frozen decision.
+                if self._signal_capture_enabled:
+                    try:
+                        self.signal_capture.record_signal(
+                            self.engine, "buy", self._pending_buy_reason,
+                            candle_time=(int(t) if t is not None else None),
+                            price=(sc if sc is not None else self._last_price),
+                        )
+                    except Exception as e:
+                        logger.debug(f"[SIGNAL CAPTURE] buy capture failed: {e}")
                 # iter78 adopted cell: defer the entry execution by
                 # `v2_entry_delay_seconds` (engine knob, default 5.0 s since
                 # the 2026-09-02 adoption) — the live mirror of the
@@ -3628,6 +3652,19 @@ class LiveTrader:
             self._pending_exit_reason = reason
             self._pending_buy = False
             self._pending_buy_anchor = None
+            # Signal-time parameter capture: freeze the exit-cascade
+            # values (P_down vs 0.5, retrace floor vs arm, streaks vs
+            # their K thresholds, …) at the instant the EXIT was
+            # detected.  One record per detected signal, not per retry.
+            if self._signal_capture_enabled:
+                try:
+                    self.signal_capture.record_signal(
+                        self.engine, "exit", reason,
+                        candle_time=(int(t) if t is not None else None),
+                        price=(sc if sc is not None else self._last_price),
+                    )
+                except Exception as e:
+                    logger.debug(f"[SIGNAL CAPTURE] exit capture failed: {e}")
             # iter80: arm the deferred-exit hold boundary for armed/harvest
             # reasons (loss-book reasons launch instantly either way).
             if self.exit_delay_seconds > 0.0 and (
@@ -3805,7 +3842,20 @@ class LiveTrader:
                 reference_time, self.engine._v2_holder_flow_exit_window_seconds
             )
             wallet_prefix = sell_event.get("wallet", "")[:8] if sell_event else "unknown"
-            return f"dev_sell_exit:{wallet_prefix}"
+            reason = f"dev_sell_exit:{wallet_prefix}"
+            # Signal-time parameter capture: the holder-flow exit fires
+            # outside the candle loop, so freeze its record here at
+            # discovery time (same one-record-per-signal semantics).
+            if self._signal_capture_enabled:
+                try:
+                    self.signal_capture.record_signal(
+                        self.engine, "exit", reason,
+                        candle_time=int(getattr(self.engine, "_current_time", 0)),
+                        price=self._last_price,
+                    )
+                except Exception as e:
+                    logger.debug(f"[SIGNAL CAPTURE] dev-sell exit capture failed: {e}")
+            return reason
         return None
 
     def immediate_holder_flow_exit(self, exit_reason: str):
