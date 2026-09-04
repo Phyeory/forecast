@@ -8879,3 +8879,25 @@ Per the user's instruction (concurrent-session hygiene: another agent is working
 - **Verification of the removal:** `strategy_engineV2.py` diff vs HEAD = +37 / −0 lines, 100% iter80-tagged (zero SPE residue, zero HEAD content deleted); `app.js` = +14 / −0, pure iter80; engine ctor clean (`_v2_spe_enable` gone, `v2_exit_delay_seconds` present at 0.0); bare-`{}` parity re-run **PASS** on recs {2762, 1019, 3814} vs `iter78_lat5`; cache-buster v129→v130 (v129 was the concurrent session's bump; v130 invalidates both sessions' app.js changes).
 - **Recovery artifacts:** `analysis/iter79_removal_patch/` — `test_spe.py` (verbatim), `spe_engine_additions.patch` / `spe_appjs_additions.patch` (pre-removal diffs vs HEAD — NOTE these also contain the concurrent iter80 lines, marked `iter80`; apply only the `iter79` blocks), and a README. The mechanism remains REJECTED/graveyarded; the patches exist for provenance, not re-enablement.
 - **Graveyard status unchanged:** P_zero-threshold exits stay closed (Phase-2 all-cells-negative + the 85.6%-of-ticks P_zero autopsy). A future attempt needs a new data channel, not a threshold retune.
+
+### 6. ADOPTION (user decision 2026-09-03): `v2_exit_delay_seconds = 20.0` + `v2_exit_delay_armed_only = 1.0` are the production defaults.
+
+- `strategy_engineV2.py` — DEFAULT_CONFIG AND the adapter ctor pops both flipped to
+  the adopted xa20 cell (the pop defaults are what bare-{} backtests and live
+  sessions read — the iter74d bare-{} no-op hazard). Escape hatch
+  `{"v2_exit_delay_seconds": 0.0}` restores the pre-iter80 signal-instant exit
+  byte-exactly.
+- **Two-way adoption verification (trade-level via DB refs + stats, recs
+  {2762, 1019, 3814}): bare-{} reproduces the `iter80_xa20` batch exactly
+  (11/2/1 trades, pnl to 1e-6); explicit 0.0 reproduces `iter80_base_off` exactly.**
+- `analysis/test_live_parity.py` Contract A now pins BOTH escape hatches
+  (`v2_entry_delay_seconds=0.0` + `v2_exit_delay_seconds=0.0`) — 10/10 green under
+  the adopted default (Contract B exercises the deferred path).
+- `analysis/test_iter80_exit_delay.py` updated to the adopted-default contract
+  (10/10).
+- `frontend/js/app.js` + `index.html` — adopted defaults + ADOPTED hints, cache
+  v=130, `node --check` OK.
+- **Restart `main.py` after deploy** (pool workers + live sessions reload engine
+  defaults); expect `[EXIT DELAY]` hold lines on armed exits (gain_retrace /
+  rate_split_flip / tp_v2 / breakeven_scratch / reversal_exit), instant launches on
+  the loss book.
