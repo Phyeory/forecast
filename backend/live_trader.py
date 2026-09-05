@@ -3636,7 +3636,16 @@ class LiveTrader:
                 if self.entry_delay_seconds <= 0.0:
                     self._execute_pending_signals(t, so, sh, sl, sc)
 
-        elif detected_signal == Signal.EXIT.value and self.current_trade is not None:
+        elif detected_signal == Signal.EXIT.value and self.current_trade is not None \
+                and not self._pending_exit:
+            # Parity guard (mirrors FT's `and self._latency_pending is None`):
+            # the FIRST detected exit owns the deferred-exit hold.  While an
+            # exit is pending, later states that still detect the same exit
+            # condition must NOT re-arm `v2_exit_delay_seconds` — re-arming
+            # on every qualifying tick extended the hold indefinitely (the
+            # exit only launched when the condition finally dropped, e.g.
+            # session 20260904_221902_PfU7LdzwTo8B: −26.7% vs the BT's
+            # signal+20s scratch).
             reason = result.get("exit_reason")
             if not reason:
                 reason = "exit_signal"
