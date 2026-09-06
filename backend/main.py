@@ -2609,6 +2609,14 @@ async def autofeed_stop():
     return JSONResponse({"status": "stopped", "snapshot": _autofeed.snapshot()})
 
 
+@app.post("/api/autofeed/tune_now")
+async def autofeed_tune_now():
+    """Force an immediate market-conditions refresh + gate recompute.
+    Works while running or idle — the effective gates apply on the next poll."""
+    result = await _autofeed.tune_now()
+    return JSONResponse({"status": "ok", **result})
+
+
 # ── New Pairs feed & API ────────────────────────────────────────────────────
 # Discovery-only loop over PumpPortal's subscribeNewToken stream.  Every
 # accepted newborn token is auto-recorded (NO engine, NO trading) with a

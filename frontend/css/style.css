@@ -456,6 +456,14 @@ input, select, button, textarea { accent-color: var(--copper); }
 .af-head .panel-title { margin-bottom: 0; }
 .af-statusline { display: flex; align-items: center; gap: 8px; padding: 12px 20px; font-family: var(--mono); font-size: 10.5px; color: var(--dim); }
 .af-cli { margin-left: auto; }
+.af-tune { padding: 8px 20px 12px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--ink-1, rgba(255,255,255,0.02)); font-family: var(--mono); font-size: 10px; }
+.af-tune-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.af-tune-label { color: var(--bone-2); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: 9px; }
+.af-switch-sm { width: 32px !important; height: 16px !important; }
+.af-switch-sm input:checked + .af-slider::before { transform: translateX(16px) !important; }
+.af-switch-sm .af-slider::before { height: 10px; width: 10px; }
+.af-tune-conds { color: var(--dim); margin-top: 5px; }
+.af-tune-gates { color: var(--sage, #26a69a); margin-top: 2px; }
 .af-settings { padding: 14px 20px 18px; }
 #af-settings { margin-top: 0 !important; }
 

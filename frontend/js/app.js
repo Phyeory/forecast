@@ -2453,6 +2453,10 @@ const afStatLastPoll = $("af-stat-lastpoll");
 const afSaveConfigBtn = $("af-save-config");
 const afTestPollBtn = $("af-test-poll");
 const afPreview = $("af-preview");
+const afTuneWrap = $("af-tune");
+const afTuneToggle = $("af-tune-toggle");
+const afTuneConds = $("af-tune-conds");
+const afTuneGates = $("af-tune-gates");
 
 let afWS = null;
 let afConfigCache = null;
@@ -2540,6 +2544,9 @@ function afHandleStatus(snap) {
   } else {
     afStatLastPoll.textContent = "—";
   }
+
+  // Auto-tune strip
+  afRenderTune(snap);
 
   // Recent candidates → render
   afRenderCandidates(snap.recent_candidates || []);
@@ -2668,9 +2675,77 @@ function afManualStart(mint) {
 }
 window.afManualStart = afManualStart;
 
+/* ── Auto-Tune strip ────────────────────────────────────────────────── */
+function afRenderTune(snap) {
+  if (!afTuneWrap) return;
+  const enabled = !!snap.auto_tune_enabled;
+  const show = enabled || afTuneWrap.style.display === "block";
+  afTuneWrap.style.display = show ? "block" : "none";
+  if (afTuneToggle) {
+    afTuneToggle.checked = enabled;
+    afTuneToggle.disabled = false;
+  }
+
+  const cond = snap.market_conditions || null;
+  const gates = snap.effective_gates || null;
+  const fmtUsd = (n) => {
+    if (!n || n <= 0) return "—";
+    if (n >= 1e6) return `$${(n / 1e6).toFixed(2)}M`;
+    if (n >= 1e3) return `$${(n / 1e3).toFixed(1)}k`;
+    return `$${n.toFixed(0)}`;
+  };
+
+  if (!cond) {
+    if (afTuneConds) afTuneConds.textContent = enabled ? "⏳ fetching conditions…" : "off — user gates only";
+    if (afTuneGates) afTuneGates.textContent = gates
+      ? `gates: mcap≥${fmtUsd(gates.min_mcap_usd)} vol≥${fmtUsd(gates.min_volume_usd)} swaps≥${gates.min_swaps} liq≥${fmtUsd(gates.min_liquidity_usd)}`
+      : "—";
+    return;
+  }
+
+  const ageMin = snap.last_tune_at ? Math.round((Date.now() / 1000 - snap.last_tune_at) / 60) : null;
+  const sol = cond.sol_usd ? `$${cond.sol_usd.toFixed(1)}` : "?";
+  const chg = (cond.sol_chg_24h_pct != null) ? `${cond.sol_chg_24h_pct >= 0 ? "+" : ""}${cond.sol_chg_24h_pct.toFixed(1)}%` : "?";
+  const vr = cond.venue_ratio ? cond.venue_ratio.toFixed(2) : "?";
+  const venue = cond.venue_vol_usd ? fmtUsd(cond.venue_vol_usd) : "?";
+  if (afTuneConds) {
+    afTuneConds.textContent =
+      `SOL ${sol} (${chg} 24h) · PumpSwap vol ${venue}/d (ratio ${vr})` +
+      (ageMin != null ? ` · tuned ${ageMin < 1 ? "<1" : ageMin}m ago` : "");
+  }
+  if (afTuneGates && gates) {
+    afTuneGates.textContent =
+      `→ mcap≥${fmtUsd(gates.min_mcap_usd)} · vol≥${fmtUsd(gates.min_volume_usd)} · swaps≥${gates.min_swaps} · liq≥${fmtUsd(gates.min_liquidity_usd)}`;
+  }
+}
+
+if (afTuneToggle) {
+  afTuneToggle.addEventListener("change", async () => {
+    const on = afTuneToggle.checked;
+    try {
+      await apiFetch("/api/autofeed/config", {
+        method: "POST",
+        body: JSON.stringify({ auto_tune_enabled: on }),
+      });
+      if (on) {
+        // Force an immediate conditions fetch so the strip populates now
+        await apiFetch("/api/autofeed/tune_now", { method: "POST" });
+      }
+      const snap = await apiFetch("/api/autofeed/status");
+      afHandleStatus(snap);
+    } catch (e) {
+      console.error("[AutoFeed] tune toggle failed", e);
+      afTuneToggle.checked = !on;
+    }
+  });
+}
+
+
 /* ── Form read/write ───────────────────────────────────────────────── */
 const AF_FIELD_MAP = [
   ["af-poll-seconds", "poll_seconds", "float"],
+  ["af-tune-refresh", "auto_tune_refresh_seconds", "float"],
+  ["af-tune-discount", "auto_tune_mcap_grad_discount", "float"],
   ["af-interval", "interval", "str"],
   ["af-min-mcap", "min_mcap_usd", "float"],
   ["af-max-mcap", "max_mcap_usd", "float"],

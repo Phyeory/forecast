@@ -8901,3 +8901,77 @@ Per the user's instruction (concurrent-session hygiene: another agent is working
   defaults); expect `[EXIT DELAY]` hold lines on armed exits (gain_retrace /
   rate_split_flip / tp_v2 / breakeven_scratch / reversal_exit), instant launches on
   the loss book.
+
+---
+
+## Iter 82 — Overfit audit of the two adopted delay mechanisms (entry 5 s, exit 20 s armed-only). VERDICT: BOTH PLATEAU-CONFIRMED, MECHANISM-EXPLAINED, NOT SPIKE-OVERFITS. Entry-response curve fully mapped (0/3/5/7/10/15 s); exit-axis down-neighbor 10 s ≈ 20 s ≈ 45 s. No production change.
+
+**Date:** 2026-09-04. Request: "run tests and make sure that the entry and exit delays are not pure overfits." Independent recomputation + 3 new neighbor burns under an engine-hash guard (`analysis/iter82_driver.sh`; hash `245c3ff9` stable across all three cells — the concurrent iter81/AOE session's default-OFF edits did not contaminate any cell).
+
+### 0. Test suite
+173 collected, 155 passed / 18 failed — failures exactly the documented pre-existing set (mcap_floor 11, sodt_wccb 6, whale_stream 1). Delay-specific suites green: `test_iter80_exit_delay` 9/9, `test_exec_model` 11/11, `test_live_parity` 10/10.
+
+### 1. Independent recompute (scipy Wilcoxon cross-check, raw v2_results logs — `analysis/iter82_delay_overfit_audit.py`)
+- **Entry (lat5 vs base_full):** Δ +1.1779, p=1.4e-4, scipy-matched bootstrap CI [+0.67e-3, +4.48e-3], trimmed10% +1.90e-3, eras OLD +0.65 / DEAD +0.52 / MAY +0.01, 25/33 days positive, leave-one-out min +1.03, first/second-half +0.64/+0.54. Matches the iter78 record.
+- **Exit (xa20 vs base_off):** Δ +1.0405, p=0.0038, CI [+0.70e-3, +3.80e-3], eras OLD +0.59 / DEAD +0.51 / MAY −0.06, 22/32 days positive, LOO min +0.95, split halves +0.36/+0.68. Matches the iter80 record.
+- **Combined deployed stack (xa20 vs original instant base):** Δ **+2.2415**, p≈3e-7, CI [+2.64e-3, +6.92e-3], both eras positive, 76% of days positive, LOO min +2.05.
+
+### 2. Mechanism decomposition (matched 1-1 by entry time, per-trade PnL split into basis vs exit-path effects)
+- **Entry pair:** re-entry book ≈ 0 (lost 52 / −0.19; added 37 / −0.19); of +1.17 matched, **basis effect +0.35** (cand fills cheaper: mean −0.38%) + **exit-path effect +0.83** (same-reason exits fire higher off the shifted basis). Δ tracks basis direction per trade: cheaper-entry n=431 Σ+2.52 (+5.9 pts/trade) vs dearer-entry n=464 Σ−1.41 (−3.0) vs identical-entry n=86 Σ+0.06 — the PnL delta is fill-price-linked, monotone in the realized basis.
+- **Exit pair:** re-entry book ≈ +0.11; of +1.15 matched, **basis ≈ 0** and **exit-path +1.15** (armed exits sell ~2% higher on average; right-skewed: p25 −2.7 / p50 +0.15 / p75 +4.9). Broad convexity: 335 winning pairs Σ+3.11 vs 302 losing pairs Σ−1.95; top-10 pairs 48% of net; 64 W→L / 28 L→W flips — a variance-for-expectancy trade (WR −3.8 pp, exp/trade 2.08→3.18e-3), exactly the trade-off the iter80 adoption record disclosed.
+
+### 3. NEW neighbor burns (2,132-rec pinned cohort → 471 traded-pair cohort; full-DB-equivalent statistics)
+- **iter82_lat3_x0** (entry 3 s, exit 0): +2.1866 abs; vs instant Δ **+1.2407, p=5e-5**, CI +, both eras +, LOO min +1.17. **vs adopted lat5: Δ +0.06, p=0.63** — 3 s ≡ 5 s.
+- **iter82_lat7_x0** (entry 7 s, exit 0): vs instant Δ **+0.8945, p=0.0023** (OLD +0.18 / DEAD +0.69 — softer than 5 s but still positive); vs lat5 Δ −0.28, p=0.99 (ns).
+- **iter82_xa10** (entry 5, exit 10 s armed): vs exit-0 Δ **+0.9747, p=0.0042**, CI +, OLD +0.67 / DEAD +0.35; vs adopted xa20 Δ −0.07, p=0.44 — 10 s ≡ 20 s. Plus burned xa45 (+1.22 matched vs base) ≈ xa20 (+1.15): **exit plateau spans 10–45 s.**
+- **Entry-response curve (abs PnL on matched cohort):** 0 s +0.95 → 3 s +2.19 → 5 s +2.12 → 7 s +1.84 → 10 s +0.74 → 15 s +0.98. Single-peaked plateau bracketing 3–7 s; the dip mean-reverts within ~5 s and has bounced by 10 s (lat10's era inversion is decay, not a second optimum). The iter78 log's "3/7 s not burned" fragility disclosure is now closed: **5.0 is a plateau point, not a knife-edge.**
+
+### 4. Remaining honest caveats
+1. In-sample cohort remains the selection cohort — but selection was among 4 pre-registered cells, both adopted values now bracketed by 2 fresh neighbor cells each, and the whole stack is CF-predicted-then-burned-confirmed (Phase-0 predicted order held: 45 > 20, though CF overshot ~2×, as recorded at iter80).
+2. Exit-delay WR cost (−3.8 pp) and tail +6 were accepted by explicit user decision under the expectancy mandate (iter80 §5/§6) — unchanged by this audit; the 10 s cell would recover ~half the WR cost at −0.07 SOL if the user ever wants that trade.
+3. Temporal OOS not yet powered: only 9 post-adoption recordings have traded (09-02→09-04). The last-6-cohort-days probe: entry Δ positive on all 6; exit Δ positive 08-25/26/27, mildly negative 08-28/29 + 09-02 (n≤12, Mayhem-heavy). Re-run `iter82_oos_cohort.json` scoring when ≥50 OOS trades accumulate.
+4. Live evidence: only 5 tiny test sessions (0.01 SOL, balance-failed) since adoption — live confirmation pending real trading.
+
+**Graveyard note:** do NOT burn lat3/lat7/xa10 variants again — this iteration closes the neighborhood on both delay axes; any future delay work needs a new data channel (e.g. live-fill telemetry, not more backtest cells).
+
+---
+
+## Iter 80 — Curve-Born Mayhem Mandate: full structural decode + MAYHEM-CURVE-DIP-R preliminary edge (PROMISING, NOT VALIDATED) + 9 falsified surfaces
+
+**Scope:** identical protocol to Iter 79 (DIP-R), applied to curve-born mayhem coins
+(`is_mayhem_mode=true`, V2 bonding-curve venue). Primary live collection (vault-diff
+curve streams + agent-ATA inventory, 221 mints), on-chain history reconstruction
+(47 full-lifecycle tapes, 9,000 decoded trades), DexScreener census outcomes (n=1,072).
+
+### 1. Venue decode (new primary findings)
+- V2 program `6EF8r…BEwF6P`, 151-byte curve layout (v_tok/v_quote/real_tok/real_quote/
+  supply/complete/creator/mayhem/cashback/quote_mint). Graduation at v_sol=115.005.
+- **Multiple swap entrypoints share each curve**: buys {66063d12,38fc7408,c2ab1c46,
+  cfa2f612}, sells {33e685a4,5df6823c,f4f8e72d} — direction verified per-disc by
+  vault-leg footprint. Missing top-level variants loses ~40% of flow. Migration disc
+  9beae792 terminates a tape. Non-swap vault ops (agent funding/admin, 100-1000x
+  off-market) filtered by 10x trailing-median price gate.
+- Agent contributes 50–96% of prints on active tapes; two-regime flow (random-walk
+  oscillation + terminal distribution; agent −5%-from-peak → fwd-300s median −65%
+  clean / −79% lost, 0/19 combined — exit-only signal, no shorts exist).
+- Census: 97.5% dead / 0.9% graduated-then-dead / 1.6% zombie; dev-buy predicts nothing.
+
+### 2. MAYHEM-CURVE-DIP-R (LOCKED spec): k-consistent depth dips (≥30%/120s, ≥10s,
+≥3 prints, no atomic, k-ratio 0.8–1.25) → enter +5s → TP +15% / struct stop /
+−35% / 120s. Evidence: DROP=0.30/k-gated n=8, WR 100%, med +21.9%, Wilcoxon
+p=0.0059, CI [+0.20,+0.86], token 7/7 p=0.009 — ALL GATES PASS. **BUT**: n=8 is
+fragile, the k-gate was added post-hoc (mechanism-principled, disclosed), and a
+REAL −82.6% post-entry gap tail exists (k-consistent dip that gapped through every
+exit). DROP=0.20/0.25 (n=14–15, tail included) FAIL gates (p=0.08–0.24).
+VERDICT: PROMISING, NOT deployment-validated. Re-gate at n≥30 under the locked spec.
+
+### 3. Falsified (closed): dip-bounce ≥20% on random lifecycles (0/45 tapes);
+10–15% dips (negative); grind-entry (med −56%); buy-every-birth (−87% EV);
+micro-fade agent sells (−5.5 to −9.8R); scalping (fee arithmetic); post-grad DIP-R
+(pools dead); agent-peak short (impossible). 75% of live dip events are stream
+artifacts (CPMM-conservation test; subscribe-race since fixed).
+
+### 4. Artifacts: `backend/analysis/MAYHEM_CURVE_STRATEGY.md` (full report),
+`mayhem_research/` (census, outcomes, live streams (growing), 47 recon tapes,
+collector/reconstructor/labs/battery). Live collector left running for the n≥30
+re-gate. Re-open conditions documented in the strategy md.
