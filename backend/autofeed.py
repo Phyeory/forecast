@@ -90,6 +90,59 @@ GMGN_RAINDOW   = os.environ.get("GMGN_CLI_RAW",  "--raw")  # always pass --raw
 
 # ── Defaults (tuned for "clean, organic, non-bundled, >15k mcap") ──────────
 
+# ── Market-condition auto-tune (2026-09-05) ──────────────────────────────────
+#
+# The USD gates were static while the market floats:
+#   * pump.fun graduation is a FIXED ~85.005 SOL raised on the bonding curve
+#     (notes/pumpfun_internals_2026-09.md §2) — the graduation mcap in USD is
+#     therefore LINEAR in the SOL price (≈ $69k at SOL=$168 ⇒
+#     grad_mcap_usd ≈ 410.7 × sol_usd).  A fixed $20k floor silently targets a
+#     different token class at every SOL level ($20k at SOL=$103 admits deep
+#     post-grad bleeders; the same floor at SOL=$240 would block half the
+#     fresh-graduate population).
+#   * Motion gates ($ volume / swaps / liquidity) calibrated for a normal
+#     PumpSwap tape starve the feed to zero in a cold venue and under-select
+#     in a hot one.
+#
+# Tuned levers (the ONLY values auto-tune may touch):
+#   min_mcap_usd      → max(user floor, grad_mcap_usd × mcap_grad_discount)
+#   min_volume_usd    → user gate × motion_scale
+#   min_swaps         → user gate × motion_scale
+#   min_liquidity_usd → user gate × motion_scale
+#
+#   motion_scale = clamp(venue_ratio × momentum_adj, 0.5, 1.5)
+#     venue_ratio  = PumpSwap latest-day DEX volume / median of the prior 7
+#                    settled days (DeFiLlama /overview/dexs/solana breakdown)
+#     momentum_adj = 1 + 0.3 × clamp(sol_24h_chg / 10%, −1, +1)
+#                    — compensates the ≤24h lag of the daily volume series
+#
+# Everything else — risk ratios, renounced/wash/honeypot gates, holders,
+# smart money, ranking, cooldowns — is NEVER modified: auto-tune adapts
+# QUANTITY to market conditions while QUALITY stays at the user's settings.
+# All tuned values are clamped to absolute safety floors so no regime can
+# starve the feed into inactivity or admit motionless tokens.  Escape hatch:
+# `auto_tune_enabled=False` restores user-only gates byte-exactly.
+GRAD_MCAP_USD_PER_SOL        = 410.7    # $69k grad mcap at SOL=$168 (85-SOL curve)
+AUTO_TUNE_MAX_CONDITION_AGE  = 6 * 3600.0   # older conditions → user-only gates
+AUTO_TUNE_MOMENTUM_WEIGHT    = 0.3
+AUTO_TUNE_RATIO_MIN          = 0.5
+AUTO_TUNE_RATIO_MAX          = 1.5
+AUTO_TUNE_VOL_FLOOR_USD      = 5_000.0
+AUTO_TUNE_VOL_CAP_USD        = 200_000.0
+AUTO_TUNE_SWAPS_FLOOR        = 120
+AUTO_TUNE_SWAPS_CAP          = 5_000
+AUTO_TUNE_LIQ_FLOOR_USD      = 2_500.0
+AUTO_TUNE_LIQ_CAP_USD        = 100_000.0
+COINGEKO_SOL_CHART_URL       = "https://api.coingecko.com/api/v3/coins/solana/market_chart"
+LLAMA_DEXS_SOLANA_URL        = "https://api.llama.fi/overview/dexs/solana"
+# DeFiLlama daily rows are UTC-midnight anchored and keep updating intraday;
+# rows at least this old are treated as settled for the median baseline.
+LLAMA_SETTLED_MIN_AGE_S      = 26 * 3600.0
+
+DEFAULT_AUTO_TUNE_ENABLED            = True
+DEFAULT_AUTO_TUNE_REFRESH_SECONDS    = 300.0
+DEFAULT_AUTO_TUNE_MCAP_GRAD_DISCOUNT = 0.5
+
 DEFAULT_POLL_SECONDS              = 60.0
 # Spec: feed pump.fun migrated tokens above 15k mcap.
 DEFAULT_MIN_MCAP_USD              = 20_000.0
@@ -219,6 +272,10 @@ class AutofeedConfig:
     max_concurrent_feed:     int = DEFAULT_MAX_CONCURRENT_FEED
     cooldown_after_feed_minutes: float = DEFAULT_COOLDOWN_AFTER_FEED_MINUTES
     exclude_mints:           str = DEFAULT_EXCLUDE_MINTS
+    # Market-condition auto-tune (see §"auto-tune" constants above)
+    auto_tune_enabled:       bool = DEFAULT_AUTO_TUNE_ENABLED
+    auto_tune_refresh_seconds: float = DEFAULT_AUTO_TUNE_REFRESH_SECONDS
+    auto_tune_mcap_grad_discount: float = DEFAULT_AUTO_TUNE_MCAP_GRAD_DISCOUNT
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -255,6 +312,12 @@ class AutoFeed:
         self.last_poll_at: float = 0.0
         self.total_seen: int = 0
         self.total_fed: int = 0
+        # Auto-tune state
+        self._market_conditions: Optional[dict] = None
+        self._last_tuned_gates: Optional[dict] = None
+        self._last_tune_at: float = 0.0
+        self._last_tune_refresh_at: float = 0.0
+        self._tune_history: list[dict] = []
 
     # -- lifecycle ────────────────────────────────────────────────────────────
     def start(self, forward_fn=None, active_count_fn=None):
@@ -304,6 +367,215 @@ class AutoFeed:
                     changed.append(k)
         return changed
 
+    # ── Market-condition auto-tune ──────────────────────────────────────────
+
+    async def _fetch_market_conditions(self) -> Optional[dict]:
+        """Pull SOL price/momentum (CoinGecko) + venue volume (DeFiLlama).
+
+        Returns a dict with sol_usd / sol_chg_24h_pct / venue_vol_usd /
+        venue_ratio / fetched_at, or None when nothing usable came back.
+        Never raises — a failed refresh just keeps the last good snapshot.
+        """
+        import aiohttp
+
+        now = time.time()
+        out: dict = {"fetched_at": now}
+
+        try:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as s:
+                # -- SOL spot + 24h momentum (one call, 8 days of hourly points)
+                async with s.get(
+                    COINGEKO_SOL_CHART_URL,
+                    params={"vs_currency": "usd", "days": "8"},
+                ) as r:
+                    if r.status == 200:
+                        prices = (await r.json(content_type=None)).get("prices") or []
+                        if prices:
+                            sol_now = float(prices[-1][1])
+                            p24 = [x for x in prices if x[0] / 1000 <= now - 86_400]
+                            if sol_now > 0 and p24:
+                                out["sol_usd"] = sol_now
+                                out["sol_chg_24h_pct"] = (sol_now / float(p24[-1][1]) - 1.0) * 100.0
+                # -- PumpSwap daily volume series (per-DEX breakdown)
+                async with s.get(LLAMA_DEXS_SOLANA_URL) as r:
+                    if r.status == 200:
+                        data = await r.json(content_type=None)
+                        rows = [
+                            (int(pt[0]), float((pt[1] or {}).get("PumpSwap", 0.0)))
+                            for pt in (data.get("totalDataChartBreakdown") or [])
+                        ]
+                        parsed = self._parse_llama_breakdown(rows, now)
+                        if parsed:
+                            out.update(parsed)
+        except Exception as e:
+            logger.debug(f"[AutoFeed] market-conditions fetch error: {e}")
+
+        if "sol_usd" not in out and "venue_ratio" not in out:
+            return None
+        return out
+
+    @staticmethod
+    def _parse_llama_breakdown(rows: list, now: float) -> Optional[dict]:
+        """(ts, pumpswap_vol) daily rows → venue_ratio inputs.
+
+        DeFiLlama quirks this compensates (measured 2026-09-05, byte-identical
+        duplicate frozen across 3+ polls):
+          * The API appends an EXACT DUPLICATE of the previous day's value
+            as the newest (today's) row — a copy-forward placeholder carrying
+            no fresh data. Projecting it would inflate a real settled day
+            2–4x, so an exact-equal latest is used as-is (it IS the newest
+            information: yesterday's settled day).
+          * A genuinely fresh partial day (value ≠ predecessor) IS filling
+            intraday — it is projected to a full-day estimate by
+            24h / elapsed-since-UTC-midnight, clamped to ≥6h elapsed so the
+            first minutes after midnight don't overproject.
+          * Baseline = settled rows (≥26h old); a value echoed on a row that
+            is itself settled counts the day exactly once.
+        """
+        pts = [(ts, v) for ts, v in rows if v > 0]
+        if not pts:
+            return None
+        latest_ts, latest = pts[-1]
+        prev_val = pts[-2][1] if len(pts) >= 2 else None
+        is_echo = prev_val is not None and prev_val == latest
+        if latest_ts > now - 24 * 3600.0 and not is_echo:
+            day_span = 24 * 3600.0
+            elapsed = min(max(now - latest_ts, 0.25 * day_span), day_span)
+            latest = latest * day_span / elapsed
+        settled: list[float] = []
+        for ts, v in pts:
+            if now - ts < LLAMA_SETTLED_MIN_AGE_S:
+                continue
+            if settled and settled[-1] == v:
+                continue    # echoed day already counted
+            settled.append(v)
+        if not settled or latest <= 0:
+            return None
+        settled_sorted = sorted(settled)
+        n = len(settled_sorted)
+        mid = n // 2
+        median = (
+            settled_sorted[mid]
+            if n % 2
+            else (settled_sorted[mid - 1] + settled_sorted[mid]) / 2.0
+        )
+        if median <= 0:
+            return None
+        return {"venue_vol_usd": latest, "venue_ratio": latest / median}
+
+    @staticmethod
+    def _compute_tuned_gates(
+        conditions: Optional[dict],
+        cf: "AutofeedConfig",
+        now: Optional[float] = None,
+    ) -> dict:
+        """Map market conditions → effective discovery gates (pure function).
+
+        Quality gates (risk ratios / booleans / holders / smart money) are
+        never touched — only the four market-floating USD/swap levers move,
+        and every lever is clamped to an absolute floor/cap so no regime can
+        starve the feed or admit motionless tokens.  Stale or missing
+        conditions degrade to the user's static gates exactly.
+        """
+        now = now if now is not None else time.time()
+
+        def clampf(x: float, lo: float, hi: float) -> float:
+            return max(lo, min(hi, x))
+
+        # 1) SOL-anchored graduation mcap floor.
+        #    Anchors min_mcap to the USD graduation level that floats with SOL
+        #    (fixed 85-SOL curve event ⇒ grad_mcap ≈ 410.7 × sol_usd), scaled
+        #    by the user's discount so the feed stays slightly below the
+        #    graduate frontier by default.  The user's own floor still wins
+        #    when it is the stricter of the two.
+        min_mcap = cf.min_mcap_usd
+        if conditions and "sol_usd" in conditions:
+            grad_mcap = GRAD_MCAP_USD_PER_SOL * float(conditions["sol_usd"])
+            min_mcap = max(cf.min_mcap_usd, grad_mcap * cf.auto_tune_mcap_grad_discount)
+
+        # 2) Motion gates scaled by venue volume ratio ± SOL momentum.
+        scale = 1.0
+        if conditions and "venue_ratio" in conditions:
+            ratio = float(conditions["venue_ratio"])
+            momentum_adj = 1.0
+            if "sol_chg_24h_pct" in conditions:
+                momentum_adj = 1.0 + AUTO_TUNE_MOMENTUM_WEIGHT * clampf(
+                    float(conditions["sol_chg_24h_pct"]) / 10.0, -1.0, 1.0
+                )
+            scale = clampf(ratio * momentum_adj, AUTO_TUNE_RATIO_MIN, AUTO_TUNE_RATIO_MAX)
+
+        return {
+            "min_mcap_usd":      float(min_mcap),
+            "min_volume_usd":    clampf(cf.min_volume_usd * scale, AUTO_TUNE_VOL_FLOOR_USD, AUTO_TUNE_VOL_CAP_USD),
+            "min_swaps":         int(round(clampf(cf.min_swaps * scale, AUTO_TUNE_SWAPS_FLOOR, AUTO_TUNE_SWAPS_CAP))),
+            "min_liquidity_usd": clampf(cf.min_liquidity_usd * scale, AUTO_TUNE_LIQ_FLOOR_USD, AUTO_TUNE_LIQ_CAP_USD),
+        }
+
+    def effective_gates(self) -> dict:
+        """The gates actually enforced right now (auto-tuned when live).
+
+        Stale conditions (older than AUTO_TUNE_MAX_CONDITION_AGE) fall back to
+        the user's static gates — a dead price feed must never freeze tuning
+        at an old SOL level or starve the feed.
+        """
+        cf = self.config
+        user_gates = {
+            "min_mcap_usd": float(cf.min_mcap_usd),
+            "min_volume_usd": float(cf.min_volume_usd),
+            "min_swaps": int(cf.min_swaps),
+            "min_liquidity_usd": float(cf.min_liquidity_usd),
+        }
+        if not cf.auto_tune_enabled or not self._market_conditions:
+            return user_gates
+        if time.time() - float(self._market_conditions.get("fetched_at", 0.0)) > AUTO_TUNE_MAX_CONDITION_AGE:
+            return user_gates
+        return self._compute_tuned_gates(self._market_conditions, cf)
+
+    async def refresh_market_conditions(self) -> bool:
+        """Fetch fresh conditions + recompute effective gates. Called by the
+        poll loop every `auto_tune_refresh_seconds` and by /api/autofeed/tune_now.
+        Returns True when new conditions landed."""
+        if not self.config.auto_tune_enabled:
+            return False
+        try:
+            cond = await self._fetch_market_conditions()
+        except Exception as e:
+            logger.warning(f"[AutoFeed] auto-tune conditions fetch failed: {e}")
+            return False
+        if not cond:
+            return False
+        self._market_conditions = cond
+        gates = self._compute_tuned_gates(cond, self.config)
+        self._last_tuned_gates = gates
+        self._last_tune_at = time.time()
+        # Tune history ring (cap 50 entries) — lets the dashboard and any
+        # later research audit how the gates moved with the market.
+        self._tune_history.append({"ts": self._last_tune_at, "conditions": cond, "gates": gates})
+        if len(self._tune_history) > 50:
+            self._tune_history = self._tune_history[-50:]
+        logger.info(
+            f"[AutoFeed] Auto-tune: SOL=${cond.get('sol_usd', 0):.1f} "
+            f"24h={cond.get('sol_chg_24h_pct', 0):+.1f}% "
+            f"venue_ratio={cond.get('venue_ratio', 0):.2f} → "
+            f"mcap≥${gates['min_mcap_usd']:.0f} vol≥${gates['min_volume_usd']:.0f} "
+            f"swaps≥{gates['min_swaps']} liq≥${gates['min_liquidity_usd']:.0f}"
+        )
+        return True
+
+    async def tune_now(self) -> dict:
+        """Manual refresh hook for POST /api/autofeed/tune_now — forces a
+        conditions fetch + recompute regardless of the refresh cadence."""
+        ok = await self.refresh_market_conditions()
+        return {
+            "refreshed": ok,
+            "auto_tune_enabled": self.config.auto_tune_enabled,
+            "conditions": self._market_conditions,
+            "effective_gates": self.effective_gates(),
+        }
+
+
     # ── gmgn-cli invocation ──────────────────────────────────────────────────
 
     def _build_cli_args(self) -> list[str]:
@@ -314,6 +586,7 @@ class AutoFeed:
         bot_degen_rate) are filtered locally in `_to_candidate` instead.
         """
         cf = self.config
+        eff = self.effective_gates()   # auto-tuned when enabled & conditions live
         args = ["market", "trending", "--chain", "sol", "--raw"]
 
         args += ["--interval", cf.interval or DEFAULT_INTERVAL]
@@ -323,14 +596,17 @@ class AutoFeed:
         args += ["--limit", "100"]
 
         # Server-side numeric range filters (supported by gmgn-cli).
-        args += ["--min-marketcap", str(int(cf.min_mcap_usd))]
+        # The four market-floating levers use the AUTO-TUNED effective gates;
+        # every other server-side flag (holders / smart money / risk ratios)
+        # passes the user's static value straight through.
+        args += ["--min-marketcap", str(int(eff["min_mcap_usd"]))]
         args += ["--max-marketcap", str(int(cf.max_mcap_usd))]
-        args += ["--min-liquidity", str(int(cf.min_liquidity_usd))]
+        args += ["--min-liquidity", str(int(eff["min_liquidity_usd"]))]
         args += ["--min-holder-count", str(int(cf.min_holders))]
         args += ["--min-smart-degen-count", str(int(cf.min_smart_degen_count))]
         # Motion gates (OP: "lots of motion - trending coins"):
-        args += ["--min-volume", str(int(cf.min_volume_usd))]
-        args += ["--min-swaps", str(int(cf.min_swaps))]
+        args += ["--min-volume", str(int(eff["min_volume_usd"]))]
+        args += ["--min-swaps", str(int(eff["min_swaps"]))]
         args += ["--max-top10-holder-rate", str(cf.max_top10_holder_rate)]
         args += ["--max-insider-rate", str(cf.max_insider_rate)]
         args += ["--max-bundler-rate", str(cf.max_bundler_rate)]
@@ -479,9 +755,10 @@ class AutoFeed:
 
         # Hard gates that may bypass server (defense in depth)
         cf = self.config
-        if mcap < cf.min_mcap_usd or mcap > cf.max_mcap_usd:
+        eff = self.effective_gates()   # auto-tuned when enabled & conditions live
+        if mcap < eff["min_mcap_usd"] or mcap > cf.max_mcap_usd:
             return None
-        if liq_usd > 0 and liq_usd < cf.min_liquidity_usd:
+        if liq_usd > 0 and liq_usd < eff["min_liquidity_usd"]:
             return None
         if holders > 0 and holders < cf.min_holders:
             return None
@@ -505,9 +782,9 @@ class AutoFeed:
                 return None
 
         # OP: "coins that got fed should have lots of motion - trending coins" —
-        # Enforce motion locally too (defense in depth):
-        if vol > 0 and vol < cf.min_volume_usd: return None
-        if swaps > 0 and swaps < cf.min_swaps:  return None
+        # Enforce motion locally too (defense in depth; auto-tuned effective gates):
+        if vol > 0 and vol < eff["min_volume_usd"]: return None
+        if swaps > 0 and swaps < eff["min_swaps"]:  return None
 
         # Boolean gates — wash trading & honeypot are non-negotiable rejections.
         if cf.reject_wash_trading and is_wash: return None
@@ -556,12 +833,27 @@ class AutoFeed:
 
     async def _loop(self):
         logger.info("[AutoFeed] Poll loop entered")
+        # Prime conditions once at loop start so the very first poll already
+        # runs against tuned gates (no partial-config poll before data lands).
+        try:
+            await self.refresh_market_conditions()
+        except Exception as e:
+            logger.warning(f"[AutoFeed] initial auto-tune refresh failed: {e}")
         while not self._stop_evt.is_set():
             try:
                 await self._tick()
             except Exception as e:
                 logger.error(f"[AutoFeed] tick error: {e}", exc_info=True)
                 self.last_error = f"tick error: {e}"
+            # Periodic market-condition refresh (auto-tune heartbeat)
+            if self.config.auto_tune_enabled and (
+                time.time() - self._last_tune_refresh_at >= self.config.auto_tune_refresh_seconds
+            ):
+                self._last_tune_refresh_at = time.time()
+                try:
+                    await self.refresh_market_conditions()
+                except Exception as e:
+                    logger.warning(f"[AutoFeed] periodic auto-tune refresh failed: {e}")
             try:
                 await asyncio.wait_for(self._stop_evt.wait(), timeout=self.config.poll_seconds)
             except asyncio.TimeoutError:
@@ -681,6 +973,14 @@ class AutoFeed:
             "max_created_age": self.config.max_created_age,
             "max_concurrent_feed": self.config.max_concurrent_feed,
             "cooldown_after_feed_minutes": self.config.cooldown_after_feed_minutes,
+            # Auto-tune block — conditions, effective gates, and provenance
+            "auto_tune_enabled": self.config.auto_tune_enabled,
+            "auto_tune_refresh_seconds": self.config.auto_tune_refresh_seconds,
+            "auto_tune_mcap_grad_discount": self.config.auto_tune_mcap_grad_discount,
+            "market_conditions": self._market_conditions,
+            "effective_gates": self.effective_gates(),
+            "last_tune_at": self._last_tune_at,
+            "tune_history": self._tune_history[-10:],
             "last_poll_at": self.last_poll_at,
             "last_error": self.last_error,
             "total_seen": self.total_seen,

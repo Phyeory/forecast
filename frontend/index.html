@@ -13,7 +13,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="stylesheet"
     href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" />
-  <link rel="stylesheet" href="/static/css/style.css?v=204" />
+  <link rel="stylesheet" href="/static/css/style.css?v=205" />
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 
@@ -428,6 +428,19 @@
             <span id="af-cli-status" class="af-cli"></span>
           </div>
 
+          <!-- Market-condition auto-tune strip -->
+          <div class="af-tune" id="af-tune" style="display:none">
+            <div class="af-tune-head">
+              <span class="af-tune-label">⚙ Auto-Tune</span>
+              <label class="af-switch af-switch-sm" title="Adapt USD gates to SOL price / venue volume">
+                <input type="checkbox" id="af-tune-toggle" checked />
+                <span class="af-slider"></span>
+              </label>
+            </div>
+            <div class="af-tune-conds" id="af-tune-conds">— no conditions yet —</div>
+            <div class="af-tune-gates" id="af-tune-gates">—</div>
+          </div>
+
           <!-- Settings -->
           <div class="af-settings" id="af-settings" style="display:none">
             <h4 class="af-subhead">Discovery Filters</h4>
@@ -435,6 +448,15 @@
               <div class="form-group">
                 <label class="form-label">Poll Interval (s)</label>
                 <input id="af-poll-seconds" type="number" class="form-input" value="60" step="5" min="15" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Auto-Tune Refresh (s)</label>
+                <input id="af-tune-refresh" type="number" class="form-input" value="300" step="30" min="60" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">MCap Grad Discount (0–1)</label>
+                <input id="af-tune-discount" type="number" class="form-input" value="0.5" step="0.05"
+                  min="0" max="1" title="min_mcap floor = graduation mcap × this discount (graduation ≈ 410.7 × SOL/USD)" />
               </div>
               <div class="form-group">
                 <label class="form-label">Trending Interval</label>
@@ -879,7 +901,7 @@
       setTimeout(check, 1000);
     })();
   </script>
-  <script src="/static/js/app.js?v=130"></script>
+  <script src="/static/js/app.js?v=131"></script>
 </body>
 
 </html>
