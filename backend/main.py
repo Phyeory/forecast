@@ -2314,6 +2314,8 @@ async def _get_or_create_live_session(
                 no_motion_stop_seconds=120.0,
             ))
         live_trader.start_watchdog()
+        for _tr in extra_traders:
+            _tr.start_watchdog()
 
         all_versions = [engine_version] + fleet_versions
         session = _LiveSession(

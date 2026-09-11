@@ -1,900 +1,261 @@
 # AGENTS.md
 
-This file provides comprehensive guidance, execution architecture invariants, mathematical formulations, and the complete quantitative research history for AI agents and developers working in this repository.
+Guidance for AI agents and developers working in this repository.
+**Last full revision: 2026-09-11** (post git-surgery repair; futures/sniper/MSM/HMM layers removed,
+delays off, holder-flow gates off per user policy). The prior 900-line version with the inline
+research history is in git history (`git show 3a33e47:AGENTS.md`).
+
+The full research history lives in **RESEARCH_LOG.md** (condensed, with per-era tables and the
+graveyard). This file covers only what you need to work on the code correctly.
 
 ---
+
+## What this is
+
+A real-time analytics + automated trading platform for volatile Solana memecoins (pump.fun /
+PumpSwap). A browser dashboard (vanilla JS) talks to a single FastAPI app (`backend/main.py`)
+that streams trades, aggregates 1 s candles, runs stochastic strategy engines, executes live
+trades on-chain (Jupiter), records everything to SQLite, and batch-backtests against those
+recordings.
 
 ## Commands & Workflows
 
-All commands assume the `backend/` Python virtual environment (created by `./start.sh` on first run). Python 3.13 is required.
-
 ```bash
-# Run the full application (FastAPI + uvicorn on :8000, serves frontend)
+# Run the full application (FastAPI + uvicorn on :8000, serves the frontend)
 ./start.sh
-
-# Or run backend manually:
+# Or manually (venv at backend/.venv, Python 3.13):
 cd backend && source .venv/bin/activate && python main.py
 
-# Install dependencies (venv lives at backend/.venv)
-cd backend && pip install -r requirements.txt
+# Unit / integration tests (analysis suite; see Testing section for ignores)
+cd backend && ./.venv/bin/python -m pytest analysis/ -q \
+  --ignore=analysis/test_live_trader_balance.py \
+  --ignore=analysis/test_timeout_hypothesis.py
 
-# Run pytest unit test suite
-cd backend && python -m pytest ../test_gamma.py -q
-# Or run direct test scripts:
-python backend/test_gamma.py
+# Batch backtest across recordings (the benchmarking entry point)
+BACKTEST_RESULTS_DIR=backend/v2_results python run_iteration.py --label <label> --max-workers 8
+# Subset:
+BACKTEST_RESULTS_DIR=backend/v2_results python run_iteration.py --label <label> \
+  --recording-ids-file /path/to/ids.json --max-workers 8
 
-# --- QUANTITATIVE BENCHMARKING WORKFLOW (V2 ENGINE) ---
+# Statistical candidate-vs-baseline analysis (Wilcoxon + bootstrap CI + McNemar)
+python backend/analysis/paired_diff.py --baseline <batch> --candidate <batch> --save <name>
 
-# Run a full V2 backtest iteration batch across all completed recordings
-BACKTEST_RESULTS_DIR=backend/v2_results python run_iteration.py --label iter04_baseline --max-workers 8
-
-# Run backtest on a specific subset of recordings
-BACKTEST_RESULTS_DIR=backend/v2_results python run_iteration.py --label iter05_test \
-  --recording-ids-file /path/to/subset.json --max-workers 8
-
-# Run paired-difference statistical analysis comparing candidate vs baseline
-python backend/analysis/paired_diff.py --baseline iter08_baseline_full --candidate iter10_full --save iter10_vs_iter08
-
-# Aggregate per-trade results for a specific batch ID manually
-python backend/analysis/aggregate_results.py --batch-id iter04_full --save iter04_summary
+# Aggregate a finished batch's per-trade logs
+python backend/analysis/aggregate_results.py --batch-id <batch> --save <name>
 ```
 
-*Note: No automated linter or code formatter is configured; preserve existing code style.*
+Notes: batch runs have **no resume** (a restart re-runs the whole cell); a full-DB cell takes
+~60–70 min at 8 workers on a quiet machine, ~7× slower under load; the batch label is the start
+unix time; **restart `main.py` after any code deployment** (pool workers freeze engine code at
+spawn). `run_backtest(...)` returns a summary dict (stats under `["stats"]`), not trade lists —
+read per-trade logs from `backend/v2_results/`.
 
 ---
 
-## Core Conventions & Execution Invariants
+## Core execution invariants (do not break)
 
-1. **The Single Most Important Invariant (Pipeline Parity)**: The `Backtester`, `ForwardTester`, and `LiveTrader` **must** evolve `StrategyEngine` state identically. Any modification to `strategy_engine.py` or `strategy_engineV2.py` that causes divergence between these three execution paths is a critical bug.
-2. **4-State Intra-Candle Expansion**: All three pipelines feed a 4-state intra-candle expansion (`open → first extreme → second extreme → close`) into `engine.update()` per candle. Do NOT "simplify" this to a single update per candle; signals and state updates occur at specific intra-candle moments.
-3. **Execution Timing (signal-instant, iter73 2026-08-30)**:
-   - **Live trader**: a BUY/EXIT signal fires its swap on the SAME intra-candle state that generated it (no next-state hop, no n+1-bar wait). Blocked launches (swap in flight, re-entry block, stop) stay pending and retry; a BUY may queue while the previous trade is still `"closing"` (its sell settling) and fires on the post-settle drain.
-   - **Backtester default `exec_model="instant"`**: a signal from state $k$ fills at that state's close ± slippage — the exact mirror of live. `exec_model="legacy"` reproduces the retired n+1 mid-bar model byte-identically (pre-iter73 baseline batches). Optional `entry/exit_latency_seconds` overlay defers the fill to $t_{\text{signal}} + \text{latency}$, priced on the recorded intra-candle path (measured live signal→confirm: buys median 10.0 s, sells 2.3 s).
-   - **Engine anchor parity**: `notify_trade_opened` uses `signal-state close × (1 + 1%)` in BOTH pipelines (live captures it at queue time so delayed launches keep the same basis).
-4. **Complete Decision Streams (No Lookahead / Truncation Bias)**:
-   - When a backtest recording ends, any open position is force-closed on the final candle's close price via `reason="recording_ended"` through `_close_long()`.
-   - Discarding unclosed trades introduces severe right-tail PnL overstatement. Every trade initiated during a backtest must contribute to final statistics.
-5. **Determinism**: Keep both V1 and V2 engines strictly deterministic across backtest, paper, and live execution.
-6. **Engine Factory Indirection**: All pipelines instantiate strategy engines via `engine_factory.create_engine(engine_version=1|2, **params)`. Both V1 (`StrategyEngine`) and V2 (`StrategyEngineV2Adapter`) present the exact same public interface.
-7. **Database Isolation**: Real market datasets reside in SQLite DBs under `backend/data/` (`price_data.db`, `backtest_data.db`, `sniper.db`). Do not write to `backend/candles.db` (legacy file).
-8. **Isolated Result Directories**: Use `BACKTEST_RESULTS_DIR=backend/v2_results` during V2 sweeps to protect benchmark artifacts from being cleared by V1 parameter sweeps.
-9. **No Orphaned Pool Workers**: Every `ProcessPoolExecutor` / `mp.Pool` worker (backtester `_get_pool`, `run_orderflow_*`, `run_stage1_sweep`, `iter06_probe`) must start with `guard_parent()` (via `initializer=` or a call at the top of the worker function) from `backend/process_watchdog.py`. It hard-exits the worker within 1 s if its spawn parent dies (SIGKILL / crash / closed terminal), preventing the CPU-burning orphan pools that previously kept running for 17+ h with PPID=1. The guard is a pure safety net — a live parent is unaffected and backtest output is byte-identical. Pool workers spawned before a code change do NOT carry the guard — restart `main.py` after deployments so its backtest pool re-initializes.
+1. **Pipeline parity** — `Backtester`, `ForwardTester`, and `LiveTrader` must evolve the engine
+   identically. Any engine change that diverges these three paths is a critical bug. Verify with
+   `backend/analysis/test_live_parity.py` (LiveTrader-with-stubbed-swaps vs ForwardTester on real
+   recordings) before claiming parity.
+2. **4-state intra-candle expansion** — every candle is fed as `open → first extreme → second
+   extreme → close` (4 `engine.update()` calls). Signals fire at specific intra-candle moments.
+   Never simplify to one update per candle.
+3. **Signal-instant execution (iter73)** — live fires the swap on the SAME intra-candle state that
+   generated the signal; backtester default `exec_model="instant"` fills at that state's close ±
+   slippage. `exec_model="legacy"` byte-reproduces the retired n+1 mid-bar model.
+   `entry/exit_latency_seconds > 0` defer fills to `t_signal + latency`, priced on the recorded
+   intra-candle path (no lookahead).
+4. **Deferred-fill delay knobs live on the ENGINE** (`v2_entry_delay_seconds`,
+   `v2_exit_delay_seconds`, `v2_exit_delay_armed_only` — **production 0.0 = OFF** since
+   2026-09-11; measured cells were 5.0 / 20.0+armed). Pipelines read them off the engine object
+   (backtester keys `ForwardTester.enable_*_latency`, live_trader holds the queued swap). 0.0 is
+   byte-exact signal-instant.
+5. **Complete decision streams** — the backtester force-closes any open position at recording end
+   (`reason="recording_ended"`). Never drop unclosed trades (lookahead/right-tail bias).
+6. **Determinism** — engines are deterministic across backtest/paper/live.
+7. **Engine factory** — instantiate engines only via `engine_factory.create_engine(version=1|2|3|4|6)`.
+   V1 `StrategyEngine` and V2 `StrategyEngineV2Adapter` expose the same public interface.
+   V3 (newborn dump-bottom), V4/V6 (archetype experiments) are non-default.
+8. **Database isolation** — real datasets in `backend/data/*.db` (`price_data.db`, `backtest_data.db`,
+   `sniper.db`). Never write `backend/candles.db` (legacy).
+9. **Isolated result dirs** — `BACKTEST_RESULTS_DIR=backend/v2_results` for all V2 sweeps.
+   `backend/v2_results/` holds the batch history baselines are compared against — do not prune.
+10. **No orphaned pool workers** — every pool worker must call `guard_parent()`
+    (`backend/process_watchdog.py`); it hard-exits within 1 s if the parent dies. Deployments
+    require a `main.py` restart so pools re-init with current code.
 
 ---
 
-## Codebase Architecture
-
-The Pump-Chart Dashboard is a real-time analytics and automated trading platform built for volatile Solana tokens (memecoins).
+## Architecture
 
 ```mermaid
 graph TD
-    Client[Browser / Frontend app.js] <-->|WebSocket / REST| FastAPI[backend/main.py]
+    Client[Browser: frontend/js/app.js] <-->|REST + WS| FastAPI[backend/main.py]
     FastAPI <--> Stream[pumpfun_client.py]
     Stream --> Agg[candle_aggregator.py]
     Agg --> Factory[engine_factory.py]
-    Factory -->|Version 1| V1Engine[strategy_engine.py]
-    Factory -->|Version 2| V2Adapter[strategy_engineV2.py]
-    
-    Sub1[backtester.py] --> Factory
-    Sub2[forward_tester.py] --> Factory
-    Sub3[live_trader.py] --> Factory
-    
-    Sub1 --> Data[data_store.py SQLite]
-    Sub4[sniper/ router] --> SniperEng[sniper/sniper_engine.py]
+    Factory --> V1[strategy_engine.py] 
+    Factory --> V2[strategy_engineV2.py]
+    Sub1[backtester.py] --> FT[forward_tester.py] --> Factory
+    Sub2[live_trader.py] --> FT
+    HF[holder_flow.py] --> Main & FT
+    Data[data_store.py SQLite] --> Sub1 & HF
 ```
 
-### 1. Frontend (`frontend/`)
-- Pure HTML5 + Vanilla JS (`js/app.js`, `js/sniper.js`, `polymarket.html`).
-- Uses LightweightCharts with HTML5 Canvas overlays for Volume Profiles, Rate of Change (ROC), and Regime Status Bars.
-- WebSockets: `/ws/{mint}` for live chart data/signals, `/ws/live/{mint}` for live execution, `/ws/sniper` for sniper stream.
+- **`backend/main.py`** — the FastAPI app: REST (`/api/token/*`, `/api/recorder/*`,
+  `/api/backtest*`, `/api/live/*`) and WS multiplexers (`/ws/{mint}`, `/ws/live/{mint}`,
+  `/ws/autofeed`). Live sessions are server-side (own trader, stream, auto-recording,
+  holder-flow pump) and survive tab closure. Runs the holder-flow 1 s pump
+  (`_holder_flow_pump`), immediate holder-flow exit dispatch, and the live fleet registry
+  (multi-engine: ⌘/ctrl-click the engine toggle splits buy size N ways; shared-wallet sells are
+  attributed via a fleet share registry).
+- **`backend/pumpfun_client.py`** — mint/pool resolution + trade streaming (PumpPortal WS,
+  Pump.fun REST, Solana RPC `accountSubscribe` vault-diff, DexScreener fallback), globally gated
+  by `asyncio.Semaphore(8)`. **The FD-leak fix (4731969) lives here**: `stop()` force-closes the
+  stream's aiohttp session because a generator parked at `yield` never exits its `async with`.
+  Do not remove.
+- **`backend/candle_aggregator.py`** — trades → OHLCV (1 s … 1 h) with the 4-state expansion.
+- **`backend/data_store.py`** — SQLite (`price_data.db`, `backtest_data.db`, `sniper.db`),
+  recordings, holder-flow persistence, `get_holder_flow_since` id-cursor delivery.
+- **`backend/holder_flow.py`** — insider/whale sell detection. TWO sources into one table:
+  realtime on-chain watcher (whale = any ≥$100 sell from the session trade stream via
+  `observe_trade`, tick-time; dev = ATA balance subscription via `accountSubscribe`) and the
+  legacy GMGN poll (enrichment/fallback only). SOL/USD via CoinGecko, cached, never blocks hot
+  paths. Cross-source dedupe by tx-hash LRU + near-duplicate rule.
+- **`backend/forward_tester.py`** — the execution simulator shared by backtest and paper:
+  slippage, `exec_model`, latency overlays, `holder_flow_latency_seconds`, per-trade JSON logs.
+- **`backend/live_trader.py`** — mainnet execution (Jupiter V1 Lite + `solders` signing).
+  Pending-signal retry semantics (blocked launches retry every state/boundary/settle; BUY may
+  queue while the prior trade is still settling). Market-cap floor: breach with a position open →
+  emergency sell to completion + entry block + session terminate; idle breach → immediate
+  terminate. (The mcap-floor HOLD policy commit `3ec53f9` is orphaned — never merged into any
+  branch; current code is the emergency-sell behavior.)
+- **`backend/backtester.py`** — recording replay via ForwardTester + ProcessPool pool
+  (`guard_parent`), batch persistence to `backtest_data.db` + `v2_results/` per-trade logs.
+- **`backend/signal_capture.py`** — live per-signal engine-value capture to
+  `data/live_logs/<session>/signals.jsonl` (read-only parity instrument).
+- **`backend/autofeed.py`** — server-side auto-opening of live sessions from a candidate feed;
+  once started it runs without a browser, but a backend restart does NOT auto-resume it (UI only
+  mirrors `is_running`).
+- **`backend/newpairs.py` / `newpairs_store.py`** — newborn-token recorder (no trading; separate
+  DB; 120 s no-motion stop). Feed default-OFF.
+- **`backend/process_watchdog.py`** — `guard_parent()` orphan protection.
+- **`backend/analysis/`** — paired_diff.py, aggregate_results.py, test suite, and per-iteration
+  artifacts (see Cleanup note below).
+- **`frontend/`** — vanilla JS + LightweightCharts; canvas overlays for volume profile / ROC /
+  regime bar. `frontend/js/app.js` mirrors all engine knobs (`engineParamsV2`).
 
-### 2. Backend Core (`backend/`)
-- **`main.py`**: Single FastAPI application serving REST endpoints (`/api/token/*`, `/api/recorder/*`, `/api/backtest/*`, `/api/live/*`, `/api/sniper/*`) and WebSocket multiplexers.
-- **`pumpfun_client.py`**: Resolves mints, Raydium pairs, or pump.fun assets and streams trades via PumpPortal WS, Pump.fun V3 REST, Solana RPC `accountSubscribe`, or DexScreener fallback. Gated globally via `asyncio.Semaphore(8)`.
-- **`candle_aggregator.py`**: Aggregates unstructured trades into OHLCV candles (1s to 1h timeframes). Emits 4 sub-tick intra-candle expansion states.
-- **`data_store.py`**: Manages SQLite storage for price data (`backend/data/price_data.db`), backtest records (`backend/data/backtest_data.db`), and sniper states (`backend/data/sniper.db`).
-
-### 3. Execution Pipelines ("The Three Amigos")
-- **`backtester.py`**: Offline engine running on historical recording DBs. Expands candles to 4 intra-candle states, fills signals at the **signal-instant price** by default (`exec_model="instant"`, iter73 — `exec_model="legacy"` restores the retired 1-bar-delay mid-bar model byte-identically; `entry/exit_latency_seconds>0` defer fills to $t_{\text{signal}}+\text{latency}$ on the recorded path), force-closes open positions at `recording_ended`, and writes per-trade JSON logs. iter66: optional `exec_offset_pct_buy/sell` params (default 0.0 = exact legacy fills) shift fill levels up/down multiplicatively after slippage so any batch can be replayed at measured live fill levels — separates strategy alpha from execution cost. **Calibration verdict (2026-08-26; 49 paired trades / 25 sessions via `analysis/iter66_calibrate_exec_offsets.py` → `iter66_exec_calibration.json`): live entries fill ~1% BELOW the modelled fill (median −0.99% ≈ −1/1.01 — the model's +1% entry-slippage premium is phantom on this routing, candle-verified); exits scatter [−26%, +24%] with median ≈ −1%; the residual live-vs-BT PnL gap is per-exit SECONDS-level timing lag (corr −0.62 with sell offset, worst pairs late-printing `dev_sell_exit`s) which no level knob represents. Live-cost lens knobs: buy=−0.99 / sell=−0.96; production & research defaults stay 0.0 for baseline continuity.** Analysis-layer only; `exec_model`/latency knobs exposed via `/api/backtest` since iter73.
-- **`forward_tester.py`**: Live paper-trading core. Connects to live WS streams, models realistic execution slippage (entry slips toward High, exit slips toward Low).
-- **`live_trader.py`**: Mainnet execution engine using Jupiter V1 Lite APIs and `solders` transaction signing from Solana base58 secret keys. Market-cap safety floor (2026-08-29 policy): a breach with a position open HOLDS (no panic sell; entries blocked; normal engine exits keep running) and the watchdog closes the position + terminates the session only if it goes stale (no price motion for `mcap_floor_stale_seconds`, default 600 s) while still below the floor; an idle breach still terminates immediately.
-
-### 4. Sniper Module (`backend/sniper/`)
-A dedicated automated sniping pipeline mounted via `/api/sniper/*`. Executes a 5-stage sequential analysis: `launch_detector → pressure_analyzer → chart_validator → entry_signal → exit_signal`.
-
-### 5. Holder-Flow Instrumentation (`backend/holder_flow.py`)
-A `HolderFlowMonitor` with TWO event sources feeding the same `holder_flow` table (iter66): the **realtime on-chain watcher** (primary) and the legacy **GMGN smartmoney poll** (now enrichment/fallback only — sniper/bundler/rat_trader tags, registry data, and tokens with no resolvable pool/creator). The on-chain path uses no third-party indexer ⇒ no API key, no rate limits, no indexing lag:
-- **Whale sells** (any wallet selling ≥ `_MIN_SELL_USD` = $100 — the dominant gate-triggering class): classified straight off each session's trade stream via `observe_trade(mint, trade)`, called from BOTH `main.py` stream loops for every non-synthetic tick. Needs no trader identity (vault-diff trades carry none). Tick-time latency. **iter72 wiring fix (2026-08-29)**: the original identity-only dispatch silently dropped every vault-diff trade (`trader: ''` → early return), so until this fix the recorded holder_flow stream carried only the ~6.7% of ≥$100 sell prints that passed GMGN's 200-row global window (measured on the dense cohort: 17,992 candle-seconds with ≥$100 sell volume vs 1,201 persisted rows — a COVERAGE artifact, not curation; persisted sizes are representative of the full print population). `observe_trade` now dispatches anonymous sells ≥ `_MIN_SELL_USD` as `whale` events through the same dedupe/persist path; identified traders keep the dev/registry path; anonymous buys are still dropped. All iters 43–71 holder-flow results were measured on the 6.7%-coverage stream; recordings started after this fix carry ~full coverage — re-gate holder-flow mechanisms on the new data regime (RESEARCH_LOG.md Iter 72).
-- **Dev trades**: `_onchain_devsell_loop` resolves `coin_creator` from the token's PumpSwap pool account (byte 211, one HTTP RPC, 30 s retry), locates the dev's SPL token account (`getTokenAccountsByOwner`, one call), and `accountSubscribe`s it on the shared `_solana_hub`, diffing the raw u64 balance per notification (~1 s push latency; balance decrease = sell, increase = buy; SOL amount sized via `last_price_sol` learned from the stream). Dev resolution seeds `state.wallet_registry[dev]="dev"` so late GMGN trades still get the verified tag.
-- **Coverage semantics** mirror iter43 production (`require_tag=0`): `tag='dev'` (creator wallet, any side/size) + `tag='whale'` (any other ≥$100 sell). rec3466 evidence motivated whale coverage: its exit-triggering sells were whale-tagged while the resolved dev had zero events (already fully dumped).
-- **Cross-source dedupe**: `_claim_tx` tx-hash LRU (10k, halving eviction) + `_is_near_duplicate` (same side within ±5 s regardless of wallet when either identity is empty — vault-diff/ATA events carry no identity). First source wins; collapsing simultaneous distinct same-side dumps is accepted (immaterial to binary gates).
-- **Pricing**: SOL/USD via CoinGecko cached 60 s, non-blocking background refresh ≤1/5 s, constant fallback — hot paths never wait on network.
-
-- **Data capture**: Events are persisted to a `holder_flow` table in `price_data.db` so future recordings are backtestable.
-- **Provenance tagging (iter38)**: Each sell carries a canonical `tag`. Verified insider tags are `dev`/`sniper`/`bundler`/`rat_trader` (matched from the per-token wallet registry, or normalised from the feed's `maker_info.tags` via `_TAG_SYNONYMS`/`_normalise_tag`). A large sell (≥ `_MIN_SELL_USD`) with **no** recognised provenance is tagged `whale` so it stays distinguishable from a verified insider sell. Registry fetches are logged and retried on empty (the iter38 root cause: the registry silently never populated ⇒ 100% untagged events).
-- **Entry gate** (`strategy_engineV2.py`): Blocks entry if a dev/insider sell occurred in the last 30 s. Was default ON (`v2_holder_flow_entry_block=1.0`); **DISABLED (=0.0) 2026-08-23 by user working-tree decision — see Iter 62** (backtest says it was net-protective; decision under re-gate).
-- **Exit trigger** (`strategy_engineV2.py` + `forward_tester.py`): Fires an immediate exit if a dev/insider sell occurs while in position. Was default ON (`v2_holder_flow_exit_enable=1.0`); **DISABLED (=0.0) 2026-08-23 by user working-tree decision — see Iter 62** (the single largest positive contributor lost in the ablation: profitable saves on 08-08/10/11/12/18 vanished into `kelly_flat`/tail).
-- **`v2_holder_flow_require_tag`** (default **0.0 = gate 1.0**): when > 0 the gate/exit only fire on *verified* insider tags (`_DEV_TAGS`); the `whale` fallback and untagged events do NOT qualify. Set to 0.0 for the iter43-validated "any big seller" circuit-breaker. **iter43 proved gate 1.0 (require_tag=0) is the first ACCEPTED informational alpha source**: +163% PnL (+0.273→+0.719 SOL) on 262 holder_flow recordings, Wilcoxon p=0.0095, CI [0.0014, 0.0101]. Gate 2.0 (require_tag=1) was REJECTED (p=0.077) because the GMGN wallet registry has sparse tag coverage (only 12/44 dev_sell_exits fire with require_tag=1).
-- **Backtest support** (`backtester.py`): Loads `holder_flow` events from the DB and passes them to `ForwardTester` for replay.
-- **Live support** (`main.py`): Each live session runs a `HolderFlowMonitor` that pushes events into the engine in real time and persists them to the auto-recording. Events are pre-loaded from the DB at session start via `set_holder_flow_events()` (matching the backtester), then a 1s background pump task (`_holder_flow_pump`) pushes newly discovered events via `append_holder_flow_events()`, decoupled from trade ticks (iter39 parity fix — previously events were only pushed on trade ticks, causing 10s+ delivery delay on illiquid tokens). After appending new events, the pump immediately calls `live_trader.check_immediate_holder_flow_exit()` — if a dev/insider sell is detected, an immediate `execute_sell()` is fired without waiting for the next trade tick (iter41 parity fix — addresses remaining mismatch on illiquid tokens where no tick arrives for 30s+ after the insiders dumps).
-- **Rate-limit architecture**: A process-wide shared singleton (`get_shared_monitor()`) with refcounted start/stop — one 5 s poller regardless of session count.  Calls the GMGN OpenAPI directly over async HTTP (`https://openapi.gmgn.ai`, exist-auth: `X-APIKEY` + `timestamp` + `client_id`), NOT via the `npx gmgn-cli` subprocess.  On HTTP 429 it parses the server-provided reset time, backs off until then, and suppresses repeated ban logs. Non-429 errors are surfaced via a rate-limited logger (one line per distinct error per 60 s) so registry/fetch failures are observable. Since iter66 the GMGN poll is enrichment/fallback only; the realtime path is the on-chain watcher above (whale = session trade stream, dev = ATA balance subscription), so GMGN rate limits no longer gate event delivery.
-
-The mechanism is parity-safe when no `holder_flow` data exists (the gates never fire on an empty table, so legacy recordings are byte-identical). With the iter43-validated defaults (gate 1.0 ON, `require_tag=0`), the gate fires on any ≥ $100 sell. iter43 proved this is the first informational alpha source to break the OHLCV-only ceiling: it converts 13 kelly_flat exits (mean -45%) into dev_sell_exit exits (mean +9%), saving +0.592 SOL. Gate 2.0 (`require_tag=1`) was REJECTED because the GMGN wallet registry has sparse tag coverage (only 12/44 sells have verified tags).
-
-### 6. Futures Backtesting (`backend/futures_model.py` + `backend/futures_exchange.py`)
-
-Two modes share the same `ForwardTester` futures layer (`market_type="futures"`):
-
-**Mode A — recording-replay perp.** Run the leveraged account against any existing pump.fun spot recording (mark≈close, funding=run default). Canvas for testing perp mechanics on memecoin price action.
-
-**Mode B — historical perp data (preferred, this project default).** Public REST history from Bybit linear USDT-M perps (`BTC/ETH/SOL/LTC`, extensible) is fetched, cached in `backend/data/futures_cache.db`, and the same engine + 4-state intra-candle pipelines run directly over the cached rows — **no user recordings required**.  USDT-M serves as USD-stable proxy for USDC accounting (1:1, <1bp basis); `sol_price_usd=1.0` mode routes the account into native USDC reporting.
-
-- **No engine changes.**  `StrategyEngineV1/V2` long-only; leverage scales notional, not `n_star`.  Mirror-image shorts were quantitatively rejected iters 33–39.
-- **Fees / slippage.**  Futures defaults: CEX taker 0.045% + 0.1% slippage.  The engine-internal `s_0`/`s_1` Kelly costs remain spot-calibrated unless overridden via `engine_params`.
-- **Funding.**  Real perp funding history is ingested alongside klines, cached per bar (`funding_rate` column), and settled at every `funding_interval_seconds` boundary (default 8 h, timestamp-anchored).  `0.0` means "no feed provided" (run default applies).
-- **Liquidation.**  Checked on EACH intra-candle state against the mark price (`mark_price` feed when present, close otherwise).  Fires independent of engine exits; PnL capped at margin (isolated margin).
-- **Engine calibration note.**  V2 was calibrated on 1s memecoin bars; on a 1h major it typically passes through the 60-bar warmup untouched and trades conservatively.  This is a true engine-calibration restriction, not a pipeline defect — per-run overrides (``warmup``, ``confidence_high``) are exposed via the existing Engine Parameters modal.
-- **Frontend.**  ⚖️ *Futures* tab = a second nav-tab page (`fbt` ctx prefix).  Selector cards for BTC/ETH/SOL/LTC + USDC margin/leverage/history config; results reuse the same chart + stats grid + trades table as the spot Backtest tab with futures columns appended (liquidations, funding paid/received, taker fees, max lev used).
-- **Persistence.**  Futures runs distinguishable by ``backtests.market_type='futures'`` + `mint='FUT:<SYMBOL>'`; `recording_id=0` (no recording row is fabricated).  The canonical query for a replay-vs-real perp cohort is ``.../api/backtests?market_type=futures``.
-- **Regression guard.**  ``cd backend && python test_futures.py`` (13 tests: spot byte-identity + liq-before-engine-exit + funding accrual + mark-vs-last + cache schema + USDC accounting + funding feed override + end-to-end synthetic run).
-
-### 7. Quantitative Benchmarking & Analysis (`backend/analysis/`)
-
-A **strictly additive** futures layer: when `market_type="futures"` is passed to `ForwardTester` / `run_backtest` / `run_backtest_batch` (or the two HTTP endpoints), the same `Backtester` / engine / `get_recording_candles()` pipeline runs with a leveraged-margin account layered on top of the spot math.  Spot behaviour is byte-identical when the flag is left at the default `"spot"`.
-
-- **No engine changes.**  `StrategyEngineV1/V2` remain long-only — futures support lives entirely in the execution / accounting layer.  Leverage scales position notional, not `n_star`.  Mirror-image shorts were evaluated and rejected (iter33–39: the down-side posterior `P_down` never reaches the ≥ 0.5 threshold the gated mirror-entry would need, so a short circuit would be net-negative *and* would break the pipeline-parity invariant).
-- **Fees / slippage.**  Futures runs default to a CEX taker fee (0.045%) + 0.1% slippage; the engine-Kelly-internal `s_0`/`s_1` defaults remain for spot calibration.  Set a realistic `engine_params` override (e.g. `{"s_0": 0.00045, "fee_fraction": 0.00045}`) for futures runs if you want the Kelly gate to price perp costs in.
-- **Funding.**  Settled at every `funding_interval_seconds` boundary (default 8 h = 28800 s) against the open position's mark-price notional.  Per-candle `funding_rate` column (additive COALESCE migration) overrides the run default when non-zero; spot recordings (0) make funding a no-op.  `0.0` means "no feed provided" — a true zero funding rate is indistinguishable from missing data, which is the safe conservative option.
-- **Liquidation.**  Checked on EACH of the 4 intracandle states against the mark price (falls back to close when no `mark_price` column).  Fires independent of engine exits and wins any execution-order race within the bar; PnL capped at margin at risk (isolated margin, no negative balance) with a 0.5% insurance-fund fee levied at the liq fill.  The engine is simply notified of the close and never sees a liquidated position remain.
-- **Persistence.**  `backtests.market_type` distinguishes rows; per-trade futures fields (leverage / notional / funding / liquidation / liq-fee) live as additive columns on `backtest_trades`.  `/api/backtests?market_type=futures` filters for the futures tab.
-- **Frontend.**  ⚖️ *Futures* `nav-tab` reuses the existing tab system; config / metrics / trade-table renderers are the same as the spot Backtest tab, parameterised by a `ctx` prefix (`bt` / `fbt`), with leverage / funding stats and extended trade columns gated on `market_type == 'futures'`.
-- **Regression guard.**  `cd backend && python test_futures.py` covers spot-byte-identity, mark-vs-last liquidation priority, funding accrual across 8-h boundaries (incl. partial settlement at close), and the stats-dict shape contract.
-
-### 7. Quantitative Benchmarking & Analysis (`backend/analysis/`)
-- **`run_iteration.py`**: Batch entry point that executes backtests across recordings, gathers results, and saves aggregate metrics.
-- **`aggregate_results.py`**: Summarizes per-trade JSON outputs into metrics (win rate, total PnL, profit factor, expectancy, exit reason breakdowns).
-- **`paired_diff.py`**: Strict statistical hypothesis testing tool comparing candidate vs. baseline batches via Wilcoxon signed-rank tests, 10,000-sample bootstrap 95% CIs, McNemar tests, and per-token improvement percentages.
+Removed subsystems (do not resurrect without a new data channel): futures, sniper, MSM/HMM
+fleet-regime gate (reverted 2026-09-11), iter57 Q-regime cache, whale-dump exit, SPE exit,
+mayhem V7.
 
 ---
 
-## Strategy Engine V1 Specification (Physics & Langevin Analogy)
+## Strategy Engine V1 (`backend/strategy_engine.py`) — physics analogy
 
-**File:** `backend/strategy_engine.py`
+Langevin view: price = position p + momentum m, viscous damping γ (EMA3/EMA7 spread contraction),
+thermal noise σ (ATR, floored by rolling median), external force F_ext (signed cumulative delta),
+potential landscape U(p) from volume-profile HVNs. 2-state Kalman filter estimates (p, m);
+signal strength S = |m̂|/ATR_floor, barrier-adjusted S_eff = S/ΔU; regimes IDLE → TREND →
+EXHAUSTION → REVERSAL/CONTINUATION; 4-pillar confidence C (persistence .30 / momentum .25 /
+volatility .25 / EMA-sep .20) gates entries at `confidence_high` 0.79; blow-off-top guard,
+anti-chop filter, cold-start breakout. Full math: `strategyV1.md`.
 
-Engine V1 models price action using a Langevin dynamics physics analogy (a particle moving through a viscous fluid subjected to external forces and background noise).
+## Strategy Engine V2 (`backend/strategy_engineV2.py`) — stochastic RBPF/UKF/Kramers
 
-```
-Price Action = Position (p) + Momentum (m) + Viscous Damping (γ) + Thermal Noise (ATR) + Potential Barriers (Volume Profile)
-```
+Latent state x_t = [log-price x, drift μ, log-vol h, flow φ, liquidity ℓ]. SDEs: OU drift
+dμ = −λ_μ μ dt + σ_μ dW; log-vol OU anchored to observable EWMA r̄² (prevents filter collapse —
+iter01/02 lesson); flow anchored to normalized delta φ̄. Adaptive measurement variance
+(max of EWMA/spread/floor, Mehra). Rao-Blackwellized particle filter → per-particle topological
+regime; trend confidence from posterior entropy. Market potential U(x,t) = −T ln ρ + V_liq from
+volume KDE; Kramers escape rates k± over barriers with drift work; softmax → P⁺/P⁻/P⁰; direction
+by strict Bayesian majority; Kelly expected log-utility E* gates the long.
 
-### 1. Mathematical Observables & State Estimation
-- **Position ($\hat{p}$) & Momentum ($\hat{m}$)**: Estimated in real-time via a 2-State Kalman Filter:
-  $$\begin{bmatrix} p \\ m \end{bmatrix}_{k} = \begin{bmatrix} 1 & 1 \\ 0 & 1 - \gamma \end{bmatrix} \begin{bmatrix} p \\ m \end{bmatrix}_{k-1} + \mathbf{w}_k$$
-- **Viscous Damping ($\gamma$)**: Contraction rate of the EMA 3 vs EMA 7 spread.
-- **Background Friction / Noise ($\sigma$)**: Average True Range (ATR), bounded below by a rolling median $ATR_{\text{floor}}$.
-- **External Force ($F_{\text{ext}}$)**: Signed Cumulative Delta Volume (buy volume vs. sell volume).
-- **Potential Landscape ($U(p)$)**: Fixed-range Volume Profile where High Volume Nodes (HVNs) represent potential energy barriers.
+### V2 exit cascade (`_check_exit_v2`, first match wins)
 
-### 2. Core Signal Formulation
-- **Base Signal Strength ($S$)**:
-  $$S = \frac{|\hat{m}|}{ATR_{\text{floor}}}$$
-- **Barrier-Adjusted Effective Signal ($S_{\text{effective}}$)**:
-  $$S_{\text{effective}} = \frac{S}{\Delta U}$$
-  where $\Delta U$ is the relative work required to cross the nearest HVN barrier.
+1. `tp_v2` — take-profit target.
+2. `gain_retrace` — armed at +10% peak; exit when gain retraces peak·(1−0.5).
+3. `breakeven_scratch` — armed after drawdown; exit on recovery to entry+buffer.
+4. `rate_split_flip` — stationary Kramers split s = k⁻/(k⁺+k⁻) ≥ 0.55 for 12 consecutive ticks
+   while armed (peak ≥ entry·1.10); harvests winners pre-give-back (iter63/64, production ON).
+5. `reversal_exit` — regime flips to REVERSAL.
+6. `kramers_down_exit` — P⁻ ≥ 0.5.
+7. `bayesian_flip` — direction flips away from long with E* > 0.
+8. `kelly_flat` — direction ≠ +1 AND E* ≤ 0 for 60 ticks AND ≥40% offside (iter21).
+9. `evr_triage` — unconfirmed + trailing buy-ratio < 0.45 + ≥20% offside after 120 s, vetoed when
+   the max single-second sell share (60 s window) > 0.25 (iter48/50, production ON).
 
-### 3. State Machine Regimes
-State transitions: `IDLE → TREND → EXHAUSTION → REVERSAL / CONTINUATION → TREND`
-- **`TREND`**: Triggered when momentum persistence, volatility expansion, and EMA separation cross threshold limits.
-- **`EXHAUSTION`**: Triggered when momentum $|\hat{m}|$ decays while ATR remains elevated.
-- **`REVERSAL`**: Declared when Delta Volume forces flip direction following exhaustion.
+`recording_ended` force-close is applied by the backtester at tape end. Removed exits (do not
+re-add): whale-dump (iter72/78), SPE/P_zero (iter79), pool_drain (iter65), V1 trailing stop.
 
-### 4. 4-Pillar Signal Confidence Scoring
-Confidence $C \in [0, 1]$ dictates trade entry permission:
-$$C = 0.30 \cdot C_{\text{persistence}} + 0.25 \cdot C_{\text{momentum}} + 0.25 \cdot C_{\text{volatility}} + 0.20 \cdot C_{\text{ema\_sep}}$$
-Entries require $C \ge \text{confidence\_high}$ (default 0.79).
+### Production knob defaults (authoritative: `DEFAULT_CONFIG` in the engine)
 
-### 5. Risk Safeguards
-- **Blow-Off Top Guard**: Suspends buy signals if $p > \hat{p} \cdot (1 + k)$ alongside massive $S$, or when momentum $|\hat{m}|$ exhibits multi-bar decay at price peaks.
-- **Anti-Chop Filter**: Rejects entry inside `< 2%` range boxes situated in the 35%-65% midline mark.
-- **Cold-Start Breakout**: Allows 1-bar fast entry on exit from long `IDLE` state when $C > 0.67$.
-
----
-
-## Strategy Engine V2 Specification (Stochastic RBPF / UKF / Kramers Escape)
-
-**File:** `backend/strategy_engineV2.py` (Adapted to V1 interface via `StrategyEngineV2Adapter`)
-
-Engine V2 replaces heuristic physics with a continuous-time Stochastic Differential Equation (SDE) state-space model tracked by a Rao-Blackwellized Particle Filter (RBPF) and Unscented Kalman Filters (UKF).
-
-### 1. Continuous Latent State Vector
-$$\mathbf{x}_t = \begin{bmatrix} x_t & \mu_t & h_t & \phi_t & \ell_t \end{bmatrix}^T$$
-- $x_t$: Log-price $\ln(P_t)$
-- $\mu_t$: Continuous drift (momentum)
-- $h_t$: Log-volatility (OU process mean-reverting to realized variance)
-- $\phi_t$: Flow pressure / signed delta
-- $\ell_t$: Liquidity scale
-
-### 2. Stochastic Dynamics & Filter Equations
-- **Drift SDE**: $d\mu_t = -\lambda_\mu \mu_t dt + \sigma_\mu dW_t^\mu$
-- **Log-Volatility SDE**: $dh_t = -\kappa_h (h_t - \bar{h}_t) dt + \sigma_h dW_t^h$
-- **Observable EWMA Anchors** (prevents filter collapse):
-  $$\bar{r}^2_t = (1-\alpha) \bar{r}^2_{t-1} + \alpha \cdot r_t^2 \implies \bar{h}_t = \ln(\bar{r}^2_t)$$
-  $$\bar{\phi}_t = (1-\alpha) \bar{\phi}_{t-1} + \alpha \cdot \frac{\delta_t}{v_t + \varepsilon}$$
-- **Adaptive Measurement Variance** (Mehra 1970):
-  $$R_{\text{meas}} = \max(R_{\text{ema}}, \text{spread}^2, \sigma_{\text{floor}}^2)$$
-
-### 3. Per-Particle Discrete Topological Regime Derivation
-The discrete regime $R \in \{\text{IDLE}, \text{TREND}, \text{EXHAUSTION}, \text{REVERSAL}, \dots\}$ is derived per particle from its continuous posterior phase vector $\mathbf{x}_t^{(i)}$. The particle population distribution forms the exact Bayesian regime posterior; trend confidence $C$ is computed from posterior entropy:
-$$C = 1 - \frac{H(R)}{\ln(|R|)}$$
-
-### 4. Market Potential & Kramers Escape Rate
-Market Potential Landscape:
-$$U(x, t) = -T_t \ln \rho(x, t) + V_{\text{liq}}(x, t)$$
-where $\rho(x, t)$ is the Kernel Density Estimate (KDE) of price/volume, $T_t$ is structural temperature (posterior variance), and $V_{\text{liq}}$ is bid/ask liquidity energy.
-
-Kramers Escape Rates over left/right barriers ($x_\pm$):
-$$k_\pm = \frac{\sqrt{\omega_0 |\omega_b|}}{2\pi \gamma} \exp\left(-\frac{\Delta U_\pm}{T_t}\right)$$
-where $\Delta U_\pm = U(x_\pm) - U(x_t) \pm \frac{1}{2} \mu_t (x_\pm - x_t)$ includes directional drift-work.
-
-### 5. Bayesian Escape Probabilities & Kelly Utility Decision
-Over horizon $\tau$, escape probabilities are integrated:
-$$P^+, P^-, P^0 = \text{softmax}\left(\text{Kramers\_Passage}(k_+, k_-, \tau)\right)$$
-Direction $z^* \in \{-1, 0, 1\}$ is decided by strict Bayesian majority ($P^+ > P^-$ and $P^+ > P^0$).
-
-Kelly-Optimal Expected Log-Utility:
-$$\mathcal{E}^* = \max_z \left( z \cdot \hat{\mu}_\tau - \text{cost} \right)$$
-A long trade is opened only if $z^* = +1$ and $\mathcal{E}^* > 0$.
-
-### 6. V2 Exit Logic (`_check_exit_v2`)
-Position exits fire on the first matching condition:
-1. **Take Profit (`tp_v2`)**: Price reaches effective take-profit target.
-2. **Gain-Retrace Profit Lock (`gain_retrace`)**: armed at +A% peak gain; exit when gain retraces to peak·(1−g) (iter17/27; flat base give-back since the iter57/58 regime tightening was REMOVED 2026-08-24, iter64).
-3. **Breakeven Scratch (`breakeven_scratch`)**: armed after −X% drawdown; exit on recovery to entry+buf (iter17).
-4. **Stationary Rate-Split Flip (`rate_split_flip:armed|off`, iter63/64, PRODUCTION ON since 2026-08-25)**: stationary Kramers split $s = k^-/(k^++k^-) \ge \theta=0.55$ sustained $K=12$ consecutive 4-state ticks while ARMED (peak ≥ entry·(1+10%)) — the τ→∞ limit of the same passage model that drives #6 below; harvests winners before the give-back floor is touched. Regime gate exists (`v2_rate_split_regime_gate`) but is default OFF (measured better ungated). See RESEARCH_LOG.md Iters 63/64.
-4-bis. **Stagnation-Posterior Exit (`spe_exit`, iter79, REJECTED — code REMOVED 2026-09-03 per user decision; recovery artifacts in `analysis/iter79_removal_patch/`)**: `P_zero = exp(−k_total·τ) ≥ p_zero_min` sustained `persist` consecutive 4-state ticks while ≥ offside_pct% offside, with armed-winner suppressions; was positioned between #3 and #4 in the cascade. **Phase 0 mechanism autopsy (235,468 in-position ticks over a 202-recording cohort): P_zero ≥ 0.85 on 85.6% of ALL ticks (median 0.979; offside ticks 80.9%) — on 1 s memecoin tapes k_total is tiny (p50 0.0043/s) so the τ=5 decision horizon leaves the no-escape posterior ≈ 1 EVERYWHERE; the "stagnation signature" does not discriminate dead tokens from healthy transient dips at any threshold.** Phase-1 spec cells A/B/C: Δ −0.49 / +0.06 / −0.40 (all spe_exit books 0% WR); Phase-2 pre-registered 5-cell full-DB sweep (0.90–0.95 × K20–40 × off 20–25%): **ALL REJECTED — Δ −0.04…−0.44, Wilcoxon p 0.46–0.91, era-inverted (OLD pays, DEAD flat)**; the tail cuts (65→22–40 OLD) are paid for by a 0%-WR spe_exit book (−4.2…−5.6 SOL/cell), the `breakeven_scratch` winner book halved (57→12–18), and +70–80 replacement-churn trades (the iter37 bound, twelfth confirmation). **Graveyard: do NOT re-test P_zero-threshold exits as a primary trigger on this stack — the ratio>1.5 CF islands are 1–17-fire dust, and a future P_zero mechanism needs a new data channel (genuinely featureless-KDE detection), not a threshold retune.** See RESEARCH_LOG.md Iter 79 (+ addendum for the removal).
-5. **Spec Reversal (`reversal_exit`)**: Derived topological regime flips to `REVERSAL`.
-6. **Kramers Down Exit (`kramers_down_exit`)**: Downward Bayesian escape probability $P^- \ge 0.5$.
-7. **Bayesian Flip Exit (`bayesian_flip`)**: Engine decision direction flips away from long ($z^* \neq +1$) with positive Kelly utility $\mathcal{E}^* > 0$.
-8. **Sustained No-Long-Kelly (`kelly_flat`, iter21)**: direction ≠ +1 AND E* ≤ 0 sustained K=60 ticks AND ≥40% offside.
-9. **EVR Triage (`evr_triage`, iter48/50)**: unconfirmed + flow-invalidated + ≥20% offside after 120 s (with iter50 sell-concentration veto).
-10. **Whale-Dump Confirmed Exit (`whale_dump_exit`, iter72/iter78 — REMOVED in the 2026-09-02 dead-code cleanup)**: re-implemented at iter78 from the unit-test spec (the original code was lost in a working-tree cleanup), re-gated on the grown 2,127-recording DB, and REJECTED twice more (spec cell min_usd 200: 6 fires / Δ−0.024 / era-inverted OLD +0.008 / DEAD −0.032 / tail unchanged at every band; min_usd 100 cell: 3 fires / Δ−0.007 / inert) before removal. Mechanism definition (preserved here for provenance; the unit-test spec survives in git history at commit d904e42-era `analysis/test_whale_dump.py`): a candle whose sell volume ≥ min_usd ($200; USD via mcap/(close×1e9) — no external feed, no holder_flow dependency, ~100% candle coverage) landing on a never-armed (peak ≤ +5%) trade ≥8% offside at the print close, whose price STAYS ≤ print-close×0.97 for 5 DISTINCT candles, is a confirmed distribution dump — exit at the confirming candle. The 5-candle persistence is the causal dump/absorbed-sweep discriminator (every un-confirmed print-exit variant was class-(D) net-negative; print-time features class-(A)). The iter78 verdict extends iter72's power result (~5 fires/cohort on the grown DB): the fires lose more than they save via replacement re-entries. **Graveyard: do NOT re-implement without a new data channel; the iter72 adoption record is in RESEARCH_LOG.md Iter 72.**
-11. **Pool-Drain Early Exit (`pool_drain_exit`, iter65, REJECTED — stays default-OFF/dormant)**: bonding-curve SOL depth (`pool_sol`, plumbed since iter28, first consumed here) falls ≥ `v2_pool_drain_frac` below its pre-entry median base within [`age_min`, `age_max`] s of entry. CF separation was strong (≥25% drain: 42% of tail losers vs 5.4% of winners) but the real-engine screen REJECTED all 9 cells (best Δ −0.175 SOL, CI-null; +0.41 SOL oracle → −0.21 SOL real: fires harvest losses at the drain price; freed capital re-enters and re-bleeds, tail≤−15% actually grew). Graveyard entry: do NOT re-test as an EXIT; a predictive (pre-entry) consumption or portfolio scope would be required. See RESEARCH_LOG.md Iter 65.
+EVR ON (120 s / 20% / 0.45 / veto 0.25) · holder-flow entry gate OFF · dev-sell exit OFF
+(iter62 user policy, 2026-08-23) · rate-split ON (10% / 0.55 / 12) · kelly_flat ON (60 ticks /
+40%) · entry delay 0.0 · exit delay 0.0 (armed_only 1.0) · warmup 100 · confidence_high 0.79.
+The UI mirror is `frontend/js/app.js::engineParamsV2` — keep both in sync when changing defaults.
 
 ---
 
-> **iter73 (2026-08-30) Signal-Instant Execution Parity — live fires swaps at the signal tick; backtester default `exec_model="instant"` (n+1 mid-bar model retired to the `legacy` escape hatch); measured-latency overlay priced on the recorded path. NO ENGINE CHANGE (strategy_engineV2.py untouched).**
-> Ground truth first: a 626-session journal audit (`data/live_logs/*/trades.jsonl`, 138 confirmed buys/sells) measured live signal→on-chain-confirm at **buy median 10.0 s (p90 15.7 s — confirm-stamped upper bound; landing is typically 1–3 s earlier under the `_background_buy_settle` poll loop) / sell median 2.3 s (p90 4.5 s)**, versus the old fill_fraction model's ~1.5 s simulated delay — quantifying the user's complaint that the n+1 mechanism was a "terrible simulation".
-> **Live (`live_trader.py`)**: `_queue_signal_from_state` now receives each state's prices and fires `_execute_pending_signals` on the SIGNAL STATE itself — engine `notify_trade_opened/closed` synchronously, swap launched immediately; no next-state hop, no boundary wait. The phantom `_engine_fill_fraction`/`_engine_intrabar_price` mid-bar anchor is REMOVED; the engine anchor is `signal-state close × (1 + engine_fill_slippage_pct=1%)` — identical to the backtester's instant basis (captured at queue time via `_pending_buy_anchor` so a delayed launch keeps the same basis; the real on-chain fill still overwrites `entry_price` at confirmation). Pending/retry semantics preserved: blocked signals (swap in flight, re-entry block, stop) retry at every state/boundary/settle, and a BUY may queue while the previous trade is still `"closing"` (its sell settling) — required for same-candle exit→re-entry parity (rec2949: 7 vs 9 trades without it).
-> **Backtest (`forward_tester.py`/`backtester.py`/`main.py`)**: `ForwardTester(exec_model=...)` with three modes — **`"instant"` (new DEFAULT)**: a signal from state $k$ fills at that state's close ± slippage (± iter66 exec offsets); no pending queue; engine notified at the signal state. **`"legacy"`**: the pre-change n+1 fill_fraction model byte-identical — every historical baseline batch remains reproducible by pinning `exec_model="legacy"` (or `{"exec_model": "legacy"}` on the API body). **Latency overlay** (`entry_latency_seconds`/`exit_latency_seconds` > 0, on instant): fill deferred to $t_{\text{signal}}+\text{latency}$ and priced by interpolating the RECORDED intra-candle path (`_path_price_at`; no lookahead — the containing candle must complete before the fill resolves); engine notified when the fill lands. All knobs exposed through `run_backtest`, `run_backtest_batch`, `/api/backtest`, `/api/backtest/batch`.
-> **Verification**: `analysis/test_live_parity.py` 10/10 (decision parity on recs {2935, 2949, 2941} under instant mode); NEW `analysis/test_exec_model.py` 11/11 (fill math, path interpolation/clamping, latency end-to-end, mode matrix); determinism trade-identical in every mode; spot-check of the overlay's honesty: rec2935 instant +0.0430 → latency(10 s/2.3 s) +0.0192 SOL (−55% on a 5-trade session — the measured cost of real latency on 1 s bars). Suite: 103 passed; the 17 pre-existing failures (`test_mcap_floor_hold`, `test_whale_dump`, `test_whale_stream_wiring`) pin mechanisms whose commits are orphaned/reverted on this branch (`3ec53f9` not contained in any branch; whale gate removed) — flagged for the user.
-> **Research impact**: all baselines from this point use signal-instant fills; `iter68_base_1787965293` is the last legacy-fill canonical cohort (comparisons must pin `exec_model="legacy"`). The latency overlay is the first honest instrument for the live-vs-BT timing gap — recommended first study: full-cohort entry-latency {0, 5, 10, 15} s × exit {0, 2.3} s grid vs the new instant baseline. See RESEARCH_LOG.md Iter 73.
+## Holder-flow subsystem (iter36–66)
+
+Events persist to a `holder_flow` table in `price_data.db`; the backtester replays them at their
+exact on-chain timestamps; live pre-loads at session start and pumps new rows every 1 s
+(id-cursor, exactly-once), calling `check_immediate_holder_flow_exit()` right after appending so
+illiquid tokens don't wait for the next tick. Gates are **OFF** in production (iter62 policy);
+`v2_holder_flow_require_tag=0` semantics = any ≥$100 sell qualifies when enabled. Whale events
+from vault-diff trades carry no identity (anonymous ≥$100 sells); verified tags come from the
+GMGN registry (sparse — 12/44 in the iter43 cohort). Coverage history matters: pre-iter72
+recordings carry only ~6.7% of ≥$100 sells (identity-only dispatch dropped vault-diff trades);
+post-iter72 recordings carry ~full coverage.
 
 ---
 
-## Quantitative Research Log & Empirical History (Iterations 01–14)
+## Benchmarking & research protocol
 
-All quantitative strategy research is evaluated against historical recordings using strict statistical decision gates.
-
-### The Paired-Difference Anti-Overfit Decision Protocol
-A candidate strategy modification is **ACCEPTED** if and only if:
-1. **Wilcoxon Signed-Rank Test**: Per-recording PnL paired difference ($\Delta = \text{candidate} - \text{baseline}$) yields one-sided $p < 0.05$.
-2. **Bootstrap 95% Confidence Interval**: 10,000-sample bootstrap CI of mean $\Delta$ PnL is strictly positive ($\text{lower bound} > 0$).
-3. **Majority Token Improvement**: $\ge 50\%$ of traded tokens show individual PnL improvement (anti-overfit guard against outlier-driven gains).
-
----
-
-### Iteration Benchmark Summary Table
-
-| Iter | Label | Scope / Cohort | Trades | Win Rate | Total PnL (SOL) | Profit Factor | Verdict / Status | Primary Failure / Success Mechanism |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **01** | `iter01_baseline` | 6 tokens | 0 | N/A | 0.000 | N/A | **REJECTED** | Self-referential $h/\phi$ EMAs collapsed UKF to $-15$ clamp; $U(x)\equiv 0$. |
-| **02** | `iter02_v2subset` | 6 tokens | 79 | 7.6% | -0.241 | 0.08 | **ACCEPTED (Base)**| Observable EWMA anchors restored state variance; engine traded but churned on point-estimate sign noise. |
-| **03** | `iter03_v2subset` | 6 tokens | 34 | 35.3% | -0.153 | 0.59 | **ACCEPTED** | Replaced point-estimate sign with integrated Bayesian posterior $P^\pm$; cut trades by 57%, PF up 6x. |
-| **03b**| `iter03_subset30` | 30 tokens | 66 | 39.4% | -0.007 | 0.99 | **CONFIRMED** | Confirmed break-even across 30 tokens; loss concentrated on V1 trailing stop (`eff_trail_v2`). |
-| **04** | `iter04_subset30` | 30 tokens | 16 | 93.8% | +0.610 | 150.0 | **ACCEPTED** | Bayesian exit-only logic (removed V1 trailing stop); eliminated false-stop churn on memecoin pullbacks. |
-| **04b**| `iter04_random100`| 100 tokens | 14 | 100.0% | +0.274 | $\infty$ | **CONFIRMED** | Validated across independent random 100-token sample. |
-| **04c**| `iter04_sub50b` | 50 tokens | 62 | 82.3% | +0.768 | 7.96 | **CONFIRMED** | Confirmed generalization on independent 50-token subset ($p < 0.001$). |
-| **04f**| `iter04_full` | 1495 tokens | 2547 | 80.4% | +18.593 | 5.96 | **CAVEAT (Insertion Bias)** | Pre-force-close (pre-`ef31d98`) baseline. **NOT A REAL BASELINE** — overstated PnL by silently discarding unclosed losing trades at recording end. Re-running V2 at the exact iter04 commit (`59b5128`) on `rec482` reproduces the iter08 behaviour (`-0.057 SOL, 14 trades including `recording_ended`), not the iter04 reported (13 trades, +0.043 SOL). The 731 vs 950 per-token logfile discrepancy between iter04 and iter08 corresponds exactly to the missing 656 `recording_ended` trades at -25.98 SOL that turns +18.59 into -7.40 SOL. See "iter04 Audit" section below. |
-| **05** | `iter05_sw_sweep` | 200 tokens | 141-256| 81.9-84.4%| +1.588-+1.778| 5.0-6.2| **REJECTED** | Windowed momentum decay & raw $S_{\text{eff}}$ filters dropped positive-expectancy low/mid $S_{\text{eff}}$ trades. |
-| **06** | `iter06_seffspec` | 200 tokens | 289-294| 78.9-79.9%| +1.770-+1.825| 4.8-5.1| **REJECTED** | Barrier-anchored $S_{\text{eff}}$ & $k_{\text{up}}$ limiters. Empty volume buffer in KDE made $k_{\text{up}}=1e6$ everywhere. |
-| **07** | `iter07_drawdown` | 2547 trades | 2547 | 80.4% | -20.27 to -9.46| N/A | **REJECTED (Sim)**| Hard SL cap simulation. Interrupted normal drawdown-and-rebound phase of winning trades; costs exceeded savings. |
-| **08** | `iter08_full` | 1495 tokens | 3197 | 65.6% | **-7.395** | 0.76 | **CANONICAL BASE**| First correctly-accounted baseline. `recording_ended` force-close (commit `ef31d98`) made the backtester complete every decision stream. Exits: `kramers_down` (+17.89 SOL) vs `rec_ended` (-25.98 SOL). The -25.98 SOL "drag" is exactly the dropped-loser tail that inflated iter04_full's +18.59 SOL → all iter04-vs-iter10-subset numbers were biased in the same direction (see iter04 Audit section). |
-| **09** | `iter09_signflip` | 31 tokens | 457 (rec)| 3.1% | -0.949 (1 rec)| N/A | **REJECTED** | Spec-literal down-drift sign change without KDE volume geometry caused 457x trade explosion on single token. |
-| **10** | `iter10_full` | 950 tokens | 3050 | 64.2% | -7.340 | 0.75 | **REJECTED** | Crash circuit breaker + entry cooldown. Cooldown blocked profitable re-entries on rebounding tokens ($p=0.144$). |
-| **11a**| `iter11_subset10` | 10 tokens | 53 | 71.7% | -0.786 | 0.22 | **REJECTED** | Sustained trapped-basin streak. Vacillation between attractors reset streak counters; 0 CB exits fired. |
-| **11b**| `iter11_frac` | 10 tokens | 53 | 71.7% | -0.786 | 0.22 | **REJECTED** | Trapped-basin sliding window fraction. In-position trapped fraction never exceeded 10% during offside bleeds. |
-| **12** | `iter12_full` | 950 tokens | 144,435| 3.5% | **-324.72** | 0.02 | **REJECTED** | Inverse Gaussian catalyst & Expected Hold Exit. 4-state intra-candle updates flipped $\mu_t$ sign 4x/candle $\to$ 144k churn trades. |
-| **13** | `iter13_rho_fix` | 11 tokens | 65 | 29.2% | -0.090 | 0.31 | **REJECTED** | Unconditional KDE $\rho$ price-occupancy feed. Price-occupancy lagged trends $\to$ identified trend start as basin $\to$ premature exit on pumps. |
-| **14** | `iter14_dt_fix` | 20 tokens | 0-15 | 3.4-46.7% | -1.889 | N/A | **REJECTED** | SDE $dt=1/\text{ticks\_per\_state}$ ($0.25$). Detuned effective SDE OU rate constants by 4x $\to$ silenced all entries on 7/7 worst tokens. |
-| **15** | `iter15_recorder_fix` | n/a (no backtest) | n/a | n/a | n/a | n/a | **RECORDER PATCH (not engine)** | **Root cause of iter08's -25.98 SOL `recording_ended` drag was a recorder bug, not an engine bug.** Audit of `backend/data/price_data.db` found 0/2,394,211 candles with `buy_volume > 0` and only 4/1510 recordings (all 5m ES=F/TSLA seed-history outliers) with any volume. All 1506 1s memecoin recordings were routed through `PumpSwapRPCClient` or `DexScreenerPollClient` (both emit `sol_amount=0, tx_type="update"`); `PumpFunWSClient` (which carries real `sol_amount` and `tx_type=buy/sell`) was never used. **The V2 engine ran the entire iter01→14 research history with KDE $\rho \equiv$ uniform and $\phi_t \equiv 0$** — the failure modes iter05–14 tried to fix at the engine layer were compensation attempts for missing order-flow input. Patch in `backend/pumpfun_client.py` (`PumpSwapRPCClient` class only): diff vault balances across `accountSubscribe` notifications, populate real `sol_amount`/`token_amount`, derive `tx_type` from WSOL-flow direction (quote-mint inflow = buy; outflow = sell). Live smoke test on a real WIF/PumpSwap pool confirmed 1 real sell trade → `tx_type="sell", sol_amount=0.41 SOL, sell_volume=0.41`. iter14 Fix-A/B/C reverted (`backend/strategy_engineV2.py` byte-equivalent to iter08 HEAD). All prior baselines are bounded by the volume-free regime; need fresh recordings before re-evaluating. |
+- **Acceptance gate** for any candidate: per-recording ΔPnL paired Wilcoxon p < 0.05, 10k-sample
+  bootstrap 95% CI > 0, ≥50% token-improvement breadth. Tail-extermination candidates must also
+  pass tail-focused tests (big-loser counts, tail drag, kelly_flat PnL) because ~80% of tokens
+  have no tail and whole-PnL tests are structurally blind to them.
+- **Baselines**: all batch history lives in `backend/v2_results/` (batch label = start unix time;
+  glob `*_{label}_*`). Historical numbers were measured on stacks that no longer exist (MSM gate,
+  delays, gate states changed on 2026-09-11) — **re-baseline before candidate comparison**.
+  WR ~66% is the only cross-era invariant.
+- **Known measurement traps**: 10× notional and restart-reset dashboard counters make live-vs-BT
+  headline numbers non-comparable (use the iter67 journal method); `v2_results` JSONs are
+  survivor-conditioned (never infer trade rates from them); pool workers freeze engine code at
+  spawn (mid-burn edits don't affect a running batch); random-sample backtest probes are the
+  right instrument when the tape is thin.
+- **Graveyard** (condensed): P_zero exits, whale-dump exit, pool-drain exit, exit-only/re-entry
+  changes (iter37 oracle bound), P_down-blind sizing/gates, static provenance, pool_sol signals,
+  regime entry-side anything, Kelly-coupled sizing, silence-gate re-admission, EVR
+  delay/ratio extension, creator-rug QC, V4/V6 as defaults. Details in RESEARCH_LOG.md.
 
 ---
 
-### Detailed Analysis of Iteration Failure Modes & Lessons
+## Testing
 
-#### Iter 01–04: Baseline Stabilisation & Bayesian Exit Discovery
-- **Iter 01**: Discovered that EWMA targets anchored to posterior latent states ($h, \phi$) form positive feedback loops that collapse UKF variance to the $-15$ bound.
-- **Iter 02**: Anchored $h$ to observable log-return variance $\bar{r}^2$ and $\phi$ to normalized delta $\bar{\phi}$. Fixed filter collapse, but point-estimate sign direction (`sign(mu_hat)`) churned 79 trades at a 7.6% win rate.
-- **Iter 03**: Replaced point-estimate sign with integrated Bayesian posterior escape probabilities ($P^+, P^-, P^0$). Win rate jumped to 35.3%, cutting trade count by 57%.
-- **Iter 04**: Removed V1 confidence-scaled trailing stops (`eff_trail_v2`). Memecoins exhibit natural 15–25% intra-candle pullbacks during intact trends. Standard trailing stops trigger false exits on pullbacks; relying strictly on Bayesian posterior flips ($P^- \ge 0.5$) raised win rate to 82–93% across independent test sets.
-
-#### Iter 05–07: Entry Filters & Risk Budget Failures
-- **Iter 05**: Evaluated windowed momentum decay entry blocks and raw $S_{\text{effective}}$ thresholds. All thresholds reduced total PnL because low-$S_{\text{eff}}$ trades were net positive in aggregate.
-- **Iter 06**: Attempted barrier-adjusted $S_{\text{eff}} = S / \Delta U$. Revealed that on datasets with zero recorded trade volume, the KDE buffer is empty ($\rho \equiv 1$), causing potential energy $U(x)$ to collapse to symmetric liquidity tapers where $k_{\text{up}} = 1e6$ constantly.
-- **Iter 07**: Simulated hard intra-trade stop-loss caps (-7.5% to -25%). Cap-driven exits prematurely truncated winning trades during initial drawdown-and-rebound phases. At a -15% cap, winner truncation costs (-14.73 SOL) far exceeded catastrophic loser savings (+0.26 SOL).
-
-#### Iter 08: Backtester Parity & The Canonical Baseline
-- **Iter 08**: Identified that the backtester was silently dropping unclosed trades when recordings ended, introducing look-ahead bias and overstating PnL (+18.59 SOL).
-- **Rule Enforced**: Added `reason="recording_ended"` force-close on final candle close (commit `ef31d98`, 2026-07-22).
-- **True Baseline (`iter08_baseline_full`)**: Total PnL corrected to **-7.395 SOL** across 1495 recordings. Breakdown revealed the Bayesian exit engine alone remains highly profitable (**+17.89 SOL across 2538 `kramers_down_exit` trades at 80.5% WR**), but is dragged down by 656 un-exited slow-bleed trades force-closed at `recording_ended` (**-25.98 SOL**).
-- **iter04 + 18.59 SOL audit (2026-07-27)**: Re-running V2 at the iter04 commit on the worst-token recording (`rec482`) reproduces iter08's behaviour, not iter04's. The V2 engine state machine was materially unchanged between iter04 and iter08; the "regression" was a backtester bookkeeping fix that finally counted 656 dropped losers (-25.98 SOL). **iter04_full is NOT a valid acceptance target.** Full audit in the dedicated section below.
-
-#### Iter 09–14: Diagnostic Breakdown of Advanced Rejections
-- **Iter 09 (Down-Drift Work Sign)**: Reversing the down-drift work sign to match literal spec text without KDE volume geometry caused 457x trade churn on single tokens (e.g., rec1843: 1 trade/+0.006 SOL $\to$ 457 trades/-0.949 SOL).
-- **Iter 10 & 11 (Circuit Breakers & Trapped Basins)**: Attempted to exit slow bleeds when particles became trapped in potential basins. Particle states vacillate rapidly between trapped ($k_{\text{up}}=0$) and escaping ($k_{\text{up}}=1e6$) attractors within single candles, resetting streak counters and generating false triggers on winning pullbacks.
-- **Iter 12 (Inverse Gaussian & Continuous Hold Exit)**: Restored Inverse Gaussian first-passage CDFs and continuous Kelly hold-utility exits. Because the V1 pipeline feeds 4 intra-candle sub-tick updates per 1s candle into the Kalman filter, $\mu_t$ fluctuates intra-candle, causing the continuous hold-exit to fire 144,435 times (-324.72 SOL PnL).
-- **Iter 13 (Unconditional KDE Occupancy)**: Fed KDE $\rho$ from price-posterior occupancy when trade volume was zero. Because price-occupancy KDEs peak at recent average price, any upward pump moves $x_t$ above the peak, creating a synthetic downward barrier that triggered immediate premature exits on valid breakouts.
-- **Iter 14 (SDE Time-Dilation $dt$ Fix)**: Set $dt = 1.0 / \text{ticks\_per\_state} = 0.25$. Because DEFAULT_CONFIG parameters ($\lambda_\mu, \eta, \alpha$) were tuned for $dt=1.0$ per update, halving $dt$ reduced per-candle drift variance by 4x, silencing entry triggers entirely across 7/7 worst-volume recordings.
+- Suite: `backend/analysis/test_*.py` (+ `backend/test_autofeed_tune.py`). Required ignores:
+  `test_live_trader_balance.py`, `test_timeout_hypothesis.py` (cwd/data-file artifacts — run
+  from repo root with `PYTHONPATH=/repo:/repo/backend` if needed).
+- `test_live_parity.py` (10/10) is the parity gate for any pipeline change;
+  `test_exit_delay_hold_reset.py` covers the live exit-hold semantics;
+  `test_signal_capture.py` (11/11) covers signal capture; `test_client_fd_leak.py` covers the
+  FD-leak fix. `cd backend && ./.venv/bin/python -m pytest analysis/ -q` is the standard run.
 
 ---
 
-## iter04 Audit (2026-07-27, by opencode-zai)
+## Operational notes
 
-A next agent may be tempted to compare candidate batches against `iter04_full`
-(`+18.59 SOL / 80.4% WR / 2547 trades`) on the assumption that it represents
-the "production-best baseline" actually achievable by the V2 engine. It does
-**not**. The following audit, run on 2026-07-27, proves that iter04_full was
-an **artifact of incomplete trade accounting**:
-
-1. **Engine state-machine parity**: V2's `strategy_engineV2.py` at the exact
-   iter04_full commit (`59b5128`, 2026-07-21) is byte-equivalent to HEAD
-   `5a05d0f` for all runtime computations — the only `git diff` between
-   them is comment refinement + never-activated iter12 scaffolding
-   (`decision_method="kramers"` default).
-
-2. **Backtester divergence**: The `recording_ended` force-close block at
-   `backend/backtester.py:283-288` was *not present* at the iter04_full
-   commit. It was added in commit `ef31d98` on 2026-07-22 (the "gitignore
-   change" commit) and first used in the iter08 baseline run. Before
-   `ef31d98`, the backtester's candle loop simply finished without
-   closing `ft.current_trade`; any open position was silently dropped
-   from `ft.trade_history`, `ft.stats`, and per-token JSON log files.
-
-3. **Test re-run on worst-token recording**: executing
-   `run_backtest(recording_id=482, engine_params={}, engine_version=2)`
-   with the V2 engine checked out at commit `59b5128` produces
-   `14 trades / 78.57% WR / -0.057 SOL` (with one `recording_ended`
-   trade bleeding 10473 s to -99.55%). The iter04_full per-token log
-   for the *same* recording (`nyoro_rec482_iter04_full_*.json`)
-   reports `13 trades / 84.62% WR / +0.043 SOL` — the first 13 trades
-   are byte-identical, and the 14th long-bleed trade is missing because
-   the pre-`ef31d98` backtester never wrote it to disk.
-
-4. **Aggregate reconciliation**:
-    * iter04_full per-token JSON file count: **731** (only tokens with
-      ≥1 *exited* trade).
-    * iter08_baseline_full per-token JSON file count: **950** (any
-      recording with ≥1 *entry* attempt).
-    * Missing: **219** recordings × ~3 dropped losers each ≈ 656
-      missing trades.
-    * Missing PnL: 656 × -0.04 SOL average = **-25.98 SOL**, exactly
-      the delta between `+18.59 SOL` (reported) and `-7.40 SOL` (true).
-
-**Conclusion.** The V2 engine state machine was identical between
-iter04_full and iter08_baseline_full — the entire V2 production-baseline
-"regression" between July 20 and July 22 (a -25.98 SOL swing) was a
-bookkeeping correction, not a strategy change. Any iter14-era or
-future agent must therefore:
-
-  * Compare candidate batches against `iter08_baseline_full`, **never**
-    against `iter04_full` or any pre-`ef31d98` variant.
-  * Treat any subset-baseline numbers (iter04_subset30, iter04_sub50b,
-    iter04_random100, iter04_subset200, iter05_*_vs_iter04_baseline_*)
-    as **biased in the same direction** — they all silently dropped
-    unclosed losers. They remain useful as **rank-order comparisons
-    between iter04-era runs** (e.g. iter05 vs iter04_subset200 tells
-    you whether iter05 was *worse* than iter04 on the same dataset
-    and counting rule), but their absolute magnitudes are wrong.
-  * Never set acceptance thresholds at the iter04-level
-    (`~+19 SOL / 80% WR`); the actual target is "beat iter08_baseline_full
-    (`-7.395 SOL / 65.62% WR / 3197 trades`) by $\ge\;0$ SOL with the
-    paired-diff statistical gate cleared".
-
----
-
-> **Post-iter15 fresh-dataset era (iters 16–32, recorded 2026-07-27 onward).**
-> After the iter15 recorder fix, all benchmarking moved to the fresh
-> `backend/data/price_data.db`.  Key production-accepted changes on the fresh
-> dataset: **iter21** kelly_flat exit #7 (`no_long_exit_bars=60,
-> no_long_offside_pct=40`), **iter27** `gain_retrace_give_frac 0.4→0.5`
-> (+31.7% PnL).  iters 22–32 were a long series of **rigorous negative
-> results** establishing that the engine sits at its OHLCV-data ceiling: the
-> residual left-tail losses are dead-coin liquidity-drain dumps that are NOT
-> separable from winners by entry-time engine features (iter26), exit-side
-> stops (iter22/26 breadth-impossibility), order-flow microstructure
-> (iter31), or pool-liquidity (iter30 theory + **iter32 real-vault
-> confirmation**).  **iter31 (local pre-entry regime / manipulated-dump entry
-> gate): 0/49 causal microstructure features survive Bonferroni; the one
-> marginal candidate (`volcollapse`) is non-monotone, insignificant,
-> split-half unstable, and REJECTED in-engine (`iter31_vc90`: Δ=−0.19 SOL,
-> Wilcoxon p=0.975, breadth 5.8%) via replacement-entry dynamics.  iter32
-> (live pool-liquidity on the 49 new `pool_sol`-carrying recordings):
-> `pool_sol` is a 0.99-corr CPMM price mirror on real vault data; genuine
-> LP-pull k-jumps exist (25 events / 114k bars) and *do* lead crashes by
-> 5–15 s, but they (a) never appear at entry time, (b) are confounded by
-> pump-dump k-distortions, and (c) fire too rarely/late post-entry to beat
-> `kelly_flat` — not exploitable as an entry or exit gate.  No production
-> change in iter31/32; engine byte-identical to HEAD.**  Current canonical
-> baseline `iter31_baseline_full`: 427 trades, 75.6% WR, +0.965 SOL, PF 1.33
-> on 652 recordings.  See RESEARCH_LOG.md iters 16–32.
->
-> **iter33 (three mechanisms vs the `P_down ≡ 0` blindness — ALL REJECTED, no
-> production change).**  Three default-OFF, parity-preserving knobs were added
-> to `strategy_engineV2.py` (+163 lines, all gated): `v2_velocity_exit_enable`
-> (33a crash_velocity_unarmed exit), `v2_blind_regime_sizing_enable` (33b
-> adaptive Kelly cap), `v2_dual_kde_enable` / `v2_fast_tw_seconds` (33c
-> dual-KDE down-barrier).  Each was killed at the cheapest decisive stage, no
-> full batch burned: **33a** pre-registration found 80% of fast-dipping
-> winners (76/95) are UNARMED at the −10%-within-60s dip (the armed asymmetry
-> is a whole-trade, not dip-moment, separator) → counterfactual NET≤0 at
-> 45/49; **33b** the down-blind regime (P_down<0.05) is UNIVERSAL (87% of big
-> losers AND 88% of winners) so sizing it down is net-negative (−0.449 SOL) at
-> every threshold, and n* isn't wired to executed size anyway; **33c** the
-> fast-KDE engages 82–100% on crashes but P_down NEVER ≥0.5 on any big loser
-> and is often *lowered* (POCK 0.105→0.000) — the "no genuine support on the
-> way down" known risk materialised.  Default-OFF parity byte-exact (recs
-> {1019,878,951,1164,1089}).  Engine remains the iter31/32 Pareto frontier.
-> See RESEARCH_LOG.md Iter 33.
->
-> **iter34–35 (structural angles + on-chain provenance — ALL REJECTED, no
-> production change).**  iter34 tested six untried *structural* angles
-> (cross-token market breadth, token memory of observed crashes, entry
-> ordinal / prior-trade outcome, intra-slide reflection asymmetry,
-> structural-anchor floor, arm=7 in-position rescue) — all overlap the
-> winner distribution (AUC ≈ 0.5, every gate NET-negative).  **iter35
-> closed the last explicitly-open avenue: on-chain token provenance.**
-> Fetched real GMGN `token info` + `token security` for all 155 unique
-> mints in the `iter31_baseline` cohort (100% success).  **41/155 mints
-> (26%) have BOTH a big-loser AND a big-winner trade on the same token**
-> — a mathematical ceiling: static provenance is identical for the losing
-> and winning trades on a dual-outcome mint, so no purely token-level
-> feature can separate them.  Per-trade and per-mint tests of 16
-> provenance fields (holder concentration, mint/freeze authority, LP
-> lock/burn, tax, honeypot, token age, drawdown-from-ATH, trade-activity
-> snapshot): all AUC ≈ 0.5; the one p<0.05 hit (`top10_rate`, p=0.018)
-> fails Bonferroni, fails split-half stability, is economically
-> backwards, and is hindsight-biased (post-dump snapshot).  Every token
-> in the cohort has burned LP, renounced mint/freeze, zero tax, no
-> honeypot — the pump.fun graduation filter is already the optimal
-> provenance gate.  **This is the eighth orthogonal negative result**,
-> now spanning engine-internal state, candle-replay features,
-> microstructure, cross-token breadth, token-memory, reflection shape,
-> structural floor, pool liquidity, and on-chain provenance.  Engine
-> byte-identical to HEAD.  See RESEARCH_LOG.md Iter 34–35.
->
-> **iter37 (Persistent Submersion Exit — path-geometric kelly_flat cut —
-> REJECTED, no production change).**  A principled attempt on the
-> `kelly_flat` left tail (44/63 big losers, 92% of losing PnL).  Empirically
-> the losers are persistent negative-drift paths (trailing-60s submersion
-> median 0.98, trend R² 0.70) vs winners' transient dips (submersion median
-> 0.21).  Rule: arm after 20 continuous ticks ≤ −20% offside, exit when the
-> trailing-60s submersion fraction ≥ 0.8.  Proved a submartingale exit
-> theorem (conditional on submersion the posterior concentrates on θ<0 ⇒
-> holding has negative expected log-wealth ⇒ exit dominates).  Static
-> counterfactual looked positive (+0.104 SOL, 32 big losers cut vs 8 winners).
-> **Full batch REJECTED**: `iter37_pse` 452 trades / 70.6% WR / +0.449 SOL
-> vs `iter31_baseline` 427 / 75.6% / +0.965 — **Δ = −0.516 SOL, Wilcoxon
-> p = 0.948, bootstrap CI [−0.0073, −0.0001] strictly negative, breadth
-> 21/24 (13.2%), McNemar p = 0.035 (W→L dominant)**.  The theorem priced the
-> exit in isolation but not the **replacement entry**: freed capital
-> immediately re-bought the same bleeding token (RADISH 13→16 trades) and
-> bled again — the iter31_vc90 mechanism re-confirmed.  **Ninth orthogonal
-> negative result**; closes the last untried exit-side avenue (path-geometry,
-> non-engine-state trigger).  Engine reverted byte-identical to HEAD
-> (rec1019 byte-confirmed).  See RESEARCH_LOG.md Iter 37.
->
-> **iter37 addendum — oracle impossibility bound for exit-only changes.**
-> Decomposing the iter37 regression showed the exit itself was correct
-> (blocked +0.251 of loser PnL) but was swamped by replacement-entry churn
-> (−0.196, 29 re-entries) and displaced baseline winners (−0.251).  A
-> faithful "exit + re-entry cooldown" sim peaks at +0.785 SOL (best K=180s)
-> — still below baseline +0.965 — because blocking losing re-entries also
-> blocks winning ones (indistinguishable buy flickers).  **Oracle bound:
-> even perfect re-entry foresight (block exactly the losers) yields only
-> +0.786 SOL < baseline.**  Theorem: any mechanism that only modifies exit
-> timing and/or gates re-entry, using only the recorded OHLCV stream, is
-> bounded below baseline on the iter31 cohort.  The left tail is
-> entry-selection error, addressable only by information the engine does
-> not yet observe (e.g. validated holder-flow on fresh iter36 recordings).
-> **Do not build another kelly_flat replacement that fires earlier, adds a
-> cooldown, or re-tunes streak/offside thresholds — all are bounded below
-> baseline.**  See RESEARCH_LOG.md Iter 37 addendum.
->
-> **iter39 (live-vs-backtest pipeline parity fix — 5 root causes, 8 fixes,
-> no engine change).**  The user observed the live trader behaving differently
-> to the backtester on the same recordings.  Diagnosis identified 5 root
-> causes: (1) holder_flow event delivery latency — the live engine's
-> `append_holder_flow_events()` was called inside `_process_stream` AFTER a
-> `continue` skip that blocked delivery when price hadn't moved, so events
-> could sit undiscovered for 10s+ on illiquid tokens while the backtester
-> had them all upfront at their exact on-chain timestamp; (2) LiveTrader
-> discarded V2 exit reasons (`kramers_down_exit`, `kelly_flat`,
-> `dev_sell_exit`) in favour of regime-based labels (`trend_exit`); (3)
-> `notify_trade_opened/closed` deferred to next candle (1-2.5s
-> confirmation delay), causing `_check_exit_v2` to be skipped during the
-> confirmation window; (4) `pool_sol` not passed in live; (5)
-> `_build_full_result` mismatch.  **Fixes:** `live_trader.py` — immediate
-> notify at signal time with rollback on failure, exit reason parity,
-> `pool_sol` passthrough, `_build_full_result=False`; `main.py` — pre-load
-> holder_flow from DB at session start, 1s background pump task for
-> event delivery decoupled from trade ticks, `pool_sol` passed to
-> `live_trader.update()`; `forward_tester.py` —
-> `holder_flow_latency_seconds` parameter for future backtest latency
-> simulation.  Engine strategy logic byte-identical to HEAD.  See
-> RESEARCH_LOG.md Iter 39.
->
-> **iter41 (immediate holder-flow exit on the pump task — live parity fix,
-> no engine change).**  Closed the residual live-vs-backtest exit-timing gap
-> the iter39 audit had surfaced on illiquid tokens: the nightly parity sweep
-> showed the live `aiclan` session staying in position ~25 s longer than the
-> backtester after a dev sell because no quote-side tick arrived to fire
-> `_check_exit_v2`.  Fix: new `live_trader.check_immediate_holder_flow_exit()`
-> mirrors the V2 `dev_sell_exit` branch; the `_holder_flow_pump` in `main.py`
-> calls it immediately after `append_holder_flow_events()` and, if it
-> returns a reason, sets `_pending_exit`, calls `engine.notify_trade_closed()`,
-> and dispatches `asyncio.create_task(live_trader.execute_sell(reason))` so
-> the on-chain swap fires at event-discovery time instead of next-tick time.
-> Backtester untouched (it already had this timing via 4-state intra-candle
-> evaluation).  V1 / V2-disabled paths remain byte-identical via `hasattr` /
-> `<= 0.0` guards.  `test_futures.py` 13/13 pass.  See RESEARCH_LOG.md Iter 41.
->
-> **iter42 (V2 futures second param-set + macro-bar re-tuning + CONVERGENCE
-> NEGATIVE RESULT — long-only V2 on 1h majors is break-even at best, net-losing
-> in most regimes; strictly additive production layer shipped, no spot change).**
-> The futures historical-data layer described in §6 (Mode B) was completed:
->
-> * `backend/futures_exchange.py` — Bybit V5 public REST client (klines / mark /
->   funding / OI) + per-symbol SQLite cache under `data/futures_cache.db`;
->   `get_futures_candles(symbol, timeframe, days_back)` is the synchronous
->   public entry. Synthetic taker-buy/sell split derived from close-vs-trimean
->   tilt (Bybit 1h klines do not expose real taker split).
-> * `backend/futures_model.py` — `FuturesAccount(sol_price_usd=)` with
->   `position_notional_usdc` close-time metadata; leverage scales notional,
->   not `n_star`; isolated-margin liquidation fires once per intra-candle
->   state via mark price with 0.5% insurance-fund fee.
-> * `backend/backtester.py::run_futures_backtest()` — reuses the existing
->   `ForwardTester` + 4-state intra-candle pipeline; persists via
->   `create_backtest(..., market_type="futures")`. **Bug fixed during the
->   sweep**: the preset-injection block referenced `bars` BEFORE it was
->   fetched from cache (NameError swallowed by try/except ⇒ vscale=1.0 ⇒
->   state collapsed ⇒ 0 trades). Reordered so `bars = fe.get_futures_candles`
->   runs FIRST, then `v2_volume_scale_fut = v2_target_bar_volume_usd /
->   median(turnover)` writes the preset; 4-state expansion now spreads real
->   buy/sell volume across all 4 sub-ticks (was 0 on first 3) so the KDE
->   buffer fills and cash-equilibrated taker flow feeds the engine.
-> * `backend/forward_tester.py` — `sol_price_usd` ctor kwarg, live
->   `stats.total_funding_received`/`total_funding_paid` mirror after each
->   `settle_funding()` boundary.
-> * `backend/main.py` — `GET /api/futures/markets` lists available symbols +
->   cached coverage; `POST /api/futures/backtest` accepts symbol / leverage
->   (1..50) / days (1..90) / timeframe (∈{15m,1h}) / starting_balance / buy_size.
-> * `backend/strategy_engineV2.py` — **second parameter set for futures,
->   strictly additive, parity-preserving.** New `FUTURES_DEFAULT_CONFIG`
->   named preset, `with_futures_preset()` helper, `FUTURES_MARKET_DEFAULTS`
->   constant. Adapter `__init__` pops `v2_futures_overrides` early and
->   merges every key into `engine_kwargs` BEFORE any other parsing — when
->   the key is absent (every spot run), nothing changes. New ctor params
->   consumed only when overrides set: `_v2_volume_scale_fut` (default 1.0
->   = passthrough), `_v2_dt_per_state_fut` (default 1.0 = passthrough),
->   `_v2_kramers_down_persist_fut` + `_v2_kramers_down_streak` counter
->   (default 0 = one-tick exit = spot behaviour). `update()` applies the
->   volume scale to `volume` / `signed_delta` / `bid_depth` / `ask_depth`
->   BEFORE the obs dict is built. `_check_exit_v2()` Kramers-down branch
->   now gated by the streak counter — only fires after N consecutive
->   qualifying P_down≥0.5 ticks; any non-qualifying tick resets it.
->   Macro-bar re-tuning baked into `FUTURES_DEFAULT_CONFIG`: warmup=10,
->   `v2_sigma_t_min=0.002`, `v2_p_up_min=0.55`, slow OU rates
->   (`lambda_mu=0.015` etc. — 10x slower than spot's 0.15), KDE
->   `tw_window_seconds=100`, `tau_min/max/step=24/96/24` (1-4 day horizon),
->   `grid_sigma_extent=10.0`, `v2_volume_scale_fut=1e-7`,
->   `v2_target_bar_volume_usd=1.0`, `v2_kramers_down_persist_fut=6`
->   (~1.5h of persistent Bayesian down-belief before exit — directly
->   fixes Iter12's 144k-trade churn pathology on 4-state intra-candle
->   micro-updates).
-> * `frontend/index.html` + `js/app.js` + `css/style.css` — ⚖️ Futures
->   `nav-tab` (`#fbt-controls` instrument grid + USDC config panel);
->   `loadFuturesMarkets` hits `/api/futures/markets`;
->   `_loadBacktestResultCtx("fbt", id)` reuses the spot results grid with
->   futures columns (leverage / funding / liquidations). `formatOfflineCandles`
->   has an early `FUT:`-pseudo-mint branch returning raw USD-priced candles
->   so chart renders USDC labels (memecoin path unchanged).
-> * `AGENTS.md` §6 documents the historical-futures ingestion mode, USDC
->   accounting route (`sol_price_usd=1.0`), funding accrual, Kramers churn
->   pathology + the preset guard; spot parity invariant written into the
->   Guidelines section.
-> * `backend/test_futures.py` — 18 tests (was 13). Added
->   `TestV2FuturesParamSet` covering spot-untouched-by-default,
->   overrides-layered-correctly, `with_futures_preset()` precedence,
->   Kramers-persistence requires N contiguous qualifying ticks before
->   exit + streak reset, and volume-scale passthrough. `cd backend &&
->   python test_futures.py` — 18/18 OK.
->
-> **Convergence result (final converged sweep, `iter42_converged`):**
->
-> | Symbol | Trades | WR | PnL (USDC) | Max DD | Funding paid |
-> | :--- | :--- | :--- | :--- | :--- | :--- |
-> | BTC    |  9 | 66.7% | −2.3134 | 0.5% | +0.0896 |
-> | ETH    | 22 | 45.5% | −5.8514 | 0.8% | +0.1147 |
-> | SOL    |  8 | 50.0% | −5.5978 | 0.7% | +0.0829 |
-> | LTC    |  8 | 50.0% | +2.3980 | 0.3% | +0.1641 |
-> | **TOTAL** | **47** | **51.1%** | **−11.3646** | **0.8%** | **+0.4514** |
->
-> Run config: leverage 1.5×, 30 days, 1h timeframe, 1000 USDC start,
-> 100 USDC margin/trade, Kramers persist=6, lambda_mu=0.015, T_w=100 bars,
-> tau horizon 24-96 h.  Backtest at `iter42_converged`.
->
-> **Convergence finding.** Long-only V2 on 1h majors is **break-even at
-> 1.5× / 30d**: −11.4 USDC is ~−1.14% of account over 30 days, WR ~51%
-> (≈ coin-flip).  Asymmetry is sharp: LTC is the only profitable symbol
-> (+2.40), BTC and SOL are marginal losers, ETH is the chronic under-
-> performer (45.5% WR; the engine fights ETH's lower per-bar volatility
-> and frequent trap-reversal patterns).  The 60-day and 3× leverage
-> sweeps deepen drawdowns monotonically — no leverage sweet spot exists
-> for the long-only engine on macro bars.  This is consistent with the
-> iter33-37 quantitative negative-result tradition: the V2 engine was
-> calibrated on 1s memecoin pumps where bullish drift is the dominant
-> regime; on 1h majors the same bullish-bias posterior leaves the
-> engine unable to profitably short or stand aside, only to harvest
-> noisy longs at a coin-flip rate minus taker fees + slippage.  **Future
-> work must come from either (a) strategy rework for macro-timeframe
-> regimes, or (b) a properly calibrated short-side framework that the
-> iter33-39 posterior-short rejections did not authorise — both are
-> out of scope for this iteration.**  The futures layer is shipped as a
-> production-usable, parity-safe, strictly-additive feature with a
-> known convergence ceiling; the engine's Pareto frontier for majors
-> is documented for future agents to see.
->
-> **Testing.** `cd backend && python test_futures.py` → 18/18 pass.
-> Spot byte-identity confirmed via direct adapter comparison: ctor with
-> `v2_futures_overrides={}` vs ctor with no such key produce identical
-> `confidence_high`, `_v2_p_up_min`, `core.cfg['lambda_mu']`,
-> `_v2_volume_scale_fut`, and `_is_futures_engine=False` in both cases.
-> No spot regression is possible from this iteration.  Engine source
-> for spot runs is byte-identical to HEAD.  See RESEARCH_LOG.md Iter 42.
->
-> **iter45 Pre-entry taker order-flow imbalance gate — REJECTED /
-> Hypothesis: long entries made into net-sell taker flow become the `kelly_flat` /
-> `recording_ended` slow-bleed left tail.  New parity-safe params in
-> `strategy_engineV2.py` + `frontend/js/app.js` engineParamsV2:
-> `v2_order_flow_imbalance_gate` (1.0 = ON), plus
-> `v2_order_flow_buy_ratio_min` / `_window_seconds` / `_volume_min_sol`
-> (0.28 / 10 / 1.0 — the validated r28_w10 region).  Full 607-recording cohort
-> (`cohort_full.json`): gate 271→181 trades, -0.041→+0.140 SOL, PF 0.98→1.09.
-> **Statistical lens matters**: the standard whole-PnL `paired_diff.py`
-> gate REJECTS (p=0.476, 23.9% breadth) *because ~82% of tokens have no left
-> tail to cut* — a tail-extermination mechanism must be tested with
-> **tail-focused paired tests** (`backend/analysis/iter45_tail_test.py`:
-> big-loser counts/tail-drag/worst-trade/kelly_flat per token, Wilcoxon +
-> bootstrap CI + conditional "had-a-big-loser" cut rate + zero-added-tail).
-> Under that lens the gate is strongly significant on the full cohort:
-> big losers <-30% 33→23 (p=0.0054, CI [+0.026,+0.154]), total loss drag
-> -1.955→-1.490 (+0.465 SOL, p=0.0002, CI strictly +), worst-trade PnL
-> +363 pts (p=0.0012), kelly_flat PnL +0.303 (p=0.0010), **0 added tail
-> trades at any threshold ≤ -10%**, 34% of baseline-tail tokens cut.  Net:
-> blocks 90 entries (56 winning gain_retrace lost, -0.461 SOL) to eliminate
-> -0.390 kelly_flat + -0.378 recording_ended drag.  `test_futures.py` 18/18.
-> Setting `v2_order_flow_imbalance_gate=0.0` restores pre-iter45 behaviour.
-> See RESEARCH_LOG.md Iter 45.
->
-> **iter48 Post-entry taker-flow triage (EVR) — ACCEPTED (production default).
-> Hypothesis: the market's taker-flow response to the engine's own entry
-> separates eventual catastrophic losers from recovering winners (post-entry
-> buy-ratio AUC 0.764 vs pre-entry 0.486 — a genuinely novel observation
-> channel).  EVR mechanism: after `v2_evr_eval_delay` s (default 120), fire
-> `evr_triage` when peak-since-entry never confirmed
-> `entry·(1+confirm_pct/100)`, trailing buy-ratio < `buy_ratio_max`, and
-> close ≤ entry·(1−offside_min_pct/100).  Full-cohort evr9 config
-> (delay=120s, offside=20%, ratio=0.45, window=20s, m=10%): 53 fires on 45
-> recordings, 783 trades / 70.2% WR / +1.7531 SOL vs baseline 764 / 71.7%
-> / +1.7236 SOL.  **Tail extermination is significant**: catastrophics
-> ≤−30%: 87→76 (p=0.0038), tail_pnl +0.632 SOL (p<0.0001), kelly_flat_pnl
-> +1.142 SOL (p<0.0001); temporally stable in both recording halves
-> (p≤0.014).  **Mathematical limitations**: (1) EVR is a loss-reclassification
-> mechanism, not elimination — the exact accounting identity is kelly_flat
-> savings (+1.142) + rec_ended savings (+0.153) − EVR fire losses (−1.556) =
-> +0.030 SOL net.  (2) Whole-PnL is statistically flat: Wilcoxon p=0.352,
-> bootstrap 95% CI [−0.00060, +0.00079].  (3) WR regresses −1.5 pp due to
-> ~14 false positives inseparable from true positives (both fire at 119–151s,
-> depth −19% to −57%).  (4) Every EVR fire is a loss by construction (the
-> offside gate requires close ≤ entry×80%).  (5) Exhaustive 14-config sweep
-> confirmed evr9 is Pareto-optimal: all alternatives produce worse WR and
-> PnL (cascade for lower offside, bleed-through for higher offside).
-> **Production default: `v2_evr_enable=1.0`** (evr9 config: `confirm_pct=10`,
-> `offside_min_pct=20`, `buy_ratio_max=0.45`).  Set `v2_evr_enable=0.0`
-> to disable.  `test_evr.py` 6/6, `test_futures.py` 18/18.
-> See RESEARCH_LOG.md Iter 48.
->
-> **iter49 EVR Loss-Reclassification Gap Autopsy & Inseparability Proof — INCONCLUSIVE / RIGOROUS NEGATIVE BOUND (evr9 production default unchanged).**
-> Matched join of all 53 evr9 fires vs `iter48_baseline`: **13 FP** (all `breakeven_scratch`, 0 `gain_retrace`, cost −0.353 SOL) / **37 TP** (save +0.465) / **3 unmatched** cascade re-entries. Fire-time AUC 0.42–0.62 (age 117–151 s, depth −19% to −57%, P_down ≡ 0). Post-fire taker-flow is *reversed* at 10–20 s (TPs knife-catch, AUC(FP>TP)=0.25) and only separates at 60 s (AUC 0.72) — too late: delay-adjusted Δ ≤ 0 at every (H, thr). Price-persist and post-EVR re-entry also Δ < 0 on the complete 53-fire set. **Theorem:** Δ_zero_delay = 0.353α − 0.466β ≤ 0 unless α/β > 1.32; contemporaneous filters have α/β ≈ 1; delayed filters pay ~−9 pp extra dump per remaining TP, which exceeds the lookahead surplus. Oracle skip-all-FP = +0.353 is unreachable. **Addendum (C4–C6, not skip-rules):** sell-into-knife-catch best cell +0.036 SOL (363-config max, 7% of FP oracle, below paired-diff detection); early unconfirmed floor on the 22 pre-120 s remaining catas Δ ∈ [−0.92, −0.28]; late complementary EVR on the 32 not-offside-at-120 catas Δ ∈ [−0.14, −0.02]. Partial-EVR sizing is a convex blend of full EVR and hold ⇒ dominated by evr9. No engine change; no full-batch. **Production default unchanged: `v2_evr_enable=1.0` (evr9).**
-> See RESEARCH_LOG.md Iter 49.
->
-> **iter50 EVR Loss-Reclassification Gap: Sell-Concentration Veto & Mild-Tail Extermination — ACCEPTED (production default updated to thr = 0.25).**
-> Microstructure autopsy discovered false positives (scratches) are bursty single-second whale-sweeps (`maxsec_sell_share_60` AUC 0.686) vs true positives' (bleeds) distributed multi-second selling. Setting permanent per-trade veto `v2_evr_skip_sell_conc_min = 0.25` yields **statistically significant mild/offside tail loss extermination** ($p = 0.0001$ on $-10\%$ to $-20\%$ loss counts, 15 offside trades cut, bootstrap CI $[+0.0260, +0.0747]$ strictly positive). Win rate increases from 70.24% to **71.45% (+1.21 pp)** and total PnL reaches **+1.7951 SOL (+0.0420 SOL net improvement)**. Production parameter defaults updated in `strategy_engineV2.py` and `app.js` (`v2_evr_skip_sell_conc_min = 0.25`, `v2_evr_skip_conc_window = 60`). `test_futures.py` 18/18.
-> See RESEARCH_LOG.md Iter 50.
->
-> **iter52 Dynamic Market-Condition Adaptation System — REJECTED (no production engine change).**
-> Evaluated a causal, lookahead-free market-condition adaptation layer ($q_t = q_{\text{pump}} \cdot q_{\text{dd}} \in [0, 1]$) designed to dynamically scale entry confidence ($C_{\text{high}}$), passage probability ($P_{\text{up}}$), prediction horizon ($\tau$), or Kelly position size ($n^*$) during weak market regimes (low pump heights, deep drawdowns). Full-cohort matched comparison across 181 recordings: Baseline +2.1838 SOL (615 trades, 71.5% WR) vs Candidate +1.2540 SOL (487 trades, 70.2% WR) — **$\Delta$ = -0.9298 SOL, Wilcoxon $p = 0.9853$, token improvement breadth 22.7% (41/181)**. Restricting entries during weak market regimes suppressed profitable recovery trades and parabolic breakout runners far more than it saved on bleeding losers (re-confirming the structural regime inseparability bounds of iter34A and iter40). System remains default-OFF (`v2_regime_adapt_enable = 0.0`) in `strategy_engineV2.py` for 100% byte-exact baseline parity.
-> See RESEARCH_LOG.md Iter 52.
->
-> **iter53 Execution-Adaptive Dynamic Position Sizing Layer — REJECTED (no production strategy default change, strictly additive layer shipped).**
-> Evaluated an execution-adaptive position sizing layer in `ForwardTester` and `LiveTrader` ($S_{\text{exec}} = S_{\text{base}} \times m_{\text{spread}} \times m_{\text{slip}}$ with $m_{\text{spread}} = \max(0.1, 1 - \gamma_{\text{spread}} \cdot (\text{high}-\text{low})/\text{close})$) designed to scale down capital allocation on illiquid or wide-spread pools. Evaluated across parameter sweeps $\gamma_{\text{spread}} \in \{0.5, 1.0, 2.0, 3.0\}$: High-momentum breakout runners inherently form on expanding candles with 3%–10% spreads; the spread multiplier penalized clean winning entries (average winner size shrunk from 0.1000 SOL to 0.0904 SOL) symmetrically with losing entries (0.1000 SOL to 0.0939 SOL). Shrinking position sizes across high-spread candles sacrificed more winner PnL in positive runs than it saved on slow-bleed losers in negative runs (paired difference across cohorts $\Delta \text{PnL} = -0.0009$ SOL, Wilcoxon $p = 0.7214$, bootstrap 95% CI $[-0.000177, +0.000312]$ spans zero, breadth 38.5% below 50% gate). Layer preserved strictly default-OFF (`v2_dynamic_sizing_enable = 0.0`) in `strategy_engineV2.py`, `forward_tester.py`, `live_trader.py`, and `app.js` for 100% byte-exact baseline parity. Unit test suite `test_dynamic_sizing.py` (9/9 pass) + `test_futures.py` (18/18 pass).
-> See RESEARCH_LOG.md Iter 53.
->
-> **iter55 In-Position Stagnant Timeout (SODT) & Wide Session Catastrophic Circuit Breaker (WCCB) — REJECTED (no production strategy default change, strictly additive layer shipped).**
-> Evaluated an In-Position Stagnant Timeout (`sodt_stagnant_timeout` exit on trades offside after $T \in \{600, 720, 900, 1200\}$ s without confirming a $+P\%$ gain) and a Wide-Session Consecutive Loss Circuit Breaker (`v2_session_cb_max_consecutive_losses`). SODT achieved deep-tail compression (kelly_flat $+0.45\dots+0.49$ SOL, $p=0.0005$), but regressed whole-PnL across all 16 parameter combinations ($\Delta \text{PnL} = -0.34\dots-0.50$ SOL, Wilcoxon $p \ge 0.99$, CI strictly negative) because 44% of fired trades were recovering runners/scratches destroyed prematurely and replaced by bleeding re-entries. WCCB was non-engaging at per-session granularity (max consecutive loss streak on any single recording was 3, so $N \in \{4,5,6\}$ never tripped). Both features preserved strictly default-OFF (`v2_sodt_enable = 0.0`, `v2_session_cb_max_consecutive_losses = 0`) in `strategy_engineV2.py`, `forward_tester.py`, `live_trader.py`, and `app.js` for 100% byte-exact baseline parity. Unit test suite `test_sodt_wccb.py` (8/8 pass) + `test_futures.py` (18/18 pass).
-> See RESEARCH_LOG.md Iter 55.
->
-> **iter56 Multi-Channel Left-Tail Elimination Battery: Holder-Flow Stream Silence Gate — ACCEPTED (production default updated to `v2_hf_silence_gate_seconds = 2700.0`).**
-> Evaluated 5 independent mechanisms to eliminate the catastrophic left tail ($R \le -15\%$, 95.9% of loss drag):
-> (1) *Holder-flow pre-entry cumulative selling & distribution* (AUCs $\approx 0.42\dots0.54$; selling volume is slightly protective because active tracked pools have responsive exits, while slow bleeds have 0 on-chain events).
-> (2) *On-chain launch-anchored provenance* (all AUCs $0.40\dots0.54$; 47/146 mints are dual-outcome with both large wins and deep losses, bounding static token-level filtering).
-> (3) *Model ensemble disagreement / epistemic uncertainty* (V1 agreement AUC 0.4895; conservative V1 consensus blocks 99% of winning V2 trades).
-> (4) *In-position tracked-buy exhaustion* (in-position tracked buys identical between winners and tail losers, AUC 0.499).
-> (5) *Holder-flow stream silence entry gate* (`v2_hf_silence_gate_seconds`): Blocks entry on tokens where tracked flow existed previously but went silent $\ge K$ seconds before entry. Full-cohort tail battery across a complete granular sweep $K \in \{600, 1200, 1800, 2700, 3600, 5400\}$ s demonstrates monotonic tail-cut expansion with $K=2700.0$ s (45 minutes) emerging as the **Pareto-optimal production configuration**: expands whole-cohort PnL to **+2.0236 SOL (+0.0598 SOL net gain)**, elevates win rate to **69.58% (+0.58 pp)**, eliminates severe losers $n(\le -15\%)$ (cut by 12 trades, $p=0.0010$, CI $[+0.0140, +0.0504]$), eliminates catastrophic losers $n(\le -30\%)$ (cut by 7 trades, $p=0.0078$, CI $[+0.0056, +0.0308]$), saves **+0.4371 SOL** in tail loss drag, and maintains exactly 0 added tail recordings. Production default configured in `strategy_engineV2.py` and `app.js` (`v2_hf_silence_gate_seconds = 2700.0`). Unit test suite `test_hf_silence.py` (5/5 pass) + `test_futures.py` (18/18 pass) + `test_evr.py` (6/6 pass).
-> See RESEARCH_LOG.md Iter 56.
->
-> **iter57 Global harvest-regime give-back adaptation (Q_gr_lag3) — ACCEPTED (explicit user decision 2026-08-22 overriding the bootstrap-CI / whole-cohort-breadth criteria); production default `v2_regime_enable=1.0` with thr=0.6 / min=0.30 (adapt updated 0.3 → **0.2** by the iter58 sweep completion, which clears the strict gate outright — see iter58 below).**
-> Objective: auto-adapt the `gain_retrace` give-back to the global market regime (WR decay r=-0.76; `gain_retrace` share 67.4%→49.9%; avg win −26.8% on negative days). Diagnosis screened causal regime carriers (SOL price/momentum via CoinGecko, Solana DEX volume via DeFiLlama, local trailing pump/turnover/λ features, intraday cross-token breadth) — ALL null for next-day WR. The only carrier clearing the next-day bar is **Q_gr_lag3**: the strategy's own realised `gain_retrace` exit share over the trailing 3 trading days, strictly prior dates (next-day WR ρ=+0.564, p=0.014; caveat: largely collinear with the time trend on this 19-date panel, partial ρ=0.14). Mechanism (spec option A, one mapping): when Q(today) < `v2_regime_q_threshold`, tighten the give-back of ALREADY-ARMED winners only — `give_eff = 0.5 − 0.3·clamp01((thr−Q)/thr)` floored at 0.30, inside `_check_exit_v2`; entries/losers untouched (iter52 lesson); futures hard-disabled; Q from the causal cache `backend/data/global_regime_cache.json` built by `backend/fetch_global_regime.py`; live refresh via `_global_regime_pump` in `main.py`. Fresh full-cohort re-verification (1,458 recordings, identical cohorts, parity-proven): baseline 875 trades / 69.03% / +1.9116 SOL vs candidate (thr=0.6, adapt=0.3) 881 / 70.03% / +2.0684 — **Δ+0.157 SOL, Wilcoxon p=6.09e-06 ✓; bootstrap CI [−0.00021, +0.00099] and whole-cohort breadth 65/15=18% recorded against acceptance and overridden by the user's explicit decision** (81% breadth among the 80 changed recordings; whole-cohort breadth is structurally capped by ≤39% engagement). Mechanism verified exact: `gain_retrace` +0.434 SOL, `kelly_flat`/`recording_ended`/`evr_triage` byte-unchanged, deep tail ≤−20%/−30% exactly unchanged, negative days +0.096 / positive days +0.061; sweep monotone (thr 0.4/0.5/0.6 at adapt=0.2 → +0.101/+0.146/+0.215). **An earlier same-day session's ACCEPTED verdict (Δ+0.199, CI strictly positive, user breadth override) was based on engine code lost in a working-tree reset and DID NOT reproduce on the audited re-run — superseded by the audited numbers above.** Production defaults live in `strategy_engineV2.py` + `app.js` (`v2_regime_enable=1.0`; set `0.0` to restore byte-exact pre-iter57 behaviour). **Operational requirement:** adaptation reads `backend/data/global_regime_cache.json`; maintenance is fully automated — `main.py`'s `_regime_cache_maintenance_loop` (startup + daily 00:05 UTC, `ITER57_REGIME_AUTOREFRESH=0` kill-switch) incrementally backtests new recordings pinned to `v2_regime_enable=0.0` measurement semantics, merges exits into the cache's per-date accumulators, and rebuilds Q through the live frontier (atomic write); `fetch_global_regime.py` remains available for manual rebuilds. The forward region is calendar-continuous with a frozen window while no new trading dates close; dates beyond it run NEUTRAL (base give 0.5, safe degradation; no stale-Q fallback), and the `main.py` `_global_regime_pump` pushes refreshes into running sessions. Look-ahead audit: clean (Q(d) uses only exits strictly before d; today never qualifies); in-sample caveats (config selection, 0.35/0.70 constants, time-trend collinearity) documented in RESEARCH_LOG.md Iter 57 §5. Monitor live and re-gate as more low-Q trading dates accumulate (the (0.6, 0.2) follow-up was executed by iter58 and is now production). `test_regime_adapt.py` 17/17 + `test_futures.py` 18/18 + `test_evr.py` 6/6 + `test_hf_silence.py` 5/5.
-> See RESEARCH_LOG.md Iter 57.
->
-> **iter58 Sweep completion (adapt 0.3→0.2, ACCEPTED via the STRICT gate) + regime-adaptive entry/exit battery (ALL REJECTED; knob code since REVERTED) — production now `thr=0.6 / adapt=0.2 / min=0.30`.**
-> The full parameter grid (concave both axes, optimum bracketed — thr=0.7 breaks at −0.056, adapt=0.4 collapses to +0.055) peaks at **(thr=0.6, adapt=0.2)**: full-cohort run 880 trades / 69.77% / **+2.1267 SOL**, Δ+0.215 vs baseline, **Wilcoxon p=3.05e-06 ✓, bootstrap CI [+0.00026, +0.00095] strictly positive ✓, paired-t p=0.001 ✓**, 55/12 improved/regressed (82% among changed) — unlike adapt=0.3, no user override is required on any statistical criterion; production default updated and verified trade-by-trade against the batch logs.
-> The extension battery (user-requested: "entire algorithm's buy/sell adapts to the regime") tested three independent default-OFF knobs on the shared `_regime_tight()` scalar: **58a** `v2_regime_entry_enable` (weak-regime C_high elevation +Δ·t) — 4-cell swept (Δ0.02→+0.062, 0.04→+0.026, 0.06→−0.094, 0.08→−0.044), BOTH positive cells full-gated and REJECTED (0.04: Wilcoxon p=0.47, 7/9; 0.02: p=0.18, **6/3** — the milder the delta the MORE concentrated the effect; the entry-side negative-result line now extends to the strongest regime signal at swept-axis strength); **58b** `v2_regime_kelly_enable` (kelly_flat offside 40%−Δ·t) — 4-cell swept (−0.021/−0.001/+0.037/−0.009): single positive island, noise not mechanism (bracketed-axis rejection); **58c** `v2_regime_arm_enable` (arm 10%−Δ·t) — 3-cell swept (−0.092/−0.064/−0.013): monotone-negative, strictly harmful (bracketed-axis rejection). All three knobs were later REMOVED from the code (2026-08-23 reversion of rejected session mechanisms — findings preserved here and in RESEARCH_LOG.md).
-> Honest goal assessment: per-date WR decay is SOFTENED (trend ρ −0.607→−0.577, negative days 8→7, worst grind days flip positive) but NOT eliminated — 08-19-type days (instant entry-selection errors; iter56: 0/166 tail losers ever reach +15% MFE) are untouchable by any exit-side knob, and the entry-side channel is now conclusively negative across every tested pre-entry observable. Exit-side profit-lock geometry remains the only regime-adaptive surface with statistical support.
-> See RESEARCH_LOG.md Iter 58.
->
-> **iter59 Regime-Adaptive SDE Framework (λ_μ / α / τ_max coefficient conditioning) — ALL THREE AXES REJECTED at screen (knob code since REVERTED; no production change).**
-> Per the user's direction that the *fundamental mathematical framework* (not just the `gain_retrace` exit geometry) should adapt to the global regime, iter59 made the stationary SDE coefficient vector itself regime-conditioned on the same causal `Q(t)`/`_regime_tight()` scalar: **59a** drift persistence `λ_μ,eff = λ_μ·(1+Δ·t)`, **59b** flow persistence `α,eff = α·(1+Δ·t)`, **59c** horizon compression `τ_max,eff = τ_max·(1−f·t)` (floored at `tau_min`). Implementation: `_apply_regime_sde_scaling()` in `strategy_engineV2.py`, called at the top of `update()` before `core.update_state`, keeping the cfg dict, packed predict-kernel array (idx 0/5), `_alpha_regime` and `_tau_default` in sync; coefficients constant within a date, base-snapshotted, restored at t=0; futures hard-disabled; parity-proven (bare `{}` reproduces the production batch `iter57_t06a02_full_1787365854` trade-by-trade on recs {1810, 431, 943}). Screen (193 span-eligible recordings vs the production baseline, 9 cells, 0 errors): **all nine cells negative** — λ_μ −0.308/−0.613/−0.588 (monotone), α −0.006/−0.687/−0.723, τ −0.457/−0.503/−0.679 with trade starvation 880→694 (the horizon doubles as an entry gate — the eleventh entry-side negative result). Exit-reason autopsy: the hypothesised channel WORKS in isolation (59a's posterior exits tighten: `bayesian_flip`+`kramers_down`+`reversal`+`gain_retrace` ≈ +0.32 SOL) but the coefficients are global — the same scaling costs `tp_v2` runners −0.24, the `dev_sell` stack −0.30..−0.63, `kelly_flat` −0.14 (total damage 2.5× the gains). The regime damage does not accrue in the coefficient calibration; it accrues in armed winners' exit geometry, where iter57/58 already deployed the statistically optimal adaptation. The knob was later REMOVED from the code (2026-08-23 reversion; findings preserved here and in RESEARCH_LOG.md). `test_futures.py` 18/18 + `test_evr.py` 6/6 + `test_hf_silence.py` 5/5.
-> See RESEARCH_LOG.md Iter 59.
->
-> **iter60 Regime-bleed decomposition + Confirmation-Staged Sizing (CSS) — REJECTED at screen (code since REVERTED); the regime bleed is PROVEN to be the never-confirmed entry-rate channel.**
-> Per the user's directive (regime-change unprofitability), iter60 first decomposed the regime bleed on the production batch with per-trade candle-reconstructed MFE: low-Q dates are still net-POSITIVE (+0.87 SOL; armed trades regime-robust at 94.7% WR ≈ healthy quality) — the degradation is the **never-confirmed entry rate** doubling (24%→42%), carrying −2.7 SOL per regime window in BOTH regimes. That killed uniform throttling, daily-loss cutoffs, and trailing-PnL conditioning at diagnosis (low-Q aggregate positive; good low-Q days start deep-red). The one untested surface — **CSS**: enter at `v2_css_initial_frac` m₀ of buy size, top up the remainder via a stop-buy at the first touch of entry·(1+`v2_css_confirm_pct`) — converts the validated confirmation channel (iter48/56: catastrophic losers never confirm) into executed notional with the engine/trade-set/exit-timing completely untouched. Implemented default-OFF in `forward_tester.py` + `live_trader.py` (staged initial buy, per-state top-up, `pending_exit` suppression, futures hard-off, live mirror with single-attempt add swap) + `app.js`; OFF = byte-identical to the production batch; `test_css.py` 7/7, `test_live_parity.py` 10/10, all suites green. Screen (6 cells, 362 recordings): **all negative (−0.30…−1.03)**, bracketed on both axes (c→0 strictly worse, m₀→1 ≡ OFF). Autopsy: the intended channel is exact — never-confirmed trades realized +2.466 vs +2.476 closed-form predicted — but confirmation stop-buys fill at the GAPPING state open (up to 1.22× entry vs 1.04 modeled), and the chasing premium is paid precisely on eventual winners (−2.78). **Also fixed a batch-plumbing hazard: ForwardTester-level knobs must copy-filter `engine_params`, never pop — the shared dict object across worker chunks silently disabled the knobs on ~98% of the first screen's recordings (detected via 135/137 byte-identical never-confirmed losers).** Structural conclusion: every execution-side hedge of the discovery cost is now tested-and-rejected; the regime-resilience frontier is the deployed stack (EVR 48/50, holder-flow gates 43/56, give-back adaptation 57/58), and a regime that breaks the strategy would have to collapse the armed-trade edge itself, which no tested causal signal predicts. The CSS execution code was later REMOVED from `forward_tester.py`/`live_trader.py` (2026-08-23 reversion; findings preserved here and in RESEARCH_LOG.md). See RESEARCH_LOG.md Iter 60.
->
-> **iter57 Live-vs-Backtest Trade-Placement Parity Fix — 4 root causes fixed, live now reproduces the backtester's decision sequence exactly.**
-> The user observed the live trader placing trades the backtester would never place (and vice versa) on the same auto-recordings, with the backtester achieving better WR/PnL. Empirical alignment of 5 live sessions' trades (recs 2762/2929/2935/2941/2949) against backtests of their own recordings isolated four structural divergences, all fixed:
->
-> 1. **Holder-flow pump event loss (the dominant cause).** `main.py`'s `_holder_flow_pump` diffed the monitor's `get_events_as_dicts()` by COUNT — but `HolderFlowMonitor` trims `recent_events` to a **60 s** window, so the list shrinks below the count high-water mark and every event landing under it was silently never delivered (empirically only 8–25 % of DB events reached the engine; replaying the broken delivery reproduces the live trade sequence exactly). The iter56 `v2_hf_silence_gate` amplified this into wrong-side entry blocks (stale last-known event ⇒ spurious "silence"). **Fix:** the pump now reads `data_store.get_holder_flow_since(rec_id, last_id)` (new id-cursor helper) — the DB rows the monitor persists at discovery, which are exactly what the backtester replays ⇒ lossless, exactly-once delivery.
-> 2. **Same-price tick skip starved the engine's candle buffer.** `_process_stream` skipped `live_trader.update()` whenever consecutive ticks carried the same price, so the buffered accumulating candle kept a stale volume/buy/sell snapshot while the recorded candle (persisted per tick) carried the full volume the backtester replays. **Fix:** `live_trader.update()` now runs on EVERY tick; only the UI broadcast is throttled to price-changes/candle boundaries.
-> 3. **Pending signals were silently dropped.** `_process_completed_candle` Step 1 cleared `_pending_buy`/`_pending_exit` unconditionally, so any signal that arrived while the previous sell was still confirming (1–5 s) or a swap was in flight was lost — the backtester never drops a queued signal. **Fix:** signals retry until executed (`_execute_pending_signals`), consumed on fire, re-drained when a swap settles (`confirm_sell` → `_drain_after_settle`); BUY retries expire after `pending_signal_max_age_seconds` (default 15 s) so stale entries are never placed.
-> 4. **Notify/fill-anchor timing.** Live queued signals only after the full 4-state loop (execution always at the next candle boundary) and anchored `notify_trade_opened` at the signal-candle close; the backtester queues/Executes per state (`ft.update` Steps 1/3 run inside EVERY state) and anchors the engine at the simulated intrabar fill (intrabar(state OHLC, frac)·(1+1 %)). **Fix:** `_process_completed_candle` now executes pending signals before each state and queues after each state (`_queue_signal_from_state`); a state-4 signal executes in `update()` at the boundary tick with the NEW candle's open (the bt's "state 1 of candle N+1" slot); the engine anchor uses the identical `_engine_fill_fraction()`/`_engine_intrabar_price()` formulas (`engine_fill_slippage_pct=1.0`, matching `run_backtest`). The real on-chain fill is still recorded on the trade at confirmation — only the engine's exit-threshold anchor is the simulated fill, exactly as in backtest.
->
-> **Verification.** `backend/analysis/verify_btfill_replay.py`: the live-path replay reproduces the backtester's trades EXACTLY on all 5 sessions — every entry time (±1 s), entry reason, exit time (±1 s) and exit reason (29/29 trades). `test_live_parity.py` (10/10) locks this in end-to-end (LiveTrader with stubbed swaps vs ForwardTester at run_backtest defaults on real recordings) plus unit tests for each mechanism. `test_futures.py` 18/18. Residual live-vs-backtest differences are now limited to real-world effects the backtester cannot see: GMGN discovery latency (~poll interval), on-chain swap failures (buy-failure 120 s re-entry block is user policy), market-cap floor/no-motion session stops, and real fill prices.
-
----
-
-## Guidelines for Engine Developers & AI Agents
-
-1. **Never Touch Pipeline Parity**: When adding or modifying strategy engine parameters, ensure `Backtester`, `ForwardTester`, and `LiveTrader` receive and process identical state transitions.
-2. **Always Run `paired_diff.py`**: Never claim a strategy change is an improvement based on single-token runs or small samples. Run candidate batches against `iter08_baseline_full` and require Wilcoxon $p < 0.05$, bootstrap CI $> 0$, and $\ge 50\%$ token improvement.
-3. **Respect the 4-State Expansion**: Do not remove the 4-state intra-candle expansion logic in `candle_aggregator.py` or the execution pipelines; intra-candle extreme prices are essential for realistic paper/live execution.
-4. **Preserve Force-Close at Recording End**: Any backtester modification must maintain the `recording_ended` position force-close to prevent look-ahead bias and unclosed trade filtering.
-5. **Differentiate Observable Data vs. Model Assumptions**: When working with zero-volume candle streams, account for KDE buffer emptiness ($\rho \equiv 1$) rather than introducing synthetic occupancy fallbacks that create lag-follow pathologies.
-6. **Recording dataset history — two regimes, one DB wipe**:
-    * **Legacy dataset (iter01–iter14, prior to 2026-07-27):** DELETED. The pre-iter15 recordings cannot be retro-fixed because the per-trade vault deltas were never persisted; rather than carry the broken artefacts forward the user wiped `backend/data/price_data.db` after iter15's `PumpSwapRPCClient` recorder patch shipped (commit `195aa90`). Any quoted iter01–iter14 absolute metric (`iter04_full`, `iter08_baseline_full`, etc.) is from this deleted dataset and exists only in `backend/analysis/*.json` snapshots and `backend/v2_results/*` per-token logs from that era. Those artefacts are still useful as failure-mode records of the volume-free regime but the underlying recordings are gone.
-    * **Fresh dataset (post-iter15, recorded 2026-07-27 onward):** `backend/data/price_data.db`
-    * **Canonical baseline naming**: The fresh dataset must be benchmarked with `iter16_baseline_full` (or later iter–baseline as the user prefers). Do NOT compare candidate batches against the deleted `iter08_baseline_full` artefacts stored in `backend/analysis/iter08_baseline_full.json` — those metrics measure a volume-free regime that no longer exists. The `paired_diff.py` acceptance gate must point at the fresh baseline.
->
-> **iter61 Regime participation floor (user risk-policy knob; was production default 0.25 by explicit user decision 2026-08-23 — **REMOVED 2026-08-24 by follow-up user decision, see Iter 64**) — PnL gate rejected every floor in-sample; the floor was an allocation decision, not a statistically-gated alpha.**
-> Grounding the user's "significant loss every day lately": live 08-19→22 = −0.081 SOL (4 red days, worst trades −100% dead-coin rides, WR ~75% but payoff ratio 0.20) — and the BACKTEST AGREES (−0.31 over the same days; live fills ≈ feed prices, no execution gap): genuine regime decay. Two more signal families killed at diagnosis: intraday realized confirmation rate (no good/bad-day separation — 08-12 +0.27 and 08-20 −0.09 share the same 70-76% causal band) and per-token cumulative loss caps (save +0.01..0.06 bad days, cost −0.01..0.13 good days). Mechanism: `v2_regime_participation_floor` — a fleet-level entry block when causal Q(today) < floor, reusing the Q cache/`_global_regime_pump` infrastructure (live zero-touch); futures hard-off; explicit 0.0 restores never-block parity. Validation: floor 0.30/0.40/0.50 → Δ −0.22/−0.37/−0.57, imp/reg 22/26…67/87 — **the strict PnL gate rejects all floors because Q does not rank days by PnL** (the two best low-Q days, +0.27/+0.36 at Q 0.29/0.43, are indistinguishable from the grind). Under the user's stated objective (consistent traded-day WR + positive expectancy) the floor is the only mechanism that moves daily consistency; "70% every day" is statistically unreachable (±6-8pp binomial band at n=10-50/day). Enabling it was an explicit user risk decision. See RESEARCH_LOG.md Iter 61.
->
-> **iter61 addendum (full battery, user-audited):** floor sweep completed (0.25→0.50, non-monotone — 0.45 dominated); full-cohort runs on the two coherent cells (1,490 identical recordings, 0 errors): floor 0.25 → 828 trades / 70.0% / +2.179 / exp +0.00263; floor 0.50 → 541 / **73.8%** / +1.559 / **PF 1.44 / exp +0.00288**. Formal paired tests (new `analysis/iter61_paired.py` — **`paired_diff.py` drops one-sided pairs and is blind to entry-blocking candidates; missing candidate log must be counted as 0 PnL**): 0.25 formally insignificant (Δ+0.052, Wilcoxon p=0.66, CI spans zero) — a POWER property, not a null result: it engages on ~1% of trading days, so whole-cohort tests cannot see it either way; 0.50 REJECT on PnL (Δ−0.568, p=0.74) but delivers the consistency objective: negative days 9→5 (all remaining are healthy-regime WR-65-76% small-loss days), daily WR band [42,83]→[57,83] median 68.4→74.5%, expectancy/trade +19%, total PnL −27%.
->
-> **iter61 addendum 2 (PRODUCTION DECISION + session reversion, 2026-08-23):** the user adopted **floor = 0.25 as production default** (`strategy_engineV2.py` DEFAULT_CONFIG + `app.js`; set 0.0 to restore pre-iter61 behaviour). Rationale: zero in-sample cost on the full cohort (828 / 70.0% / +2.1791 / PF 1.38 vs 880 / 69.8% / +2.1267 / 1.35), cuts exactly the catastrophic-Q dates (rec2859 on 08-21: 5 trades / −0.098 SOL → 0 trades), worst documented case costs nothing. Higher floors stay off. Same-session reversion of rejected mechanisms: all iter58 battery knobs (`v2_regime_entry_*`/`kelly_*`/`arm_*`), iter59 SDE conditioning (`v2_regime_sde_enable` + `_apply_regime_sde_scaling`), and iter60 CSS (`v2_css_*`, ForwardTester/LiveTrader staging paths, `execute_buy(amount_sol=)` parameter) were REMOVED from `strategy_engineV2.py` / `forward_tester.py` / `live_trader.py` / `app.js` — findings preserved in RESEARCH_LOG.md only. Post-surgery parity (`analysis/iter61_production_parity.py`): explicit `floor=0.0` reproduces `iter57_t06a02_full_1787365854` trade-by-trade on recs {1810, 431, 943}; bare `{}` reproduces `iter61_f025_full_1787438813`. Tests: `analysis/test_regime_adapt.py` rewritten to 15 tests (58/59 suites pruned with their code); `test_live_parity.py` pins `floor=0.0` inside decision-parity so mechanics parity stays date-independent. All green: regime_adapt 15/15, futures 18/18, evr 6/6, hf_silence 5/5, live_parity 10/10. Monitor live traded-day consistency and re-gate before raising the floor.
->
-> **iter62 Production ablation — holder-flow gates/exit + regime layers DISABLED by user working-tree decision; date-segmented backtest VERDICT: NET-NEGATIVE, the disabled layers were protective (decision under re-gate).**
-> The user turned off four production knobs in the working tree (uncommitted): `v2_holder_flow_entry_block` 1.0→**0.0**, `v2_holder_flow_exit_enable` 1.0→**0.0**, `v2_regime_enable` 1.0→**0.0** (iter57/58 give-back), `v2_regime_participation_floor` 0.25→**0** (iter61) — after observing the live trader "performing significantly better". EVR triage + sell-concentration veto (iter48/50) and the HF silence gate 2700 s (iter56) remain ON. A fresh day-segmented sweep (`backend/analysis/run_date_segmented_backtests_v3.py`; report `DATE_SEGMENTED_BACKTEST_REPORT_V3.md`; cache `backend/analysis/date_segmented_results_v3.json`; batch prefix `date3_`) re-ran ALL 26 dates / 1,557 recordings / 985 trades under the ablated defaults and paired every shared date against the same-morning all-layers-ON V2 cache (byte-identical cohorts verified on all 25 shared dates; new date 08-23 excluded from pairing). **Result: Δ = −0.7366 SOL on the paired dates (+1.1655 vs +1.9021), Wilcoxon p=0.0535, bootstrap 95% CI [−0.0596, −0.0022] strictly negative, breadth 5/25 improved; tail trades ≤−15% +29; kelly_flat drag −1.132 SOL.** Dates 07-27→08-06 are byte-identical (zero dev-sell events there), proving the diff isolates the four layers. Mechanism: `dev_sell_exit` was a profitable SAVE — its PnL on 08-08/10/11/12/18 (+0.07/+0.16/+0.11/+0.08/+0.12) vanished when disabled and those trades round-tripped into tails; the entry gate had been silently filtering bad entries; regime give-back removal hurt most on grind dates (08-12 −0.220, 08-19 −0.196 worst regressions). Live-vs-backtest divergence hypotheses (untested): GMGN discovery latency degrades live dev-sell exit fills vs exact-timestamp replay (testable via `forward_tester.holder_flow_latency_seconds`), and ~4 live days is a small sample. The knobs STAY OFF per explicit user decision (iter57-style policy override, opposite direction); nothing committed. Re-gate criteria: latency-injected backtest survival of the dev-sell edge, restore-exit-only split, or ≥2 more weeks of live data before concluding. **Do NOT treat V3 as a baseline — `iter61_f025_full_1787438813` / the V2 cache remain the production reference cohort.** See RESEARCH_LOG.md Iter 62.
->
-> **iter63 "Selling too late" — Stationary Kramers Rate-Split Early-Harvest Exit (`rate_split_flip`) — MECHANISM BUILT + FULL-BATCH STRONG (Δ+0.3633, p=2.0e-05, breadth 74.5%) but STRICT GATE 2/3 (bootstrap mean-CI straddles zero by 2.2e-4); shipped default-OFF, adoption awaits explicit user override (iter57 precedent).**
-> User complaint: sells fire too late — winners peak +50% and realise +15%; losses are big. Forensics on the date3 production baseline (`analysis/iter63_forensics.py`, 979 trades): winners capture only **51% of peak MFE** (median give-back 58%), 46.5% of armed `gain_retrace` exits land BELOW their own floor (gap-through), tail losers ≤−15% (n=202) never confirm +10% (99.5%) and sit ~99 s (median) between the −20% cross and their exit while `kelly_flat` fires at median 355 s. A prior interrupted agent session had run an "exit-horizon amplification" family (`eha*`: exit-side τ×3–4 + Kramers persist) and a trail-tightening family (`blp*`) whose engine code was LOST in a working-tree reset — its surviving per-token logs were re-scored offline (`analysis/iter63_salvage.py`): **BLP trail-tightening = strong NET LOSER (−0.77 / −1.34 SOL; kills tp_v2/kramers/reversal tails), EHA = directionally positive (+0.05..+0.15 screen) but full-batch gate-failed (Δ+0.268, p=0.047, CI straddles)** — both findings conditioned this iter's design.
-> **Mechanism (fundamental, not an overlay):** the engine's `_kramers_escape_and_decision` already returns per-tick escape rates `k_up/k_down`; for a position DEFENDING value the decision-relevant statistic is the τ→∞ limit of the same two-state CTMC passage distribution — the **stationary split s = k_d/(k_u+k_d)** (direction of least resistance), replacing the finite-horizon *speed* condition P_down(τ) ≥ 0.5 that entry-appropriate Kelly-τ selection imposes. New exit #2d in `_check_exit_v2`: armed winners only (peak ≥ entry·(1+A%)), fire when **s ≥ θ sustained K consecutive 4-state ticks** (~K/4 s — the iter12 temporal-coherence lesson). Params (ALL default-OFF/parity): `v2_rate_split_enable=0.0`, `v2_rate_split_arm_pct=10.0`, `v2_rate_split_offside_pct=0.0` (offside scope exists but was REJECTED by CF + composite screen), `v2_rate_split_theta=0.50` (production candidate uses 0.55), `v2_rate_split_persist=4` (candidate uses 12), `v2_rate_split_min_peak_age_ticks=0` (runner-immunity veto — implemented, tested, **REJECTED**, see below). Futures engines hard-off. Per-trade state (`_rate_split_streak`, `_last_peak_tick`) reset in both `notify_trade_opened/closed` → three-pipeline parity by construction.
-> **Diagnostics tooling shipped:** write-only per-tick debug hook (`v2_debug_tick_log` param → JSONL of [t,o,h,l,c,entry,peak,k_up,k_down,P_up,P_down,P_zero,direction,E_star,tau,exit_reason,no_long_streak] for every in-position tick; default OFF, parity-proven 260/260 byte-identical vs date3 logs via `analysis/iter63_capture.py` with inline per-rec parity assertions + `guard_parent()` workers). Counterfactual scorer (`analysis/iter63_cfscore.py`) sweeps θ×K×scope×peak-age over the captures as an upper bound (same-path, no re-entry). Giveback comparison (`analysis/iter63_giveback.py`): armed-winner capture ratio 51%→60%, big-MFE median realised +31%→+39%, harvested-class median give-back **13%** vs baseline 58%.
-> **Screen (260-rec subset, real engine, `analysis/iter63_screen2.py`; baseline +1.1123):** plateau at {θ∈[0.55,0.60]}×{K∈[12,16]} ≈ +0.24..+0.29 with p ≤ 0.003; winner **rsb12t55 (armed, θ=0.55, K=12): Δ+0.2841, p=0.0007, imp/reg 54/22, trades 758→759, tails unchanged, `tp_v2` UNTOUCHED (moonshot runners preserved — rate_split harvests +2.956 drawn from gain_retrace −1.41 / kramers −0.89 / bayesian −0.30)**. Rejected cells: θ=0.50/K=8 (−0.03), offside-composite (+0.08, dilutes), arm20 (+0.16 < arm10), peak-age veto mpa20 (+0.115) / mpa60 (−0.07).
-> **Runner-saturation finding:** during active price discovery above all KDE mass the up-barrier degenerates ⇒ s saturates to 1.0 on every breather of a healthy runner (rec952 trace: s≡1.000 through a +169% rip; flip fired at +31.6%/78s while the peak was 1–3 s old). The natural fix — require the tracked peak to be ≥N ticks stale before firing — was built, unit-tested, CF-scanned AND real-screened, and is **net-negative on both modes** (the blocked flips are net-positive trades); the regression class it targets (~6 runner recs, −0.48 SOL of the battery) is irreducible on this OHLCV stream without flow confirmation (future work, bounded by the iter37 oracle argument).
-> **Full-cohort batch** (`iter63_full_1787536207`, all recordings, params file `analysis/iter63_rsb12t55.json`): 1,029 trades / **72.11% WR / +1.8223 SOL / PF 1.23** vs date3 baseline 985 / 71.78% / +1.4403 / 1.19 → **Δ +0.3633 SOL (+25.2%)**. Battery (`analysis/iter63_battery.py`): Wilcoxon one-sided **p = 2.0e-05 ✓**, breadth **70/24 = 74.5% ✓**, McNemar 2 W→L vs 5 L→W ✓, bootstrap CI **[−0.000219, +0.001877] ✗ straddles zero** → strict gate literal verdict NOT PASSED on the CI criterion alone. `rate_split_flip:armed` class: 116 exits, **+3.246 SOL, worst trade 0.0%** (pure profit-taking). Date-segmented deltas positive on the user's complaint window (08-19 +0.039, 08-20 +0.045, 08-21 −0.021, 08-22 +0.038). Regression autopsy (`analysis/iter63_reentry_autopsy.py`): post-flip re-entries are net-POSITIVE (+0.192 SOL, n=185) — no replacement-entry pathology; regressions are mid-run consolidation flips forfeiting runner continuation (rec952 −0.127, rec406 −0.055, rec1255 −0.044).
-> **Standing:** engine default-OFF (bare {} = byte-exact current production; proven recs {1810,431,943} + 260/260 capture + test_futures 18/18 + live_parity 10/10 pytest + regime_adapt 15/15 + rate_split unit 7/7). Adoption = flip `v2_rate_split_enable` pop-default 0.0→1.0 (+ DEFAULT_CONFIG entry) with θ=0.55/K=12; rejection = no action. Re-gate per RESEARCH_LOG.md Iter 63 §11. See RESEARCH_LOG.md Iter 63.
->
-> **iter64 Regime-channel REPLACEMENT — iter57/58 give-back adaptation + iter61 participation floor REMOVED (explicit user decision 2026-08-24); the causal Q(today) now gates ONLY the rate-split exit (`v2_rate_split_regime_gate=1.0` → fires on weak-regime days, inert otherwise). Candidate verification DEFERRED to the user.**
-> The user re-affirmed the ablated config as production after a self-run full batch with holder-flow and regime layers disabled ("these mechanisms are doing bad") and directed: remove ALL existing regime-adapting machinery, replace the adaptation channel with the iter63 mechanism gated to weak market regimes. **Surgery (all parity-proven):** removed from `strategy_engineV2.py` — DEFAULT_CONFIG entries `v2_regime_enable`/`_q_threshold`/`_give_frac_adapt`/`_give_frac_min`/`_regime_participation_floor`, their ctor pops, methods `_regime_tight()`/`_regime_give_frac()`/`_regime_participation_blocked()`, the exit-#2b adaptive floor (back to flat `_gain_retrace_give_frac`) and the entry-side participation-floor branch; `_load_global_regime_cache()`/`set_global_regime_map()`/`_regime_q_today()` RETAINED (the gate consumes them), load-trigger now `rate_split_enable>0 ∧ regime_gate>0`. New params: `v2_rate_split_regime_gate=1.0`, `v2_rate_split_q_max=0.6`, `v2_rate_split_unknown_q_enable=1.0` (iter63 unknown-Q dates were net +0.091); ctor pop defaults θ→**0.55**/K→**12** (screened optimum); measurement pin in `main.py::_regime_cache_maintenance_loop` updated to `{"v2_rate_split_enable": 0.0}` so Q keeps measuring base exit semantics; `app.js` mirrors all 9 `v2_rate_split_*` knobs. Gate evidence (iter63 date-segmented Δ vs Q): weak days (Q<0.6) +0.263 SOL/13d vs strong days +0.010/7d (Spearman ρ≈0.02 — binary split, not monotone; 08-21 Q=0.243 regressed −0.021 while 08-01 Q=0.948 improved +0.053, hence GATE not scaling). **Verification state:** post-surgery suites all green (regime_adapt rewritten 10/10 for the gate incl. surgical-removal assertions, futures 18/18, live_parity+hf_silence 15/15 pytest, rate_split 7/7; bare-{} byte-identical to date3 on recs {1810,431,943}). **Verification (EXECUTED 2026-08-25, iterated with the user's own full-batch):** user's production candidate config reproduced **byte-exact** (1101/71.84%/+1.8596; batch `1787614267302` → rerun as `iter64_userbase_1787616977`; note it also had `v2_hf_silence_gate_seconds=0`). 12-cell 260-rec sweep (`analysis/iter64_screen.py`) shows θ=0.55/K=12/arm=10 IS the local optimum (every perturbed direction ≤ +0.01..−0.09); full-cohort follow-ups: **arm6 REJECTED (Δ−0.037 pair, p=0.72)**; **ungated (`v2_rate_split_regime_gate=0.0`) is the ONLY positive direction found: 1,108 trades/71.8%/+2.0739 SOL, paired Δ+0.155, Wilcoxon p=0.001, breadth 25/5 (83%), McNemar 0/3, tails flat, CI straddles by 4.8e-4** — gate-off adoption awaits user's call (iter57/61 precedent); the user's "+4 SOL" target is not reachable by these parameters — needs a new information channel. Battery runner: `analysis/iter63_battery.py <CAND> iter64_userbase_`. See RESEARCH_LOG.md Iter 64 §6.
-
-> **iter64 ADOPTION (2026-08-25, explicit user decision):** the measured-best configuration is now PRODUCTION DEFAULT — `v2_rate_split_enable 0.0→1.0`, `v2_rate_split_regime_gate 1.0→0.0` (ungated), `v2_hf_silence_gate_seconds 2700→0.0` (matches the user's baseline profile). Byte-parity of the flip proven: bare `{}` ≡ explicit `iter64sw_ungated` params on probe recs 1810/431 (13/13 + 16/16 trades identical). All suites green on adopted defaults: futures 18/18, live_parity 10/10 pytest, regime_adapt 10/10, rate_split 7/7, hf_silence 5/5 (default assertion updated 2700→0). To restore the pre-iter64 candidate state pass `v2_rate_split_enable=0.0`. See RESEARCH_LOG.md Iter 64 §7.
-
-> **iter66 Live-vs-backtest divergence fixes — exec-level fill calibration knobs + realtime rate-limit-free holder-flow source (whale stream via `observe_trade` + dev-ATA `accountSubscribe` watcher); GMGN demoted to enrichment/fallback; NO engine change.**
-> Forensics on the 08-25/26 overnight sessions: the live trader's DECISION sequence already matched the backtester (post-iter57 parity machinery). An initial ad-hoc estimate attributed the PnL gap to fill LEVELS (+27.3%/−22.5% vs candle references) — **the iter66 calibration (§ below, 2026-08-26) REVISED this**: systematic pairing of all 49 same-decision trades shows entry levels match within ~1% and the residual gap is per-exit SECONDS-level timing lag. Holder-flow delivery latency (7–9 s: GMGN indexing + 5 s poll) was therefore the primary addressable cause — which is exactly what the shipped realtime watcher removes. Fixes shipped:
-> (1) **Exec-level calibration knobs** — `ForwardTester(..., exec_offset_pct_buy=0.0, exec_offset_pct_sell=0.0)` plumbed through `run_backtest`; spot-only, multiplicative after slippage (buy ×(1+b/100), sell ×(1−s/100)); default 0.0 = IEEE-exact identity (unit-tested to 1e-12). Lets any batch be replayed AT measured live fill levels to separate strategy alpha from execution cost. Analysis-layer only (not yet in `/api/backtest`).
-> (2) **Watcher v1 REJECTED by live probe**: PumpPortal `subscribeTokenTrade` delivers ZERO trades for graduated PumpSwap tokens (probe: active tokens at 10–27 txns/min per DexScreener returned nothing over 25–35 s) — unusable for the production cohort, which is 100% PumpSwap-sourced post-graduation.
-> (3) **Watcher v2 shipped** (`holder_flow.py`, zero third-party indexers): whale sells (any ≥$100 sell — the dominant gate-triggering class; rec3466's exits were whale-tagged with the dev holding nothing) classified off the session trade stream via new `observe_trade()` called from BOTH `main.py` stream loops; dev trades via `_onchain_devsell_loop` = resolve `coin_creator` from the pool account (byte 211, one HTTP RPC) → find the dev SPL token account (`getTokenAccountsByOwner`, one call) → `accountSubscribe` it on the shared `_solana_hub` and diff raw u64 balances (~1 s push latency). Coverage mirrors iter43 `require_tag=0` semantics exactly (`dev` any side/size + `whale` ≥$100). Cross-source dedupe: tx-hash LRU claims + ±5 s same-side wildcard window (identity-less vault-diff/ATA events). Delivery semantics UNCHANGED — watchers only persist to `holder_flow`; the DB id-cursor pump remains the sole exactly-once engine channel (iter41 immediate-exit intact). GMGN stays for sniper/bundler/rat_trader enrichment + fallback when no pool/creator/ATA resolves; on-chain dev resolution seeds `wallet_registry` so late GMGN trades keep verified tags.
-> **Rate-limit answer**: delay root causes were GMGN indexing lag + poll interval (+ potential silent 429 backoffs); the new path has none — WS push ~1 s, no API key/quota. Public RPC *HTTP* does throttle bursts (observed 429/503 while probing), but production load is 1–2 HTTP calls per session start; worst case under RPC degradation is the dev channel arming ≤30 s late (retry loop); the whale channel rides the session stream and is unaffected.
-> **Validation:** new suite `analysis/test_holder_flow_onchain.py` 18/18 (standalone+pytest: pool layout, classifier matrix, dedupe family, SOL/USD cache/fallback, observe_trade, e2e loop vs stubbed hub, ATA-parsing vs canned local RPC, FT knob identities); regressions futures 18/18 · evr 6/6 · hf_silence 5/5 · regime_adapt 10/10 · live_parity 10/10. Live-fire on active Wittgenstein `DQJ9P44c…`: dev resolved <1 s, whale dispatched ($293, tag=whale), clean teardown; dev-holds-nothing case degrades to GMGN-only with 30 s retry as designed.
-> **Data-regime note**: post-iter66 recordings accumulate holder-flow events EARLIER than GMGN-era ones (tick-time whales / ~1 s devs vs 5–15 s polls) — do not mix eras in latency-sensitive stats; gate semantics unchanged; pre-iter66 recordings byte-identical.
-> **Exec-knob CALIBRATION (2026-08-26, same session):** `analysis/iter66_calibrate_exec_offsets.py` paired all 49 matchable live trades across the 25 traded sessions against their BT twins (entry ±5 s, reason-matched) and measured offsets in knob parameterisation: **buy median −0.99%** (= −1/1.01 ⇒ live fills AT the raw intrabar path price; the model's +1% entry-slippage premium is phantom on this routing — candle-verified on rec3404), **sell median ≈ −0.96%** but scattering [−26%, +24%] with a positive tail of late-printing `dev_sell_exit`/fast `gain_retrace` fires. Applying the medians ("live-cost lens": buy=−0.99/sell=−0.96) shifts replay PnL only marginally (+0.0082→+0.0108 SOL vs live −0.0029) and does NOT reconcile nightly totals; a uniform 7 s `holder_flow_latency_seconds` injection closes only ~20% and is non-monotone per session. **Verdict: residual live-vs-BT divergence is exit-TIMING dispersion, not fill level; production/research knob defaults stay 0.0 for baseline continuity.** Artifact: `backend/analysis/iter66_exec_calibration.json`. Follow-ups ranked: expose exec-offset knobs via API/UI; monitor dev-channel arm-rate in production logs before trusting whale-only coverage; extend ATA watching to rat_trader/sniper wallets once stable. See RESEARCH_LOG.md Iter 66 + addendum §9.
-
-> **iter68 Tail-mandate session — silence-gate re-admission REJECTED on the current stack; fresh canonical baseline `iter68_base_1787965293`; five probe channels killed; NO engine change.**
-> Re-measured baseline at HEAD (`37a112e`, warmup 400): **`iter68_base_1787965293` = 735 trades / 70.2% WR / +2.2833 SOL / PF 1.45** on the 953-rec `iter48_cohort_full.json` cohort — this is the canonical comparison batch for future iterations (tail ≤−10%: 149/−4.83; ≤−20%: 115/−4.30; ≤−30%: 74/−3.32). The undocumented `warmup_bars 60→400` commit was measured for the first time: on common recordings it is a wash (Δ−0.028, tail sets byte-similar); the +0.34 cohort gain is entry RE-TIMING (151 shallow-churn recordings silenced +0.086; 22 late-entry recordings unlocked +0.458) — NOT a tail cut.
-> **Re-admission sweep of `v2_hf_silence_gate_seconds` (2700/3600/1800, single-knob vs the new baseline, pre-registered in `analysis/iter68_PREREGISTRATION.md`): ALL REJECTED.** 2700: Δ −0.1950 (boot CI lower bound strictly negative), tail sig only ≤0%/≤−10% (fails Bonferroni ×4); 3600: Δ −0.1617, tail sig only ≤0%; 1800: Δ −0.2820 (13 sig tail metrics but whole-PnL worst). Monotone: tail battery strengthens as the window shortens while whole-PnL degrades — the tail cuts and the PnL loss are the SAME blocked trades (39 blocked carried +0.22 net: 6 `rate_split` + 19 `gain_retrace` winners vs 7 tail trades). Old-stack sibling A/B (+0.39, 18 sig metrics) did NOT transfer: warmup 400 already removed the early dead-window entries the gate used to block, so the marginal blocked population is now the late fresh-pump class on GMGN-sparse tokens (56% of cohort recs carry zero holder-flow rows). **Do NOT re-test this gate on this cohort/stack** — re-gate only on post-iter66 dense-coverage data (measure the blocked population first; `analysis/iter68_anatomy.py` pattern) or at a future stack boundary that re-opens early-recording entries. Probe kills this session (all CF-only, no batch burned): depth-trigger exits (72–78% of dd-crossers touch entry again), pre-entry velocity/flow (zero separation), EVR flow-starvation (6 trades, noise), iter50-veto re-arm (net ≈ 0), iter45 OFI gate (already full-batch-rejected). See RESEARCH_LOG.md Iter 68.
->
-> **iter67 GMGN poll regression fix — 30 s poll interval racing the 30 s entry-block window caused 100% of the live-vs-backtest entry-set divergence (2026-08-28); NO engine change, parity-preserving.**
-> Forensics on the 08-27/28 overnight session (102 recordings, 48 live trades +0.0346 SOL / 66.7% WR vs 18 BT trades +0.327 SOL / 72.2% WR): the live trader placed 30 entries the backtester blocked. Root cause identified via per-recording cross-join (`analysis/iter67_live_vs_bt_night.py`): **every instance of a live-only entry has a qualifying whale/bundler sell event in the holder-flow DB at timestamp T with the live entry firing at T+1…T+12 s — meaning the event arrived at the live engine while still inside the 30 s entry-block observability window (so no block fired), but the event's on-chain timestamp is what the backtester uses, correctly blocking entry**. The regression cause: commit `37a112e` changed `_POLL_INTERVAL` from 5 s to 30 s. With a 30 s poll a whale event lands in the DB at time T; the GMGN feed delivers it to the live engine at T+25…T+30 s; by that time the 30 s entry-block window has almost expired, so the block does not fire; the backtester, replaying from the DB at the true T, sees 27–30 s remaining in the window and fires the block correctly. DB-level proof (`analysis/iter67_live_vs_bt_night.py` summary lines for all 4 divergent recordings): every live-only entry has "hf event N s before entry; if delivered 30 s late, window at entry = 30−N s remaining → BLOCKED at live, PASSES at BT" (N ∈ {1,1,1,3,4,12} across the 6 spurious entries, all confirming the gap).
-> **Fixes shipped (3 changes to `backend/holder_flow.py`; backtester knob plumbed):**
-> 1. **`_POLL_INTERVAL` restored to 5.0 s** (with a prominent comment explaining why it must stay ≤ half the 30 s entry-block window). Added `_POLL_INTERVAL_IDLE = 30.0` — the monitor polls at 30 s only when no tokens are actively watched (zero sessions open), falling back to 5 s immediately when any `watch_token()` is called.
-> 2. **Immediate poll-loop wakeup on `watch_token()`** — added `asyncio.Event` (`_watch_signal`) to `HolderFlowMonitor.__init__`; `watch_token()` sets it before returning; `_poll_loop` uses `asyncio.wait_for(_watch_signal.wait(), timeout=interval)` so the next poll fires within milliseconds of a new session opening rather than waiting up to 30 s for the timer to expire. Eliminates the startup-window race where the first poll could miss events that arrived in the first 0–30 s of a session.
-> 3. **Feed-window-turnover detector** — new `_note_feed_coverage(trades)` method called inside `_poll_once()` after each fetch. Compares the oldest timestamp in the new poll against the newest timestamp of the previous poll. If a gap exists (oldest_new > prev_newest) it means GMGN's rolling window scrolled past events we never saw — permanent silent loss. Emits a rate-limited `logger.warning("feed_window_gap")` so this is observable in production logs without flooding.
-> 4. **`holder_flow_latency_seconds` knob plumbed through backtester** — already existed in `ForwardTester` (shifts event timestamps forward before indexing, so replaying with lat=N s simulates what the live engine would have seen). Added the param to `run_backtest(holder_flow_latency_seconds=0.0)` and `run_backtest_batch(holder_flow_latency_seconds=0.0)`, passed through `common_kwargs` to `ForwardTester`. Default 0.0 = byte-identical to all prior baselines. Lets any batch be replayed at the measured live delivery latency to reproduce the live trade set for diagnostics.
-> **Validation:** `analysis/test_iter67_holder_flow_latency.py` 8/8 (pins `_POLL_INTERVAL ≤ 5.0`; verifies `_watch_signal.is_set()` after `watch_token()`; async scenario confirms poll fires within 50 ms of new watch; feed-window-turnover logged on timestamp gap; `run_backtest`/`run_backtest_batch` expose the knob; `ForwardTester` shifts event times at the correct lat without mutating caller's list; lat=60 s prevents what lat=0 s allows on a 30 s window). Regressions: futures 18/18 · live_parity 10/10 · evr 6/6 · hf_silence 5/5 · rate_split 3/3 · no_motion 11/11 · holder_flow_onchain 2/2.
-> **Calibration note (iter66 correction):** the iter66 calibration script compared `live_trade["entry_price"]` (the raw candle-close anchor set at signal time) to the BT model anchor — both are the same model construct, not real AMM quotes. The reported "live entries fill ~1% BELOW the modelled fill" finding is therefore measuring model-anchor noise, not real execution. Actual Jupiter quotes are median ~1.255× the recorded candle close; round-trip execution drag is approximately −2.3%. The `exec_offset_pct_buy/sell` knob defaults remain 0.0 for baseline continuity; a valid calibration would pair real on-chain fill SOL amounts (from `confirm_buy`/`confirm_sell`) against BT intrabar prices, which requires post-hoc log analysis of the swap receipts.
-> **Residual live-vs-backtest gap (not addressed by this patch):** exit fill timing (live exit fires median +3.3 s after BT, plus ~1.9 s on-chain settlement); ATA rent (~0.00209 SOL per new mint, ~70/124 trades each night) silently excluded from `confirm_sell` PnL because basis is `size_sol` not `cost_sol`; real Jupiter slippage not captured in the BT model. These are measurement/accounting gaps, not decision-parity gaps.
-
----
-
-## Strategy Engine V3 Specification (Newborn-Coin Dump-Bottom Recovery)
-
-**File:** `backend/strategy_engineV3.py` (adapter `StrategyEngineV3Adapter`; engine_version=3 via `engine_factory.create_engine`)
-
-V3 reuses the **V2 mathematical core verbatim** (RBPF + UKF + KDE market potential + Kramers escape + Kelly utility, imported from `strategy_engineV2.py`, never duplicated) and layers a **four-phase lifecycle state machine** specialised for pump.fun newborn tokens, where the first minutes follow a predictable inorganic script: snipers/bundlers pump at birth, dump their supply, and organic buyers either arrive at the bottom or never do.
-
-### 1. Lifecycle Phases (per 4-state tick, monotone forward)
-
-| Phase | Regime map | Transition condition |
-| :--- | :--- | :--- |
-| `P_LAUNCH` | TREND | birth → running high ≥ open·(1+`v3_launch_gain_min_pct`/100) (default +20%) |
-| `P_DUMP` | EXHAUSTION | low ≤ launch_high·(1−`v3_dump_retrace_pct`/100) (default −50% round-trip); multi-leg dumps re-arm BOTTOM when a new low < dump_low·0.85 |
-| `P_BOTTOM` | IDLE | trailing buy-ratio over `v3_dump_window_seconds` recovers above 1−`v3_dump_sell_ratio_min` (or the window empties = exhaustion) |
-| `P_ORGANIC` | CONTINUATION | terminal entry-hunting phase; a stillborn tape (no pump) never leaves LAUNCH and never trades — correct: no dump to recover from |
-
-### 2. Entry Gate (all five conditions, evaluated only in ORGANIC phase)
-1. **Bayesian**: direction=+1 AND E*>0 AND P_up ≥ `v3_p_up_min` (0.60) — same Kramers contract as V2.
-2. **Organic flow**: trailing buy-ratio ≥ `v3_organic_buy_ratio_min` (0.60) over `v3_organic_window_seconds` (30 s) with window volume ≥ `v3_organic_volume_min_sol` (silence ≠ demand).
-3. **Mcap entry band**: `v3_mcap_entry_min_usd` ≤ mcap ≤ `v3_mcap_entry_max_usd` (user spec: $2k–$4k).
-4. **Volatility floor**: posterior σ_t ≥ `v3_sigma_t_min` (0.010).
-5. **Holder-flow block**: no dev/insider sell ≥ `v3_holder_flow_min_usd` within `v3_holder_flow_window_seconds`.
-
-### 3. STRICT Exits (fixed levels, no posterior veto — unlike V1/V2)
-1. **Take-profit**: close ≥ entry·(1+`v3_takeprofit_pct`/100) → `v3_take_profit` (default +250%; the 2k→8k band ≈ 3–4×).
-2. **Mcap band exit**: mcap ≥ `v3_mcap_exit_usd` → `v3_mcap_band_exit` (default $7.5k = user spec 7–8k midpoint).
-3. **Stop-loss**: close ≤ entry·(1−`v3_stoploss_pct`/100) → `v3_stop_loss` (default −30%; survives newborn chop, caps dead-coin tail).
-4. **Supplementary** (offside-guarded, never cut winners): sustained Kramers down-flip (K=12 ticks, ≥15% offside) → `v3_kramers_down_exit`; dev/insider sell in position → `v3_dev_sell_exit`.
-
-### 4. Calibration Notes
-- OU rates 2× faster than V2 spot (lambda_mu 0.30, alpha 0.30); KDE memory T_w=3600 s (a newborn tape IS the memory); warmup 60 intakes (15 candles — newborn tapes run 30–100 candles).
-- **τ horizon sweep MUST stay 5–30 s** (V2-validated): a compressed τ_max=10 starves `P_zero=e^{−kτ}` decay — measured 257 vs 57 gate-clearing ticks on the same tape with dir≡0 throughout.
-- Lifecycle/flow gates read candle-level buy/sell splits (state-4 ticks), identical across all three pipelines (`market_cap_usd` reaches `engine.update()` in backtest, paper, and live already).
-
-### 5. Verification Status (2026-08-30)
-- `backend/test_engine_v3.py` — 43/43: factory dispatch, full V1 surface (every capture attr), lifecycle transitions, entry-gate refusals (silence, out-of-band mcap, dev-sell block), strict TP/SL/mcap exits, holder-flow exit+block, determinism.
-- Real-tape chain (rec 3943, wide mcap band): 3 trades, `v3_stop_loss`×2 + `v3_take_profit`, +0.15 SOL — the complete lifecycle→gate→entry→exit path works end-to-end.
-- With the production 2k–4k band: 0 trades on all 12 tested graduated-pair recordings (they never visit the band) and correct phase tracking on all 10 newborn recordings in `newpairs_data.db` — **the engine is conservative-by-design on the current data regime**; current newborn recordings carry volume only in birth-seed buys (per-mint trade streams were IP-throttled), so the organic-flow gate has no sell side to measure yet. First genuine V3 backtests require new newborn recordings with full taker splits.
-
----
-
-> **iter78 (2026-09-02) The Consistency Mandate, Session 2 — the tail is the mandate; the first both-era-positive discovery of the program is an EXECUTION cell: 5-second deferred-entry fills.**
-> Pre-registered in `backend/analysis/iter78_PREREGISTRATION.md` before any burn; fresh full-DB B′ baseline `iter78_base_full_1788309622` (2,127 recs, 1,032 trades / 64.9% / +0.9459 SOL; OLD +1.212 / DEAD −0.249 / Mayhem −0.018; 32 days, 17 negative, worst −0.195, day-σ 0.162). Structure measured on the frozen B′ logs: the 117-trade ≤−30% tail (−5.18 SOL, 74 OLD / 43 DEAD era — NOT era-conditional, diffuse across 105 recordings, 91/117 never reach +5% MFE) is the entire consistency problem — remove it and negative days go 14→2. Every classical surface re-closed with numbers (dd-exits at every depth/delay −0.03…−0.41; EVR retune bound −0.24…−0.62; pre-entry sell-block windows era-inverted or winner-blocking; session-run/post-tail sizing −0.02…−0.31; event-keyed day partitions −0.06…−0.14). Doors: V3 newborn re-arm gate-FAIL (5/2,119 recordings armed — the newborn mcap band does not exist in this DB); iter72 whale-dump exit re-implemented from its unit-test spec and shipped **default-OFF** (parity proven; spec cell 6 fires Δ−0.024 era-inverted; min_usd-100 cell inert) — both REJECTED.
-> **The discovery: `entry_latency_seconds=5` (iter73's pending first study — buy fills deferred to t_signal+5s on the recorded path; ENGINE UNTOUCHED): +2.1237 SOL / 65.7% WR on 2,127 recs — Δ+1.178 vs the instant baseline, Wilcoxon p=0.00014, CI strictly positive, breadth 57%, BOTH eras positive (OLD +0.65 / DEAD +0.52), tail ≤−30% 123→104 (every band down), negative days 17→12, day-σ 0.162→0.161, Mayhem not degraded.** Mechanism measured on 978 matched pairs: the 5s fill lands mean −0.38% below the signal close (−6.2% on eventual-tail trades); 10s lands +0.56% (the dip has bounced) — the grid is non-monotone (10s Δ−0.21 era-inverted; 15s +0.03 era-inverted; 10s×sell2.3s +0.04 era-inverted), so 5s is a sharp local optimum. Exit-migration autopsy: base kelly_flat/recording_ended loser rides become gain_retrace/breakeven exits — entries filled into the micro-dip re-arm (+10%) on the bounce and harvest the recovery. Robustness: split-half +0.68/+0.49, per-recording median Δ positive, trimmed mean +0.0019. Caveats on record: not universal (rec2935 loses), live fill timing ≠ backtest path-pricing, peak sharpness is fragility, 3/7s cells unburned.
-> **ADOPTION (user decision 2026-09-02, same session): `v2_entry_delay_seconds = 5.0` is the PRODUCTION DEFAULT — a first-class engine knob consumed by all three pipelines** (backtester: engine-keyed `ForwardTester.enable_entry_latency` injection, bare-{} runs the adopted model; live trader: the pending-BUY executor holds the signal on the candle clock for 5 s then fills at the then-current state prices with a launch-state engine anchor; app.js mirrored). Escape hatch: `{"v2_entry_delay_seconds": 0.0}` restores the pre-iter78 signal-instant fill byte-exactly (pinned by live-parity Contract A). Parity proven both directions trade-level byte-equal (recs 2762/1019/3814 vs the `iter78_lat5` and `iter78_base_full` batches). Restart `main.py` after deploy. See RESEARCH_LOG.md Iter 78 §6.
-
----
-
-> **iter78 CLEANUP (2026-09-02, user decision: "remove the dead code for the mechanisms that aren't going to be enabled at all") — behavior-byte-identical surgery, 689 engine lines removed.**
-> **Verified first:** every ENABLED mechanism's parameters match its adoption battery exactly — EVR (iter48 evr9 + iter50 veto 0.25), rate_split ungated (iter63/64 θ=0.55/K=12/arm+10%), holder-flow gates 1.0 (iter43, windows 30/15 s, min $100, require_tag=0), MSM config B′ (`0:idle;2:idle,trend`), gain_retrace arm+10%/give 0.5 (iter27/29), kelly_flat K=60/40% (iter21), breakeven 25/2.5 (iter17), warmup 400 intakes (100 candles), `v2_entry_delay_seconds=5.0` (iter78). All values re-verified against the engine object; parity proof: bare-{} reproduces the adopted `iter78_lat5` batch trade-level byte-equal on recs {2762, 1019, 3814, 2119} BEFORE and AFTER the surgery.
-> **Removed from `strategy_engineV2.py`** (default-off/rejected mechanisms with no re-enable path): the FUTURES second param-set (FUTURES_DEFAULT_CONFIG, `with_futures_preset`, `v2_futures_overrides` merge, `_is_futures_engine`, `_v2_volume_scale_fut`/`_v2_dt_per_state_fut`/`_v2_kramers_down_persist_fut` + their update()-path branches — the futures layer itself was deleted 2026-08-29); the whale-dump confirmed exit (iter72/78, both cells rejected — entry #10 above); the iter75 σ² s2 gate (`_passes_s2_gate`, `set_fleet_medium_state`, `_medium_low_turbulence_now`, σ²-history tracking); the iter56/68 holder-flow silence gate (`_hf_silence_blocks_entry` — REJECTED at the warmup-400 re-gate); the iter45 pre-entry order-flow-imbalance gate (full-batch-rejected); the iter05 leading-decay EXIT branch + its persist/offside knobs + the `iter05_s_effective_min` gate (the **entry-side decay block is behaviorally ON via getattr defaults and is KEPT**); the iter64 regime Q-gate machinery (`_load_global_regime_cache`, `set_global_regime_map`, `_regime_q_today`, `_rate_split_regime_allows`, `v2_rate_split_regime_gate`/`q_max`/`unknown_q_enable` — the flip is ungated, iter64 production semantics); `v2_require_past_peak` (iter17b rejected); the unused `mu_exit_*` trio; `v2_msm_occupancy_floor` (iter74b rejected — the `state_at` occupancy_floor argument is fixed at 0.0).
-> **Removed consumers:** `backtester.py` `_MediumSource` + the s2 medium-timeline injection; `main.py` the iter57 regime-cache maintenance loop (daily auto-batch), the fleet vol-of-vol medium push, and the live `_global_regime_pump` (Q cache push); `backend/fetch_global_regime.py` DELETED. `run_iteration.py`'s `--entry/exit-latency-seconds` (iter78) kept.
-> **Kept (behaviorally live or needed):** the V1-era attr pops (`max_entry_bar_count`, `forbidden_bc_lo/hi`, `trail_floor_pct`, `reversal_exit_bars_max`) — captured into the per-trade `cfg_*` log snapshots; the iter05 decay trackers in the core engine (consumed by the live entry-side decay block); `_candle_volume_history` (shared with the live EVR ratio windows).
-> **Tests:** deleted `analysis/test_whale_dump.py`, `test_hf_silence.py`, `test_global_regime_cache.py`; `test_regime_adapt.py` replaced by `analysis/test_rate_split.py` (6/6 — ungated production contract + surgical-removal assertions for every removed Q attr/method); `test_iter74_msm.py` s2 section stripped (9/9); `test_iter63_rate_split.py` stale regime_gate assertion dropped (7/7). Full suite **119 passed / 12 failed** — the 12 are the documented pre-existing orphaned-commit failures (mcap_floor_hold 11, whale_stream_wiring 1), unchanged by this cleanup.
-> **Verification:** post-cleanup bare-{} runs reproduce the adopted `iter78_lat5` snapshot byte-exact on all 4 probe recordings (entry/exit times, prices, reasons, pnl to 1e-5); `main.py` imports clean; `app.js` dead knobs/hints removed (cache v=127), `node --check` passes. Restart `main.py` after deploy (pool workers + live sessions must reload the engine). See RESEARCH_LOG.md Iter 78 §7.
-
----
-
-> **iter79 Stagnation-Posterior Exit (SPE, 2026-09-02/03) — REJECTED at Phase-2 with a structural mechanism autopsy; shipped default-OFF (`v2_spe_enable=0.0`); P_zero-threshold exits join the graveyard.**
-> Hypothesis (user brief): `P_zero = exp(−k_total·τ) → 1` when order flow dries mid-dump (k_up, k_down → 0; featureless KDE) — exit a sustained-stagnant, offside, un-armed trade to pre-empt `kelly_flat`/`recording_ended` (the −2.81/−1.54 SOL bleed books on `iter78_lat5`). Implemented per spec (6 knobs, streak updated every in-position tick from the CURRENT decision, exit between breakeven_scratch and rate_split_flip, two armed-winner suppressions, `"spe_exit"` reason, app.js mirrored v128); bare-{} parity trade-level byte-equal on recs {2762, 1019, 3814}; `analysis/test_spe.py` 10/10; full suite 133 passed / 18 failed = the documented pre-existing set (verified byte-identical at pristine HEAD).
-> **Phase 0 (235,468-tick capture over a 202-recording loser+winner cohort, no engine burn) — THE LOAD-BEARING FINDING: P_zero is the NORM, not the exception.** P_zero ≥ 0.85 on **85.6% of ALL in-position ticks** (median 0.979; offside ticks 80.9% ≥ 0.85). On 1 s memecoin tapes k_total is tiny (p50 0.0043/s) so even τ=5 s leaves the no-escape posterior ≈ 1 everywhere; the engine's E_star-maximising τ-sweep selects τ=5 on 85% of bleed ticks. The stagnation posterior does NOT discriminate dead tokens from healthy transient dips at any threshold — the entire discriminative burden falls on persist/offside gates, i.e. on transient-dip geometry the iter37/46/68/70 family already closed. CF ratios: brief spec cells A/B/C = 0.84/1.18/0.87 (all below the 1.5 gate); 81-cell box scan peaks at 2.52 only in a 14-fire island; the arm-block does not rescue the spec cells (the CF-cut winners were NEVER armed — 94/94 peaked < +10%). Analysis-bug disclosure: the first CF pass read tick idx 10 (P_down) as P_zero — idx 11 is correct; all published numbers corrected and identity-verified.
-> **Phase 1 (3 spec cells, real engine, 202-recording cohort):** A (0.85/20/10%) Δ −0.491; B (0.90/15/15%) Δ +0.064 (the only PnL-positive cell; WR −11.6pp; spe book 223 fires @ 0% WR); C (0.80/30/10%) Δ −0.398. Tail ≤−30% collapses 92→17/18/24 but is paid for by winner cuts + replacement churn (+74–83 trades).
-> **Phase 2 (pre-registered 5-cell full-DB sweep around the CF-best region 0.90–0.95 × K20–40 × off 20–25%): ALL FIVE REJECTED.** Δ PnL −0.435/−0.379/−0.407/−0.245/−0.043 (p20/p30/p40/z95/o25), Wilcoxon p 0.46–0.91, bootstrap CI-lo negative on every cell, breadth 47.9–54.2%, **era-inverted on every cell (OLD −0.14…−0.45 / DEAD −0.05…+0.10 — the both-era gate fails everywhere)**, WR −3.2…−6.2pp. The `spe_exit` book is 0% WR at −4.2…−5.6 SOL per cell (median −22 to −28%): the mechanism does NOT remove the bleed, it RELABELS it (`kelly_flat` −2.81 → 0, but spe_exit inherits −5+ SOL) at a slightly-less-bad fill, while halving the `breakeven_scratch` winner book (57→12–18, −0.16 SOL), cutting `evr_triage` (41→11–27), and adding +70–80 replacement-churn trades. The two effects the static CF could not see, both now measured: replacement re-entry bleed (iter37 bound, twelfth confirmation) and the transient-dip-then-recover winner class being inseparable from the tail at the fire moment.
-> **Graveyard clause: do NOT re-test P_zero-threshold exits as a primary trigger on this stack.** The Phase-2 region was burned end-to-end; the CF's ratio>1.5 islands are 1–17-fire statistical dust; the P_zero channel is bounded by the same inseparability that closed the depth-triggered family. A future stagnation mechanism needs a NEW data channel (e.g. genuinely featureless-KDE detection that is not k_total≈0-always on 1 s bars), not a threshold retune. The knobs remain in `DEFAULT_CONFIG`/`app.js` as the documented, enable-gated, parity-proven surface; escape hatch `{"v2_spe_enable": 1.0, …}` re-runs any cell. See RESEARCH_LOG.md Iter 79.
+- **Deployments**: restart `main.py`; hard-refresh the browser (app.js is cached).
+- **Live logs**: `backend/data/live_logs/<session>/` — `trades.jsonl` (execution journal),
+  `signals.jsonl` (engine values at each signal). Use these for live-vs-BT audits, not the
+  in-memory dashboard counters.
+- **External data**: pump.fun/Cloudflare blocks curl/impersonation (probe with curl, use the
+  browser API-proxy technique); DexScreener accepts 30-mint batches; DefiLlama's newest
+  `dexs/solana` row is a copy-forward of the prior day (don't project it as a hot day);
+  CoinGecko SOL price cached 60 s.
+- **Stash hazard**: a persistent old stash (`ce4a316`-era, iter57 code) merges into any selective
+  `git stash pop` — check `git stash list` first; restore clean files via
+  `git checkout HEAD -- <path>`.

@@ -966,9 +966,34 @@ class PumpSwapRPCClient:
         # (it is a state snapshot, not a trade).
         self._prev_base_raw: Optional[int] = None
         self._prev_quote_raw: Optional[int] = None
+        # FD-leak fix (2026-09-08): the stream() generator holds its aiohttp
+        # ClientSession open across its whole life; when the consumer task
+        # stops iterating (session teardown), the generator parks at `yield`
+        # and the `async with` NEVER exits — the session's pipes/kqueues leak
+        # (observed: ~1700 leaked sessions → 10.4k FDs → "Too many open
+        # files" → SQLite/DNS failures + CPU spin in retry loops).  Keep a
+        # reference here so stop() can force-close it, which makes the parked
+        # generator fail on its next scheduling tick and unwind cleanly.
+        self._http: Optional[aiohttp.ClientSession] = None
 
     def stop(self):
         self._stop = True
+        # Best-effort synchronous kick: closing the session from the event
+        # loop thread is safe (aiohttp close is async; the underlying
+        # connector .close() unblocks pending waits and the parked
+        # generator's next tick raises, unwinding the async-with).
+        sess = self._http
+        if sess is not None and not sess.closed:
+            try:
+                # Schedule the async close; if no loop is running (sync
+                # context), create a task on the running loop if possible.
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(sess.close())
+                else:
+                    asyncio.run(sess.close())
+            except Exception:
+                pass
 
     async def _rpc(self, session: aiohttp.ClientSession, method: str, params: list) -> dict:
         """Execute a Solana JSON-RPC call with global rate-limiting and 429 retry."""
@@ -1174,28 +1199,35 @@ class PumpSwapRPCClient:
         while not self._stop:
             try:
                 async with aiohttp.ClientSession() as http_session:
-                    await self._load_pool(http_session)
-                    await self._refresh_market_caps(http_session)
-                    first = self._current_trade()
-                    if first:
-                        yield first
-
-                    assert self._pool is not None
-                    base_account = self._pool["pool_base_token_account"]
-                    quote_account = self._pool["pool_quote_token_account"]
-
-                    # Use the shared hub — no new WS connection opened here
-                    queue: asyncio.Queue = asyncio.Queue(maxsize=512)
-                    await _solana_hub.subscribe(base_account, queue)
-                    await _solana_hub.subscribe(quote_account, queue)
-
-                    logger.info(f"[PumpSwapRPC] Watching pool {self.pair_address[:8]}… (shared WS)")
-                    backoff = 1.0
-                    last_emit_ts = time.time()
-                    next_mcap_refresh = time.time() + 5.0
-                    dirty = False
-
+                    # FD-leak fix: expose the session to stop() so teardown
+                    # can close it even while this generator is parked at a
+                    # yield (see stop()).  The try/finally clears the ref on
+                    # EVERY exit path (normal, exception, GeneratorExit) so a
+                    # later stop() can never close a session this generator
+                    # already released via the async-with.
+                    self._http = http_session
                     try:
+                        await self._load_pool(http_session)
+                        await self._refresh_market_caps(http_session)
+                        first = self._current_trade()
+                        if first:
+                            yield first
+
+                        assert self._pool is not None
+                        base_account = self._pool["pool_base_token_account"]
+                        quote_account = self._pool["pool_quote_token_account"]
+
+                        # Use the shared hub — no new WS connection opened here
+                        queue: asyncio.Queue = asyncio.Queue(maxsize=512)
+                        await _solana_hub.subscribe(base_account, queue)
+                        await _solana_hub.subscribe(quote_account, queue)
+
+                        logger.info(f"[PumpSwapRPC] Watching pool {self.pair_address[:8]}… (shared WS)")
+                        backoff = 1.0
+                        last_emit_ts = time.time()
+                        next_mcap_refresh = time.time() + 5.0
+                        dirty = False
+
                         while not self._stop:
                             now = time.time()
 
@@ -1255,8 +1287,19 @@ class PumpSwapRPCClient:
 
                             await asyncio.sleep(0.05)
                     finally:
-                        await _solana_hub.unsubscribe(base_account, queue)
-                        await _solana_hub.unsubscribe(quote_account, queue)
+                        # Unsubscribe only when the hub subscribe happened —
+                        # pool-decode failures exit before it exists.
+                        try:
+                            await _solana_hub.unsubscribe(base_account, queue)
+                            await _solana_hub.unsubscribe(quote_account, queue)
+                        except Exception:
+                            pass
+                        # FD-leak fix: clear the stop()-visible ref on every
+                        # exit path (normal, exception, GeneratorExit) so a
+                        # later stop() can never close a session the
+                        # async-with already released.
+                        if self._http is http_session:
+                            self._http = None
 
             except RuntimeError as e:
                 msg = str(e)
