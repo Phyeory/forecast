@@ -76,6 +76,7 @@ _RESULTS_DIR = os.environ.get(
 
 _pool: ProcessPoolExecutor | None = None
 
+
 def _get_pool(max_workers: int) -> ProcessPoolExecutor:
     global _pool
     if multiprocessing.current_process().name != 'MainProcess':
@@ -326,6 +327,33 @@ def run_backtest(
         entry_latency_seconds=entry_latency_seconds,
         exit_latency_seconds=exit_latency_seconds,
     )
+
+    # iter78 ADOPTION: 5-second deferred-entry execution cell.  The knob
+    # lives on the ENGINE (`v2_entry_delay_seconds`, default 5.0 since the
+    # 2026-09-02 adoption), so bare {} runs the adopted model — the same
+    # engine-keyed injection pattern the iter74d MSM adoption used.  An
+    # EXPLICIT entry_latency_seconds argument (run_iteration
+    # --entry-latency-seconds / the batch kwarg) overrides the engine knob;
+    # `{"v2_entry_delay_seconds": 0.0}` restores the pre-iter78
+    # signal-instant fill byte-exactly.  Only the instant/latency exec
+    # models consume it (ForwardTester.__init__ merges it into
+    # entry_latency_seconds); "legacy" is never altered.
+    if entry_latency_seconds <= 0.0 and exec_model != "legacy":
+        _eng_delay = float(getattr(ft.engine, "v2_entry_delay_seconds", 0.0))
+        if _eng_delay > 0.0:
+            ft.enable_entry_latency(_eng_delay)
+
+    # iter80: deferred-exit-fill cell — same engine-keyed injection pattern
+    # as the entry block above.  The knob lives on the ENGINE
+    # (`v2_exit_delay_seconds`, default 0.0 = instant exit fill = pre-iter80
+    # byte parity; `v2_exit_delay_armed_only` restricts deferral to the
+    # armed/harvest exit classes).  An EXPLICIT exit_latency_seconds
+    # argument overrides the engine knob.  Never applied to "legacy".
+    if exit_latency_seconds <= 0.0 and exec_model != "legacy":
+        _eng_exit_delay = float(getattr(ft.engine, "v2_exit_delay_seconds", 0.0))
+        if _eng_exit_delay > 0.0:
+            _eng_exit_armed = float(getattr(ft.engine, "v2_exit_delay_armed_only", 0.0))
+            ft.enable_exit_latency(_eng_exit_delay, armed_only=_eng_exit_armed > 0.0)
 
     # Saving full candle series is useful for an interactive single backtest,
     # but it dominates SQLite I/O in iteration batches.  Batch runs keep the

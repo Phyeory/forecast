@@ -207,6 +207,31 @@ let engineParamsV2 = {
   v2_rate_split_theta:          0.55,  // sustained stationary-split threshold
   v2_rate_split_persist:          12,  // consecutive 4-state ticks (≈3 s)
   v2_rate_split_min_peak_age_ticks: 0, // runner-immunity veto REJECTED (0 = off)
+
+  // ── iter78 ADOPTION: deferred-entry execution cell (2026-09-02, user
+  // decision).  Entries execute N seconds after the BUY signal — live
+  // holds the queued swap and fills at the then-current price; backtests
+  // price the fill on the recorded path at t_signal+N.  The adopted 5 s
+  // cell (batch iter78_lat5): Δ+1.178 SOL vs instant fills, both eras
+  // positive, tail ≤−30% 123→104, negative days 17→12.  The 5 s fill buys
+  // the transient micro-dip after the signal; 10 s+ buys the bounce
+  // (era-inverted) — do NOT move off 5.0 without re-gating.
+  // 0.0 restores the pre-iter78 signal-instant fill. ──
+  v2_entry_delay_seconds:       0.0,  // production OFF (user decision 2026-09-11); >0 = seconds to defer entry execution
+
+  // ── iter80 ADOPTED (user decision 2026-09-03): deferred EXIT-fill
+  // execution, armed-only 20s (the sell-side basis).  The iter78 discovery
+  // mirrored: armed harvest exits (gain_retrace / rate_split_flip / tp_v2 /
+  // breakeven_scratch / reversal_exit) fill at the bottom of the bounce
+  // their own give-back rule creates — recorded path +8.95% above the fill
+  // in the 30s median, share ≥+2% = 68% (frozen lat5 book, n=582).
+  // Deferring the LOSS book is poison (E[Δp30] = −0.25%); the uniform x15
+  // cell was REJECTED.  Adopted cell `iter80_xa20`: Δ+1.0405 vs base,
+  // Wilcoxon p=0.0038, CI [+0.00073,+0.00380], both eras positive (OLD
+  // +0.59 / DEAD +0.51), expectancy/trade +48%, negative days 12→11,
+  // PF 1.41.  0.0 = instant exit fill (pre-iter80 byte-exact hatch). ──
+  v2_exit_delay_seconds:      0.0,  // production OFF (user decision 2026-09-11); >0 = seconds to defer armed exit execution
+  v2_exit_delay_armed_only:   1.0,  // 1.0 = defer armed/harvest exit classes only
 };
 
 /* Strategy Engine Parameters — V3 (newborn-coin dump-bottom recovery).
@@ -444,12 +469,9 @@ function renderSettings() {
     v2_rate_split_theta:                 "Sustained downward escape rate split threshold s = k_down / (k_up + k_down)",
     v2_rate_split_persist:               "Required consecutive 4-state intra-candle ticks (≈ persist / 4 seconds) with split ≥ theta",
     v2_rate_split_min_peak_age_ticks:    "Minimum ticks elapsed since peak price before firing (0 = disabled)",
-    v2_whale_dump_exit_enable:           "1.0 = enable whale-dump confirmed exit: candle sell print ≥ min_usd on a never-armed, offside trade, confirmed by price staying under the print close (iter72)",
-    v2_whale_dump_min_usd:               "Whale-dump print size floor in USD (candle sell_volume × SOL/USD)",
-    v2_whale_dump_offside_pct:            "Offside % at the print close required to arm the whale-dump exit",
-    v2_whale_dump_max_peak_pct:           "Never-armed condition: peak gain since entry must stay ≤ this %",
-    v2_whale_dump_confirm_s:              "Candles of price persistence below the print close required to confirm the dump",
-    v2_whale_dump_confirm_g:              "Confirmation give-back %: confirm close ≤ print close × (1 − g/100)",
+    v2_entry_delay_seconds:              "Production default 0.0 = OFF (user decision 2026-09-11): signal-instant fill. Set >0 to re-enable deferred entry execution — the measured iter78 cell was 5.0 (Δ+1.178 SOL vs instant, both eras positive, tail 123→104); the 5 s fill buys the ~5 s micro-dip, 10 s+ buys the bounce and era-inverts — do not move off 5.0 without re-gating. Live holds the queued swap and fills at the then-current price; backtests price the fill on the recorded path at t_signal+N",
+    v2_exit_delay_seconds:               "Production default 0.0 = OFF (user decision 2026-09-11): instant exit fill (pre-iter80, byte-exact). Set >0 to re-enable deferred ARMED exit execution — the measured iter80 cell was 20.0 (Δ+1.0405, p=0.0038, both eras positive, expectancy/trade +48%): the recorded path is +8.95% above armed exit fills in the 30s median (the give-back harvest fires at the bottom of its own micro-dip). Loss-book exits (kelly_flat/evr_triage/kramers_down/dev_sell/recording_ended) always fill instantly",
+    v2_exit_delay_armed_only:            "ADOPTED default 1.0: defer only the armed/harvest exit classes (gain_retrace, rate_split_flip, tp_v2, breakeven_scratch, reversal_exit). 0.0 defers every exit uniformly — the uniform cell was REJECTED (unarmed exits have NEGATIVE forward drift E[Δp30] = −0.25%; deferring the loss book is poison)",
   };
 
   // ── V3 parameter hints (newborn dump-bottom engine) ──

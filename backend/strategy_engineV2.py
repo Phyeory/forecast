@@ -244,6 +244,60 @@ DEFAULT_CONFIG = {
     "v2_rate_split_theta": 0.55,          # sustained stationary-split threshold
     "v2_rate_split_persist": 12,          # consecutive 4-state ticks (≈3 s)
     "v2_rate_split_min_peak_age_ticks": 0,  # runner-immunity veto — REJECTED (0 = off)
+
+    # ── iter78 ADOPTION: 5-second deferred-entry execution cell ────────────
+    # (user decision 2026-09-02; the only both-era-positive cell of the
+    # 78-iteration program — RESEARCH_LOG.md Iter 78 §5).  The backtest cell
+    # `iter78_lat5` (entry fills deferred to t_signal+5 s on the recorded
+    # intra-candle path; ENGINE DECISIONS UNTOUCHED) measured +2.1237 SOL /
+    # 65.7% WR on the 2,127-rec DB vs the instant-fill baseline +0.9459 /
+    # 64.9%: Δ+1.178, Wilcoxon p=1.4e-4, CI strictly positive, BOTH eras
+    # positive (OLD +0.646 / DEAD +0.519), tail ≤−30% 123→104, negative
+    # days 17→12, day-σ 0.162→0.161.  Mechanism (978 matched pairs): the 5 s
+    # fill buys the transient micro-dip (mean −0.38% below the signal close,
+    # −6.2% on eventual-tail trades) — entries filled into the dip re-arm
+    # the +10% profit-lock on the bounce and exit as winners instead of
+    # riding kelly_flat/recording_ended to the tail.  The grid is NON-MONOTONE
+    # (10 s Δ−0.21 era-inverted, 15 s +0.03, 10 s×sell 2.3 s +0.04) — do NOT
+    # move the default off 5.0 without re-gating.  (2026-09-11: user set the
+    # production default to 0.0 = OFF; the mechanism stays available.)
+    # Consumption: the pipelines read this knob and defer the BUY FILL by
+    # N seconds after the signal state — backtester.py passes it as
+    # ForwardTester(entry_latency_seconds=…), live_trader.py delays the swap
+    # launch by N seconds.  Setting it to 0.0 restores the signal-instant
+    # fill byte-exactly (the iter73 model).  It does NOT touch any engine
+    # decision, exit, or size — only the execution timing of entries.
+    "v2_entry_delay_seconds": 0.0,   # production OFF (user decision 2026-09-11); >0 = iter78 deferred fill (5.0 was the adopted cell)
+
+    # ── iter80 ADOPTION: 20-second deferred-exit execution (armed-only) ────
+    # (user decision 2026-09-03; the sell-side mirror of the iter78 entry
+    # delay — RESEARCH_LOG.md Iter 80).  Ground truth on the frozen lat5
+    # book: after ARMED exit fires the recorded path is +8.95% above the
+    # fill in the 30s median (share ≥+2% = 68%) — the give-back harvest
+    # fires at the bottom of its own micro-dip; UNARMED exits average
+    # E[Δp30] = −0.25% so deferral is RESTRICTED to the armed/harvest exit
+    # classes (gain_retrace / rate_split_flip:armed / tp_v2 /
+    # breakeven_scratch / reversal_exit); the loss book (kelly_flat,
+    # evr_triage, kramers_down_exit, dev_sell_exit, recording_ended) fills
+    # at the signal instant exactly as before.  The full-DB cell
+    # `iter80_xa20` (1,003 trades / 61.8% WR / +3.1873 SOL / PF 1.41 vs
+    # base +2.1469 / 65.6% / 1.29): Δ+1.0405, Wilcoxon p=0.0038, CI
+    # [+0.00073,+0.00380], BOTH eras positive (OLD +0.59 / DEAD +0.51),
+    # expectancy/trade +48% (+0.00208→+0.00318), negative days 12→11,
+    # worst day −0.193→−0.129.  The uniform x15 cell (loss book deferred)
+    # was REJECTED (p=0.34; tail 105→118) — do NOT defer the loss book.
+    # Trade-count drops 1,032→1,003 (deferred closes push same-recording
+    # re-entry windows past their signal; the lost re-entries were net
+    # −0.155 SOL).  Escape hatch: `{"v2_exit_delay_seconds": 0.0}` restores
+    # the pre-iter80 signal-instant exit fill byte-exactly.
+    # Consumption: the pipelines read these knobs off the ENGINE and defer
+    # the EXIT FILL by N seconds — backtester.py keys ForwardTester
+    # enable_exit_latency(L, armed_only) on them; live_trader.py holds the
+    # queued armed EXIT on the candle clock then launches the sell.  The
+    # exit DECISIONS are untouched — only the fill timing of armed exits.
+    "v2_exit_delay_seconds":     0.0,  # production OFF (user decision 2026-09-11); >0 = iter80 armed deferred fill (20.0 was the adopted cell)
+    "v2_exit_delay_armed_only":   1.0,  # 1.0 = defer armed/harvest classes only (applies when exit delay > 0)
+
 }
 
 
@@ -2987,7 +3041,7 @@ class StrategyEngineV2Adapter:
         # adoption used).  The engine itself never consumes this value: it is
         # pure execution timing, applied by ForwardTester (backtest) and
         # LiveTrader (live).  0.0 restores the signal-instant fill.
-        self.v2_entry_delay_seconds = float(engine_kwargs.pop("v2_entry_delay_seconds", 5.0))
+        self.v2_entry_delay_seconds = float(engine_kwargs.pop("v2_entry_delay_seconds", 0.0))
         # ── iter80 ADOPTED: deferred exit-fill execution (armed-only 20s) ──
         # Popped here so every pipeline can read the knobs off the engine
         # object (the backtester keys its ForwardTester
@@ -2999,10 +3053,11 @@ class StrategyEngineV2Adapter:
         # the recorded path is +8.95% above the fill in the 30s median —
         # the give-back harvest fires at the bottom of its own micro-dip;
         # UNARMED exits average −0.25%/30s so deferral must be asymmetric
-        # (armed_only=1.0).  Defaults = the ADOPTED xa20 cell (user
-        # decision 2026-09-03); 0.0 = instant exit fill (the pre-iter80
-        # model, byte-exact escape hatch).
-        self.v2_exit_delay_seconds = float(engine_kwargs.pop("v2_exit_delay_seconds", 20.0))
+        # (armed_only=1.0).  The ADOPTED xa20 cell was 20.0 (user decision
+        # 2026-09-03); 2026-09-11 the user set the production default to
+        # 0.0 = instant exit fill (the pre-iter80 model, byte-exact); >0
+        # re-enables the armed deferral.
+        self.v2_exit_delay_seconds = float(engine_kwargs.pop("v2_exit_delay_seconds", 0.0))
         # 1.0: defer only the armed/harvest exit classes (gain_retrace,
         # rate_split_flip:armed, tp_v2, breakeven_scratch, reversal_exit);
         # the loss book (kelly_flat, evr_triage, kramers_down_exit,
@@ -3041,15 +3096,7 @@ class StrategyEngineV2Adapter:
             "v2_rate_split_min_peak_age_ticks", 0))
         self._rate_split_streak = 0
         self._last_peak_tick = 0
-        if self._is_futures_engine:
-            # spot-scoped tick-noise calibration (4 ticks/s); futures engines
-            # keep the existing kramers-persistence machinery instead.
-            self._v2_rate_split_enable = 0.0
-        self._global_regime_map: dict[str, float] = {}
-        self._global_regime_cache_warned = False
-        if (self._v2_rate_split_enable > 0.0
-                and self._v2_rate_split_regime_gate > 0.0):
-            self._load_global_regime_cache()
+
         # ── Market-cap bound trade block ────────────────────────────────────
         # Block all BUY entries when the USD market cap is below mcap_low_usd
         # or above mcap_high_usd.  Both default to 0 = deactivated.
@@ -3136,105 +3183,6 @@ class StrategyEngineV2Adapter:
                 if self._is_dev_sell(event, self._v2_holder_flow_min_usd):
                     return event
         return None
-
-    def _hf_silence_blocks_entry(self, time: int) -> bool:
-        """iter56 silence gate: True when holder-flow events exist for this
-        recording but the stream has been silent for
-        >= `v2_hf_silence_gate_seconds` before `time`.  Recordings with no
-        events before `time` never arm the gate (no coverage != dead flow)."""
-        if self._v2_hf_silence_gate_seconds <= 0.0:
-            return False
-        if not self._holder_flow_timestamps:
-            return False
-        idx = bisect.bisect_right(self._holder_flow_timestamps, time)
-        if idx == 0:
-            return False
-        age = time - self._holder_flow_timestamps[idx - 1]
-        return age >= self._v2_hf_silence_gate_seconds
-
-    # ── Global regime cache (causal per-date Q map) ─────────────────────
-
-    def _load_global_regime_cache(self) -> None:
-        """Load the causal per-date regime score map {date: Q} from
-        backend/data/global_regime_cache.json (built by
-        backend/fetch_global_regime.py).  Missing/corrupt file → empty map,
-        which keeps the iter64 rate-split gate in its unknown-Q default."""
-        try:
-            import json as _json57
-            import os as _os57
-            path = _os57.path.join(_os57.path.dirname(_os57.path.abspath(__file__)),
-                                   "data", "global_regime_cache.json")
-            with open(path) as f:
-                cache = _json57.load(f)
-            qmap = cache.get("q_by_date") or {}
-            self._global_regime_map = {str(k): float(v) for k, v in qmap.items()}
-        except Exception as exc:  # missing file / bad JSON → unknown-Q default
-            if not self._global_regime_cache_warned:
-                self._global_regime_cache_warned = True
-                print(f"[v2_rate_split] global_regime_cache.json unavailable "
-                      f"({exc}); rate-split gate uses unknown-Q default")
-            self._global_regime_map = {}
-
-    def set_global_regime_map(self, qmap: dict) -> None:
-        """Live path: inject/refresh the per-date regime map (mirrors
-        set_holder_flow_events).  Values are fully determined by data
-        strictly prior to each date, so backtest and live converge on the
-        same cache."""
-        if qmap:
-            self._global_regime_map = {str(k): float(v) for k, v in qmap.items()}
-
-    def _regime_q_today(self):
-        """Causal global regime score Q for the current candle's UTC date,
-        or None when unknown (no map loaded / date missing / time unset)."""
-        if not self._global_regime_map:
-            return None
-        try:
-            import datetime as _dt57
-            day = _dt57.datetime.fromtimestamp(
-                int(getattr(self, "_current_time", 0)),
-                tz=_dt57.timezone.utc).strftime("%Y-%m-%d")
-        except Exception:
-            return None
-        q = self._global_regime_map.get(day)
-        return None if q is None else float(q)
-
-    def _rate_split_regime_allows(self) -> bool:
-        """iter64 replacement for the removed give-back adaptation / floor:
-        the rate-split flip fires only on weak-regime days.  Returns True
-        when the gate is off (backtest/live unchanged), when Q(today) is
-        unknown and unknown_q_enable is set, or when Q(today) < q_max."""
-        if self._v2_rate_split_regime_gate <= 0.0:
-            return True
-        q = self._regime_q_today()
-        if q is None:
-            return self._v2_rate_split_unknown_q_enable > 0.0
-        return q < self._v2_rate_split_q_max
-
-    def _passes_order_flow_imbalance_gate(self) -> bool:
-        """Check if the trailing order-flow taker buy ratio passes the minimum threshold."""
-        if self._v2_order_flow_imbalance_gate <= 0.0:
-            return True
-        if not self._candle_volume_history:
-            return True
-        w = self._v2_order_flow_window_seconds
-        t_curr = getattr(self, "_current_time", 0)
-        cutoff = t_curr - w
-
-        tot_buy = 0.0
-        tot_sell = 0.0
-        for cd in reversed(self._candle_volume_history):
-            ct = cd["time"]
-            if ct < cutoff:
-                break
-            tot_buy += cd["buy_vol"]
-            tot_sell += cd["sell_vol"]
-
-        tot_vol = tot_buy + tot_sell
-        if tot_vol < self._v2_order_flow_volume_min_sol:
-            return True  # low volume window -> pass
-
-        ratio = tot_buy / (tot_vol + 1e-9)
-        return ratio >= self._v2_order_flow_buy_ratio_min
 
     def _evr_trailing_buy_ratio(self):
         """iter48 EVR: trailing taker buy-ratio over the last `_v2_evr_flow_window`
@@ -4048,9 +3996,6 @@ class StrategyEngineV2Adapter:
 
     # ── V2 entry gate (uses V2 confidence + V1-style secondary gates) ──
     def _v2_passes_entry_gate(self, c: float, decision: dict) -> bool:
-        # iter45: pre-entry taker order-flow imbalance gate
-        if not self._passes_order_flow_imbalance_gate():
-            return False
         # Need both confidence above threshold and Kramers upward prob.
         if self.trend_confidence < self.entry_confidence_high:
             return False
@@ -4088,10 +4033,4 @@ class StrategyEngineV2Adapter:
             # would over-block at the cold-start of a token.
             if neg_count >= thresh * window:
                 return False
-        # iter05 s_effective gate — empirically grounded (see adapter
-        # docstring of iter05_s_effective_min).  Acts as a barrier-/SNR-
-        # quality floor; trades entered below this proxy lose more often.
-        s_min = float(getattr(self, "iter05_s_effective_min", 0.0))
-        if s_min > 0.0 and float(getattr(self, "s_effective", 0.0)) < s_min:
-            return False
         return True
