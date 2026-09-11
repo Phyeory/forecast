@@ -244,76 +244,6 @@ DEFAULT_CONFIG = {
     "v2_rate_split_theta": 0.55,          # sustained stationary-split threshold
     "v2_rate_split_persist": 12,          # consecutive 4-state ticks (≈3 s)
     "v2_rate_split_min_peak_age_ticks": 0,  # runner-immunity veto — REJECTED (0 = off)
-
-    # ── iter78 ADOPTION: 5-second deferred-entry execution cell ────────────
-    # (user decision 2026-09-02; the only both-era-positive cell of the
-    # 78-iteration program — RESEARCH_LOG.md Iter 78 §5).  The backtest cell
-    # `iter78_lat5` (entry fills deferred to t_signal+5 s on the recorded
-    # intra-candle path; ENGINE DECISIONS UNTOUCHED) measured +2.1237 SOL /
-    # 65.7% WR on the 2,127-rec DB vs the instant-fill baseline +0.9459 /
-    # 64.9%: Δ+1.178, Wilcoxon p=1.4e-4, CI strictly positive, BOTH eras
-    # positive (OLD +0.646 / DEAD +0.519), tail ≤−30% 123→104, negative
-    # days 17→12, day-σ 0.162→0.161.  Mechanism (978 matched pairs): the 5 s
-    # fill buys the transient micro-dip (mean −0.38% below the signal close,
-    # −6.2% on eventual-tail trades) — entries filled into the dip re-arm
-    # the +10% profit-lock on the bounce and exit as winners instead of
-    # riding kelly_flat/recording_ended to the tail.  The grid is NON-MONOTONE
-    # (10 s Δ−0.21 era-inverted, 15 s +0.03, 10 s×sell 2.3 s +0.04) — do NOT
-    # move the default off 5.0 without re-gating.
-    # Consumption: the pipelines read this knob and defer the BUY FILL by
-    # N seconds after the signal state — backtester.py passes it as
-    # ForwardTester(entry_latency_seconds=…), live_trader.py delays the swap
-    # launch by N seconds.  Setting it to 0.0 restores the signal-instant
-    # fill byte-exactly (the iter73 model).  It does NOT touch any engine
-    # decision, exit, or size — only the execution timing of entries.
-    "v2_entry_delay_seconds": 5.0,   # 0.0 = instant fill (pre-iter78); 5.0 = adopted cell
-
-    # ── iter80 ADOPTION: 20-second deferred-exit execution (armed-only) ────
-    # (user decision 2026-09-03; the sell-side mirror of the iter78 entry
-    # delay — RESEARCH_LOG.md Iter 80).  Ground truth on the frozen lat5
-    # book: after ARMED exit fires the recorded path is +8.95% above the
-    # fill in the 30s median (share ≥+2% = 68%) — the give-back harvest
-    # fires at the bottom of its own micro-dip; UNARMED exits average
-    # E[Δp30] = −0.25% so deferral is RESTRICTED to the armed/harvest exit
-    # classes (gain_retrace / rate_split_flip:armed / tp_v2 /
-    # breakeven_scratch / reversal_exit); the loss book (kelly_flat,
-    # evr_triage, kramers_down_exit, dev_sell_exit, recording_ended) fills
-    # at the signal instant exactly as before.  The full-DB cell
-    # `iter80_xa20` (1,003 trades / 61.8% WR / +3.1873 SOL / PF 1.41 vs
-    # base +2.1469 / 65.6% / 1.29): Δ+1.0405, Wilcoxon p=0.0038, CI
-    # [+0.00073,+0.00380], BOTH eras positive (OLD +0.59 / DEAD +0.51),
-    # expectancy/trade +48% (+0.00208→+0.00318), negative days 12→11,
-    # worst day −0.193→−0.129.  The uniform x15 cell (loss book deferred)
-    # was REJECTED (p=0.34; tail 105→118) — do NOT defer the loss book.
-    # Trade-count drops 1,032→1,003 (deferred closes push same-recording
-    # re-entry windows past their signal; the lost re-entries were net
-    # −0.155 SOL).  Escape hatch: `{"v2_exit_delay_seconds": 0.0}` restores
-    # the pre-iter80 signal-instant exit fill byte-exactly.
-    # Consumption: the pipelines read these knobs off the ENGINE and defer
-    # the EXIT FILL by N seconds — backtester.py keys ForwardTester
-    # enable_exit_latency(L, armed_only) on them; live_trader.py holds the
-    # queued armed EXIT on the candle clock then launches the sell.  The
-    # exit DECISIONS are untouched — only the fill timing of armed exits.
-    "v2_exit_delay_seconds":     20.0,  # 0.0 = instant exit fill (pre-iter80); 20.0 = adopted cell
-    "v2_exit_delay_armed_only":   1.0,  # 1.0 = defer armed/harvest classes only (ADOPTED)
-
-
-
-    # ── iter74 MSM fleet-regime entry gate — PRODUCTION configuration B ──
-    # (adopted 2026-08-31 by explicit user decision; RESEARCH_LOG Iter 74c/74d)
-    # Realtime 3-state Gaussian HMM over 5-min fleet bins; forward-filtered
-    # posterior only.  Config B = idle-regime entries blocked in every fleet
-    # state + trend-regime entries blocked in the dump state only.
-    # Full-cohort (1,525-rec) verdict: +1.2270 SOL / 65.9% / PF 1.16 /
-    # tail≤−30% 131→115 vs baseline +1.1242 / 1.13.  The adapter pops these
-    # keys from engine_kwargs with the SAME defaults, so this dict is the
-    # documentation surface; setting v2_msm_enable=0.0 is the escape hatch
-    # restoring byte-exact pre-iter74 behaviour.
-    "v2_msm_enable": 1.0,
-    # B′ (sweep winner iter75sw_bl_noI1): +1.3196 vs B's +1.2270, p=0.034,
-    # both-era positive.  The state-1 idle-block over-blocked.
-    "v2_msm_entry_blocklist": "0:idle;2:idle,trend",
-
 }
 
 
@@ -3111,61 +3041,15 @@ class StrategyEngineV2Adapter:
             "v2_rate_split_min_peak_age_ticks", 0))
         self._rate_split_streak = 0
         self._last_peak_tick = 0
-        # ── iter74 Markov-switching fleet-regime ENTRY gate ──────────────
-        # A 3-state Gaussian HMM over REALTIME fleet observables (5-min
-        # cross-token bins: med/p25 returns, buy_share, flow, pump/dump
-        # rates, n_tok) — see analysis/iter74_fleet_regime.py (offline fit)
-        # and analysis/fleet_regime_online.py (live forward filter).
-        # Blocks ALL V2 entries while the causal FILTERED posterior's
-        # argmax equals the worst (highest dump-rate) state.  Replaces the
-        # removed iter57/64 daily-Q machinery: no backtest replays, no
-        # daily qualification floor, no 1-day lag — the posterior updates
-        # every 5 minutes from live candles.  The state source is
-        # injected via set_fleet_regime_states() (backtest: precomputed
-        # causal panel states; live: FleetRegimeFilter.state_now()).
-        # Unknown state (no data yet / missing bin) NEVER blocks.
-        # PRODUCTION DEFAULT = configuration B′ (sweep winner, adopted
-        # 2026-08-31 after the iter75 8-cell bracket sweep; RESEARCH_LOG
-        # Iter 75 Addendum C): v2_msm_enable=1.0,
-        # v2_msm_entry_blocklist="0:idle;2:idle,trend".  vs config B
-        # ("0:idle;1:idle;2:idle,trend")
-        # on the 1,525-rec full cohort: +1.3196 vs +1.2270 SOL (Δ+0.093,
-        # Wilcoxon p=0.034, breadth 63%), era split BOTH positive
-        # (OLD +0.03 / DEAD +0.06) — the state-1 idle-block was
-        # over-blocking.  All other brackets below both.  Escape hatch:
-        # v2_msm_enable=0.0 restores byte-exact pre-iter74 behaviour.
-        self._v2_msm_enable = float(engine_kwargs.pop("v2_msm_enable", 1.0))
-        # iter74b: occupancy refinement — block worst-state entries ONLY
-        # when the trailing 24 h (288 bins) of fleet bins was dump-state
-        # dominated (occupancy > floor).  REJECTED at screen (isolated
-        # positive island, 12/16 cells negative — noise); removed in the
-        # 2026-09-02 dead-code cleanup — the state-switched blocklist alone
-        # decides (the state_at occupancy_floor argument is fixed at 0.0).
-        # iter74c: STATE-SWITCHED ENTRY-REGIME ALLOWLIST — the literal
-        # Markov-switching parameter change: per fleet state, a comma
-        # separated list of V1 regimes (trend/exhaustion/idle/reversal)
-        # whose BUY signals are suppressed.  Format:
-        #   "<state_idx>:<regime,regime>;<state_idx>:<regime,regime>"
-        # e.g. "0:idle;2:idle,trend" — in fleet state 0 suppress idle
-        # entries, in state 2 suppress idle AND trend entries.
-        # PRODUCTION DEFAULT = configuration B (user adoption 2026-08-31):
-        # idle entries blocked in every state + trend entries blocked in
-        # the dump state only.  Config A ("0:idle;1:idle;2:idle") is the
-        # never-negative fallback.  Empty string = no blocks.
-        self._v2_msm_entry_blocklist = str(engine_kwargs.pop(
-            "v2_msm_entry_blocklist", "0:idle;2:idle,trend"))
-        self._fleet_regime_states = None      # _PanelStateSource or None
-        self._msm_block_count = 0
-        # parse the blocklist once at construction
-        self._msm_block_map: dict[int, set[str]] = {}
-        for _part in filter(None, self._v2_msm_entry_blocklist.split(";")):
-            try:
-                _st, _regs = _part.split(":", 1)
-                self._msm_block_map[int(_st)] = {
-                    r.strip().lower() for r in _regs.split(",") if r.strip()}
-            except Exception:
-                pass
-
+        if self._is_futures_engine:
+            # spot-scoped tick-noise calibration (4 ticks/s); futures engines
+            # keep the existing kramers-persistence machinery instead.
+            self._v2_rate_split_enable = 0.0
+        self._global_regime_map: dict[str, float] = {}
+        self._global_regime_cache_warned = False
+        if (self._v2_rate_split_enable > 0.0
+                and self._v2_rate_split_regime_gate > 0.0):
+            self._load_global_regime_cache()
         # ── Market-cap bound trade block ────────────────────────────────────
         # Block all BUY entries when the USD market cap is below mcap_low_usd
         # or above mcap_high_usd.  Both default to 0 = deactivated.
@@ -3253,42 +3137,104 @@ class StrategyEngineV2Adapter:
                     return event
         return None
 
-    def set_fleet_regime_states(self, source) -> None:
-        """iter74: inject the fleet-regime state source (backtest panel
-        states or live filter).  None (default) disables the gate."""
-        self._fleet_regime_states = source
-
-    def _passes_fleet_regime_gate(self) -> bool:
-        """iter74 MSM entry gate.  iter74c semantics: when a per-state
-        ENTRY-REGIME blocklist is configured for the CURRENT fleet state,
-        it REPLACES the naive worst-state block for that state (the
-        blocklist is the refined, state-switched parameter set); the
-        naive all-entry block applies only in states with no blocklist
-        entry.  iter74b: the worst-state block can additionally require
-        trailing-24h occupancy above the floor."""
-        if self._v2_msm_enable <= 0.0:
-            return True
-        src = self._fleet_regime_states
-        if src is None:
-            return True   # no state source configured → never block
-        st = src.state_at(getattr(self, "_current_time", 0),
-                          occupancy_floor=0.0)  # iter74b refinement REJECTED; fixed 0.0
-        if st is None:
-            return True   # unknown / missing bin → never block
-        # iter74c: state-switched entry-regime allowlist — if this state
-        # has a configured blocklist, ONLY the listed regimes are blocked
-        if self._msm_block_map and int(st["state"]) in self._msm_block_map:
-            blocked_regs = self._msm_block_map[int(st["state"])]
-            _regime_attr = getattr(self, "regime", None)
-            _reg = str(getattr(_regime_attr, "value", _regime_attr) or "").lower()
-            if _reg in blocked_regs:
-                self._msm_block_count += 1
-                return False
-            return True    # state has a refined blocklist — naive rule OFF here
-        if st["blocked"]:
-            self._msm_block_count += 1
+    def _hf_silence_blocks_entry(self, time: int) -> bool:
+        """iter56 silence gate: True when holder-flow events exist for this
+        recording but the stream has been silent for
+        >= `v2_hf_silence_gate_seconds` before `time`.  Recordings with no
+        events before `time` never arm the gate (no coverage != dead flow)."""
+        if self._v2_hf_silence_gate_seconds <= 0.0:
             return False
-        return True
+        if not self._holder_flow_timestamps:
+            return False
+        idx = bisect.bisect_right(self._holder_flow_timestamps, time)
+        if idx == 0:
+            return False
+        age = time - self._holder_flow_timestamps[idx - 1]
+        return age >= self._v2_hf_silence_gate_seconds
+
+    # ── Global regime cache (causal per-date Q map) ─────────────────────
+
+    def _load_global_regime_cache(self) -> None:
+        """Load the causal per-date regime score map {date: Q} from
+        backend/data/global_regime_cache.json (built by
+        backend/fetch_global_regime.py).  Missing/corrupt file → empty map,
+        which keeps the iter64 rate-split gate in its unknown-Q default."""
+        try:
+            import json as _json57
+            import os as _os57
+            path = _os57.path.join(_os57.path.dirname(_os57.path.abspath(__file__)),
+                                   "data", "global_regime_cache.json")
+            with open(path) as f:
+                cache = _json57.load(f)
+            qmap = cache.get("q_by_date") or {}
+            self._global_regime_map = {str(k): float(v) for k, v in qmap.items()}
+        except Exception as exc:  # missing file / bad JSON → unknown-Q default
+            if not self._global_regime_cache_warned:
+                self._global_regime_cache_warned = True
+                print(f"[v2_rate_split] global_regime_cache.json unavailable "
+                      f"({exc}); rate-split gate uses unknown-Q default")
+            self._global_regime_map = {}
+
+    def set_global_regime_map(self, qmap: dict) -> None:
+        """Live path: inject/refresh the per-date regime map (mirrors
+        set_holder_flow_events).  Values are fully determined by data
+        strictly prior to each date, so backtest and live converge on the
+        same cache."""
+        if qmap:
+            self._global_regime_map = {str(k): float(v) for k, v in qmap.items()}
+
+    def _regime_q_today(self):
+        """Causal global regime score Q for the current candle's UTC date,
+        or None when unknown (no map loaded / date missing / time unset)."""
+        if not self._global_regime_map:
+            return None
+        try:
+            import datetime as _dt57
+            day = _dt57.datetime.fromtimestamp(
+                int(getattr(self, "_current_time", 0)),
+                tz=_dt57.timezone.utc).strftime("%Y-%m-%d")
+        except Exception:
+            return None
+        q = self._global_regime_map.get(day)
+        return None if q is None else float(q)
+
+    def _rate_split_regime_allows(self) -> bool:
+        """iter64 replacement for the removed give-back adaptation / floor:
+        the rate-split flip fires only on weak-regime days.  Returns True
+        when the gate is off (backtest/live unchanged), when Q(today) is
+        unknown and unknown_q_enable is set, or when Q(today) < q_max."""
+        if self._v2_rate_split_regime_gate <= 0.0:
+            return True
+        q = self._regime_q_today()
+        if q is None:
+            return self._v2_rate_split_unknown_q_enable > 0.0
+        return q < self._v2_rate_split_q_max
+
+    def _passes_order_flow_imbalance_gate(self) -> bool:
+        """Check if the trailing order-flow taker buy ratio passes the minimum threshold."""
+        if self._v2_order_flow_imbalance_gate <= 0.0:
+            return True
+        if not self._candle_volume_history:
+            return True
+        w = self._v2_order_flow_window_seconds
+        t_curr = getattr(self, "_current_time", 0)
+        cutoff = t_curr - w
+
+        tot_buy = 0.0
+        tot_sell = 0.0
+        for cd in reversed(self._candle_volume_history):
+            ct = cd["time"]
+            if ct < cutoff:
+                break
+            tot_buy += cd["buy_vol"]
+            tot_sell += cd["sell_vol"]
+
+        tot_vol = tot_buy + tot_sell
+        if tot_vol < self._v2_order_flow_volume_min_sol:
+            return True  # low volume window -> pass
+
+        ratio = tot_buy / (tot_vol + 1e-9)
+        return ratio >= self._v2_order_flow_buy_ratio_min
 
     def _evr_trailing_buy_ratio(self):
         """iter48 EVR: trailing taker buy-ratio over the last `_v2_evr_flow_window`
@@ -4102,9 +4048,8 @@ class StrategyEngineV2Adapter:
 
     # ── V2 entry gate (uses V2 confidence + V1-style secondary gates) ──
     def _v2_passes_entry_gate(self, c: float, decision: dict) -> bool:
-        # iter74: Markov-switching fleet-regime gate (blocks the worst
-        # realtime fleet state; default OFF)
-        if not self._passes_fleet_regime_gate():
+        # iter45: pre-entry taker order-flow imbalance gate
+        if not self._passes_order_flow_imbalance_gate():
             return False
         # Need both confidence above threshold and Kramers upward prob.
         if self.trend_confidence < self.entry_confidence_high:
@@ -4143,4 +4088,10 @@ class StrategyEngineV2Adapter:
             # would over-block at the cold-start of a token.
             if neg_count >= thresh * window:
                 return False
+        # iter05 s_effective gate — empirically grounded (see adapter
+        # docstring of iter05_s_effective_min).  Acts as a barrier-/SNR-
+        # quality floor; trades entered below this proxy lose more often.
+        s_min = float(getattr(self, "iter05_s_effective_min", 0.0))
+        if s_min > 0.0 and float(getattr(self, "s_effective", 0.0)) < s_min:
+            return False
         return True

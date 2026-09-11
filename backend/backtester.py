@@ -76,7 +76,6 @@ _RESULTS_DIR = os.environ.get(
 
 _pool: ProcessPoolExecutor | None = None
 
-
 def _get_pool(max_workers: int) -> ProcessPoolExecutor:
     global _pool
     if multiprocessing.current_process().name != 'MainProcess':
@@ -327,57 +326,6 @@ def run_backtest(
         entry_latency_seconds=entry_latency_seconds,
         exit_latency_seconds=exit_latency_seconds,
     )
-
-    # iter78 ADOPTION: 5-second deferred-entry execution cell.  The knob
-    # lives on the ENGINE (`v2_entry_delay_seconds`, default 5.0 since the
-    # 2026-09-02 adoption), so bare {} runs the adopted model — the same
-    # engine-keyed injection pattern the iter74d MSM adoption used.  An
-    # EXPLICIT entry_latency_seconds argument (run_iteration
-    # --entry-latency-seconds / the batch kwarg) overrides the engine knob;
-    # `{"v2_entry_delay_seconds": 0.0}` restores the pre-iter78
-    # signal-instant fill byte-exactly.  Only the instant/latency exec
-    # models consume it (ForwardTester.__init__ merges it into
-    # entry_latency_seconds); "legacy" is never altered.
-    if entry_latency_seconds <= 0.0 and exec_model != "legacy":
-        _eng_delay = float(getattr(ft.engine, "v2_entry_delay_seconds", 0.0))
-        if _eng_delay > 0.0:
-            ft.enable_entry_latency(_eng_delay)
-
-    # iter80: deferred-exit-fill cell — same engine-keyed injection pattern
-    # as the entry block above.  The knob lives on the ENGINE
-    # (`v2_exit_delay_seconds`, default 0.0 = instant exit fill = pre-iter80
-    # byte parity; `v2_exit_delay_armed_only` restricts deferral to the
-    # armed/harvest exit classes).  An EXPLICIT exit_latency_seconds
-    # argument overrides the engine knob.  Never applied to "legacy".
-    if exit_latency_seconds <= 0.0 and exec_model != "legacy":
-        _eng_exit_delay = float(getattr(ft.engine, "v2_exit_delay_seconds", 0.0))
-        if _eng_exit_delay > 0.0:
-            _eng_exit_armed = float(getattr(ft.engine, "v2_exit_delay_armed_only", 0.0))
-            ft.enable_exit_latency(_eng_exit_delay, armed_only=_eng_exit_armed > 0.0)
-
-    # iter74: MSM fleet-regime entry gate — inject the precomputed causal
-    # fleet-state lookup whenever the ENGINE has the MSM gate enabled
-    # (configuration B is the production DEFAULT since 2026-08-31, so this
-    # fires on bare {} too; explicit v2_msm_enable=0.0 leaves the engine
-    # gate off and no source is injected = byte-exact pre-iter74).
-    # Missing artifacts → loud log + gate never blocks (safe degradation).
-    # iter75: also inject the causal fleet-MEDIUM timeline (low-turbulence
-    # flag per bin) when the s2 gate is enabled — same pattern, same parity.
-    if engine_version == 2:
-        try:
-            if float(getattr(ft.engine, "_v2_msm_enable", 0.0)) > 0.0:
-                from fleet_regime_online import FleetRegimeFilter
-                # iter75sw: env override lets bin-size / ablation sweep cells
-                # point at their own state artifacts; default = production.
-                _states_path = os.environ.get("V2_MSM_STATES_PATH", "")
-                if not _states_path:
-                    _states_path = os.path.join(os.path.dirname(__file__), "fleet_filtered_states.json")
-                if not os.path.exists(_states_path):
-                    _states_path = os.path.join(os.path.dirname(__file__), "analysis", "fleet_filtered_states.json")
-                ft.engine.set_fleet_regime_states(FleetRegimeFilter.from_panel(_states_path))
-        except Exception as _msm_err:
-            print(f"[iter74/75] fleet state injection FAILED for rec {recording_id}: "
-                  f"{_msm_err} — gates will not block")
 
     # Saving full candle series is useful for an interactive single backtest,
     # but it dominates SQLite I/O in iteration batches.  Batch runs keep the
