@@ -91,7 +91,7 @@ negative results (microstructure, breadth, provenance, pool liquidity, geometry,
 | 52–55 | REJECTED | Market-condition adaptation, execution-adaptive sizing, SODT timeout, WCCB — all net-negative or non-engaging; shipped default-OFF (later removed). |
 | 56 | ACCEPTED | **HF stream silence gate 2700 s** (tail loss drag −0.44 SOL). *Removed from code in the Sep-2 cleanup; re-admission REJECTED at iter68 — do not restore.* |
 
-## Era 3 — Regime adaptation program (iters 57–66) — closed & removed
+## Era 3 — Regime adaptation program (iters 57–66)
 
 | Iter | Verdict | Mechanism / lesson |
 |---|---|---|
@@ -130,7 +130,6 @@ negative results (microstructure, breadth, provenance, pool liquidity, geometry,
 ## Missions
 
 - **Live-monitor mission (2026-09-04 → 09-05, COMPLETE).** Mission prompt `notes/live_monitor_agent_prompt.md`; outcome report `notes/live_monitor_2026-09-04_report.md`. Stopping criteria met; exit-hold reset bug fixed (`171e715`); "perfected" bar = 3 clean audit sessions.
-- **Calibrated simulator mission (2026-09-10).** Honest fill model (+3.1..18.7% net round-trip by mcap band, live-validated) flips the July-era baseline negative; all candidates FAIL on the holdout; P4 risk-off package engine-verified but net-negative. MSM panel spliced as automatic backtest default + band-offset fill layer — **both dropped by the 2026-09-11 reset/revert session (user decision)**. Algorithm PnL was NOT improved by this mission. (Entry reconstructed 2026-09-11; the original section was lost in the resets.)
 
 ---
 
@@ -149,6 +148,4 @@ negative results (microstructure, breadth, provenance, pool liquidity, geometry,
 | iter31_baseline_full | 652 recs | +0.965 | 75.6% | post-OHLCV-ceiling era |
 | iter74d_base_full | 1,525 recs | +1.124 | 65.9% | canonical 08-31 cohort |
 | iter75sw B′ | 1,525 recs | +1.320 | 66.0% | with MSM gate (now reverted) |
-| mission-era honest fills | 2,127 recs | negative | — | July-era edge dies under realistic fills |
 
-`+2.0 SOL`-era numbers are frozen 08-16 cohorts; WR (~66%) is the only cross-era invariant.
