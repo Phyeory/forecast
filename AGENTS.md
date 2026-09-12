@@ -67,10 +67,14 @@ read per-trade logs from `backend/v2_results/`.
    `entry/exit_latency_seconds > 0` defer fills to `t_signal + latency`, priced on the recorded
    intra-candle path (no lookahead).
 4. **Deferred-fill delay knobs live on the ENGINE** (`v2_entry_delay_seconds`,
-   `v2_exit_delay_seconds`, `v2_exit_delay_armed_only` — **production 0.0 = OFF** since
-   2026-09-11; measured cells were 5.0 / 20.0+armed). Pipelines read them off the engine object
-   (backtester keys `ForwardTester.enable_*_latency`, live_trader holds the queued swap). 0.0 is
-   byte-exact signal-instant.
+   `v2_exit_delay_seconds`, `v2_exit_delay_armed_only` — **exit delay 20.0 armed-only ADOPTED
+   2026-09-12 (iter83: full-DB Δ+5.06 SOL, p=5.6e-17, both eras, holdout-confirmed)**;
+   entry delay **0.0** (iter83 REJECTED on the current stack — era-inverting). Pipelines read
+   them off the engine object (backtester keys `ForwardTester.enable_*_latency`, live_trader
+   holds the queued swap). 0.0 is byte-exact signal-instant. NOTE: batch cells pass only the
+   `--params` dict — the adapter pop fallbacks are the effective bare-`{}` defaults, so set
+   ALL delay knobs explicitly in sweep cells and `shasum` the engine file around long burns
+   (a 09-11 mid-session external edit of the fallbacks silently re-configured four cells).
 5. **Complete decision streams** — the backtester force-closes any open position at recording end
    (`reason="recording_ended"`). Never drop unclosed trades (lookahead/right-tail bias).
 6. **Determinism** — engines are deterministic across backtest/paper/live.
@@ -193,7 +197,8 @@ re-add): whale-dump (iter72/78), SPE/P_zero (iter79), pool_drain (iter65), V1 tr
 
 EVR ON (120 s / 20% / 0.45 / veto 0.25) · holder-flow entry gate OFF · dev-sell exit OFF
 (iter62 user policy, 2026-08-23) · rate-split ON (10% / 0.55 / 12) · kelly_flat ON (60 ticks /
-40%) · entry delay 0.0 · exit delay 0.0 (armed_only 1.0) · warmup 100 · confidence_high 0.79.
+40%) · entry delay 0.0 (iter83 REJECTED) · exit delay 20.0 armed_only 1.0 (iter83 ADOPTED
+2026-09-12) · warmup 100 · confidence_high 0.79.
 The UI mirror is `frontend/js/app.js::engineParamsV2` — keep both in sync when changing defaults.
 
 ---
