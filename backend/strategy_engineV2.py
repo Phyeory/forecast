@@ -296,7 +296,30 @@ DEFAULT_CONFIG = {
     # queued armed EXIT on the candle clock then launches the sell.  The
     # exit DECISIONS are untouched — only the fill timing of armed exits.
     "v2_exit_delay_seconds":     20.0,  # iter83 ADOPTED 2026-09-12 (armed-only 20s: full-DB Δ+5.06 SOL p=5.6e-17, both eras+, holdout-confirmed; >0 = iter80 armed deferred fill)
-    "v2_exit_delay_armed_only":   1.0,  # 1.0 = defer armed/harvest classes only (applies when exit delay > 0)
+    "v2_exit_delay_armed_only":   1.0,  # 1.0 = defer armed/harvest exit classes only (applies when exit delay > 0)
+
+    # ── iter85: per-coin online SDE recalibration ─────────────────────────
+    # The engine re-estimates all 13 free SDE coefficients from THIS coin's
+    # own rolling candle tape (same physics formulas + _CLIP stability
+    # bounds as backend/session_calibrator.py).  Lives INSIDE the engine so
+    # Backtester / ForwardTester / LiveTrader stay in pipeline parity by
+    # construction (invariant 1).  Default OFF — opt-in with
+    # {"v2_percoin_cal_enable": 1.0}; bare-{} batches never silently change.
+    "v2_percoin_cal_enable":      0.0,  # 1.0 = ON
+    "v2_percoin_cal_min_candles": 120,  # tape length before first recalibration
+    "v2_percoin_cal_every":       100,  # full candles between recalibrations
+    "v2_percoin_cal_window":      600,  # rolling window length (full candles)
+
+    # ── ADOPTED 2026-09-12 (user directive): population SDE calibration ──
+    # At session start, all 13 free SDE coefficients are estimated from the
+    # last 50 completed recordings before the session (physics-based
+    # population estimator in backend/session_calibrator.py).  ADOPTED CELL
+    # iter84b_cal_full (full-DB 2,437 recs): 777 trades, WR 68.3%, PnL +4.86
+    # SOL, exp +0.0063/trade — vs DEFAULT 1,311 / 63.5% / +4.47 / +0.0034.
+    # The engine knob is the single source of truth: the backtest sentinel
+    # and the live session builder both default to it, so backtest and live
+    # calibrate identically.  0.0 = OFF (pre-adoption byte-parity hatch).
+    "v2_popcal_enable":          1.0,
 
 }
 
@@ -2411,6 +2434,48 @@ class MemecoinStrategyEngine:
         self._last_sigma_t:  float = sigma_t_init
         self._last_sigma_phi: float = self.cfg["sigma_phi"]
 
+        # ── iter85: per-coin online recalibration state ────────────────────
+        # Which cfg keys the initial config explicitly set — per-coin
+        # recalibration NEVER overrides an explicit user choice.
+        self._explicit_cfg_keys: frozenset = frozenset((config or {}).keys())
+        self._recal_count: int = 0
+
+    # ── iter85: per-coin recalibration ──────────────────────────────────
+    def recalibrate(self, overrides: dict) -> int:
+        """Apply per-coin SDE coefficient overrides mid-session.
+
+        Rules:
+          * Explicitly-configured keys (passed at engine construction) are
+            never overridden — user intent wins.
+          * Non-SDE keys are ignored (only the 13 free coefficients move).
+          * Returns the number of coefficients actually changed.
+
+        Downstream effects (all refreshable in place):
+          self._cfg_arr repacked for the numba kernels; _alpha_regime /
+          _tau_default re-cached; MarketPotential.lambda_decay refreshed
+          when lambda_0 changes.  rbpf.step() receives cfg/cfg_arr per
+          call, so the next update() runs the new physics.
+        """
+        _SDE_KEYS = (
+            "sigma_mu", "lambda_mu", "kappa_mu", "sigma_phi", "alpha",
+            "beta", "eta", "sigma_h", "theta", "sigma_ell", "zeta",
+            "lambda_0", "tau_max",
+        )
+        changed = 0
+        for k in _SDE_KEYS:
+            if k in overrides and k not in self._explicit_cfg_keys:
+                v = float(overrides[k])
+                if math.isfinite(v) and v != self.cfg[k]:
+                    self.cfg[k] = v
+                    changed += 1
+        if changed:
+            self._cfg_arr = _pack_cfg_kernels(self.cfg)
+            self._alpha_regime = float(self.cfg["alpha"])
+            self._tau_default = float(self.cfg["tau_max"])
+            self.potential.lambda_decay = float(self.cfg["lambda_0"])
+            self._recal_count += 1
+        return changed
+
     # ── Spec method 1: update_state ────────────────────────────────────
     def update_state(self, obs: dict) -> dict:
         """
@@ -2797,6 +2862,20 @@ class StrategyEngineV2Adapter:
         self._prev_close: Optional[float] = None
         self._v1_trend_confidence = 0.0
 
+        # ── iter85: per-coin online recalibration ─────────────────────────
+        # Rolling candle tape of THIS coin (completed candles only — volume
+        # lands on the 4th intra-candle state).  Mirrors the
+        # _candle_volume_history dedupe pattern above.
+        self._v2_percoin_enable = float(engine_kwargs.get("v2_percoin_cal_enable", 0.0)) > 0.0
+        self._v2_percoin_min_candles = int(engine_kwargs.get("v2_percoin_cal_min_candles", 120))
+        self._v2_percoin_every = max(1, int(engine_kwargs.get("v2_percoin_cal_every", 100)))
+        self._v2_percoin_window = max(self._v2_percoin_min_candles,
+                                      int(engine_kwargs.get("v2_percoin_cal_window", 600)))
+        self._percoin_tape: list[dict] = []       # [{t, o, h, l, c, v, bv, sv, pool}]
+        self._percoin_last_t: int = -1            # candle timestamp currently being filled
+        self._percoin_completed: int = 0          # completed candles since last recal
+        self._percoin_next_at: int = self._v2_percoin_min_candles  # trigger threshold
+
         # ── V1 config knobs the capture enumerates (cfg_*) ──
         # We echo them onto `eng` so the ForwardTester's _capture_entry_params
         # dictionary doesn't AttributeError.  All defaults, mirroring V1.
@@ -3109,6 +3188,50 @@ class StrategyEngineV2Adapter:
         self._holder_flow_events: list[dict] = []
         self._holder_flow_index: dict[int, list[dict]] = {}
         self._holder_flow_timestamps: list[int] = []
+
+    # ── iter85: per-coin online recalibration ──────────────────────────────
+
+    def _percoin_recalibrate(self) -> None:
+        """Re-estimate SDE coefficients from THIS coin's rolling tape.
+
+        Runs on the adapter (which owns the candle tape) and applies results
+        through the core engine's recalibrate() — explicit user keys always
+        win, _CLIP stability bounds enforced inside the estimator.  On a
+        degenerate/too-short tape the estimator returns {} and current
+        coefficients are kept.  Deterministic: pure numpy, no RNG.
+        """
+        from session_calibrator import estimate_from_session_arrays
+
+        tape = self._percoin_tape[:-1] if (
+            self._percoin_tape and self._percoin_tape[-1]["t"] == self._percoin_last_t
+            # last row is the candle that JUST opened (in-progress) — its
+            # volume split is still incomplete, so exclude it from estimation
+        ) else self._percoin_tape
+        n = len(tape)
+        if n < 20:
+            return
+        closes = np.array([row["c"] for row in tape], dtype=float)
+        vols   = np.array([row["v"] for row in tape], dtype=float)
+        buys   = np.array([row["bv"] for row in tape], dtype=float)
+        sells  = np.array([row["sv"] for row in tape], dtype=float)
+        pools  = np.array([row["pool"] for row in tape], dtype=float)
+        duration_s = float(tape[-1]["t"] - tape[0]["t"]) or float(n)
+
+        overrides = estimate_from_session_arrays(
+            closes, vols, buys, sells, pools, duration_s,
+        )
+        if overrides:
+            changed = self.core.recalibrate(overrides)
+            if changed:
+                self._percoin_log = getattr(self, "_percoin_log", [])
+                self._percoin_log.append({
+                    "completed_candles": self._percoin_completed,
+                    "changed": changed,
+                    "coeffs": dict(overrides),
+                })
+        # Schedule the next recalibration regardless of outcome (a skipped
+        # degenerate tape should not retry every candle).
+        self._percoin_next_at = self._percoin_completed + self._v2_percoin_every
 
     # ── Holder-flow helpers ───────────────────────────────────────────────
 
@@ -3504,6 +3627,39 @@ class StrategyEngineV2Adapter:
                 self._candle_volume_history.append({"time": t_sec, "buy_vol": buy_volume, "sell_vol": sell_volume})
                 if len(self._candle_volume_history) > 300:
                     self._candle_volume_history.pop(0)
+
+        # ── iter85: per-coin tape buffer + online recalibration ──────────
+        # A candle row fills across its 4 intra-candle states (same time
+        # value); the 4th state carries the completed volume split.  When a
+        # NEW candle's timestamp arrives, the previous row is complete.
+        if self._v2_percoin_enable:
+            t_c = int(time)
+            if t_c != self._percoin_last_t:
+                if self._percoin_last_t >= 0:
+                    # previous candle just completed
+                    self._percoin_completed += 1
+                self._percoin_tape.append({
+                    "t": t_c, "o": float(o), "h": float(h), "l": float(l),
+                    "c": float(c), "v": float(volume), "bv": float(buy_volume),
+                    "sv": float(sell_volume), "pool": float(pool_sol),
+                })
+                if len(self._percoin_tape) > self._v2_percoin_window:
+                    self._percoin_tape.pop(0)
+                self._percoin_last_t = t_c
+            else:
+                # refresh the in-progress row (keep H/L extremes + last data)
+                row = self._percoin_tape[-1]
+                row["h"] = max(row["h"], float(h))
+                row["l"] = min(row["l"], float(l))
+                row["c"] = float(c)
+                row["v"] = float(volume)
+                row["bv"] = float(buy_volume)
+                row["sv"] = float(sell_volume)
+                if pool_sol > 0.0:
+                    row["pool"] = float(pool_sol)
+
+            if self._percoin_completed >= self._percoin_next_at:
+                self._percoin_recalibrate()
 
         # Snapshot the previous close BEFORE `_maintain_v1_indicators`
         # overwrites it with the current bar's close — otherwise the V2
