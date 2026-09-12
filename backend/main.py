@@ -36,6 +36,7 @@ import data_store
 import newpairs_store
 from backtester import run_backtest, run_backtest_batch
 from holder_flow import HolderFlowMonitor, get_shared_monitor
+from session_calibrator import calibrate_async
 
 logging.basicConfig(
     level=logging.INFO,
@@ -2285,6 +2286,28 @@ async def _get_or_create_live_session(
         n_engines = 1 + len(fleet_versions)
 
         primary_kwargs = dict(engine_params or {})
+        # Population SDE calibration — ADOPTED 2026-09-12 (iter84b_cal_full
+        # cell).  The ENGINE knob `v2_popcal_enable` (DEFAULT_CONFIG) is the
+        # single source of truth: backtests and live sessions calibrate
+        # identically by default.  Passing `v2_popcal_enable` in the session's
+        # engine_params overrides it for that session (0.0 = OFF hatch).
+        # The flag is consumed here — it never reaches the engine config.
+        try:
+            from strategy_engineV2 import DEFAULT_CONFIG as _V2_DEFAULTS
+            _popcal_on = float(
+                primary_kwargs.get("v2_popcal_enable",
+                                    _V2_DEFAULTS.get("v2_popcal_enable", 0.0))
+            ) > 0.0
+            if _popcal_on:
+                cal_overrides = await calibrate_async()
+                # User params win over calibration (explicit beats implicit)
+                merged = {**cal_overrides, **primary_kwargs}
+                merged.pop("v2_popcal_enable", None)
+                primary_kwargs = merged
+            else:
+                primary_kwargs.pop("v2_popcal_enable", None)
+        except Exception as _cal_err:
+            logger.warning(f"[SessionCalibrator] calibration skipped: {_cal_err}")
         live_trader = LiveTrader(
             token_mint=real_mint,
             keypair=keypair,

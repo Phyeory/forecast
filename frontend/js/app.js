@@ -80,7 +80,7 @@ let engineParamsV2 = {
   sigma_ell:  0.10,    // ℓ shock std
   zeta:       0.30,    // liquidity-jump decay magnitude on ℓ
   // KDE / volume profile decay  (iter16k: T_w = 14400 s structural KDE memory)
-  lambda_0:   0.00006944, // KDE exponential decay rate (1/14400s ≈ full recording lifetime)
+  lambda_0:   0.0000694444, // KDE exponential decay rate (1/14400s ≈ full recording lifetime; engine value 1/14400)
   lambda_1:   0.10,    // secondary slow-decay component
   // Jump-intensity (Poisson rate per second)
   kappa_J:    0.05,    // λ_J  — governs ℓ jump frequency
@@ -232,6 +232,23 @@ let engineParamsV2 = {
   // PF 1.41.  0.0 = instant exit fill (pre-iter80 byte-exact hatch). ──
   v2_exit_delay_seconds:      20.0,  // iter83 ADOPTED 2026-09-12 (armed-only 20s: full-DB Δ+5.06 SOL p=5.6e-17, both eras+, holdout-confirmed); >0 = seconds to defer armed exit execution
   v2_exit_delay_armed_only:   1.0,  // 1.0 = defer armed/harvest exit classes only
+  // ── iter85: per-coin online SDE recalibration (default OFF — research cell) ──
+  // The engine re-estimates all 13 free SDE coefficients from THIS coin's own
+  // rolling candle tape (same physics formulas + stability bounds as
+  // backend/session_calibrator.py), every N completed candles.  Runs INSIDE
+  // the engine so backtest/paper/live stay in pipeline parity by construction.
+  v2_percoin_cal_enable:      0.0,  // 1.0 = ON (research cell iter85; production default OFF)
+  v2_percoin_cal_min_candles: 120,  // full candles before the first recalibration
+  v2_percoin_cal_every:       100,  // full candles between recalibrations
+  v2_percoin_cal_window:      600,  // rolling tape length (full candles) used per estimation
+  // ── ADOPTED 2026-09-12: population SDE calibration at session start ──
+  // All 13 free SDE coefficients estimated from the last 50 completed
+  // recordings before the session (physics formulas + UKF-stability bounds,
+  // backend/session_calibrator.py).  ADOPTED CELL iter84b_cal_full (full-DB):
+  // 777 trades, WR 68.3%, PnL +4.86 SOL, exp +0.0063/trade — vs DEFAULT
+  // 1,311 / 63.5% / +4.47 / +0.0034.  Master switch for BOTH backtest and
+  // live (the engine knob is the single source of truth).
+  v2_popcal_enable:           1.0,  // ADOPTED default 1.0 = ON; 0.0 = OFF (pre-adoption byte-parity hatch)
 };
 
 /* Strategy Engine Parameters — V3 (newborn-coin dump-bottom recovery).
@@ -472,6 +489,11 @@ function renderSettings() {
     v2_entry_delay_seconds:              "Production default 0.0 = OFF (iter83 verdict 2026-09-12 on the post-cleanup stack: pure e5/e3 are era-inverting with post-Aug-20 ΔPnL < 0, and e2/e5 stacked on the adopted exit delay cost −1.8/−1.7 SOL vs exit-delay alone — keep 0.0). The old iter78 e5 effect (Δ+1.178, both eras) did not survive the stack change; re-gate before re-enabling. Live holds the queued swap and fills at the then-current price; backtests price the fill on the recorded path at t_signal+N",
     v2_exit_delay_seconds:               "Production default 20.0 = ADOPTED (iter83 2026-09-12): deferred ARMED exit execution — full-DB Δ+5.06 SOL vs delays-off, Wilcoxon p=5.6e-17, both eras positive, unseen-holdout confirmed (p=6.8e-9), catastrophic tail reduced. The recorded path is +8.95% above armed exit fills in the 30s median (the give-back harvest fires at the bottom of its own micro-dip). Loss-book exits (kelly_flat/evr_triage/kramers_down/dev_sell/recording_ended) always fill instantly. Set 0.0 for the instant exit fill (pre-iter80 byte-exact hatch)",
     v2_exit_delay_armed_only:            "ADOPTED default 1.0: defer only the armed/harvest exit classes (gain_retrace, rate_split_flip, tp_v2, breakeven_scratch, reversal_exit). 0.0 defers every exit uniformly — the uniform cell was REJECTED (unarmed exits have NEGATIVE forward drift E[Δp30] = −0.25%; deferring the loss book is poison)",
+    v2_percoin_cal_enable:                "iter85 research cell (default 0.0 = OFF): 1.0 makes the engine re-estimate all 13 free SDE coefficients from THIS coin's own rolling candle tape every v2_percoin_cal_every completed candles, using the same physics formulas + UKF-stability bounds as the population calibrator. Runs inside the engine so backtest/paper/live behave identically. Explicit engine params set at launch are never overridden by the recalibration",
+    v2_percoin_cal_min_candles:           "Full candles of this coin's tape required before the first online recalibration (thin tapes are skipped entirely)",
+    v2_percoin_cal_every:                 "Full candles between per-coin recalibrations",
+    v2_percoin_cal_window:                "Rolling tape length (full candles) used for each per-coin estimation — older candles fall out of the estimate",
+    v2_popcal_enable:                      "ADOPTED default 1.0 = ON (2026-09-12, iter84b_cal_full cell: 777 trades / WR 68.3% / +4.86 SOL / exp +0.0063 vs DEFAULT 1,311 / 63.5% / +4.47 / +0.0034): at session start, all 13 free SDE coefficients are estimated from the last 50 completed recordings (physics population estimator). Single master switch for backtest AND live — the engine knob is the source of truth. 0.0 = OFF (pre-adoption DEFAULT_CONFIG byte-parity)",
   };
 
   // ── V3 parameter hints (newborn dump-bottom engine) ──

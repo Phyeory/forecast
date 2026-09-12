@@ -58,6 +58,7 @@ from data_store import (
     create_backtest,
     list_recordings,
 )
+from session_calibrator import calibrate_from_history
 
 
 import multiprocessing
@@ -307,6 +308,32 @@ def run_backtest(
 
     if engine_params is None:
         engine_params = {}
+
+    # CRITICAL (2026-09-12 leak fix): never mutate the caller's dict.  Batch
+    # workers share ONE engine_params object across every task in a chunk
+    # (pickle memoizes the shared reference), so the old pop() removed the
+    # sentinel on the first task and left tasks 2..N defaulting into
+    # calibration — silently contaminating every NONCAL baseline batch since
+    # iter84 (iter84's byte-identical REGIME_B null and the first iter84b
+    # base_full were this leak).
+    engine_params = dict(engine_params)
+    # Population SDE calibration (iter84b estimator — last 50 completed
+    # recordings before this recording's started_at) as the base layer; cell
+    # params override on top.  ADOPTED 2026-09-12 (iter84b_cal_full cell:
+    # 777 trades / WR 68.3% / +4.86 SOL / exp +0.0063): the DEFAULT comes
+    # from the engine knob `v2_popcal_enable` — single source of truth, so
+    # backtest and live calibrate identically.  The per-call sentinel
+    # overrides it for cells:
+    #   {"use_session_calibration": false} → pure DEFAULT_CONFIG (NONCAL)
+    #   {"use_session_calibration": true}  → force calibration ON
+    #   absent                             → engine knob default (adopted: ON)
+    from strategy_engineV2 import DEFAULT_CONFIG as _V2_DEFAULTS
+    _popcal_default = bool(_V2_DEFAULTS.get("v2_popcal_enable", 0.0))
+    _use_cal = bool(engine_params.pop("use_session_calibration", _popcal_default))
+    if _use_cal:
+        cal_base = calibrate_from_history(float(recording.get("started_at", 0.0)))
+        # Cell params win over calibration (explicit beats implicit)
+        engine_params = {**cal_base, **engine_params}
 
     timeframe = recording["timeframe"]
 
