@@ -331,9 +331,27 @@ def run_backtest(
     _popcal_default = bool(_V2_DEFAULTS.get("v2_popcal_enable", 0.0))
     _use_cal = bool(engine_params.pop("use_session_calibration", _popcal_default))
     if _use_cal:
-        cal_base = calibrate_from_history(float(recording.get("started_at", 0.0)))
-        # Cell params win over calibration (explicit beats implicit)
+        # iter86 mint-history layer (user proposal): THIS token's own prior
+        # candles (prior completed recordings of the same mint before
+        # started_at — no lookahead) take precedence over the population
+        # prior; thin/degenerate mint tapes fall through to population.
+        cal_base: dict = {}
+        _mintcal_on = float(
+            engine_params.get("v2_mintcal_enable",
+                              _V2_DEFAULTS.get("v2_mintcal_enable", 0.0))
+        ) > 0.0
+        if _mintcal_on:
+            from session_calibrator import calibrate_from_mint_history
+            cal_base = calibrate_from_mint_history(
+                str(recording.get("mint") or ""),
+                float(recording.get("started_at", 0.0)),
+            )
+        if not cal_base:
+            cal_base = calibrate_from_history(float(recording.get("started_at", 0.0)))
+        # Cell params win over calibration (explicit beats implicit); the
+        # mintcal trigger key never reaches the engine config.
         engine_params = {**cal_base, **engine_params}
+        engine_params.pop("v2_mintcal_enable", None)
 
     timeframe = recording["timeframe"]
 

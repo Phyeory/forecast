@@ -321,6 +321,15 @@ DEFAULT_CONFIG = {
     # calibrate identically.  0.0 = OFF (pre-adoption byte-parity hatch).
     "v2_popcal_enable":          1.0,
 
+    # ── iter86: mint-history calibration (user proposal — full token picture) ──
+    # BEFORE the population layer, estimate from THIS TOKEN's own prior
+    # recorded tape (all candles from prior completed recordings of the same
+    # mint, backtest-safe).  A coin re-visited by the platform gets its own
+    # physics at tick 0 instead of a cross-population prior.  Falls through
+    # to the population layer when the mint has <120 prior candles (~71% of
+    # sessions).  Research cell until gates pass; production default OFF.
+    "v2_mintcal_enable":         0.0,
+
 }
 
 
