@@ -22,8 +22,8 @@ holder-flow gates off) — **re-baseline before comparing new candidates**.
 |---|---|---|
 | Engine | V2 RBPF/UKF/Kramers, long-only, spot-only | iter02-04 |
 | Exec model | signal-instant fills (`exec_model="instant"`); `legacy` escape hatch; measured-latency overlay available | iter73 |
-| Entry delay | **0.0 = OFF** (was 5.0, iter78) | user decision 2026-09-11 |
-| Exit delay | **0.0 = OFF** (was 20.0 armed-only, iter80) | user decision 2026-09-11 |
+| Entry delay | **0.0 = OFF** (iter83 REJECTED on post-cleanup stack — era-inverting) | iter83 verdict 2026-09-12 |
+| Exit delay | **20.0 armed-only = ON** (iter83 ADOPTED: full-DB Δ+5.06 SOL p=5.6e-17, both eras, holdout p=6.8e-9) | iter83 verdict 2026-09-12 |
 | EVR triage + sell-concentration veto | ON (eval 120 s / offside 20% / ratio 0.45 / veto 0.25) | iter48/50 |
 | Holder-flow entry gate | **OFF** (iter62 user policy; briefly resurrected by git resets, restored OFF) | iter43/62 |
 | Holder-flow dev-sell exit | **OFF** (same) | iter43/62 |
@@ -148,4 +148,170 @@ negative results (microstructure, breadth, provenance, pool liquidity, geometry,
 | iter31_baseline_full | 652 recs | +0.965 | 75.6% | post-OHLCV-ceiling era |
 | iter74d_base_full | 1,525 recs | +1.124 | 65.9% | canonical 08-31 cohort |
 | iter75sw B′ | 1,525 recs | +1.320 | 66.0% | with MSM gate (now reverted) |
+| iter83_base_full | 2,396 recs | −0.661 | 67.2% | post-cleanup stack: gates OFF, delays OFF, no MSM |
+| iter83_win_x20_full | 2,411 recs | +4.402 | 63.6% | + iter83 exit delay 20 s armed-only (ADOPTED 2026-09-12) |
 
+## Iter 83 — Entry/exit delay re-tune on the post-cleanup stack (2026-09-11, PREREGISTERED)
+
+User mandate: re-tune the deferred-fill delay knobs (`v2_entry_delay_seconds` /
+`v2_exit_delay_seconds` / `v2_exit_delay_armed_only`, production 0.0/0.0 since the 09-11
+reset) on the CURRENT stack (MSM gone, holder-flow gates OFF) with strict anti-overfit
+protocol and pre/post-Aug-20 era-consistency reporting. Prior delay measurements
+(iter78/80/82) were taken on stacks that no longer exist — numbers below are fresh.
+
+**Stack correction (2026-09-11, pre-burn):** the first baseline burn
+(`iter83_base_gatesON_1789149203`, 518 traded recs, 1,192 trades, WR 64.93%, +0.5361 SOL)
+ran with the holder-flow entry block + dev-sell exit ON — the committed tree still carried
+the pre-iter62 `1.0` defaults; the iter62 OFF restore was never committed and did not
+survive the Sep-11 git surgery (docs claiming "re-applied OFF" were wrong about the engine
+file). Restored OFF per standing user policy (engine DEFAULT_CONFIG + constructor
+fallbacks + `app.js` mirror); all iter83 cells burn on the corrected stack. The gates-ON
+batch is kept under the `iter83_base_gatesON` label as a side measurement (gates ON vs OFF
+on the same cohort). An external write reverted RESEARCH_LOG.md to HEAD mid-session
+(20:08, likely a stale editor buffer); this prereg was re-added before any candidate cell
+ran.
+
+**Cohort**: all 2,396 completed 1s recordings. **Era convention (UTC)**: pre = `started_at <
+1787184000` (2026-08-20T00:00Z) → 1,375 recs; post = ≥ → 1,021 recs.
+
+**Split** (seed 20260911, era-stratified 50/50, `backend/analysis/iter83_split.json`):
+TRAIN 1,197 (687 pre / 510 post) for all screening; HOLDOUT 1,199 (688 pre / 511 post)
+unseen until the single verification look.
+
+**Cells** (engine V2, buy 0.1 SOL, exec instant, delay knobs via `--params`; baseline run on
+FULL DB as the required post-cleanup re-baseline):
+
+| Cell | entry_delay | exit_delay (armed_only=1.0) | Rationale |
+|---|---|---|---|
+| C0 baseline | 0.0 | 0.0 | production stack |
+| C1 | 5.0 | 0.0 | iter78 discovery cell |
+| C2 | 3.0 | 0.0 | plateau robustness (iter82: 3≡5) |
+| C3 | 0.0 | 20.0 | iter80 armed-exit cell |
+| C4 | 5.0 | 20.0 | combined |
+
+**Screening gates** (TRAIN only, paired per-recording ΔPnL vs baseline): Wilcoxon
+(one-sided greater) p < 0.05; 10k-bootstrap 95% CI low > 0; ≥ 50% recordings improved;
+both-era ΔPnL ≥ −0.02 SOL (era-robustness soft gate). **Selection**: highest bootstrap mean
+ΔPnL among passing cells; if none passes → REJECTED, delays stay OFF, stop — no cell gets a
+second look.
+
+**Verification gates** (single look; winner on FULL DB incl. holdout, paired vs C0):
+Wilcoxon p < 0.05; CI low > 0; breadth ≥ 50%; **era consistency (user mandate)**:
+candidate per-era WR |pre−post| ≤ 7pp, candidate per-era total PnL > 0, per-era ΔPnL ≥
+−0.05 SOL with at least one era strictly > 0; **tail guard**: catastrophic trades
+(pnl_pct ≤ −30%) count within +3% of baseline and their summed PnL not worse by more than
+0.05 SOL. Anti-overfit: exactly one config advances to verification; no post-verification
+cell swaps; deterministic engine (rng_seed 42); no engine-code edits during burns.
+
+**Amendment 1 (2026-09-11 ~23:55) — external default drift + cell re-burn.** At 20:45–20:46
+(between the baseline spawn and the first cell spawn) an external write — user working in
+parallel — re-applied delay defaults into the tree: `v2_entry_delay_seconds` 0.0→**2.0**,
+`v2_exit_delay_seconds` 0.0→**20.0** (DEFAULT_CONFIG + adapter pops + `app.js`). Because
+batch cells pass ONLY the `--params` dict (DEFAULT_CONFIG is never merged in; the adapter
+pop fallbacks ARE the effective bare-`{}` defaults), all four first-run cells silently ran
+with exit=20+armed: `iter83_c1_e5_train` and `iter83_c4_e5x20_train` were byte-identical
+(e5+x20a), `c2` = e3+x20a, `c3` = e2(fallback!)+x20a. The baseline (spawned 20:16,
+pre-drift) is a true delays-OFF run and remains the reference. The four contaminated
+batches are quarantined as `iter83_drift{1..4}_*` (kept for the record, excluded from
+selection). Cells re-burned with FULLY EXPLICIT params (entry+exit+armed in every file) so
+pop drift cannot corrupt them, and a fifth cell is added at the user's hand-set config:
+**C5 = entry 2.0 + exit 20.0 armed** (disclosed user-introduced candidate; competes under
+the same screening gates; selection rule unchanged — highest bootstrap mean Δ among
+passing cells on TRAIN, single full-DB verification look).
+
+**Selection (2026-09-12 ~01:00, TRAIN only, 295 paired recs vs baseline).** Canonical
+paired_diff + era/tail per cell:
+
+| Cell | config (entry/exit armed) | boot mean Δ | Wilcoxon p> | CI95 low | breadth | era Δ pre / post | verdict |
+|---|---|---|---|---|---|---|---|
+| C1 | 5.0 / 0.0 | +0.00242 | 0.0228 | −0.00043 | 53.1% | +0.78 / **−0.081** | **FAIL** (CI + era-inverting) |
+| C2 | 3.0 / 0.0 | +0.00198 | 0.0107 | −0.00064 | 52.9% | +0.62 / **−0.041** | **FAIL** (CI + era-inverting) |
+| **C3** | **0.0 / 20.0 armed** | **+0.00958** | **7.1e-10** | **+0.00607** | **59.7%** | **+1.97 / +0.85** | **SELECTED** |
+| C4 | 5.0 / 20.0 armed | +0.00368 | 0.0039 | +0.00062 | 54.8% | +0.92 / +0.14 | pass, weaker |
+| C5 | 2.0 / 20.0 armed | +0.00330 | 0.00135 | +0.00039 | 55.0% | +0.57 / +0.39 | pass, weaker |
+
+Mechanism read: the exit-only armed deferral (C3) harvests armed winners ~20 s deeper into
+their own bounce — `rate_split_flip:armed` avg/trade 0.029→0.037 SOL, EVR fires 40→28,
+WR −2.2pp but expectancy/trade 5×. EVERY entry-delay config (C1/C2 pure, C4/C5 on top of
+x20a) DEGRADES the stack on the current tape — the iter78 entry effect did not survive the
+post-cleanup stack (gates OFF, no MSM): pure e5 is era-inverting (post Δ −0.08) and e2/e5
+cost −1.8 / −1.7 SOL respectively when stacked on x20a. Determinism verified: C4
+byte-identical to its drift twin (290/290 recs), C5 to its drift twin (291/291). Winner
+C3 (e0/x20a) advanced to the single full-DB verification burn `iter83_win_x20_full`.
+
+**VERDICT (2026-09-12 ~02:20): ACCEPT — `v2_exit_delay_seconds` 20.0 (armed-only 1.0)
+ADOPTED as the production default; `v2_entry_delay_seconds` stays 0.0.**
+
+- **Full-DB verification** (`iter83_win_x20_full` vs `iter83_base_full`, 571 paired recs):
+  candidate 572 traded / 1,301 trades / WR 63.64% / **+4.4025 SOL** / PF 1.37 vs baseline
+  WR 67.21% / −0.6614 / PF 0.95 → **Δ +5.064 SOL**, Wilcoxon (greater) p = **5.6e-17**,
+  paired t p = 3.2e-12, bootstrap 95% CI [+0.00647, +0.01137]/rec, breadth 59.5%,
+  McNemar p = 0.82. Canonical `paired_diff` verdict: **ACCEPT** (saved
+  `backend/analysis/iter83_win_full_paired.json`).
+- **Era consistency (user mandate)**: candidate PnL pre **+3.227** / post **+1.176** (both
+  ≫ 0; per-era Δ +2.82 / +2.22, each p < 3e-9, both CI+); candidate WR 64.47 / 62.18 —
+  **2.3pp era gap** (baseline: 4.2pp gap AND era-inconsistent PnL +0.41/−1.07). The
+  baseline's entire loss lived in the post-Aug-20 era; the exit delay fixes that era
+  (+2.22) without touching the pre era's sign.
+- **Unseen holdout (1,199 recs, first look)**: Δ mean +0.00802/rec, p = **6.8e-9**,
+  CI [+0.00503, +0.01129], breadth 59.4%; per-era Δ +0.85 (p=1.4e-4) / +1.37 (p=2.7e-6),
+  both CI+; candidate per-era PnL +1.41 / +0.39. No look-ahead: holdout was sealed at
+  split time and untouched during screening/selection.
+- **Tail guard**: catastrophic (≤−30%) trades 207→187, drag −9.39→−8.30 SOL (improved).
+- **Stability**: random train halves p = 8.0e-11 / 5.1e-8, breadth 60.0% / 59.1%.
+- **Mechanism**: armed harvest exits (gain_retrace, rate_split_flip:armed, tp_v2,
+  breakeven_scratch, reversal_exit) fill ~20 s deeper into their own bounce; WR −3.6pp but
+  expectancy/trade 0.00045 → 0.00338 SOL (**7.5×**). Loss book (kelly_flat, evr_triage,
+  kramers_down, recording_ended) fills instantly, untouched. Engine decisions byte-identical
+  to baseline's — execution timing only.
+- **Adoption**: DEFAULT_CONFIG + adapter pops + `app.js` (values + tooltips) set to
+  entry 0.0 / exit 20.0 / armed 1.0 — this REPLACES the interim hand-set entry 2.0
+  (evidence: C5 vs C3 = −1.8 SOL on train; every entry-delay config degraded the stack).
+  Stale default-pinning tests updated to the adopted defaults; suite green. Restart
+  `main.py` to deploy to live (LiveTrader reads the knobs off the engine object).
+- **Watch items**: post-adoption OOS re-score at ≥50 live trades (iter82 journal method);
+  headline WR on this stack is now ~63–64% (not the old 66% invariant — the exit delay
+  trades WR for expectancy); live-vs-BT audits should expect the −3.6pp WR shift.
+
+## Iter 83b — Holder-flow contribution on the adopted delay stack (2026-09-12, PREREGISTERED)
+
+User mandate: with the adopted production config (entry 0.0 / exit 20.0 armed), measure
+whether the holder-flow entry block + dev-sell exit actually contribute, on train AND the
+unseen holdout, then set the final production combination to exactly one of: [no delays +
+HF gates ON] · [delays + HF ON] · [delays + no HF] · [neither] (the [no delays + no HF]
+corner is already measured and NEGATIVE — not a candidate).
+
+**2×2 evidence** (delays = adopted e0/x20a; HF = `v2_holder_flow_entry_block` +
+`v2_holder_flow_exit_enable`): three corners already burned full-DB on this cohort —
+[no-delay+no-HF] `iter83_base_full` −0.661/67.2%; [no-delay+HF] `iter83_base_gatesON`
++0.536/64.9%; [delays+no-HF] `iter83_win_x20_full` +4.403/63.6% (verified). Missing corner
+**C6 = delays + HF ON** (`iter83b_params_c6.json`, all five knobs explicit): burn on TRAIN
+→ screen → full-DB verification only if it wins screening.
+
+**Decision rule (pre-stated, two-sided)**: C6 vs adopted gates-OFF config, TRAIN paired
+per-recording ΔPnL — significantly better (Wilcoxon greater p<0.05 AND CI low>0 AND
+breadth≥50%) → HF ON; significantly worse (Wilcoxon less p<0.05 AND CI high<0) → HF OFF;
+indeterminate → HF OFF (standing iter62 policy; no adoption without evidence). Verification
+inherits every iter83 gate (p/CI/breadth, era consistency WR-gap ≤7pp + per-era PnL>0, tail
+≤−30% guard). Era convention unchanged (cut 1787184000). Same split/seed. Report the full
+2×2 on train + holdout with era splits before setting production.
+
+
+**VERDICT (2026-09-12 ~03:20): production = [delays ON (exit 20 armed) + holder-flow OFF]
+— i.e., NO CODE CHANGE beyond the iter83 adoption; gates stay OFF.** Screening (C6 = gates
+ON on the adopted stack, train, 271 paired recs): Δ mean +0.00126 (p=0.037) but CI
+[−0.00095, +0.00328] spans 0 and breadth 16.6% — indeterminate per the pre-stated two-sided
+rule → keep OFF (iter62 policy). Full 2×2 (same 2,396-rec cohort):
+
+| delays | HF gates | full-DB PnL | WR | trades | note |
+|---|---|---|---|---|---|
+| off | off | −0.661 | 67.2% | 1,351 | baseline |
+| off | ON | +0.536 | 64.9% | 1,192 | gates add +1.20 (p=0.004, CI+, both eras) here |
+| 20a | off | +4.402 | 63.6% | 1,301 | adopted (iter83 verified) |
+| 20a | ON | +2.771 (train only) | 63.3% | 607 | ≈0 marginal on the delays stack (CI spans 0) |
+
+Mechanism read: the armed exit deferral already captures the post-washout protection the
+dev-sell exit was buying — marginal holder-flow contribution collapses to ~0 once the exit
+delay is on. Coverage caveat: pre-iter72 recordings carry ~6.7% whale-stream coverage, so
+the no-delays arm's +1.20 is measured on sparse-coverage data (post-fix recordings would
+be the clean channel if this is ever re-litigated with a full-coverage cohort).

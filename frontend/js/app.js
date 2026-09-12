@@ -183,8 +183,8 @@ let engineParamsV2 = {
   // a dev or whale sell occurs while in position (checked within exit window).
   // v2_holder_flow_require_tag: 0.0 = any large sell ≥ min_usd qualifies
   // (gate 1.0); 1.0 = require verified insider tag (dev/sniper/bundler/rat_trader).
-  v2_holder_flow_entry_block:          1.0,   // 1.0 = ON (production default), 0.0 = OFF
-  v2_holder_flow_exit_enable:          1.0,   // 1.0 = ON (production default), 0.0 = OFF
+  v2_holder_flow_entry_block:          0.0,   // 1.0 = ON, 0.0 = OFF (iter62 user policy; re-applied OFF 2026-09-11)
+  v2_holder_flow_exit_enable:          0.0,   // 1.0 = ON, 0.0 = OFF (iter62 user policy; re-applied OFF 2026-09-11)
   v2_holder_flow_require_tag:          0.0,   // 0.0 = all large sells (gate 1.0); 1.0 = verified tags only
   v2_holder_flow_min_usd:            100.0,   // Min sell USD threshold to filter dust (default $100)
   v2_holder_flow_entry_window_seconds:  30,   // Lookback window (s) before entry for dev/whale sell
@@ -217,7 +217,7 @@ let engineParamsV2 = {
   // the transient micro-dip after the signal; 10 s+ buys the bounce
   // (era-inverted) — do NOT move off 5.0 without re-gating.
   // 0.0 restores the pre-iter78 signal-instant fill. ──
-  v2_entry_delay_seconds:       0.0,  // production OFF (user decision 2026-09-11); >0 = seconds to defer entry execution
+  v2_entry_delay_seconds:       0.0,  // iter83 REJECTED on the current stack 2026-09-12 (era-inverting; degrades x20a) — keep 0.0; >0 = seconds to defer entry execution
 
   // ── iter80 ADOPTED (user decision 2026-09-03): deferred EXIT-fill
   // execution, armed-only 20s (the sell-side basis).  The iter78 discovery
@@ -230,7 +230,7 @@ let engineParamsV2 = {
   // Wilcoxon p=0.0038, CI [+0.00073,+0.00380], both eras positive (OLD
   // +0.59 / DEAD +0.51), expectancy/trade +48%, negative days 12→11,
   // PF 1.41.  0.0 = instant exit fill (pre-iter80 byte-exact hatch). ──
-  v2_exit_delay_seconds:      0.0,  // production OFF (user decision 2026-09-11); >0 = seconds to defer armed exit execution
+  v2_exit_delay_seconds:      20.0,  // iter83 ADOPTED 2026-09-12 (armed-only 20s: full-DB Δ+5.06 SOL p=5.6e-17, both eras+, holdout-confirmed); >0 = seconds to defer armed exit execution
   v2_exit_delay_armed_only:   1.0,  // 1.0 = defer armed/harvest exit classes only
 };
 
@@ -469,8 +469,8 @@ function renderSettings() {
     v2_rate_split_theta:                 "Sustained downward escape rate split threshold s = k_down / (k_up + k_down)",
     v2_rate_split_persist:               "Required consecutive 4-state intra-candle ticks (≈ persist / 4 seconds) with split ≥ theta",
     v2_rate_split_min_peak_age_ticks:    "Minimum ticks elapsed since peak price before firing (0 = disabled)",
-    v2_entry_delay_seconds:              "Production default 0.0 = OFF (user decision 2026-09-11): signal-instant fill. Set >0 to re-enable deferred entry execution — the measured iter78 cell was 5.0 (Δ+1.178 SOL vs instant, both eras positive, tail 123→104); the 5 s fill buys the ~5 s micro-dip, 10 s+ buys the bounce and era-inverts — do not move off 5.0 without re-gating. Live holds the queued swap and fills at the then-current price; backtests price the fill on the recorded path at t_signal+N",
-    v2_exit_delay_seconds:               "Production default 0.0 = OFF (user decision 2026-09-11): instant exit fill (pre-iter80, byte-exact). Set >0 to re-enable deferred ARMED exit execution — the measured iter80 cell was 20.0 (Δ+1.0405, p=0.0038, both eras positive, expectancy/trade +48%): the recorded path is +8.95% above armed exit fills in the 30s median (the give-back harvest fires at the bottom of its own micro-dip). Loss-book exits (kelly_flat/evr_triage/kramers_down/dev_sell/recording_ended) always fill instantly",
+    v2_entry_delay_seconds:              "Production default 0.0 = OFF (iter83 verdict 2026-09-12 on the post-cleanup stack: pure e5/e3 are era-inverting with post-Aug-20 ΔPnL < 0, and e2/e5 stacked on the adopted exit delay cost −1.8/−1.7 SOL vs exit-delay alone — keep 0.0). The old iter78 e5 effect (Δ+1.178, both eras) did not survive the stack change; re-gate before re-enabling. Live holds the queued swap and fills at the then-current price; backtests price the fill on the recorded path at t_signal+N",
+    v2_exit_delay_seconds:               "Production default 20.0 = ADOPTED (iter83 2026-09-12): deferred ARMED exit execution — full-DB Δ+5.06 SOL vs delays-off, Wilcoxon p=5.6e-17, both eras positive, unseen-holdout confirmed (p=6.8e-9), catastrophic tail reduced. The recorded path is +8.95% above armed exit fills in the 30s median (the give-back harvest fires at the bottom of its own micro-dip). Loss-book exits (kelly_flat/evr_triage/kramers_down/dev_sell/recording_ended) always fill instantly. Set 0.0 for the instant exit fill (pre-iter80 byte-exact hatch)",
     v2_exit_delay_armed_only:            "ADOPTED default 1.0: defer only the armed/harvest exit classes (gain_retrace, rate_split_flip, tp_v2, breakeven_scratch, reversal_exit). 0.0 defers every exit uniformly — the uniform cell was REJECTED (unarmed exits have NEGATIVE forward drift E[Δp30] = −0.25%; deferring the loss book is poison)",
   };
 

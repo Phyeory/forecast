@@ -225,8 +225,8 @@ DEFAULT_CONFIG = {
     "v2_evr_skip_sell_conc_min": 0.25,   # veto when maxsec sell share > this (0 = OFF)
     "v2_evr_skip_conc_window":  60,     # trailing window (s) for the share
     # ── iter36/43/56/66: Holder-Flow & Dev Sell Monitoring ───────────────
-    "v2_holder_flow_entry_block":          1.0,   # 1.0 = ON, 0.0 = OFF
-    "v2_holder_flow_exit_enable":          1.0,   # 1.0 = ON, 0.0 = OFF
+    "v2_holder_flow_entry_block":          0.0,   # 1.0 = ON, 0.0 = OFF (iter62 user policy; re-applied OFF 2026-09-11 — the git-surgery reset resurrected the committed 1.0)
+    "v2_holder_flow_exit_enable":          0.0,   # 1.0 = ON, 0.0 = OFF (iter62 user policy; see entry_block note)
     "v2_holder_flow_require_tag":          0.0,   # 0.0 = all large sells (gate 1.0); 1.0 = verified tags only
     "v2_holder_flow_min_usd":            100.0,   # Min sell USD threshold to filter dust
     "v2_holder_flow_entry_window_seconds":  30,   # Lookback window (s) before entry for dev/whale sell
@@ -267,7 +267,7 @@ DEFAULT_CONFIG = {
     # launch by N seconds.  Setting it to 0.0 restores the signal-instant
     # fill byte-exactly (the iter73 model).  It does NOT touch any engine
     # decision, exit, or size — only the execution timing of entries.
-    "v2_entry_delay_seconds": 0.0,   # production OFF (user decision 2026-09-11); >0 = iter78 deferred fill (5.0 was the adopted cell)
+    "v2_entry_delay_seconds": 0.0,   # iter83 REJECTED on the current stack 2026-09-12 (pure e5/e3 era-inverting, post Δ<0; e2/e5 stacked on x20a cost −1.8/−1.7 SOL vs x20a alone — keep 0.0); >0 = iter78 deferred fill
 
     # ── iter80 ADOPTION: 20-second deferred-exit execution (armed-only) ────
     # (user decision 2026-09-03; the sell-side mirror of the iter78 entry
@@ -295,7 +295,7 @@ DEFAULT_CONFIG = {
     # enable_exit_latency(L, armed_only) on them; live_trader.py holds the
     # queued armed EXIT on the candle clock then launches the sell.  The
     # exit DECISIONS are untouched — only the fill timing of armed exits.
-    "v2_exit_delay_seconds":     0.0,  # production OFF (user decision 2026-09-11); >0 = iter80 armed deferred fill (20.0 was the adopted cell)
+    "v2_exit_delay_seconds":     20.0,  # iter83 ADOPTED 2026-09-12 (armed-only 20s: full-DB Δ+5.06 SOL p=5.6e-17, both eras+, holdout-confirmed; >0 = iter80 armed deferred fill)
     "v2_exit_delay_armed_only":   1.0,  # 1.0 = defer armed/harvest classes only (applies when exit delay > 0)
 
 }
@@ -3004,8 +3004,8 @@ class StrategyEngineV2Adapter:
         #   When no holder_flow events are loaded, `_has_recent_dev_sell`
         #   always returns False, so behaviour is byte-identical to the
         #   pre-iter36 engine (parity-safe on recordings without holder_flow).
-        self._v2_holder_flow_entry_block = float(engine_kwargs.pop("v2_holder_flow_entry_block", 1.0))
-        self._v2_holder_flow_exit_enable = float(engine_kwargs.pop("v2_holder_flow_exit_enable", 1.0))
+        self._v2_holder_flow_entry_block = float(engine_kwargs.pop("v2_holder_flow_entry_block", 0.0))
+        self._v2_holder_flow_exit_enable = float(engine_kwargs.pop("v2_holder_flow_exit_enable", 0.0))
         self._v2_holder_flow_require_tag = float(engine_kwargs.pop("v2_holder_flow_require_tag", 0.0))
         self._v2_holder_flow_min_usd     = float(engine_kwargs.pop("v2_holder_flow_min_usd", 100.0))
         self._v2_holder_flow_entry_window_seconds = int(engine_kwargs.pop("v2_holder_flow_entry_window_seconds", 30))
@@ -3057,7 +3057,7 @@ class StrategyEngineV2Adapter:
         # 2026-09-03); 2026-09-11 the user set the production default to
         # 0.0 = instant exit fill (the pre-iter80 model, byte-exact); >0
         # re-enables the armed deferral.
-        self.v2_exit_delay_seconds = float(engine_kwargs.pop("v2_exit_delay_seconds", 0.0))
+        self.v2_exit_delay_seconds = float(engine_kwargs.pop("v2_exit_delay_seconds", 20.0))
         # 1.0: defer only the armed/harvest exit classes (gain_retrace,
         # rate_split_flip:armed, tp_v2, breakeven_scratch, reversal_exit);
         # the loss book (kelly_flat, evr_triage, kramers_down_exit,
