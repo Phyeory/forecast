@@ -569,6 +569,90 @@ def calibrate_from_population(
         return dict(_ALWAYS_EXPLICIT)
 
 
+# ── iter86: mint-history calibration (user proposal — full token picture) ───
+
+# Minimum prior same-mint candles required for a mint-history estimate.
+MIN_MINT_CANDLES = 120
+# Cap on prior same-mint candles fed to the estimator (rolling tail — the
+# most recent history is the relevant physics; also bounds query cost).
+MAX_MINT_CANDLES = 6000
+
+_MINT_CANDLE_QUERY = """
+SELECT c.open, c.high, c.low, c.close, c.volume,
+       c.buy_volume, c.sell_volume, c.pool_sol
+FROM candles c
+JOIN recordings r ON r.id = c.recording_id
+WHERE r.mint = ?
+  AND r.status = 'completed'
+  AND r.started_at > 0
+  AND r.started_at < ?
+  AND c.close > 0 AND c.open > 0
+ORDER BY r.started_at ASC, c.rowid ASC
+"""
+
+
+def calibrate_from_mint_history(
+    mint: str,
+    started_at_unix: float,
+    db_path: str = _DB_PATH,
+) -> dict:
+    """Estimate SDE coefficients from THIS TOKEN's own prior tape.
+
+    The user's proposal: instead of waiting for the live session's own first
+    ~120 candles, use the token's real recorded history — the full picture of
+    the coin being traded, available at tick 0 of the session.  In backtest
+    this reads every candle from prior completed recordings of the SAME mint
+    before the session start (deterministic, no lookahead — the session's own
+    candles are never touched).  In live, the same-mint recordings in the DB
+    play the same role; a chain-fetch path can extend coverage for mints the
+    DB has never seen.
+
+    Returns {} when this mint has < MIN_MINT_CANDLES prior candles — the
+    caller falls through to the next calibration layer (population / DEFAULT).
+    """
+    if not mint:
+        return {}
+    try:
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        rows = conn.execute(
+            _MINT_CANDLE_QUERY, (mint, float(started_at_unix))
+        ).fetchall()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"[MintCal] query error: {e}")
+        return {}
+
+    if len(rows) < MIN_MINT_CANDLES:
+        return {}
+
+    # Keep only the rolling tail (most recent physics), then build the
+    # (N, 9) candle array the estimator expects (rec-id column unused here).
+    rows = rows[-MAX_MINT_CANDLES:]
+    arr = np.array(
+        [[0.0] + list(r) for r in rows], dtype=float
+    )
+    duration_s = float(len(rows))  # 1s candles → duration ≈ candle count
+
+    try:
+        stats = _compute_rec_stats(arr, duration_s)
+    except Exception as e:
+        logger.warning(f"[MintCal] estimator error: {e}")
+        return {}
+    if stats is None:
+        return {}
+
+    overrides = _population_to_overrides(stats)
+    if not overrides:
+        return {}
+
+    logger.info(
+        f"[MintCal] {mint[:8]} calibrated from {len(rows)} prior same-mint "
+        f"candles: "
+        + ", ".join(f"{k}={v:.4g}" for k, v in sorted(overrides.items()))
+    )
+    return overrides
+
+
 # ── Public backtest path (sync) ───────────────────────────────────────────────
 
 def calibrate_from_history(started_at_unix: float) -> dict:

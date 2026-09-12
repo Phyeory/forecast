@@ -2292,6 +2292,10 @@ async def _get_or_create_live_session(
         # identically by default.  Passing `v2_popcal_enable` in the session's
         # engine_params overrides it for that session (0.0 = OFF hatch).
         # The flag is consumed here — it never reaches the engine config.
+        # iter86 mint-history layer: when `v2_mintcal_enable` is on, this
+        # token's OWN prior recorded candles calibrate FIRST (same-mint
+        # recordings in price_data.db before now — parity with the backtest
+        # mint layer); thin mints fall through to the population prior.
         try:
             from strategy_engineV2 import DEFAULT_CONFIG as _V2_DEFAULTS
             _popcal_on = float(
@@ -2299,13 +2303,26 @@ async def _get_or_create_live_session(
                                     _V2_DEFAULTS.get("v2_popcal_enable", 0.0))
             ) > 0.0
             if _popcal_on:
-                cal_overrides = await calibrate_async()
+                cal_overrides: dict = {}
+                _mintcal_on = float(
+                    primary_kwargs.get("v2_mintcal_enable",
+                                       _V2_DEFAULTS.get("v2_mintcal_enable", 0.0))
+                ) > 0.0
+                if _mintcal_on and real_mint:
+                    from session_calibrator import calibrate_from_mint_history
+                    cal_overrides = await asyncio.to_thread(
+                        calibrate_from_mint_history, str(real_mint), time.time()
+                    )
+                if not cal_overrides:
+                    cal_overrides = await calibrate_async()
                 # User params win over calibration (explicit beats implicit)
                 merged = {**cal_overrides, **primary_kwargs}
                 merged.pop("v2_popcal_enable", None)
+                merged.pop("v2_mintcal_enable", None)
                 primary_kwargs = merged
             else:
                 primary_kwargs.pop("v2_popcal_enable", None)
+                primary_kwargs.pop("v2_mintcal_enable", None)
         except Exception as _cal_err:
             logger.warning(f"[SessionCalibrator] calibration skipped: {_cal_err}")
         live_trader = LiveTrader(
