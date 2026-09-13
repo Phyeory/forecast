@@ -252,6 +252,7 @@ let engineParamsV2 = {
   v2_percoin_cal_min_candles: 120,  // full candles before the first recalibration
   v2_percoin_cal_every:       100,  // full candles between recalibrations
   v2_percoin_cal_window:      600,  // rolling tape length (full candles) used per estimation
+  v2_percoin_requires_mintcal: 1.0, // ADOPTED default 1.0 = ON (iter86c): per-coin refinement fires ONLY on mint-history sessions — on thin-mint/popcal tapes the online estimates are noise (true full-DB evidence)
   // ── ADOPTED 2026-09-12: population SDE calibration at session start ──
   // All 13 free SDE coefficients estimated from the last 50 completed
   // recordings before the session (physics formulas + UKF-stability bounds,
@@ -504,6 +505,7 @@ function renderSettings() {
     v2_percoin_cal_min_candles:           "Full candles of this coin's tape required before the first online recalibration (thin tapes are skipped entirely)",
     v2_percoin_cal_every:                 "Full candles between per-coin recalibrations",
     v2_percoin_cal_window:                "Rolling tape length (full candles) used for each per-coin estimation — older candles fall out of the estimate",
+    v2_percoin_requires_mintcal:           "ADOPTED default 1.0 = ON (iter86c): the per-coin online layer fires only when the mint-history layer supplied this session's coefficients (long prior tape = meaningful online estimates). On thin-mint/popcal sessions the online estimates are tape-noise (true full-DB burn: train −0.94 vs holdout +1.64 imbalance). An explicit v2_percoin_cal_enable in the session params bypasses this gate",
     v2_popcal_enable:                      "ADOPTED 1.0 = ON (2026-09-12): all 13 free SDE coefficients estimated from the last 50 completed recordings at session start. Fallback layer under mint-history: used only when THIS token has <120 prior same-mint candles. 0.0 = OFF (pre-adoption DEFAULT_CONFIG byte-parity)",
     v2_mintcal_enable:                     "ADOPTED default 1.0 = ON (2026-09-13, iter86b combined stack, user proposal): estimate all 13 SDE coefficients from THIS TOKEN's own prior recorded tape (prior completed recordings of the same mint — no lookahead) at tick 0. Gates: affected cohort Δ+0.71 SOL p=0.0057 CI+ breadth 62%, full-DB Δ+0.68 p=0.0027 breadth 71%, holdout +0.26 p=0.0033 breadth 78%, WR 63.8→76.8%, expectancy ×8 at equal trade count. 0.0 = OFF (population layer only)",
   };

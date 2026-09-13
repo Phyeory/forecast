@@ -306,6 +306,12 @@ DEFAULT_CONFIG = {
     # construction (invariant 1).  Default OFF — opt-in with
     # {"v2_percoin_cal_enable": 1.0}; bare-{} batches never silently change.
     "v2_percoin_cal_enable":      1.0,  # ADOPTED 2026-09-13 (iter86b combined stack: refines the mint-history/population start mid-session; standalone-rejected, adopted in combination)
+    # iter86c: per-coin refinement is evidence-backed ONLY on top of the
+    # mint-history layer (long prior tape → meaningful online estimates).
+    # On thin-mint/popcal sessions it is noise (true full-DB burn: −0.94
+    # train vs +1.64 holdout imbalance).  1.0 = per-coin fires only when the
+    # mint-history layer actually supplied the session's coefficients.
+    "v2_percoin_requires_mintcal": 1.0,
     "v2_percoin_cal_min_candles": 120,  # tape length before first recalibration
     "v2_percoin_cal_every":       100,  # full candles between recalibrations
     "v2_percoin_cal_window":      600,  # rolling window length (full candles)
@@ -2910,6 +2916,22 @@ class StrategyEngineV2Adapter:
             engine_kwargs.get("v2_percoin_cal_enable",
                                DEFAULT_CONFIG["v2_percoin_cal_enable"])
         ) > 0.0
+        # iter86c: when v2_percoin_requires_mintcal is set, the online layer
+        # additionally requires the mint-history layer to have supplied the
+        # session's coefficients (the _calibration_sourced sentinel — set by
+        # the pipelines only for mint-layer sessions).  On thin-mint/popcal
+        # sessions the online estimates are tape-noise (true full-DB burn
+        # evidence: train/holdout imbalance ±1.3 SOL).  An EXPLICIT
+        # v2_percoin_cal_enable in the caller's kwargs bypasses the gate
+        # (explicit beats implicit — surgical control stays possible).
+        _percoin_explicit = "v2_percoin_cal_enable" in engine_kwargs
+        _requires_mint = float(
+            engine_kwargs.get("v2_percoin_requires_mintcal",
+                              DEFAULT_CONFIG["v2_percoin_requires_mintcal"])
+        ) > 0.0
+        _mint_sourced = bool(engine_kwargs.get("_calibration_sourced", 0))
+        if _requires_mint and not _mint_sourced and not _percoin_explicit:
+            self._v2_percoin_enable = False
         self._v2_percoin_min_candles = int(
             engine_kwargs.get("v2_percoin_cal_min_candles",
                                DEFAULT_CONFIG["v2_percoin_cal_min_candles"]))

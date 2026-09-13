@@ -342,6 +342,7 @@ def run_backtest(
         # started_at — no lookahead) take precedence over the population
         # prior; thin/degenerate mint tapes fall through to population.
         cal_base: dict = {}
+        _mint_layer_fired = False
         _mintcal_on = float(
             engine_params.get("v2_mintcal_enable",
                               _V2_DEFAULTS.get("v2_mintcal_enable", 0.0))
@@ -352,18 +353,20 @@ def run_backtest(
                 str(recording.get("mint") or ""),
                 float(recording.get("started_at", 0.0)),
             )
+            _mint_layer_fired = bool(cal_base)
         if not cal_base:
             cal_base = calibrate_from_history(float(recording.get("started_at", 0.0)))
-        # Mark the SDE coefficients as calibration-sourced (iter86b): the
-        # per-coin online recalibration may refine them (the layers stack —
-        # mint-history starts the physics, per-coin adapts it mid-session).
-        # Dropped when the caller passed SDE keys explicitly (user intent
-        # stays protected); otherwise the engine's per-key protection is
-        # bypassed only for calibration-set coefficients.
+        # Mark SDE coefficients as calibration-sourced (iter86b) — but ONLY
+        # for mint-layer sessions (iter86c): the per-coin online refinement
+        # is evidence-backed on top of the mint layer's long prior tape; on
+        # popcal-fallback (thin-mint) sessions the online estimates are
+        # tape-noise (true full-DB burn: train −0.94 vs holdout +1.64
+        # imbalance), so those sessions must NOT carry the sentinel (the
+        # adapter's requires-mintcal gate then keeps per-coin off).
         _SDE_13 = ("sigma_mu", "lambda_mu", "kappa_mu", "sigma_phi", "alpha",
                    "beta", "eta", "sigma_h", "theta", "sigma_ell", "zeta",
                    "lambda_0", "tau_max")
-        if not any(k in engine_params for k in _SDE_13):
+        if _mint_layer_fired and not any(k in engine_params for k in _SDE_13):
             cal_base["_calibration_sourced"] = 1
         # Cell params win over calibration (explicit beats implicit); the
         # mintcal trigger key never reaches the engine config.
