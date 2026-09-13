@@ -305,7 +305,7 @@ DEFAULT_CONFIG = {
     # Backtester / ForwardTester / LiveTrader stay in pipeline parity by
     # construction (invariant 1).  Default OFF — opt-in with
     # {"v2_percoin_cal_enable": 1.0}; bare-{} batches never silently change.
-    "v2_percoin_cal_enable":      0.0,  # 1.0 = ON
+    "v2_percoin_cal_enable":      1.0,  # ADOPTED 2026-09-13 (iter86b combined stack: refines the mint-history/population start mid-session; standalone-rejected, adopted in combination)
     "v2_percoin_cal_min_candles": 120,  # tape length before first recalibration
     "v2_percoin_cal_every":       100,  # full candles between recalibrations
     "v2_percoin_cal_window":      600,  # rolling window length (full candles)
@@ -327,8 +327,16 @@ DEFAULT_CONFIG = {
     # mint, backtest-safe).  A coin re-visited by the platform gets its own
     # physics at tick 0 instead of a cross-population prior.  Falls through
     # to the population layer when the mint has <120 prior candles (~71% of
-    # sessions).  Research cell until gates pass; production default OFF.
-    "v2_mintcal_enable":         0.0,
+    # sessions).
+    # ADOPTED 2026-09-13 as iter86b COMBINED STACK (mint-history tick-0 +
+    # per-coin online recalibration refining it): affected-cohort (702 recs)
+    # Δ+0.71 SOL p=0.0057 CI[+0.0002,+0.0019] breadth 62.1%; full-DB Δ+0.68
+    # p=0.0027 CI[+0.0001,+0.0005] breadth 70.7%; HOLDOUT +0.26 p=0.0033
+    # breadth 77.8%; PRE-era p=0.0036 CI+ breadth 80% — every gate passed vs
+    # the adopted population stack.  WR 63.8→76.8%, expectancy ×8 (both
+    # 69-trade: decision quality, not throttling).  Thin mints (<120 prior
+    # candles) fall through to population — byte-identical there.
+    "v2_mintcal_enable":         1.0,
 
 }
 
@@ -2446,7 +2454,20 @@ class MemecoinStrategyEngine:
         # ── iter85: per-coin online recalibration state ────────────────────
         # Which cfg keys the initial config explicitly set — per-coin
         # recalibration NEVER overrides an explicit user choice.
-        self._explicit_cfg_keys: frozenset = frozenset((config or {}).keys())
+        # iter86: when the constructor kwargs were produced by a CALIBRATION
+        # layer (population / mint-history — pipelines mark them with the
+        # `_calibration_sourced` sentinel), the 13 SDE coefficients are NOT
+        # "user-explicit": the online recalibration may refine them (the
+        # layers are designed to stack: mint-history starts the physics,
+        # per-coin recalibration adapts it as the session tape grows).
+        _sde_keys = ("sigma_mu", "lambda_mu", "kappa_mu", "sigma_phi",
+                     "alpha", "beta", "eta", "sigma_h", "theta",
+                     "sigma_ell", "zeta", "lambda_0", "tau_max")
+        _cal_sourced = bool((config or {}).get("_calibration_sourced", 0))
+        self._explicit_cfg_keys: frozenset = frozenset(
+            k for k in (config or {}).keys()
+            if not (_cal_sourced and k in _sde_keys)
+        )
         self._recal_count: int = 0
 
     # ── iter85: per-coin recalibration ──────────────────────────────────
@@ -2786,6 +2807,12 @@ class StrategyEngineV2Adapter:
         # Re-inject needed control knobs that don't crash V2.
         if self._warmup_bars:
             v2_cfg.setdefault("warmup_bars", self._warmup_bars)
+        # iter86b: forward the calibration-sourced sentinel (not a DEFAULT_CONFIG
+        # key, so the filter above would strip it) — it tells the core which
+        # SDE coefficients came from a calibration layer and may be refined
+        # by the per-coin online recalibration.
+        if "_calibration_sourced" in engine_kwargs:
+            v2_cfg["_calibration_sourced"] = engine_kwargs["_calibration_sourced"]
 
         # Build the V2 core engine.
         self.core = MemecoinStrategyEngine(v2_cfg)
@@ -2875,11 +2902,24 @@ class StrategyEngineV2Adapter:
         # Rolling candle tape of THIS coin (completed candles only — volume
         # lands on the 4th intra-candle state).  Mirrors the
         # _candle_volume_history dedupe pattern above.
-        self._v2_percoin_enable = float(engine_kwargs.get("v2_percoin_cal_enable", 0.0)) > 0.0
-        self._v2_percoin_min_candles = int(engine_kwargs.get("v2_percoin_cal_min_candles", 120))
-        self._v2_percoin_every = max(1, int(engine_kwargs.get("v2_percoin_cal_every", 100)))
-        self._v2_percoin_window = max(self._v2_percoin_min_candles,
-                                      int(engine_kwargs.get("v2_percoin_cal_window", 600)))
+        # iter86b adoption: defaults source from DEFAULT_CONFIG (the knobs are
+        # adopted production config, single source of truth — the adapter's
+        # old hardcoded 0.0 fallback silently disabled the layer for bare-{}
+        # engine_params).
+        self._v2_percoin_enable = float(
+            engine_kwargs.get("v2_percoin_cal_enable",
+                               DEFAULT_CONFIG["v2_percoin_cal_enable"])
+        ) > 0.0
+        self._v2_percoin_min_candles = int(
+            engine_kwargs.get("v2_percoin_cal_min_candles",
+                               DEFAULT_CONFIG["v2_percoin_cal_min_candles"]))
+        self._v2_percoin_every = max(1, int(
+            engine_kwargs.get("v2_percoin_cal_every",
+                              DEFAULT_CONFIG["v2_percoin_cal_every"])))
+        self._v2_percoin_window = max(
+            self._v2_percoin_min_candles,
+            int(engine_kwargs.get("v2_percoin_cal_window",
+                                  DEFAULT_CONFIG["v2_percoin_cal_window"])))
         self._percoin_tape: list[dict] = []       # [{t, o, h, l, c, v, bv, sv, pool}]
         self._percoin_last_t: int = -1            # candle timestamp currently being filled
         self._percoin_completed: int = 0          # completed candles since last recal

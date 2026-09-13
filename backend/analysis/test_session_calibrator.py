@@ -457,8 +457,9 @@ class TestPopcalAdoption:
     with tests pinning a never-committed 'per-coin swap' state.)"""
 
     def test_bare_params_backtest_calibrates(self):
-        """Bare {} through run_backtest = adopted behaviour: the engine
-        receives calibrated SDE coefficients."""
+        """Bare {} through run_backtest = the ADOPTED combined stack
+        (iter86b, 2026-09-13: mint-history + population + per-coin online).
+        Rec 4320 separates the configs: stack=5 trades / −0.052420."""
         from backtester import run_backtest
         try:
             s = run_backtest(recording_id=4320, engine_version=2,
@@ -467,8 +468,9 @@ class TestPopcalAdoption:
         except Exception:
             pytest.skip("recording 4320 / DB unavailable")
         st = s["stats"]
-        assert (st["total_trades"], round(st["total_pnl_sol"], 6)) == (3, -0.050051), (
-            "bare-params backtest did not calibrate — adopted default broken"
+        assert (st["total_trades"], round(st["total_pnl_sol"], 6)) == (5, -0.052420), (
+            "bare-params backtest no longer reproduces the adopted stack "
+            "cell — adoption default broken"
         )
 
     def test_sentinel_false_is_off_hatch(self):

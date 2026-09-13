@@ -330,6 +330,12 @@ def run_backtest(
     from strategy_engineV2 import DEFAULT_CONFIG as _V2_DEFAULTS
     _popcal_default = bool(_V2_DEFAULTS.get("v2_popcal_enable", 0.0))
     _use_cal = bool(engine_params.pop("use_session_calibration", _popcal_default))
+    if not _use_cal and "v2_percoin_cal_enable" not in engine_params:
+        # NONCAL sentinel semantics: disable ALL calibration layers, including
+        # the engine-native per-coin online recalibration (it is DEFAULT-ON
+        # since the iter86b adoption).  An explicit v2_percoin_cal_enable in
+        # the caller's params wins (surgical control stays possible).
+        engine_params["v2_percoin_cal_enable"] = 0.0
     if _use_cal:
         # iter86 mint-history layer (user proposal): THIS token's own prior
         # candles (prior completed recordings of the same mint before
@@ -348,6 +354,17 @@ def run_backtest(
             )
         if not cal_base:
             cal_base = calibrate_from_history(float(recording.get("started_at", 0.0)))
+        # Mark the SDE coefficients as calibration-sourced (iter86b): the
+        # per-coin online recalibration may refine them (the layers stack —
+        # mint-history starts the physics, per-coin adapts it mid-session).
+        # Dropped when the caller passed SDE keys explicitly (user intent
+        # stays protected); otherwise the engine's per-key protection is
+        # bypassed only for calibration-set coefficients.
+        _SDE_13 = ("sigma_mu", "lambda_mu", "kappa_mu", "sigma_phi", "alpha",
+                   "beta", "eta", "sigma_h", "theta", "sigma_ell", "zeta",
+                   "lambda_0", "tau_max")
+        if not any(k in engine_params for k in _SDE_13):
+            cal_base["_calibration_sourced"] = 1
         # Cell params win over calibration (explicit beats implicit); the
         # mintcal trigger key never reaches the engine config.
         engine_params = {**cal_base, **engine_params}
