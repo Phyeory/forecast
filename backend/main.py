@@ -2304,6 +2304,7 @@ async def _get_or_create_live_session(
             ) > 0.0
             if _popcal_on:
                 cal_overrides: dict = {}
+                _mint_layer_fired = False
                 _mintcal_on = float(
                     primary_kwargs.get("v2_mintcal_enable",
                                        _V2_DEFAULTS.get("v2_mintcal_enable", 0.0))
@@ -2313,9 +2314,22 @@ async def _get_or_create_live_session(
                     cal_overrides = await asyncio.to_thread(
                         calibrate_from_mint_history, str(real_mint), time.time()
                     )
+                    _mint_layer_fired = bool(cal_overrides)
                 if not cal_overrides:
                     cal_overrides = await calibrate_async()
-                # User params win over calibration (explicit beats implicit)
+                # iter86c: mark mint-layer sessions only — the per-coin online
+                # refinement (requires-mintcal gate in the adapter) is
+                # evidence-backed on mint physics, noise on thin-mint popcal
+                # sessions (parity with the backtest layer).
+                _SDE_13 = ("sigma_mu", "lambda_mu", "kappa_mu", "sigma_phi",
+                           "alpha", "beta", "eta", "sigma_h", "theta",
+                           "sigma_ell", "zeta", "lambda_0", "tau_max")
+                if _mint_layer_fired and not any(
+                        k in primary_kwargs for k in _SDE_13):
+                    cal_overrides["_calibration_sourced"] = 1
+                # User params win over calibration (explicit beats implicit).
+                # NOTE: _calibration_sourced stays in the kwargs — the
+                # adapter reads it to arm the per-coin requires-mintcal gate.
                 merged = {**cal_overrides, **primary_kwargs}
                 merged.pop("v2_popcal_enable", None)
                 merged.pop("v2_mintcal_enable", None)

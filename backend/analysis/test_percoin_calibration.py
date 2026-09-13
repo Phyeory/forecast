@@ -157,19 +157,29 @@ class TestAdapterPerCoin:
             assert eng.core.cfg[k] == DEFAULT_CONFIG[k], f"{k} changed while OFF"
         assert eng.core._recal_count == 0
 
-    def test_bare_engine_is_adopted_on(self):
-        """iter86b adoption: bare-constructed engines carry the per-coin
-        layer ON (DEFAULT_CONFIG single source of truth — the adapter must
-        not shadow it with a hardcoded 0.0 fallback)."""
-        eng = create_engine(engine_version=2)   # no kwargs at all
-        assert eng._v2_percoin_enable is True, (
-            "bare engine lost the adopted per-coin default — adapter fallback "
-            "no longer sourced from DEFAULT_CONFIG"
+    def test_bare_engine_gated_off_without_mint_layer(self):
+        """iter86c: bare-constructed engines (no calibration kwargs) run with
+        per-coin GATED OFF (requires-mintcal default ON — online estimates on
+        thin-mint/popcal tapes are noise).  Mint-sourced sessions arm it."""
+        eng = create_engine(engine_version=2)
+        assert eng._v2_percoin_enable is False, (
+            "bare engine has per-coin active without a mint layer — the "
+            "requires-mintcal gate is not gating"
         )
+        eng2 = create_engine(engine_version=2, lambda_mu=0.25,
+                             _calibration_sourced=1)
+        assert eng2._v2_percoin_enable is True, (
+            "mint-sourced session lost the per-coin refinement"
+        )
+        # explicit opt-out still wins for mint-sourced sessions
+        eng3 = create_engine(engine_version=2, lambda_mu=0.25,
+                             _calibration_sourced=1, v2_percoin_cal_enable=0.0)
+        assert eng3._v2_percoin_enable is False
 
     def test_on_recalibrates_mid_session(self):
         tape = make_tape(7, 400, 0.05, 0.02, 0.3)
-        eng = create_engine(engine_version=2, v2_percoin_cal_enable=1.0)
+        eng = create_engine(engine_version=2, v2_percoin_cal_enable=1.0,
+                            _calibration_sourced=1)  # mint-layer session
         feed_adapter(eng, tape)
         assert eng.core._recal_count >= 1, "no recalibration fired"
         assert getattr(eng, "_percoin_log", []), "recalibration not logged"
@@ -182,8 +192,10 @@ class TestAdapterPerCoin:
     def test_two_coins_diverge(self):
         quiet = make_tape(8, 400, 0.01, 0.002, 0.0)
         wild = make_tape(9, 400, 0.08, 0.05, 0.5)
-        e_q = create_engine(engine_version=2, v2_percoin_cal_enable=1.0)
-        e_w = create_engine(engine_version=2, v2_percoin_cal_enable=1.0)
+        e_q = create_engine(engine_version=2, v2_percoin_cal_enable=1.0,
+                            _calibration_sourced=1)
+        e_w = create_engine(engine_version=2, v2_percoin_cal_enable=1.0,
+                            _calibration_sourced=1)
         feed_adapter(e_q, quiet)
         feed_adapter(e_w, wild)
         keys = ("sigma_mu", "lambda_mu", "alpha", "eta", "sigma_h", "tau_max")
@@ -211,7 +223,8 @@ class TestAdapterPerCoin:
     def test_tape_buffer_dedupe_4state(self):
         """400 candles × 4 states must produce exactly 400 tape rows."""
         tape = make_tape(12, 400, 0.03, 0.01, 0.0)
-        e = create_engine(engine_version=2, v2_percoin_cal_enable=1.0)
+        e = create_engine(engine_version=2, v2_percoin_cal_enable=1.0,
+                          _calibration_sourced=1)
         # use a min_candles trigger beyond the tape so no recal interferes
         e._v2_percoin_min_candles = 10_000
         e._percoin_next_at = 10_000
@@ -364,7 +377,7 @@ class TestLayerStacking:
         import inspect
         import backtester
         src = inspect.getsource(backtester.run_backtest)
-        assert 'if not any(k in engine_params for k in _SDE_13)' in src
+        assert '_mint_layer_fired and not any(k in engine_params for k in _SDE_13)' in src
         assert 'cal_base["_calibration_sourced"] = 1' in src
 
     def test_stack_end_to_end(self):
@@ -414,9 +427,11 @@ class TestAdoptionHatchMatrix:
         return (st["total_trades"], round(st["total_pnl_sol"], 6))
 
     def test_bare_params_run_adopted_stack(self):
+        """Rec 4320 is thin-mint: bare {} = population fallback (per-coin
+        gated off by requires-mintcal — no noise layer on thin tapes)."""
         got = self._run({})
-        assert got == (5, -0.052420), (
-            f"bare-{{}} no longer reproduces the adopted stack cell: {got}"
+        assert got == (3, -0.050051), (
+            f"bare-{{}} on thin-mint rec no longer matches popcal baseline: {got}"
         )
 
     def test_noncal_is_pure_default(self):
