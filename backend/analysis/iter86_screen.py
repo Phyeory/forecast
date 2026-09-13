@@ -27,7 +27,8 @@ from scipy.stats import wilcoxon
 RESULTS_DIR = "backend/v2_results"
 ERA_CUT = 1787184000
 BASE_BATCH = "iter84b_cal_full_1789218145"
-MINT_BATCH = None  # discovered
+import os as _os
+MINT_BATCH = _os.environ.get("iter86_candidate") or None  # discovered
 ANALYSIS = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -91,7 +92,8 @@ def symptoms(batch_id, label, ids=None):
 
 
 if __name__ == "__main__":
-    mint_batch = find_batch("iter86_mintcal")
+    _cand = sys.argv[sys.argv.index("--candidate") + 1] if "--candidate" in sys.argv else "iter86_mintcal"
+    mint_batch = find_batch(_cand)
     print(f"baseline: {BASE_BATCH}\nmint cell: {mint_batch}\n")
 
     base = load_batch(BASE_BATCH)

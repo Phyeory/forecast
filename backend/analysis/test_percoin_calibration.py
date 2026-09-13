@@ -144,15 +144,28 @@ class TestCoreRecalibrate:
 # ── Adapter integration ──────────────────────────────────────────────────────
 
 class TestAdapterPerCoin:
-    def test_off_is_default_byte_parity(self):
+    def test_explicit_off_is_default_byte_parity(self):
+        """v2_percoin_cal_enable=0.0 (explicit OFF) = coefficients frozen at
+        construction values.  Post-iter86b-adoption a BARE engine runs the
+        adopted ON stack; the OFF hatch is the explicit 0.0."""
         tape = make_tape(6, 300, 0.03, 0.01, 0.2)
-        eng = create_engine(engine_version=2)   # no kwargs at all
+        eng = create_engine(engine_version=2, v2_percoin_cal_enable=0.0)
         feed_adapter(eng, tape)
         for k in ("sigma_mu", "lambda_mu", "kappa_mu", "sigma_phi", "alpha",
                   "beta", "eta", "sigma_h", "theta", "sigma_ell", "zeta",
                   "lambda_0", "tau_max"):
             assert eng.core.cfg[k] == DEFAULT_CONFIG[k], f"{k} changed while OFF"
         assert eng.core._recal_count == 0
+
+    def test_bare_engine_is_adopted_on(self):
+        """iter86b adoption: bare-constructed engines carry the per-coin
+        layer ON (DEFAULT_CONFIG single source of truth — the adapter must
+        not shadow it with a hardcoded 0.0 fallback)."""
+        eng = create_engine(engine_version=2)   # no kwargs at all
+        assert eng._v2_percoin_enable is True, (
+            "bare engine lost the adopted per-coin default — adapter fallback "
+            "no longer sourced from DEFAULT_CONFIG"
+        )
 
     def test_on_recalibrates_mid_session(self):
         tape = make_tape(7, 400, 0.05, 0.02, 0.3)
@@ -318,3 +331,118 @@ class TestMintHistoryLayer:
         st = s["stats"]
         # must produce a result (mint layer or fallback) without error
         assert "total_trades" in st
+
+
+# ── iter86b: calibration-layer stacking ──────────────────────────────────────
+
+class TestLayerStacking:
+    """Mint-history start + per-coin online refinement + user protection."""
+
+    def test_calibration_sentinel_forwarded_through_adapter(self):
+        """_calibration_sourced must reach the core through the adapter's
+        DEFAULT_CONFIG-key filter (it is not a DEFAULT_CONFIG key)."""
+        from engine_factory import create_engine
+        eng = create_engine(
+            engine_version=2,
+            sigma_mu=0.05, _calibration_sourced=1,
+            v2_percoin_cal_enable=1.0,
+        )
+        # core treats sigma_mu as refinable: explicit keys exclude it
+        assert "sigma_mu" not in eng.core._explicit_cfg_keys
+        n = eng.core.recalibrate({"sigma_mu": 0.08})
+        assert n == 1
+
+    def test_without_sentinel_keys_still_protected(self):
+        from engine_factory import create_engine
+        eng = create_engine(engine_version=2, sigma_mu=0.05)
+        assert "sigma_mu" in eng.core._explicit_cfg_keys
+        assert eng.core.recalibrate({"sigma_mu": 0.08}) == 0
+
+    def test_backtester_sets_sentinel_only_without_user_sde(self):
+        """The pipeline must NOT set _calibration_sourced when the caller
+        passed SDE keys (user intent stays protected even with calibration)."""
+        import inspect
+        import backtester
+        src = inspect.getsource(backtester.run_backtest)
+        assert 'if not any(k in engine_params for k in _SDE_13)' in src
+        assert 'cal_base["_calibration_sourced"] = 1' in src
+
+    def test_stack_end_to_end(self):
+        """mint coefficients at tick 0 + online recalibration refines them."""
+        import numpy as np
+        from engine_factory import create_engine
+        rng = np.random.default_rng(86)
+        n = 400
+        closes = 100.0 * np.exp(np.cumsum(rng.normal(0, 0.03, n)))
+        vols = rng.uniform(0.5, 2.0, n)
+        buys = vols * rng.uniform(0.3, 0.7, n)
+        eng = create_engine(
+            engine_version=2,
+            lambda_mu=0.2368,            # "mint layer" value
+            _calibration_sourced=1,       # pipeline marks it refinable
+            v2_percoin_cal_enable=1.0,
+        )
+        for i in range(n):
+            o = closes[i - 1] if i else closes[0]
+            t = 1000 + i
+            eng.update(t, o, o, o, o, 0.0)
+            eng.update(t, o, max(o, closes[i]), min(o, closes[i]), closes[i], 0.0)
+            eng.update(t, o, max(o, closes[i]) * 1.005, min(o, closes[i]) * 0.995,
+                       min(o, closes[i]) * 0.995, 0.0)
+            eng.update(t, o, max(o, closes[i]) * 1.005, min(o, closes[i]) * 0.995,
+                       closes[i], vols[i], buys[i], vols[i] - buys[i], 10.0)
+        assert eng.core._recal_count >= 1, "online recalibration did not fire past mint start"
+
+
+# ── iter86b adoption: hatch-matrix semantics ─────────────────────────────────
+
+class TestAdoptionHatchMatrix:
+    """The adopted stack's four hatches on a discriminating recording.
+    Rec 4320 separates all configs: stack=5 trades, popcal=3, DEFAULT=2."""
+
+    PROBE = 4320
+
+    def _run(self, params):
+        from backtester import run_backtest
+        try:
+            s = run_backtest(recording_id=self.PROBE, engine_version=2,
+                             engine_params=params, buy_size_sol=0.1,
+                             persist_results=False)
+        except Exception:
+            pytest.skip("recording 4320 / DB unavailable")
+        st = s["stats"]
+        return (st["total_trades"], round(st["total_pnl_sol"], 6))
+
+    def test_bare_params_run_adopted_stack(self):
+        got = self._run({})
+        assert got == (5, -0.052420), (
+            f"bare-{{}} no longer reproduces the adopted stack cell: {got}"
+        )
+
+    def test_noncal_is_pure_default(self):
+        got = self._run({"use_session_calibration": False})
+        assert got == (2, -0.079628), (
+            f"NONCAL no longer byte-matches pure DEFAULT: {got}"
+        )
+
+    def test_popcal_only_matches_prior_adoption(self):
+        got = self._run({"v2_mintcal_enable": 0.0, "v2_percoin_cal_enable": 0.0})
+        assert got == (3, -0.050051), (
+            f"popcal-only no longer matches the 09-12 adopted baseline: {got}"
+        )
+
+    def test_noncal_plus_percoin_explicit(self):
+        got = self._run({"use_session_calibration": False,
+                         "v2_percoin_cal_enable": 1.0})
+        assert got == (4, 0.023963), (
+            f"surgical NONCAL+percoin control changed: {got}"
+        )
+
+    def test_noncal_disables_engine_native_percoin(self):
+        """The sentinel-false path must inject percoin-off when the caller
+        didn't pass the knob — otherwise NONCAL baselines silently carry
+        the online layer (iter86b adoption hazard)."""
+        import inspect
+        import backtester
+        src = inspect.getsource(backtester.run_backtest)
+        assert 'engine_params["v2_percoin_cal_enable"] = 0.0' in src
