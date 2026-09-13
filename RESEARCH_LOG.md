@@ -764,3 +764,80 @@ one knob away at every layer.
 (app.js v134). Existing baselines remain comparable via `{"use_session_calibration": false}`
 cells or the knob — future candidate screens MUST pin which side of the calibration
 default they ran on.
+
+---
+
+## iter86 — Mint-history calibration (user proposal: full token picture from its own prior tape) (2026-09-13)
+
+**User proposal**: calibrate from the token's real blockchain history instead of waiting for
+the session's own first 120 candles — full picture at tick 0.
+
+**Backtestable form**: `calibrate_from_mint_history(mint, started_at)` — all prior candles
+from completed recordings of the SAME mint before session start (no lookahead; the session's
+own candles are never touched).  Coverage: 702/2,437 recordings (29%) have ≥120 prior
+same-mint candles (388 with 2000+).  Zero overlap between newpairs_data.db newborn recordings
+and trading mints — no additional DB-resident history source exists.
+
+**Cell `iter86_mintcal`** (702 affected recs, both arms on the adopted popcal stack):
+- Affected cohort: Δ+0.16 SOL, p=0.37, breadth 48.0% (24↑/26↓) — GATES FAIL (paired).
+- But symptoms: expectancy flips −0.0012 → **+0.0016**, PnL −0.079 → +0.084, WR 64.8% vs 63.8%.
+- Full-DB reconstruction: holdout +0.13 p=0.055 breadth 77% — near-miss, directionally positive.
+- Decomposition by tape depth: mid-tapes (600-1999) strongest (+0.00051/rec), deep near-zero,
+  thin still positive — NO noise penalty to fix; the signal is real but small and exposure-
+  limited (only ~7% of affected recs trade at all).
+
+**iter86b combined stack** (preregistered, burning): mint-history at tick 0 + per-coin online
+recalibration refining it (iter85 machinery, previously standalone-rejected).  Enabling fix:
+`_calibration_sourced` sentinel — calibration-layer keys are refinable by the online layer
+(they are not user-explicit), while user-passed SDE keys remain protected (backtester sets the
+sentinel only when the caller passed no SDE keys).  Verified: mint lambda_mu 0.2368 start →
+online refinement 0.2311, recal_count 3, user keys protected; tests 26/26.
+
+Hypothesis: the two layers compound — mint-history fixes the cold-start (first ~120 candles
+run DEFAULT today), online adaptation tracks regime shifts mid-session.  Either alone was a
+wash; the combined cell is the first iteration with a fresh effect surface.
+
+### iter86b VERDICT (2026-09-13): **ALL GATES PASSED — ADOPTED** (user directive goal reached)
+
+Combined stack — mint-history at tick 0 + per-coin online recalibration refining it (the
+iter85 machinery, previously standalone-rejected, adopted in combination):
+
+| cohort | n | Δ SOL | CI95 | p_greater | breadth |
+|---|---|---|---|---|---|
+| AFFECTED (702) | 702 | **+0.71** | [+0.0002, +0.0019] | **0.0057** | 62.1% (36↑/22↓) |
+| FULL DB (recon) | 2452 | **+0.68** | [+0.0001, +0.0005] | **0.0027** | 70.7% (29↑/12↓) |
+| PRE-era | 1375 | +0.56 | [+0.0001, +0.0009] | 0.0036 | 80.0% |
+| POST-era | 1077 | +0.12 | [−0.0000, +0.0003] | 0.121 | 61.9% |
+| HOLDOUT | 1199 | **+0.26** | [+0.0001, +0.0004] | **0.0033** | 77.8% |
+
+Symptoms on the affected cohort: WR 63.8→**76.8%** (+13pp), expectancy −0.0012→**+0.0091**
+(×8), PnL −0.08→+0.63, PF 3.46 — at IDENTICAL trade count (69=69): pure decision-quality,
+no throttling.  Mechanism verification: 19 recordings the baseline never traded now trade
+(healed cold-start), 17 baseline-traded go silent (own-history says "not this coin's
+pattern"), shared recordings same counts better decisions.  No cohort leakage.
+
+**The two previously-null mechanisms compound**: mint-history fixes the cold-start (the
+first ~120 candles previously ran DEFAULT physics) and discriminates which tokens match
+their own history; per-coin online recalibration then tracks regime drift mid-session.  The
+enabling fix — `_calibration_sourced` sentinel (calibration-layer coefficients are refinable
+by the online layer; user-explicit keys stay protected; pipelines set the sentinel only when
+the caller passed no SDE keys) — was load-bearing: without it the online layer no-oped on
+exactly the keys mint-history set.
+
+**Adoption wiring** (all default ON, single source of truth):
+- `v2_mintcal_enable=1.0`, `v2_percoin_cal_enable=1.0` in DEFAULT_CONFIG; adapter per-coin
+  fallbacks now sourced from DEFAULT_CONFIG (the old hardcoded 0.0 silently disabled the
+  layer for bare-{} engine_params — caught by the end-to-end adoption probe).
+- NONCAL sentinel (`use_session_calibration: false`) now ALSO disables the engine-native
+  per-coin layer when the caller didn't pass the knob explicitly — pure-DEFAULT byte-parity
+  restored (verified: rec 4320 NONCAL = historical 2 trades / −0.079628 exactly).
+- Hatch matrix pinned by tests: bare {} = stack (5 trades); NONCAL = pure DEFAULT (2);
+  popcal-only = 09-12 baseline (3); NONCAL+percoin-explicit = surgical (4).
+- app.js mirrors the adopted knobs (v135); backtest batch path byte-reproduces the cell.
+
+**Live path**: main.py applies mint-history → population → DEFAULT at session start and
+the engine recalibrates online — identical to backtest by construction (parity 10/10).
+For never-before-seen mints live falls back to population calibration; the chain-fetch
+extension of the user's proposal (fetching full on-chain history for new mints) remains the
+next coverage expansion and is live-only (not backtestable — would need the fetched history
+persisted into the session recording for replay parity).
