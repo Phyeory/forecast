@@ -841,3 +841,70 @@ For never-before-seen mints live falls back to population calibration; the chain
 extension of the user's proposal (fetching full on-chain history for new mints) remains the
 next coverage expansion and is live-only (not backtestable — would need the fetched history
 persisted into the session recording for replay parity).
+
+---
+
+## iter86c — TRUE full-DB burn correction + per-coin gate (2026-09-13, evening)
+
+**The user asked "did you run a fullbatch backtest?" — the honest answer exposed a flaw:**
+the iter86b full-DB/holdout numbers were a RECONSTRUCTION (702-rec burn + assumed-identical
+rest), and the assumption was invalid: the per-coin layer acts on ALL recordings, including
+the 1,735 thin-mint ones where iter85 had already shown it's a wash.
+
+**True full-DB burn of the ungated combined stack (iter86b_full, 2,437 recs):**
+- FULL DB Δ+1.30, p_g=0.049, **CI crosses zero** [−0.0003, +0.0013], breadth 54.9%
+- POST-era Δ+0.25 p=0.36 — **H1 FAILS as preregistered**
+- TRAIN half Δ−0.59; HOLDOUT half Δ+2.00 (p=0.0019, CI+) — a ±1.3 SOL random-half imbalance
+- Decomposition: affected-702 reproduces its burn 702/702 byte-identical (+0.71, split-
+  balanced +0.35 train / +0.36 holdout — the mint-history effect is REAL and clean); the
+  entire noise lives in non-affected ∩ per-coin (−0.94 train / +1.64 holdout) — the
+  iter85 noise signature on thin-mint tapes.
+
+**Root cause**: per-coin online estimates on thin-mint/popcal sessions are tape-noise —
+meaningful online estimation needs the mint layer's long prior tape as the starting physics.
+
+**iter86c fix (evidence-backed)**: `v2_percoin_requires_mintcal=1.0` (DEFAULT_CONFIG) — the
+adapter arms the per-coin layer ONLY when the `_calibration_sourced` sentinel is present,
+and the pipelines set that sentinel ONLY for mint-layer sessions (population fallback does
+NOT set it). An explicit per-session `v2_percoin_cal_enable` bypasses the gate (explicit
+beats implicit). Live path (main.py) mirrors the backtest exactly.
+
+**Verified**: affected rec 410 gated-bare reproduces the stack burn (1, 0.004415) ✓;
+thin-mint recs 4320/4665/4668 gated-bare = popcal baseline exactly (the 3 "trades" earlier
+seen on 4665 were thin-mint per-coin noise — now removed) ✓; suite 198, parity 10/10 ✓.
+
+**Airtight full-DB burn of the gated config (iter86c_full) — RUNNING.** Expected: affected
+702 = stack-burn values (+0.71 vs popcal), everything else byte-identical to cal_full. The
+mechanism's gates live on the affected cohort (where it can act); the full-DB burn exists
+so the adopted configuration's whole-DB artifact is real, not reconstructed.
+
+**Lesson (added to the measurement-traps canon)**: an engine-native layer that runs on every
+recording cannot be reconstructed from a subset burn + baseline — "rest = baseline" requires
+the layer to be provably inert there. Reconstruct only what is byte-identical by verified
+control, and burn the rest.
+
+---
+
+## iter86d — Live chain fetch of full mint history (2026-09-14, user proposal completed)
+
+Live sessions on thin mints (no prior recorded tape) now fetch the token's COMPLETE
+on-chain trade history at session start — the user's "full picture via blockchain":
+- bonding-curve PDA signatures → pre-graduation trades (reserves-formula price)
+- PumpSwap pool signatures (pool via DexScreener, WSOL-quoted) → post-graduation trades
+- 1s candles with buy/sell split → persisted to `mint_history_candles` (shared by live
+  and backtest — parity by construction; failure → population fallback)
+- Bounded 90s timeout, fits inside the 100-candle warmup; `v2_chain_fetch_enable=1.0`
+
+**RPC retention limit discovered**: publicnode/mainnet-beta retain only ~2 days of
+signatures per account — the chain fetch recovers RECENT history (exactly what a live
+session needs for a freshly-opened token) but cannot reconstruct weeks-old history for
+quiet tokens. Fetched candles accumulate permanently, so a token's chain tape deepens
+across sessions.
+
+**Incidental bug fix**: pumpfun_client's PumpFunRPCClient used a WRONG pump.fun program
+constant (derived PDA didn't exist — the native curve-watcher was silently dead; live
+prices actually came from the PumpPortal stream's reserve fields). Fixed to the canonical
+program (validated on-chain: account exists, signatures returned).
+
+Chain-fetch smoke on real chain data: fetched + persisted + calibrated (65 candles from a
+live token; thin only because the token traded little). Suite 204, parity 10/10.
