@@ -344,6 +344,15 @@ DEFAULT_CONFIG = {
     # candles) fall through to population — byte-identical there.
     "v2_mintcal_enable":         1.0,
 
+    # ── iter86d: live chain fetch of full mint history (user proposal) ──
+    # Thin-mint live sessions fetch the token's COMPLETE bonding-curve trade
+    # history from Solana RPC once at session start (bounded 90s, fits inside
+    # the 100-candle warmup), persist it to price_data.db
+    # `mint_history_candles`, and calibrate from the full picture at tick 0.
+    # Persisted rows are shared by live AND backtest (parity by construction).
+    # Failure → population fallback, logged.
+    "v2_chain_fetch_enable":     1.0,
+
 }
 
 

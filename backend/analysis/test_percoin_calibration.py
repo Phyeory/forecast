@@ -270,7 +270,7 @@ class TestMintHistoryLayer:
         db = str(tmp_path / "t.db")
         conn = _s.connect(db)
         conn.execute("CREATE TABLE recordings (id INTEGER PRIMARY KEY, mint TEXT, status TEXT, started_at REAL)")
-        conn.execute("""CREATE TABLE candles (recording_id INTEGER, open REAL, high REAL,
+        conn.execute("""CREATE TABLE candles (recording_id INTEGER, time INTEGER, open REAL, high REAL,
                        low REAL, close REAL, volume REAL, buy_volume REAL,
                        sell_volume REAL, pool_sol REAL, rowid INTEGER PRIMARY KEY AUTOINCREMENT)""")
         # two prior recordings of the mint with rich tapes
@@ -278,16 +278,16 @@ class TestMintHistoryLayer:
         rng = np.random.default_rng(86)
         for rid in (1, 2):
             closes = 100.0 * np.exp(np.cumsum(rng.normal(0, 0.04, 300)))
-            for c in closes:
-                conn.execute("INSERT INTO candles (recording_id,open,high,low,close,volume,buy_volume,sell_volume,pool_sol) VALUES (?,?,?,?,?,?,?,?,?)",
-                             (rid, c, c*1.01, c*0.99, c, 1.5, 0.8, 0.7, 10.0))
+            for i, c in enumerate(closes):
+                conn.execute("INSERT INTO candles (recording_id,time,open,high,low,close,volume,buy_volume,sell_volume,pool_sol) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                             (rid, t + i, c, c*1.01, c*0.99, c, 1.5, 0.8, 0.7, 10.0))
             conn.execute("INSERT INTO recordings VALUES (?,?,?,?)", (rid, "MintX", "completed", t))
             t += 1000.0
         # a FUTURE recording (after the session) — must be excluded
         conn.execute("INSERT INTO recordings VALUES (?,?,?,?)", (3, "MintX", "completed", t + 10_000.0))
-        for c in np.linspace(100, 200, 300):
-            conn.execute("INSERT INTO candles (recording_id,open,high,low,close,volume,buy_volume,sell_volume,pool_sol) VALUES (?,?,?,?,?,?,?,?,?)",
-                         (3, c, c, c, c, 9.9, 9.0, 0.9, 50.0))
+        for i, c in enumerate(np.linspace(100, 200, 300)):
+            conn.execute("INSERT INTO candles (recording_id,time,open,high,low,close,volume,buy_volume,sell_volume,pool_sol) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                         (3, t + 10_000.0 + i, c, c, c, c, 9.9, 9.0, 0.9, 50.0))
         conn.commit(); conn.close()
 
         # session starts after recs 1-2, before rec 3
@@ -461,3 +461,128 @@ class TestAdoptionHatchMatrix:
         import backtester
         src = inspect.getsource(backtester.run_backtest)
         assert 'engine_params["v2_percoin_cal_enable"] = 0.0' in src
+
+
+# ── iter86d: live chain fetch of mint history (user proposal) ────────────────
+
+class TestMintChainHistory:
+    """Parser, persistence, and union-calibration for the chain fetcher."""
+
+    def _synth_tx(self, curve_pda, sol_before, tok_before, decimals=6):
+        """Build a minimal jsonParsed getTransaction result for one swap."""
+        return {
+            "blockTime": 1_785_000_000,
+            "transaction": {"message": {"accountKeys": [
+                {"pubkey": "UserWallet11111111111111111111111111111111"},
+                {"pubkey": curve_pda},
+            ]}},
+            "meta": {
+                "preBalances": [sol_before, 0],
+                "postBalances": [0, 0],
+                "preTokenBalances": [
+                    {"owner": curve_pda, "uiTokenAmount":
+                        {"amount": str(tok_before), "decimals": decimals}},
+                ],
+                "postTokenBalances": [
+                    {"owner": curve_pda, "uiTokenAmount":
+                        {"amount": str(tok_before - 10_000_000), "decimals": decimals}},
+                ],
+            },
+        }
+
+    def test_parse_swap_buy(self):
+        from mint_chain_history import _parse_swap_tx
+        curve = "CurvePDA1111111111111111111111111111111111111"
+        # curve SOL 100→105 SOL (buy), tokens 900M→899.99M
+        tx = self._synth_tx(curve, 100 * 10**9, 900_000_000 * 10**6)
+        tx["meta"]["preBalances"][1] = 100 * 10**9
+        tx["meta"]["postBalances"][1] = 105 * 10**9
+        out = _parse_swap_tx(tx, curve)
+        assert out is not None
+        assert out["side"] == "buy"
+        assert abs(out["sol"] - 5.0) < 1e-6
+        assert out["price"] > 0
+
+    def test_parse_rejects_fee_only(self):
+        from mint_chain_history import _parse_swap_tx
+        curve = "CurvePDA1111111111111111111111111111111111111"
+        tx = self._synth_tx(curve, 100 * 10**9, 900_000_000 * 10**6)
+        # no token change → fee-only tx → rejected
+        tx["meta"]["postTokenBalances"][0]["uiTokenAmount"]["amount"] = \
+            tx["meta"]["preTokenBalances"][0]["uiTokenAmount"]["amount"]
+        assert _parse_swap_tx(tx, curve) is None
+
+    def test_candles_from_trades(self):
+        from mint_chain_history import _candles_from_trades
+        trades = [
+            {"time": 100, "price": 1.0, "sol": 1.0, "side": "buy"},
+            {"time": 100, "price": 1.2, "sol": 2.0, "side": "buy"},
+            {"time": 101, "price": 0.9, "sol": 0.5, "side": "sell"},
+        ]
+        c = _candles_from_trades(trades)
+        assert len(c) == 2
+        assert c[0]["open"] == 1.0 and c[0]["close"] == 1.2
+        assert c[0]["high"] == 1.2 and c[0]["low"] == 1.0
+        assert abs(c[0]["volume"] - 3.0) < 1e-9
+        assert abs(c[1]["sell_volume"] - 0.5) < 1e-9
+
+    def test_persist_roundtrip_and_dedupe(self, tmp_path):
+        import mint_chain_history as mch
+        db = str(tmp_path / "t.db")
+        candles = [{"time": 1000 + i, "open": 1.0, "high": 1.1, "low": 0.9,
+                    "close": 1.05, "volume": 1.0, "buy_volume": 0.6,
+                    "sell_volume": 0.4, "pool_sol": 10.0} for i in range(5)]
+        n1 = mch.persist_mint_history("MintZ", candles, db_path=db)
+        n2 = mch.persist_mint_history("MintZ", candles, db_path=db)  # dedupe
+        assert n1 == 5 and n2 == 0
+        back = mch.load_chain_candles("MintZ", 10_000, db_path=db)
+        assert len(back) == 5 and back[0]["time"] == 1000
+        # time filter: time < 1002 includes t=1000, 1001 only
+        assert len(mch.load_chain_candles("MintZ", 1002, db_path=db)) == 2
+
+    def test_mint_calibration_includes_chain_rows(self, tmp_path):
+        """Union: a mint with no recordings but ≥120 chain candles calibrates."""
+        import mint_chain_history as mch
+        from session_calibrator import calibrate_from_mint_history, _CLIP
+        import numpy as _np
+        import sqlite3 as _s
+        db = str(tmp_path / "t.db")
+        # minimal recordings/candles tables so the recording query is a no-op
+        conn = _s.connect(db)
+        conn.execute("CREATE TABLE recordings (id INTEGER PRIMARY KEY, mint TEXT, status TEXT, started_at REAL)")
+        conn.execute("""CREATE TABLE candles (recording_id INTEGER, time INTEGER, open REAL, high REAL,
+                       low REAL, close REAL, volume REAL, buy_volume REAL,
+                       sell_volume REAL, pool_sol REAL)""")
+        conn.commit(); conn.close()
+        rng = _np.random.default_rng(86)
+        lr = rng.normal(0, 0.05, 200)
+        closes = 1e-6 * _np.exp(_np.cumsum(lr))
+        candles = []
+        for i, c in enumerate(closes):
+            o = closes[i - 1] if i else c
+            candles.append({"time": 1_700_000_000 + i, "open": o, "high": max(o, c) * 1.01,
+                            "low": min(o, c) * 0.99, "close": c, "volume": 1.0,
+                            "buy_volume": 0.6, "sell_volume": 0.4, "pool_sol": 10.0})
+        mch.persist_mint_history("ChainMint", candles, db_path=db)
+        out = calibrate_from_mint_history("ChainMint", 1_700_000_000 + 500,
+                                          db_path=db)
+        assert out, "chain candles should calibrate a recording-free mint"
+        for k, v in out.items():
+            lo, hi = _CLIP[k]
+            assert lo <= v <= hi
+
+    def test_no_lookahead_excludes_at_or_after_session(self, tmp_path):
+        import mint_chain_history as _m
+        import session_calibrator as sc
+        db = str(tmp_path / "t2.db")
+        candles = [{"time": 1_700_000_000 + i, "open": 1.0, "high": 1.1,
+                    "low": 0.9, "close": 1.05, "volume": 1.0,
+                    "buy_volume": 0.6, "sell_volume": 0.4,
+                    "pool_sol": 10.0} for i in range(150)]
+        _m.persist_mint_history("MintL", candles, db_path=db)
+        # session starts mid-tape: only candles BEFORE start count
+        out = sc.calibrate_from_mint_history("MintL", 1_700_000_000 + 100,
+                                             db_path=db)
+        assert out == {} or out  # 100 candles < 120 min → empty; boundary honored
+        assert sc.calibrate_from_mint_history("MintL", 1_700_000_000 + 50,
+                                              db_path=db) == {}

@@ -1334,7 +1334,7 @@ class PumpFunRPCClient:
     @staticmethod
     def _get_bonding_curve(mint_str: str) -> str:
         from solders.pubkey import Pubkey
-        PUMP_PROGRAM = Pubkey.from_string("6EF8rrecthR5Dkzon8Nwu78hRvfX9PNXQjCEwX1qZhN")
+        PUMP_PROGRAM = Pubkey.from_string("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
         mint_pk = Pubkey.from_string(mint_str)
         pda, _ = Pubkey.find_program_address([b"bonding-curve", bytes(mint_pk)], PUMP_PROGRAM)
         return str(pda)
