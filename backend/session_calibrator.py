@@ -578,7 +578,7 @@ MIN_MINT_CANDLES = 120
 MAX_MINT_CANDLES = 6000
 
 _MINT_CANDLE_QUERY = """
-SELECT c.open, c.high, c.low, c.close, c.volume,
+SELECT c.time, c.open, c.high, c.low, c.close, c.volume,
        c.buy_volume, c.sell_volume, c.pool_sol
 FROM candles c
 JOIN recordings r ON r.id = c.recording_id
@@ -586,8 +586,9 @@ WHERE r.mint = ?
   AND r.status = 'completed'
   AND r.started_at > 0
   AND r.started_at < ?
+  AND c.time < ?
   AND c.close > 0 AND c.open > 0
-ORDER BY r.started_at ASC, c.rowid ASC
+ORDER BY c.time ASC
 """
 
 
@@ -614,13 +615,35 @@ def calibrate_from_mint_history(
         return {}
     try:
         conn = sqlite3.connect(db_path, timeout=10.0)
+        before = float(started_at_unix)
         rows = conn.execute(
-            _MINT_CANDLE_QUERY, (mint, float(started_at_unix))
+            _MINT_CANDLE_QUERY, (mint, before, before)
         ).fetchall()
+        # iter86d: union the persisted chain-fetch candles (live sessions on
+        # mints this platform never recorded).  Same table, same filter —
+        # live and backtest read identical rows, so parity holds.
+        try:
+            chain_rows = conn.execute(
+                """SELECT time, open, high, low, close, volume,
+                          buy_volume, sell_volume, pool_sol
+                   FROM mint_history_candles
+                   WHERE mint=? AND time < ? AND source='chain'
+                   ORDER BY time ASC""",
+                (mint, float(started_at_unix)),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            chain_rows = []  # table not created yet
         conn.close()
     except Exception as e:
         logger.warning(f"[MintCal] query error: {e}")
         return {}
+
+    # union on 9-tuples (time, o, h, l, c, v, bv, sv, pool); dedupe by time —
+    # recording candles win over chain candles at the same second
+    merged = {r[0]: tuple(r) for r in rows}
+    for cr in chain_rows:
+        merged.setdefault(cr[0], tuple(cr))
+    rows = [merged[t] for t in sorted(merged)]
 
     if len(rows) < MIN_MINT_CANDLES:
         return {}
@@ -628,9 +651,7 @@ def calibrate_from_mint_history(
     # Keep only the rolling tail (most recent physics), then build the
     # (N, 9) candle array the estimator expects (rec-id column unused here).
     rows = rows[-MAX_MINT_CANDLES:]
-    arr = np.array(
-        [[0.0] + list(r) for r in rows], dtype=float
-    )
+    arr = np.array([[0.0] + list(r) for r in rows], dtype=float)
     duration_s = float(len(rows))  # 1s candles → duration ≈ candle count
 
     try:

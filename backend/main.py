@@ -2314,6 +2314,35 @@ async def _get_or_create_live_session(
                     cal_overrides = await asyncio.to_thread(
                         calibrate_from_mint_history, str(real_mint), time.time()
                     )
+                    # iter86d (user proposal — live chain fetch): thin mints
+                    # fetch their FULL on-chain history once, persist it, and
+                    # recalibrate.  Bounded (timeout ≤ 90s) — fits inside the
+                    # engine's 100-candle warmup, so no tradable window is
+                    # lost.  Persisted rows make future backtests of this
+                    # session see identical calibration (parity).
+                    _chain_on = float(
+                        primary_kwargs.get("v2_chain_fetch_enable",
+                                           _V2_DEFAULTS.get("v2_chain_fetch_enable", 0.0))
+                    ) > 0.0
+                    if _chain_on and not cal_overrides:
+                        try:
+                            from mint_chain_history import fetch_and_persist
+                            inserted = await asyncio.wait_for(
+                                fetch_and_persist(str(real_mint)), timeout=95.0
+                            )
+                            if inserted:
+                                logger.info(
+                                    f"[MintChain] {real_mint[:8]}… persisted "
+                                    f"{inserted} chain candles — recalibrating"
+                                )
+                                cal_overrides = await asyncio.to_thread(
+                                    calibrate_from_mint_history,
+                                    str(real_mint), time.time(),
+                                )
+                        except asyncio.TimeoutError:
+                            logger.warning("[MintChain] fetch timed out — population fallback")
+                        except Exception as _chain_err:
+                            logger.warning(f"[MintChain] fetch failed: {_chain_err}")
                     _mint_layer_fired = bool(cal_overrides)
                 if not cal_overrides:
                     cal_overrides = await calibrate_async()
