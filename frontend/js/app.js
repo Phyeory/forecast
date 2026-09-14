@@ -248,7 +248,10 @@ let engineParamsV2 = {
   // expectancy ×8 at equal trade count.  Thin mints (<120 prior candles)
   // fall through to the population layer.
   v2_mintcal_enable:          1.0,  // ADOPTED default 1.0 = ON; 0.0 = OFF (population-layer fallback only)
-  v2_percoin_cal_enable:      1.0,  // ADOPTED default 1.0 = ON (refines calibration layers mid-session); 0.0 = OFF
+  // v2_percoin_cal_enable is deliberately NOT broadcast here (iter86c): a
+  // transmitted explicit value would bypass the requires-mintcal gate on
+  // every session.  The layer arms itself on mint-history sessions; surgical
+  // per-session control stays available via the API.
   v2_percoin_cal_min_candles: 120,  // full candles before the first recalibration
   v2_percoin_cal_every:       100,  // full candles between recalibrations
   v2_percoin_cal_window:      600,  // rolling tape length (full candles) used per estimation

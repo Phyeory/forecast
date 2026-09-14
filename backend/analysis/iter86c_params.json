@@ -1,0 +1,8 @@
+{
+  "v2_mintcal_enable": 1.0,
+  "v2_exit_delay_seconds": 20.0,
+  "v2_exit_delay_armed_only": 1.0,
+  "v2_entry_delay_seconds": 0.0,
+  "v2_holder_flow_entry_block": 0.0,
+  "v2_holder_flow_exit_enable": 0.0
+}
