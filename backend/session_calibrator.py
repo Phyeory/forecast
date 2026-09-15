@@ -61,6 +61,43 @@ _ALWAYS_EXPLICIT: dict = {
     "v2_holder_flow_exit_enable": 0.0,
 }
 
+# ── Canonical 13 free SDE coefficient keys ─────────────────────────────────
+SDE_COEFF_KEYS = ("sigma_mu", "lambda_mu", "kappa_mu", "sigma_phi", "alpha",
+                  "beta", "eta", "sigma_h", "theta", "sigma_ell", "zeta",
+                  "lambda_0", "tau_max")
+
+
+def drop_default_sde_keys(engine_params: dict, defaults: dict,
+                          keys: tuple = SDE_COEFF_KEYS) -> dict:
+    """Return a copy of `engine_params` minus SDE coefficients identical to
+    `defaults` (within float tolerance).
+
+    The dashboard transmits all 13 SDE coefficients at DEFAULT_CONFIG values
+    on every call — presence must not count as user intent.  Left in place,
+    default-valued keys would (a) overwrite the calibration base in the
+    {**cal, **params} merge, (b) suppress the mint `_calibration_sourced`
+    sentinel, and (c) pin the keys against per-coin online refinement —
+    silently running dashboard backtests/sessions uncalibrated while bare-{}
+    sessions calibrate (live-vs-backtest parity break, 2026-09-15).
+    Genuinely tweaked (non-default) values are kept and still count as
+    explicit: user intent wins.
+    """
+    cleaned = dict(engine_params)
+    for k in keys:
+        if k not in cleaned:
+            continue
+        dflt = defaults.get(k, None)
+        if dflt is None:
+            continue
+        try:
+            same = math.isclose(float(cleaned[k]), float(dflt),
+                                rel_tol=1e-6, abs_tol=1e-12)
+        except (TypeError, ValueError):
+            continue
+        if same:
+            cleaned.pop(k, None)
+    return cleaned
+
 # ── Clipping bounds for each estimated coefficient ────────────────────────────
 # (lo, hi) — derived from the SDE physics: values outside these ranges would
 # make the filter either degenerate (collapse) or useless (pure noise).

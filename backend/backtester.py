@@ -58,7 +58,7 @@ from data_store import (
     create_backtest,
     list_recordings,
 )
-from session_calibrator import calibrate_from_history
+from session_calibrator import calibrate_from_history, drop_default_sde_keys
 
 
 import multiprocessing
@@ -337,6 +337,11 @@ def run_backtest(
         # the caller's params wins (surgical control stays possible).
         engine_params["v2_percoin_cal_enable"] = 0.0
     if _use_cal:
+        # Default-valued SDE keys carry no user intent (the dashboard sends
+        # all 13 at DEFAULT_CONFIG values on every call) — drop them so the
+        # calibration base survives the merge below and the mint sentinel
+        # can arm (parity with bare-{} live sessions; see drop_default_sde_keys).
+        engine_params = drop_default_sde_keys(engine_params, _V2_DEFAULTS)
         # iter86 mint-history layer (user proposal): THIS token's own prior
         # candles (prior completed recordings of the same mint before
         # started_at — no lookahead) take precedence over the population

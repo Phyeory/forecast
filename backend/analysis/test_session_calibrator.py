@@ -524,3 +524,46 @@ class TestPopcalAdoption:
             assert abs(fresh[k] - expected[k]) < 1e-12, (
                 f"estimator drift on {k}: {fresh[k]} vs adopted-batch {expected[k]}"
             )
+
+
+# ── drop_default_sde_keys (2026-09-15 parity fix) ──────────────────────────
+# The dashboard transmits all 13 SDE coefficients at DEFAULT_CONFIG values;
+# presence must not count as user intent (else dashboard backtests run
+# uncalibrated while bare-{} sessions calibrate).
+
+def test_drop_default_sde_keys_removes_defaults():
+    from session_calibrator import SDE_COEFF_KEYS, drop_default_sde_keys
+    params = {k: DEFAULT_CONFIG[k] for k in SDE_COEFF_KEYS}
+    params["v2_exit_delay_seconds"] = 20.0  # non-SDE knob survives
+    out = drop_default_sde_keys(params, DEFAULT_CONFIG)
+    assert all(k not in out for k in SDE_COEFF_KEYS)
+    assert out["v2_exit_delay_seconds"] == 20.0
+    # input not mutated
+    assert len(params) == len(SDE_COEFF_KEYS) + 1
+
+
+def test_drop_default_sde_keys_keeps_tweaks():
+    from session_calibrator import drop_default_sde_keys
+    params = {"lambda_mu": 0.99, "sigma_mu": DEFAULT_CONFIG["sigma_mu"],
+              "v2_popcal_enable": 1.0}
+    out = drop_default_sde_keys(params, DEFAULT_CONFIG)
+    assert out["lambda_mu"] == 0.99                       # genuine intent wins
+    assert "sigma_mu" not in out
+    assert out["v2_popcal_enable"] == 1.0
+
+
+def test_drop_default_sde_keys_tolerates_truncation():
+    # Frontend sends lambda_0 as truncated 0.0000694444 vs 1/14400 —
+    # must still count as default.
+    from session_calibrator import drop_default_sde_keys
+    out = drop_default_sde_keys({"lambda_0": 0.0000694444}, DEFAULT_CONFIG)
+    assert "lambda_0" not in out
+    # ...but a real move is kept
+    out2 = drop_default_sde_keys({"lambda_0": 0.001}, DEFAULT_CONFIG)
+    assert out2["lambda_0"] == 0.001
+
+
+def test_drop_default_sde_keys_non_numeric_safe():
+    from session_calibrator import drop_default_sde_keys
+    out = drop_default_sde_keys({"alpha": "fast", "beta": None}, DEFAULT_CONFIG)
+    assert out == {"alpha": "fast", "beta": None}

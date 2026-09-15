@@ -37,7 +37,7 @@ import data_store
 import newpairs_store
 from backtester import run_backtest, run_backtest_batch
 from holder_flow import HolderFlowMonitor, get_shared_monitor
-from session_calibrator import calibrate_async
+from session_calibrator import calibrate_async, drop_default_sde_keys
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1068,6 +1068,11 @@ class _LiveSession:
                                          _V2_DEFAULTS.get("v2_popcal_enable", 0.0))
                 ) > 0.0
                 if _popcal_on:
+                    # Default-valued SDE keys carry no user intent (dashboard
+                    # sends all 13 at DEFAULT_CONFIG values) — drop them so
+                    # calibration applies and the mint sentinel can arm
+                    # (parity with the backtest layer; see drop_default_sde_keys).
+                    engine_params_in = drop_default_sde_keys(engine_params_in, _V2_DEFAULTS)
                     cal_overrides: dict = {}
                     _mint_layer_fired = False
                     _mintcal_on = float(
@@ -1665,6 +1670,14 @@ class _LiveSession:
                 "rec_id": rec_id,
                 "ended_at": time.time(),
             })
+            # Autofeed quality feedback: a no-motion, zero-trade death means
+            # the candidate was dead on arrival — hold it out of the feed for
+            # the dead-mint cooldown instead of re-feeding it every poll.
+            if self.stop_reason == "no_motion" and not _fleet_stats["total_trades"]:
+                try:
+                    _autofeed.note_dead_mint(real_mint)
+                except Exception:
+                    pass
             if _active_live_traders.get(real_mint) is self:
                 del _active_live_traders[real_mint]
             logger.info(

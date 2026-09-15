@@ -189,6 +189,17 @@ DEFAULT_INTERVAL                  = "1h"
 DEFAULT_MAX_CONCURRENT_FEED         = 100
 DEFAULT_COOLDOWN_AFTER_FEED_MINUTES = 1.0
 DEFAULT_EXCLUDE_MINTS              = ""   # comma-separated manual exclusion
+# ── Liveness + dead-mint quality gates (2026-09-15) ─────────────────────
+# GMGN trending stats are trailing-window aggregates (default interval 1h):
+# a token can pass $25k/900-swaps on the hour while having zero trades NOW.
+# Those dead-on-arrival mints then die to the 120s no-motion stop and get
+# re-fed every poll (Sep 13-15: 51% of sessions no-motion deaths, top mints
+# re-fed 4-6× each).  These gates prove life between polls instead:
+DEFAULT_REQUIRE_MOTION_PRESENCE   = True   # reject rows with vol<=0 or swaps<=0 (unverifiable motion)
+DEFAULT_MIN_SWAPS_GROWTH          = 25     # swaps increase required since last poll (proof of life)
+DEFAULT_MIN_VOLUME_GROWTH_USD     = 1_000.0  # ...or volume increase in USD
+DEFAULT_HOT_BYPASS_MULTIPLE       = 2.0    # first sighting forwards iff swaps AND vol ≥ mult × gates
+DEFAULT_DEAD_MINT_COOLDOWN_HOURS  = 12.0   # no-motion/0-trade deaths stay out of the feed this long
 
 
 # ── Candidate record ────────────────────────────────────────────────────────
@@ -253,6 +264,11 @@ class AutofeedConfig:
     min_smart_degen_count:  int = DEFAULT_MIN_SMART_DEGEN_COUNT
     min_volume_usd:         float = DEFAULT_MIN_VOLUME_USD       # OP: motion gate (USD traded)
     min_swaps:              int = DEFAULT_MIN_SWAPS              # OP: motion gate (swap count)
+    require_motion_presence: bool = DEFAULT_REQUIRE_MOTION_PRESENCE  # reject vol<=0/swaps<=0 rows
+    min_swaps_growth:        int = DEFAULT_MIN_SWAPS_GROWTH      # liveness: swaps growth since last poll
+    min_volume_growth_usd:   float = DEFAULT_MIN_VOLUME_GROWTH_USD  # liveness: ...or volume growth (USD)
+    hot_bypass_multiple:     float = DEFAULT_HOT_BYPASS_MULTIPLE  # first sighting forwards iff ≥mult×gates
+    dead_mint_cooldown_hours: float = DEFAULT_DEAD_MINT_COOLDOWN_HOURS  # no-motion deaths held out (h)
     order_by:               str = DEFAULT_ORDER_BY               # server-side ranking key
     require_migration_exchange: bool = DEFAULT_REQUIRE_MIGRATION_EXCHANGE
     migration_exchanges:    str = DEFAULT_MIGRATION_EXCHANGES    # comma-separated exchange allow-list
@@ -308,6 +324,10 @@ class AutoFeed:
         # State
         self._seen: dict[str, Candidate] = {}
         self._last_fed_at: float = 0.0
+        # Liveness memory: mint -> (swaps, volume_usd, ts) at last poll sighting
+        self._last_motion: dict[str, tuple[int, float, float]] = {}
+        # Dead-mint memory: mint -> ts when a live session died no-motion/0-trade
+        self._dead_mints: dict[str, float] = {}
         self.last_error: str = ""
         self.last_poll_at: float = 0.0
         self.total_seen: int = 0
@@ -717,6 +737,9 @@ class AutoFeed:
         # Compare excluded-set case-insensitively so users can type mints either way.
         if mint.lower() in self._excluded_set():
             return None
+        # Dead-mint memory: no-motion/0-trade deaths stay out for the cooldown.
+        if self._is_dead(mint, time.time()):
+            return None
 
         # Numeric helpers — accept None / 0 / float<string>; coerce safely
         def f(v) -> float:
@@ -782,7 +805,11 @@ class AutoFeed:
                 return None
 
         # OP: "coins that got fed should have lots of motion - trending coins" —
-        # Enforce motion locally too (defense in depth; auto-tuned effective gates):
+        # Enforce motion locally too (defense in depth; auto-tuned effective gates).
+        # Missing motion data (vol/swaps ≤ 0) is unverifiable motion — reject it
+        # outright instead of letting zero-stat rows sail through the `> 0` guards.
+        if cf.require_motion_presence and (vol <= 0 or swaps <= 0):
+            return None
         if vol > 0 and vol < eff["min_volume_usd"]: return None
         if swaps > 0 and swaps < eff["min_swaps"]:  return None
 
@@ -824,6 +851,50 @@ class AutoFeed:
             telegram=raw.get("telegram") or "",
             website=raw.get("website") or "",
         )
+
+    # ── Liveness + dead-mint gates ────────────────────────────────────────
+
+    def note_dead_mint(self, mint: str, now: Optional[float] = None) -> None:
+        """Feedback from live sessions: a no-motion, zero-trade death means
+        the candidate was dead on arrival — hold it out of the feed for
+        `dead_mint_cooldown_hours` instead of re-feeding it every poll."""
+        if not mint:
+            return
+        self._dead_mints[mint] = now if now is not None else time.time()
+
+    def _is_dead(self, mint: str, now: float) -> bool:
+        ts = self._dead_mints.get(mint)
+        if ts is None:
+            return False
+        if now - ts > self.config.dead_mint_cooldown_hours * 3600.0:
+            del self._dead_mints[mint]
+            return False
+        return True
+
+    def _passes_liveness(self, mint: str, swaps: int, vol: float,
+                         eff_min_swaps: int, eff_min_vol: float,
+                         now: float) -> bool:
+        """Proof-of-life between polls.  Trailing-window stats can look hot
+        while nothing trades NOW, so forward only when the numbers GREW
+        since the last sighting.  First sightings park for one poll —
+        unless roaring (swaps AND vol ≥ bypass× the effective gates), in
+        which case they forward immediately.  Sticky-hot rows (unchanged
+        but still ≥ bypass×) also pass — the token was roaring ≤1 poll ago.
+        Always records this sighting as the next baseline."""
+        prev = self._last_motion.get(mint)
+        self._last_motion[mint] = (swaps, vol, now)
+        if len(self._last_motion) > 500:
+            cutoff = now - 2 * 3600.0
+            self._last_motion = {k: v for k, v in self._last_motion.items() if v[2] >= cutoff}
+        mult = self.config.hot_bypass_multiple
+        hot = mult > 0 and swaps >= mult * eff_min_swaps and vol >= mult * eff_min_vol
+        if prev is None:
+            return hot
+        dswaps = swaps - prev[0]
+        dvol = vol - prev[1]
+        if dswaps >= self.config.min_swaps_growth or dvol >= self.config.min_volume_growth_usd:
+            return True
+        return bool(hot and dswaps >= 0 and dvol >= 0)
 
     def _excluded_set(self) -> set[str]:
         raw = (self.config.exclude_mints or "").strip()
@@ -869,11 +940,18 @@ class AutoFeed:
         total_parsed = 0
         new_count = 0
         new_cands: list[Candidate] = []
+        eff = self.effective_gates()   # liveness baselines (auto-tuned when live)
+        now = time.time()
         for row in rows:
             cand = self._to_candidate(row)
             if cand is None:
                 continue
             total_parsed += 1
+            # Liveness: trailing stats can look hot while nothing trades NOW —
+            # forward only on proven between-poll growth (or a roaring debut).
+            if not self._passes_liveness(cand.mint, cand.swaps, cand.volume,
+                                         int(eff["min_swaps"]), float(eff["min_volume_usd"]), now):
+                continue
             # Dedup — never re-feed within sane age window
             existing = self._seen.get(cand.mint)
             if existing is not None:
@@ -973,6 +1051,13 @@ class AutoFeed:
             "max_created_age": self.config.max_created_age,
             "max_concurrent_feed": self.config.max_concurrent_feed,
             "cooldown_after_feed_minutes": self.config.cooldown_after_feed_minutes,
+            "require_motion_presence": self.config.require_motion_presence,
+            "min_swaps_growth": self.config.min_swaps_growth,
+            "min_volume_growth_usd": self.config.min_volume_growth_usd,
+            "hot_bypass_multiple": self.config.hot_bypass_multiple,
+            "dead_mint_cooldown_hours": self.config.dead_mint_cooldown_hours,
+            "dead_mint_count": len(self._dead_mints),
+            "motion_tracked": len(self._last_motion),
             # Auto-tune block — conditions, effective gates, and provenance
             "auto_tune_enabled": self.config.auto_tune_enabled,
             "auto_tune_refresh_seconds": self.config.auto_tune_refresh_seconds,

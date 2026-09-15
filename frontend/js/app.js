@@ -2830,11 +2830,16 @@ const AF_FIELD_MAP = [
   ["af-max-concurrent", "max_concurrent_feed", "int"],
   ["af-cooldown", "cooldown_after_feed_minutes", "float"],
   ["af-exclude", "exclude_mints", "str"],
+  ["af-min-swaps-growth", "min_swaps_growth", "int"],
+  ["af-min-vol-growth", "min_volume_growth_usd", "float"],
+  ["af-hot-bypass", "hot_bypass_multiple", "float"],
+  ["af-dead-cooldown", "dead_mint_cooldown_hours", "float"],
   ["af-req-renounced-mint", "require_renounced_mint", "bool"],
   ["af-req-renounced-freeze", "require_renounced_freeze", "bool"],
   ["af-rej-wash", "reject_wash_trading", "bool"],
   ["af-rej-honeypot", "reject_honeypot", "bool"],
   ["af-req-social", "require_has_social", "bool"],
+  ["af-req-motion", "require_motion_presence", "bool"],
 ];
 
 function afPopulateForm(snap) {

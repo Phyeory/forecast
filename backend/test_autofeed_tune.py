@@ -360,6 +360,102 @@ def test_snapshot_disabled_shape():
     assert snap["market_conditions"] is None
 
 
+# ── Liveness + dead-mint quality gates (2026-09-15) ────────────────────────
+# Sep 13-15: 51% of live sessions died no-motion, top mints re-fed 4-6× —
+# GMGN trailing-1h stats pass while nothing trades NOW.
+
+def _loose_feed(**over):
+    # Gates wide open except motion presence, so tests isolate the new logic.
+    cfg = AutofeedConfig()
+    cfg.min_mcap_usd = 0.0
+    cfg.min_liquidity_usd = 0.0
+    cfg.min_holders = 0
+    cfg.min_smart_degen_count = 0
+    cfg.min_volume_usd = 0.0
+    cfg.min_swaps = 0
+    cfg.max_top10_holder_rate = 1.0
+    cfg.max_rug_ratio = 1.0
+    cfg.max_bundler_rate = 1.0
+    cfg.max_insider_rate = 1.0
+    cfg.max_rat_trader_rate = 1.0
+    cfg.max_entrapment_ratio = 1.0
+    cfg.max_bot_degen_rate = 1.0
+    cfg.require_renounced_mint = False
+    cfg.require_renounced_freeze = False
+    cfg.reject_wash_trading = False
+    cfg.reject_honeypot = False
+    cfg.require_migration_exchange = False
+    cfg.auto_tune_enabled = False
+    for k, v in over.items():
+        setattr(cfg, k, v)
+    return AutoFeed(cfg)
+
+
+def test_motion_presence_rejects_zero_stats():
+    feed = _loose_feed()
+    assert feed._to_candidate(_row(volume=0.0, swaps=100)) is None
+    assert feed._to_candidate(_row(volume=100.0, swaps=0)) is None
+    assert feed._to_candidate(_row(volume=100.0, swaps=100)) is not None
+    # escape hatch: disabled → zero-stat rows pass again
+    feed.config.require_motion_presence = False
+    assert feed._to_candidate(_row(volume=0.0, swaps=0)) is not None
+
+
+def test_liveness_first_sighting_parks_unless_roaring():
+    feed = _loose_feed()
+    now = time.time()
+    # lukewarm debut parks (baseline recorded for next poll)
+    assert feed._passes_liveness("Mint" + "a" * 32, 1_000, 30_000.0, 900, 25_000.0, now) is False
+    # roaring debut (≥2× gates on both) forwards immediately
+    assert feed._passes_liveness("Mint" + "b" * 32, 1_800, 50_000.0, 900, 25_000.0, now) is True
+    # only one leg hot → still parks
+    assert feed._passes_liveness("Mint" + "c" * 32, 5_000, 30_000.0, 900, 25_000.0, now) is False
+
+
+def test_liveness_growth_forwards_flat_drops():
+    feed = _loose_feed()
+    now = time.time()
+    m = "Mint" + "d" * 32
+    assert feed._passes_liveness(m, 1_000, 30_000.0, 900, 25_000.0, now) is False
+    # +30 swaps a poll later → alive
+    assert feed._passes_liveness(m, 1_030, 30_100.0, 900, 25_000.0, now + 60.0) is True
+    # flat numbers, lukewarm → dead now
+    assert feed._passes_liveness(m, 1_030, 30_100.0, 900, 25_000.0, now + 120.0) is False
+    # volume jump alone also proves life
+    assert feed._passes_liveness(m, 1_030, 32_000.0, 900, 25_000.0, now + 180.0) is True
+
+
+def test_liveness_sticky_hot_passes():
+    feed = _loose_feed()
+    now = time.time()
+    m = "Mint" + "e" * 32
+    assert feed._passes_liveness(m, 5_000, 200_000.0, 900, 25_000.0, now) is True
+    # identical (cached) numbers next poll, still roaring → pass
+    assert feed._passes_liveness(m, 5_000, 200_000.0, 900, 25_000.0, now + 60.0) is True
+
+
+def test_dead_mint_blocks_until_expiry():
+    feed = _loose_feed()
+    now = time.time()
+    row = _row(volume=100.0, swaps=100)
+    mint = row["address"]
+    assert feed._to_candidate(dict(row)) is not None
+    feed.note_dead_mint(mint, now=now)
+    assert feed._to_candidate(dict(row)) is None
+    # expired cooldown → admitted again
+    feed._dead_mints[mint] = now - (feed.config.dead_mint_cooldown_hours * 3600.0 + 1.0)
+    assert feed._to_candidate(dict(row)) is not None
+    assert mint not in feed._dead_mints  # lazy eviction
+    snap = feed.snapshot()
+    assert snap["dead_mint_count"] == 0
+
+
+def test_dead_mint_note_empty_is_noop():
+    feed = _loose_feed()
+    feed.note_dead_mint("")
+    assert feed.snapshot()["dead_mint_count"] == 0
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))

@@ -141,7 +141,9 @@ graph TD
   `data/live_logs/<session>/signals.jsonl` (read-only parity instrument).
 - **`backend/autofeed.py`** — server-side auto-opening of live sessions from a candidate feed;
   once started it runs without a browser, but a backend restart does NOT auto-resume it (UI only
-  mirrors `is_running`).
+  mirrors `is_running`). Quality gates: motion presence (reject vol/swaps ≤ 0 rows),
+  between-poll liveness (swaps/volume must GROW; first sightings park unless roaring),
+  dead-mint memory (no-motion/0-trade deaths held out 12 h via `note_dead_mint`).
 - **`backend/newpairs.py` / `newpairs_store.py`** — newborn-token recorder (no trading; separate
   DB; 120 s no-motion stop). Feed default-OFF.
 - **`backend/process_watchdog.py`** — `guard_parent()` orphan protection.
