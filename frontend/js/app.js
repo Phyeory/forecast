@@ -2325,6 +2325,43 @@ function refreshLiveSessions() {
       }
       if (Array.isArray(st.trades)) {
         renderLtTradeTable(st.trades);
+        // Durable backfill: the in-memory trade list resets on every server
+        // restart, so a refresh after a restart hid earlier fills (e.g. an
+        // overnight trade visible on-chain but missing from the dashboard).
+        // Merge the on-disk session ledgers so the table survives restarts.
+        // In-memory rows win on tx_hash collisions (they carry symbols).
+        apiFetch("/api/live/history?limit=20")
+          .then(hist => {
+            try {
+              const sessions = hist && hist.sessions;
+              if (!Array.isArray(sessions)) return;
+              const symByMint = {};
+              for (const t of (st.traders || [])) {
+                if (t && t.mint) symByMint[t.mint] = t.token_symbol || "";
+              }
+              const seen = new Set(st.trades.map(t => t.tx_hash).filter(Boolean));
+              const extra = [];
+              for (const s of sessions) {
+                const mint = s.token_mint || "";
+                for (const t of (s.trades || [])) {
+                  const buySig = t.tx_hash_buy || "";
+                  const sellSig = t.tx_hash_sell || "";
+                  if (buySig && !seen.has(buySig)) {
+                    seen.add(buySig);
+                    extra.push({ action: "BUY", price: t.entry_price || 0, pnl_sol: 0, pnl_pct: 0, timestamp: t.entry_time || t.event_ts || 0, tx_hash: buySig, status: "confirmed", token_symbol: symByMint[mint] || "", mint });
+                  }
+                  if (sellSig && !seen.has(sellSig)) {
+                    seen.add(sellSig);
+                    extra.push({ action: "SELL", price: t.exit_price || 0, pnl_sol: t.pnl_sol || 0, pnl_pct: t.pnl_pct || 0, timestamp: t.exit_time || t.event_ts || 0, tx_hash: sellSig, status: "confirmed", token_symbol: symByMint[mint] || "", mint });
+                  }
+                }
+              }
+              if (extra.length) {
+                renderLtTradeTable([...st.trades, ...extra].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)));
+              }
+            } catch { /* keep the in-memory table */ }
+          })
+          .catch(() => { /* keep the in-memory table */ });
       }
       if (Array.isArray(st.traders)) {
         // Sync the engine toggle from any running session — the server holds
