@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import time
 from pathlib import Path
 
@@ -887,16 +886,6 @@ async def chart_ws(
 # (POST /api/live/stop, the ⏹ Stop button) or a safety stop fires.
 _active_live_traders: dict[str, "_LiveSession"] = {}   # keyed by token mint
 _live_session_lock = asyncio.Lock()
-# Mints currently mid-creation (the slow part — calibration + iter86d chain
-# fetch — runs OUTSIDE the global lock; see _get_or_create_live_session).
-# 2026-09-14: with AutoFeed auto-starting sessions, a ~90s chain fetch held the
-# global lock and parked EVERY viewer/creation handshake ("WebSocket error" on
-# all but the first card). Same-mint callers still serialize on this map +
-# the global lock at the final registry insert; different mints no longer
-# queue behind each other's warmups.
-_creating_live_sessions: set[str] = set()
-# Bounds concurrent iter86d chain fetches (public-RPC friendly, one at a time).
-_chain_fetch_sem = asyncio.Semaphore(1)
 
 # Persistent session stats and trade events for the current server run
 _completed_live_sessions: list[dict] = []
@@ -975,14 +964,6 @@ class _LiveSession:
         self.warmup_strategy: list[dict] = []
         self.last_strategy_result: Optional[dict] = None
         self.stop_reason: str = ""
-        # session_create_opt: creation-time inputs stashed when the session
-        # was registered pre-construction; run() builds the calibrated
-        # trader fleet from these at its head.  None for legacy sessions.
-        self.create_request: Optional[dict] = None
-        # True from registration until the calibrated fleet is swapped in
-        # (run() head).  Manual trades are refused while pending — the
-        # placeholder's engine carries NO calibration and must never trade.
-        self.pending_construction: bool = False
         # LiveTrader pushes trade_update JSON strings here → fanned out to viewers
         trader.broadcast_fn = self.broadcast_text
         # iter77 fleet: sibling traders broadcast through the same fan-out;
@@ -1047,199 +1028,6 @@ class _LiveSession:
             f"[LIVE] Session start  mint={real_mint[:8]}…  wallet={self.wallet()[:8]}…  "
             f"tf={timeframe}  engines={self.engine_versions}"
         )
-
-        # ── session_create_opt: deferred trader construction ────────────────
-        # Creation returned instantly; this runner head now runs the SLOW
-        # parts (population/mint-layer SDE calibration + iter86d chain fetch,
-        # ≤ ~95s per thin mint, serialized across mints by _chain_fetch_sem).
-        # The engine is constructed only after calibration completes, so it
-        # still sees chain-calibrated params from tick 0 — byte-equivalent to
-        # the pre-optimization inline path (backtest parity preserved).
-        # Cancellation during this window ends the session with no position.
-        if getattr(self, "create_request", None) is not None:
-            req = self.create_request
-            self.create_request = None     # never re-run (task re-entry safe)
-            primary_kwargs: dict = {}
-            try:
-                from strategy_engineV2 import DEFAULT_CONFIG as _V2_DEFAULTS
-                engine_params_in: dict = dict(req["engine_params"] or {})
-                _popcal_on = float(
-                    engine_params_in.get("v2_popcal_enable",
-                                         _V2_DEFAULTS.get("v2_popcal_enable", 0.0))
-                ) > 0.0
-                if _popcal_on:
-                    cal_overrides: dict = {}
-                    _mint_layer_fired = False
-                    _mintcal_on = float(
-                        engine_params_in.get("v2_mintcal_enable",
-                                             _V2_DEFAULTS.get("v2_mintcal_enable", 0.0))
-                    ) > 0.0
-                    if _mintcal_on and real_mint:
-                        from session_calibrator import calibrate_from_mint_history
-                        cal_overrides = await asyncio.to_thread(
-                            calibrate_from_mint_history, str(real_mint), time.time()
-                        )
-                        # iter86d (user proposal — live chain fetch): thin
-                        # mints fetch their FULL on-chain history once,
-                        # persist it, and recalibrate.  Bounded ≤ 95s; the
-                        # placeholder trader is armed meanwhile, so entries
-                        # only begin once the calibrated engine is live.
-                        _chain_on = float(
-                            engine_params_in.get("v2_chain_fetch_enable",
-                                                 _V2_DEFAULTS.get("v2_chain_fetch_enable", 0.0))
-                        ) > 0.0
-                        if _chain_on and not cal_overrides:
-                            try:
-                                from mint_chain_history import fetch_and_persist
-                                async with _chain_fetch_sem:
-                                    inserted = await asyncio.wait_for(
-                                        fetch_and_persist(str(real_mint)),
-                                        timeout=95.0,
-                                    )
-                                if inserted:
-                                    logger.info(
-                                        f"[MintChain] {real_mint[:8]}… persisted "
-                                        f"{inserted} chain candles — recalibrating"
-                                    )
-                                    cal_overrides = await asyncio.to_thread(
-                                        calibrate_from_mint_history,
-                                        str(real_mint), time.time(),
-                                    )
-                            except asyncio.TimeoutError:
-                                logger.warning("[MintChain] fetch timed out — population fallback")
-                            except Exception as _chain_err:
-                                logger.warning(f"[MintChain] fetch failed: {_chain_err}")
-                        _mint_layer_fired = bool(cal_overrides)
-                    if not cal_overrides:
-                        cal_overrides = await calibrate_async()
-                    # iter86c: mark mint-layer sessions only — the per-coin
-                    # online refinement (requires-mintcal gate in the
-                    # adapter) is evidence-backed on mint physics, noise on
-                    # thin-mint popcal sessions (parity with the backtest
-                    # layer).
-                    _SDE_13 = ("sigma_mu", "lambda_mu", "kappa_mu", "sigma_phi",
-                               "alpha", "beta", "eta", "sigma_h", "theta",
-                               "sigma_ell", "zeta", "lambda_0", "tau_max")
-                    if _mint_layer_fired and not any(
-                            k in engine_params_in for k in _SDE_13):
-                        cal_overrides["_calibration_sourced"] = 1
-                    # User params win over calibration (explicit beats
-                    # implicit).  NOTE: _calibration_sourced stays in the
-                    # kwargs — the adapter reads it to arm the per-coin
-                    # requires-mintcal gate.
-                    primary_kwargs = {**cal_overrides, **engine_params_in}
-                # The popcal/mintcal/chain knobs are consumed here — they
-                # never reach the engine config.
-                for _k in ("v2_popcal_enable", "v2_mintcal_enable",
-                           "v2_chain_fetch_enable"):
-                    primary_kwargs.pop(_k, None)
-            except Exception as _cal_err:
-                logger.warning(f"[SessionCalibrator] calibration skipped: {_cal_err}")
-                for _k in ("v2_popcal_enable", "v2_mintcal_enable",
-                           "v2_chain_fetch_enable"):
-                    primary_kwargs.pop(_k, None)
-
-            if not self.cancelled.is_set():
-                # Build the real fleet (primary + siblings), carrying over
-                # any live config the placeholder was given during the
-                # pending window (update_config writes trader.buy_size_sol /
-                # .slippage_bps directly).
-                p = self.trader
-                live_trader = LiveTrader(
-                    token_mint=real_mint,
-                    keypair=req["keypair"],
-                    buy_size_sol=p.buy_size_sol,
-                    slippage_bps=p.slippage_bps,
-                    priority_fee_lamports=100_000,
-                    engine_kwargs=primary_kwargs,
-                    skip_simulation=req["skip_sim"],
-                    engine_version=req["engine_version"],
-                    # User policy (2026-08-26): terminate motionless coins
-                    # to free hardware.  Fires ONLY while fully idle (no
-                    # position / pending signal / swap), so teardown never
-                    # needs an emergency sell.
-                    no_motion_stop_seconds=120.0,
-                )
-                extra_traders: list[LiveTrader] = []
-                for ev in req["fleet_versions"]:
-                    extra_traders.append(LiveTrader(
-                        token_mint=real_mint,
-                        keypair=req["keypair"],
-                        buy_size_sol=live_trader.buy_size_sol,
-                        slippage_bps=live_trader.slippage_bps,
-                        priority_fee_lamports=100_000,
-                        engine_kwargs=dict(primary_kwargs),
-                        skip_simulation=req["skip_sim"],
-                        engine_version=ev,
-                        no_motion_stop_seconds=120.0,
-                    ))
-                # Journal continuity: the placeholder's SessionJournal (dir +
-                # session_open record) transfers to the real primary — ONE
-                # live_logs dir per session, not one per construction.  The
-                # real trader's own fresh journal (built above) is closed
-                # unused, and the placeholder's console-log handler stays
-                # attached to the shared journal the primary now owns.
-                _fresh_journal = live_trader.journal
-                live_trader.journal = p.journal
-                live_trader._journal_ctx_token = p._journal_ctx_token
-                try:
-                    _fresh_journal._logger.removeHandler(_fresh_journal._handler)
-                    _fresh_journal._handler.close()
-                    _fresh_journal._ledger.close()
-                except Exception:
-                    pass
-                try:
-                    shutil.rmtree(_fresh_journal.dir, ignore_errors=True)
-                except Exception:
-                    pass
-                # Sibling traders: LiveTrader.__init__ built each of them a
-                # fresh SessionJournal (extra live_logs dirs).  Disarm and
-                # remove those — all fleet trade records funnel through the
-                # primary's journal via the shared logger + broadcast_fn.
-                for _tr in extra_traders:
-                    _fj = _tr.journal
-                    _tr.journal = live_trader.journal
-                    try:
-                        _fj._logger.removeHandler(_fj._handler)
-                        _fj._handler.close()
-                        _fj._ledger.close()
-                        shutil.rmtree(_fj.dir, ignore_errors=True)
-                    except Exception:
-                        pass
-                live_trader.set_session_meta(
-                    recording_id=rec_id, token_name=self.token_name,
-                    token_symbol=self.token_symbol, timeframe=timeframe,
-                )
-                live_trader.start_watchdog()
-                for _tr in extra_traders:
-                    _tr.start_watchdog()
-                # Swap the fleet in BEFORE any candle processing: consumers
-                # (status/portfolio/WS controls) see the real traders from
-                # here on; engine_versions was fixed at registration.
-                self.traders = [live_trader] + extra_traders
-                self.trader = live_trader
-                traders = self.traders
-                live_trader.broadcast_fn = self.broadcast_text
-                for _tr in extra_traders:
-                    _tr.broadcast_fn = self.broadcast_text
-                # Placeholder teardown WITHOUT close(): its journal now belongs
-                # to the real primary (closing it would write a premature
-                # session_close); it owns no position and no HTTP session.
-                p._alive = False
-                p.journal = None       # orphan the ref so close() is inert
-                for _attr in ("_watchdog_task", "_balance_cache_task",
-                              "_blockhash_task"):
-                    _t = getattr(p, _attr, None)
-                    if _t is not None and not _t.done():
-                        _t.cancel()
-                logger.info(
-                    f"[LIVE] Trader fleet constructed (calibrated) for "
-                    f"{real_mint[:8]}…  engines={self.engine_versions}"
-                )
-                self.pending_construction = False
-            else:
-                self.pending_construction = False
-                return      # stopped during calibration — teardown ran via stop()
 
         # Resolve live data source
         live_source = token_info.get("_live_source", "pumpportal")
@@ -2412,69 +2200,32 @@ async def _get_or_create_live_session(
     user-supplied size (> 0, sourced from the dashboard input field) is
     refused — a hard-coded size must never be traded.
     """
-    # ── Fast path (global lock, never blocks on I/O) ───────────────────────
-    # Attach to an existing session, or bail on the attach-only / buy-size
-    # guards, WITHOUT waiting behind another mint's creation.  The slow part
-    # of creation (resolver fallback + SDE calibration + iter86d chain fetch,
-    # up to ~90s per thin mint) runs OUTSIDE the lock — 2026-09-14 incident:
-    # AutoFeed auto-starting sessions held the lock through a 91s chain fetch
-    # and every other card's WS handshake timed out with "WebSocket error".
-    while True:
-        async with _live_session_lock:
-            session = _active_live_traders.get(real_mint)
-            if session is not None and not session.cancelled.is_set():
-                return session, False
+    async with _live_session_lock:
+        session = _active_live_traders.get(real_mint)
+        if session is not None and not session.cancelled.is_set():
+            return session, False
 
-            # ── Attach-only guard — never spawn a new session at defaults ─
-            # Re-attaching viewers (page reload, tab sleep, /api/live/status
-            # re-probe) never pass a private key.  Without this guard, the
-            # stored-key fallback below silently CREATED a new session at
-            # endpoint defaults whenever the intended session had ended
-            # between the status probe and this connect — the "live trades
-            # always enter a hard-coded size" bug.  Creating a session
-            # therefore requires an explicit key from the caller; a bare
-            # attach can only ever attach.
-            if not private_key:
-                return None, False
+        # ── Attach-only guard — never spawn a new session at defaults ─────
+        # Re-attaching viewers (page reload, tab sleep, /api/live/status
+        # re-probe) never pass a private key.  Without this guard, the
+        # stored-key fallback below silently CREATED a new session at
+        # endpoint defaults whenever the intended session had ended between
+        # the status probe and this connect — the "live trades always enter
+        # a hard-coded size" bug.  Creating a session therefore requires an
+        # explicit key from the caller; a bare attach can only ever attach.
+        if not private_key:
+            return None, False
 
-            # Buy size must come from the dashboard input field (pushed
-            # through the WS query param or the /api/live/buy_size store for
-            # autofeed).  No fallback default exists or ever may exist here.
-            if buy_size is None or buy_size <= 0:
-                logger.warning(
-                    f"[LIVE] Refusing to create session for {real_mint[:8]}… — "
-                    f"no valid buy_size supplied from the dashboard input field"
-                )
-                return None, False
+        # Buy size must come from the dashboard input field (pushed through
+        # the WS query param or the /api/live/buy_size store for autofeed).
+        # No fallback default exists or ever may exist here.
+        if buy_size is None or buy_size <= 0:
+            logger.warning(
+                f"[LIVE] Refusing to create session for {real_mint[:8]}… — "
+                f"no valid buy_size supplied from the dashboard input field"
+            )
+            return None, False
 
-            # Same-mint creation race: another caller is already building
-            # this mint's session — wait for it, then re-loop to pick up the
-            # registered session (or take over creation if it failed).
-            if real_mint in _creating_live_sessions:
-                pass            # fall out of the lock and wait below
-            else:
-                _creating_live_sessions.add(real_mint)
-                break
-        await asyncio.sleep(0.25)
-
-    # Marker key as registered above — resolve_input below may REASSIGN
-    # real_mint (pair address → on-chain mint); the finally must discard the
-    # key that was actually added, not whatever it resolves to.
-    marker_mint = real_mint
-
-    # ── Create (NO global lock held — bounded-fast work only) ─────────────
-    # session_create_opt (2026-09-14, follows the AutoFeed/chain-fetch
-    # incident): creation returns in bounded-fast time.  The slow parts that
-    # used to run inline — resolver fallback + SDE calibration (mint layer
-    # + iter86d chain fetch up to ~95s) — are DEFERRED to the head of
-    # session.run(), which constructs the traders AFTER calibration and
-    # sets session.traders/.trader/warmed before any candle is processed.
-    # The engine therefore still sees chain-calibrated params from tick 0
-    # (backtest parity), but no WS handshake and no other mint's creation
-    # ever waits behind it.  Handshake-time consumers that touch
-    # session.trader must handle the pending window (recording already
-    # exists and is accepting stream ticks into the aggregator buffer).
-    try:
         # Fallback to server-side stored private key if none passed in call
         key_str = private_key or getattr(app.state, "lt_private_key", "") or _load_backend_private_key()
         if not key_str:
@@ -2503,7 +2254,7 @@ async def _get_or_create_live_session(
         token_name = token_name or (token_info or {}).get("name", "")
         token_symbol = token_symbol or (token_info or {}).get("symbol", "")
 
-        # ── iter77 multi-engine fleet construction ─────────────────────
+        # ── iter77 multi-engine fleet construction ─────────────────────────
         # `engine_versions` (comma-separated or list from the dashboard) runs
         # N engines together on this token: one LiveTrader per engine, all
         # sharing the wallet/stream/recording, each sized buy_size/N so the
@@ -2534,68 +2285,146 @@ async def _get_or_create_live_session(
         fleet_versions = [v for v in fleet_versions if v != engine_version]
         n_engines = 1 + len(fleet_versions)
 
-        # ── Registry insert (global lock again, fast) ───────────────────
-        # Re-check: another creator may have finished while we resolved.
-        async with _live_session_lock:
-            existing = _active_live_traders.get(real_mint)
-            if existing is not None and not existing.cancelled.is_set():
-                return existing, False
-
-            # Shell session: construction inputs are stashed for run() —
-            # LiveTraders are built inside the runner AFTER calibration.
-            # A single placeholder LiveTrader carries the wallet/config so
-            # /api/live/status, manual trades and update_config work during
-            # the pending window; run() replaces it with the calibrated
-            # fleet (carrying the same config over).
-            placeholder = LiveTrader(
+        primary_kwargs = dict(engine_params or {})
+        # Population SDE calibration — ADOPTED 2026-09-12 (iter84b_cal_full
+        # cell).  The ENGINE knob `v2_popcal_enable` (DEFAULT_CONFIG) is the
+        # single source of truth: backtests and live sessions calibrate
+        # identically by default.  Passing `v2_popcal_enable` in the session's
+        # engine_params overrides it for that session (0.0 = OFF hatch).
+        # The flag is consumed here — it never reaches the engine config.
+        # iter86 mint-history layer: when `v2_mintcal_enable` is on, this
+        # token's OWN prior recorded candles calibrate FIRST (same-mint
+        # recordings in price_data.db before now — parity with the backtest
+        # mint layer); thin mints fall through to the population prior.
+        try:
+            from strategy_engineV2 import DEFAULT_CONFIG as _V2_DEFAULTS
+            _popcal_on = float(
+                primary_kwargs.get("v2_popcal_enable",
+                                    _V2_DEFAULTS.get("v2_popcal_enable", 0.0))
+            ) > 0.0
+            if _popcal_on:
+                cal_overrides: dict = {}
+                _mint_layer_fired = False
+                _mintcal_on = float(
+                    primary_kwargs.get("v2_mintcal_enable",
+                                       _V2_DEFAULTS.get("v2_mintcal_enable", 0.0))
+                ) > 0.0
+                if _mintcal_on and real_mint:
+                    from session_calibrator import calibrate_from_mint_history
+                    cal_overrides = await asyncio.to_thread(
+                        calibrate_from_mint_history, str(real_mint), time.time()
+                    )
+                    # iter86d (user proposal — live chain fetch): thin mints
+                    # fetch their FULL on-chain history once, persist it, and
+                    # recalibrate.  Bounded (timeout ≤ 90s) — fits inside the
+                    # engine's 100-candle warmup, so no tradable window is
+                    # lost.  Persisted rows make future backtests of this
+                    # session see identical calibration (parity).
+                    _chain_on = float(
+                        primary_kwargs.get("v2_chain_fetch_enable",
+                                           _V2_DEFAULTS.get("v2_chain_fetch_enable", 0.0))
+                    ) > 0.0
+                    if _chain_on and not cal_overrides:
+                        try:
+                            from mint_chain_history import fetch_and_persist
+                            inserted = await asyncio.wait_for(
+                                fetch_and_persist(str(real_mint)), timeout=95.0
+                            )
+                            if inserted:
+                                logger.info(
+                                    f"[MintChain] {real_mint[:8]}… persisted "
+                                    f"{inserted} chain candles — recalibrating"
+                                )
+                                cal_overrides = await asyncio.to_thread(
+                                    calibrate_from_mint_history,
+                                    str(real_mint), time.time(),
+                                )
+                        except asyncio.TimeoutError:
+                            logger.warning("[MintChain] fetch timed out — population fallback")
+                        except Exception as _chain_err:
+                            logger.warning(f"[MintChain] fetch failed: {_chain_err}")
+                    _mint_layer_fired = bool(cal_overrides)
+                if not cal_overrides:
+                    cal_overrides = await calibrate_async()
+                # iter86c: mark mint-layer sessions only — the per-coin online
+                # refinement (requires-mintcal gate in the adapter) is
+                # evidence-backed on mint physics, noise on thin-mint popcal
+                # sessions (parity with the backtest layer).
+                _SDE_13 = ("sigma_mu", "lambda_mu", "kappa_mu", "sigma_phi",
+                           "alpha", "beta", "eta", "sigma_h", "theta",
+                           "sigma_ell", "zeta", "lambda_0", "tau_max")
+                if _mint_layer_fired and not any(
+                        k in primary_kwargs for k in _SDE_13):
+                    cal_overrides["_calibration_sourced"] = 1
+                # User params win over calibration (explicit beats implicit).
+                # NOTE: _calibration_sourced stays in the kwargs — the
+                # adapter reads it to arm the per-coin requires-mintcal gate.
+                merged = {**cal_overrides, **primary_kwargs}
+                merged.pop("v2_popcal_enable", None)
+                merged.pop("v2_mintcal_enable", None)
+                primary_kwargs = merged
+            else:
+                primary_kwargs.pop("v2_popcal_enable", None)
+                primary_kwargs.pop("v2_mintcal_enable", None)
+        except Exception as _cal_err:
+            logger.warning(f"[SessionCalibrator] calibration skipped: {_cal_err}")
+        live_trader = LiveTrader(
+            token_mint=real_mint,
+            keypair=keypair,
+            buy_size_sol=buy_size / n_engines,
+            slippage_bps=slippage_bps,
+            priority_fee_lamports=100_000,
+            engine_kwargs=primary_kwargs,
+            skip_simulation=skip_sim,
+            engine_version=engine_version,
+            # User policy (2026-08-26): terminate motionless coins to free
+            # hardware.  Fires ONLY while fully idle (no position / pending
+            # signal / swap), so teardown never needs an emergency sell; the
+            # auto-recording is finalised by the normal session teardown.
+            no_motion_stop_seconds=120.0,
+        )
+        extra_traders: list[LiveTrader] = []
+        for ev in fleet_versions:
+            extra_traders.append(LiveTrader(
                 token_mint=real_mint,
                 keypair=keypair,
                 buy_size_sol=buy_size / n_engines,
                 slippage_bps=slippage_bps,
                 priority_fee_lamports=100_000,
-                engine_kwargs={k: v for k, v in dict(engine_params or {}).items()
-                               if k not in ("v2_popcal_enable",
-                                            "v2_mintcal_enable",
-                                            "v2_chain_fetch_enable")},
+                engine_kwargs=dict(primary_kwargs),   # fresh dict per engine
                 skip_simulation=skip_sim,
-                engine_version=engine_version,
+                engine_version=ev,
                 no_motion_stop_seconds=120.0,
-            )
-            session = _LiveSession(
-                real_mint=real_mint,
-                token_name=token_name,
-                token_symbol=token_symbol,
-                timeframe=timeframe,
-                trader=placeholder,
-                token_info=token_info,
-                engine_version=engine_version,
-                extra_traders=[],
-                engine_versions=[engine_version] + fleet_versions,
-            )
-            session.create_request = {
-                "keypair": keypair,
-                "engine_params": dict(engine_params or {}),
-                "buy_size": buy_size,
-                "slippage_bps": slippage_bps,
-                "skip_sim": skip_sim,
-                "engine_version": engine_version,
-                "fleet_versions": fleet_versions,
-            }
-            session.pending_construction = True
+            ))
+        live_trader.start_watchdog()
+        for _tr in extra_traders:
+            _tr.start_watchdog()
 
-            session.rec_id = data_store.create_recording(
-                real_mint, timeframe, token_name, token_symbol
-            )
-            logger.info(f"[LIVE] Auto-recording candles → recording {session.rec_id}")
-            # NOTE: the placeholder gets NO journal (set_session_meta is
-            # called on the real primary trader inside run()); the recording
-            # id lives on the session and the runner for candle persistence.
+        all_versions = [engine_version] + fleet_versions
+        session = _LiveSession(
+            real_mint=real_mint,
+            token_name=token_name,
+            token_symbol=token_symbol,
+            timeframe=timeframe,
+            trader=live_trader,
+            token_info=token_info,
+            engine_version=engine_version,
+            extra_traders=extra_traders,
+            engine_versions=all_versions,
+        )
 
-            _active_live_traders[real_mint] = session
-            session.task = asyncio.create_task(session.run())
-            return session, True
-    finally:
-        _creating_live_sessions.discard(marker_mint)
+        session.rec_id = data_store.create_recording(
+            real_mint, timeframe, token_name, token_symbol
+        )
+        logger.info(f"[LIVE] Auto-recording candles → recording {session.rec_id}")
+        live_trader.set_session_meta(
+            recording_id=session.rec_id, token_name=token_name,
+            token_symbol=token_symbol, timeframe=timeframe,
+        )
+
+        _active_live_traders[real_mint] = session
+        session.task = asyncio.create_task(session.run())
+        return session, True
 
 
 # ── AutoFeed state & manager ───────────────────────────────────────────────
@@ -2647,46 +2476,37 @@ async def _autofeed_forward(cand: Candidate):
             "(POST /api/live/buy_size) — skipping server-side session spawn"
         )
     if pk and af_buy_size is not None:
-        # session_create_opt: the spawn runs as a detached task — the feed
-        # loop never awaits it (its resolver hop + per-mint marker wait used
-        # to stall the feed behind other creations), and N candidates spawn
-        # concurrently.  _get_or_create_live_session itself returns in
-        # bounded-fast time; the slow calibration lives in the session runner.
-        async def _spawn():
-            try:
-                session, created = await _get_or_create_live_session(
-                    real_mint=cand.mint,
-                    private_key=pk,
-                    buy_size=af_buy_size,
-                    token_name=cand.name or "",
-                    token_symbol=cand.symbol or "",
-                    timeframe="1s",
-                )
-                if created:
-                    logger.info(f"[AutoFeed] Auto-started server-side session for ${cand.symbol} ({cand.mint[:8]}…)")
-                    # Tell connected dashboards a session now exists so they
-                    # can attach a viewer card WITHOUT needing the browser
-                    # private key.  Without this push the UI only discovered
-                    # sessions by polling /api/live/status (page load / tab
-                    # switch / WS close), so autofeed sessions stayed
-                    # invisible while recording candles.
-                    for q in list(_autofeed_clients):
-                        try:
-                            q.put_nowait({
-                                "type": "session_started",
-                                "mint": session.real_mint,
-                                "token_name": session.token_name,
-                                "token_symbol": session.token_symbol,
-                                "timeframe": session.timeframe,
-                                "engine_version": session.engine_version,
-                                "timestamp": time.time(),
-                            })
-                        except asyncio.QueueFull:
-                            pass
-            except Exception as e:
-                logger.error(f"[AutoFeed] Error auto-starting session for {cand.mint[:8]}…: {e}")
-
-        asyncio.ensure_future(_spawn())
+        try:
+            session, created = await _get_or_create_live_session(
+                real_mint=cand.mint,
+                private_key=pk,
+                buy_size=af_buy_size,
+                token_name=cand.name or "",
+                token_symbol=cand.symbol or "",
+                timeframe="1s",
+            )
+            if created:
+                logger.info(f"[AutoFeed] Auto-started server-side session for ${cand.symbol} ({cand.mint[:8]}…)")
+                # Tell connected dashboards a session now exists so they can
+                # attach a viewer card WITHOUT needing the browser private key.
+                # Without this push the UI only discovered sessions by polling
+                # /api/live/status (page load / tab switch / WS close), so
+                # autofeed sessions stayed invisible while recording candles.
+                for q in list(_autofeed_clients):
+                    try:
+                        q.put_nowait({
+                            "type": "session_started",
+                            "mint": session.real_mint,
+                            "token_name": session.token_name,
+                            "token_symbol": session.token_symbol,
+                            "timeframe": session.timeframe,
+                            "engine_version": session.engine_version,
+                            "timestamp": time.time(),
+                        })
+                    except asyncio.QueueFull:
+                        pass
+        except Exception as e:
+            logger.error(f"[AutoFeed] Error auto-starting session for {cand.mint[:8]}…: {e}")
 
 
 @app.get("/api/autofeed/status")
@@ -3388,23 +3208,12 @@ async def live_trading_ws(
         if created:
             # The runner is warming up; wait so this viewer gets the same
             # warmup strategy results the old single-tab flow provided.
-            # (also covers the deferred-construction wait below)
             try:
                 await asyncio.wait_for(session.warmed.wait(), timeout=45.0)
             except asyncio.TimeoutError:
                 pass
-            if session.warmup_candles:
-                candles = session.warmup_candles
-                strategy = session.warmup_strategy
-            else:
-                # session_create_opt: constructed engines arrived after the
-                # 45s window (or none will) — replay whatever the recording
-                # holds so the chart is never blank.
-                try:
-                    candles = data_store.get_recording_candles(session.rec_id) if session.rec_id else []
-                except Exception:
-                    candles = []
-                strategy = []
+            candles = session.warmup_candles
+            strategy = session.warmup_strategy
         else:
             # Re-attach: replay everything recorded so far.  The engine has
             # already processed these candles — the chart just needs the data.
@@ -3450,45 +3259,22 @@ async def live_trading_ws(
                 if msg_type == "update_config":
                     if "buy_size" in msg:
                         # Only a valid dashboard-supplied size is applied —
-                        # never a fallback default.  Applies to the whole fleet
-                        # so the swap-in of calibrated traders (which carries
-                        # the primary's live config over) keeps split sizing.
+                        # never a fallback default.
                         try:
                             v = float(msg["buy_size"])
                         except (TypeError, ValueError):
                             v = 0.0
                         if v > 0:
-                            n = len(session.traders)
-                            for _tr in session.traders:
-                                _tr.buy_size_sol = v / max(n, 1)
+                            session.trader.buy_size_sol = v
                     if "slippage_bps" in msg:
-                        for _tr in session.traders:
-                            _tr.slippage_bps = int(msg["slippage_bps"])
+                        session.trader.slippage_bps = int(msg["slippage_bps"])
                     # priority_fee is fixed at 100_000 micro-lamports (0.0001 SOL) — ignored
                 elif msg_type == "manual_trade":
-                    # session_create_opt: manual trades wait for the calibrated
-                    # fleet — the placeholder's engine carries no calibration
-                    # and must never trade.
-                    if getattr(session, "pending_construction", False):
-                        await send({
-                            "type": "trade_update",
-                            "event": "manual_trade_failed",
-                            "detail": "engine still calibrating — try again in a moment",
-                        })
-                        continue
                     action = msg.get("action")
-                    for _tr in session.traders:
-                        try:
-                            if action == "buy":
-                                await _tr.force_buy()
-                            elif action == "sell":
-                                await _tr.force_sell()
-                        except Exception as _mt_err:
-                            await send({
-                                "type": "trade_update",
-                                "event": "manual_trade_failed",
-                                "detail": f"{type(_mt_err).__name__}: {_mt_err}",
-                            })
+                    if action == "buy":
+                        await session.trader.force_buy()
+                    elif action == "sell":
+                        await session.trader.force_sell()
                 elif msg_type == "pong":
                     pass
 
