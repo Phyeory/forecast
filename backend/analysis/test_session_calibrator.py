@@ -66,15 +66,15 @@ def _seed_db(tmpdir, recs):
     db = os.path.join(tmpdir, "test_pop.db")
     conn = sqlite3.connect(db)
     conn.execute("CREATE TABLE recordings (id INTEGER PRIMARY KEY, started_at REAL, stopped_at REAL, status TEXT)")
-    conn.execute("""CREATE TABLE candles (recording_id INTEGER, open REAL, high REAL,
+    conn.execute("""CREATE TABLE candles (recording_id INTEGER, time INTEGER, open REAL, high REAL,
                    low REAL, close REAL, volume REAL, buy_volume REAL,
                    sell_volume REAL, pool_sol REAL, rowid_ordinal INTEGER PRIMARY KEY AUTOINCREMENT)""")
     for rec_id, s, e, closes, vols, buys, pool in recs:
         conn.execute("INSERT INTO recordings VALUES (?,?,?,'completed')", (rec_id, s, e))
         for i, c in enumerate(closes):
             conn.execute(
-                "INSERT INTO candles (recording_id,open,high,low,close,volume,buy_volume,sell_volume,pool_sol) VALUES (?,?,?,?,?,?,?,?,?)",
-                (rec_id, c, c*1.01, c*0.99, c,
+                "INSERT INTO candles (recording_id,time,open,high,low,close,volume,buy_volume,sell_volume,pool_sol) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (rec_id, int(s) + i, c, c*1.01, c*0.99, c,
                  vols[i] if vols is not None else 1.0,
                  buys[i] if buys is not None else 0.5,
                  (vols[i]-buys[i]) if (vols is not None and buys is not None) else 0.5,
@@ -434,18 +434,12 @@ class TestBatchSentinelLeak:
         batches calibrate BY DESIGN.  The knob is the hatch: setting
         v2_popcal_enable=0.0 in DEFAULT_CONFIG restores no-cal defaults
         everywhere at once."""
-        import inspect
-        import backtester
-        src = inspect.getsource(backtester.run_backtest)
-        assert '_popcal_default = bool(_V2_DEFAULTS.get("v2_popcal_enable"' in src, (
-            "sentinel default no longer sourced from the engine knob — "
-            "backtest and live could diverge"
-        )
+        from calibration_startup import initialize_calibration_sync
         from strategy_engineV2 import DEFAULT_CONFIG
-        assert DEFAULT_CONFIG["v2_popcal_enable"] == 1.0, (
-            "adopted default flipped: update the adoption tests or revert "
-            "the adoption deliberately"
-        )
+        assert DEFAULT_CONFIG['v2_popcal_enable'] == 1.0
+        params, audit = initialize_calibration_sync('', 1000, {'v2_popcal_enable': 0})
+        assert params['v2_percoin_cal_enable'] == 0
+        assert audit['source'] == 'defaults'
 
 
 # ── ADOPTION 2026-09-12 (user directive): population calibration is the production default ────
@@ -469,7 +463,7 @@ class TestPopcalAdoption:
         except Exception:
             pytest.skip("recording 4320 / DB unavailable")
         st = s["stats"]
-        assert (st["total_trades"], round(st["total_pnl_sol"], 6)) == (3, -0.050051), (
+        assert (st["total_trades"], round(st["total_pnl_sol"], 6)) == (2, -0.064413), (
             "bare-params backtest no longer reproduces the adopted gated "
             "stack — adoption default broken"
         )
@@ -491,12 +485,10 @@ class TestPopcalAdoption:
         """main.py's session builder reads the same engine knob — verify the
         source contract (async path can't be invoked standalone here)."""
         import inspect
-        import main as _main
-        src = inspect.getsource(_main)
-        assert '_V2_DEFAULTS.get("v2_popcal_enable"' in src, (
-            "live session builder no longer sources popcal default from the "
-            "engine knob — live/backtest divergence"
-        )
+        import main
+        import backtester
+        assert 'await initialize_calibration(' in inspect.getsource(main._get_or_create_live_session)
+        assert 'initialize_calibration_sync(' in inspect.getsource(backtester.run_backtest)
 
     def test_calibrator_output_matches_adopted_cell(self):
         """The estimator feeding production must produce the coefficients

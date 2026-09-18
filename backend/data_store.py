@@ -112,11 +112,13 @@ def init_price_db():
     conn.close()
 
 
-def create_recording(mint: str, timeframe: str, token_name: str = "", token_symbol: str = "") -> int:
+def create_recording(mint: str, timeframe: str, token_name: str = "", token_symbol: str = "",
+                     *, started_at: float | None = None) -> int:
     conn = _get_price_conn()
     cur = conn.execute(
         "INSERT INTO recordings (mint, token_name, token_symbol, timeframe, started_at) VALUES (?, ?, ?, ?, ?)",
-        (mint, token_name, token_symbol, timeframe, time.time()),
+        (mint, token_name, token_symbol, timeframe,
+         time.time() if started_at is None else float(started_at)),
     )
     rec_id = cur.lastrowid
     conn.commit()

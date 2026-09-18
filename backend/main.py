@@ -2285,89 +2285,15 @@ async def _get_or_create_live_session(
         fleet_versions = [v for v in fleet_versions if v != engine_version]
         n_engines = 1 + len(fleet_versions)
 
+        from calibration_startup import initialize_calibration
+        calibration_started_at = time.time()
         primary_kwargs = dict(engine_params or {})
-        # Population SDE calibration — ADOPTED 2026-09-12 (iter84b_cal_full
-        # cell).  The ENGINE knob `v2_popcal_enable` (DEFAULT_CONFIG) is the
-        # single source of truth: backtests and live sessions calibrate
-        # identically by default.  Passing `v2_popcal_enable` in the session's
-        # engine_params overrides it for that session (0.0 = OFF hatch).
-        # The flag is consumed here — it never reaches the engine config.
-        # iter86 mint-history layer: when `v2_mintcal_enable` is on, this
-        # token's OWN prior recorded candles calibrate FIRST (same-mint
-        # recordings in price_data.db before now — parity with the backtest
-        # mint layer); thin mints fall through to the population prior.
-        try:
-            from strategy_engineV2 import DEFAULT_CONFIG as _V2_DEFAULTS
-            _popcal_on = float(
-                primary_kwargs.get("v2_popcal_enable",
-                                    _V2_DEFAULTS.get("v2_popcal_enable", 0.0))
-            ) > 0.0
-            if _popcal_on:
-                cal_overrides: dict = {}
-                _mint_layer_fired = False
-                _mintcal_on = float(
-                    primary_kwargs.get("v2_mintcal_enable",
-                                       _V2_DEFAULTS.get("v2_mintcal_enable", 0.0))
-                ) > 0.0
-                if _mintcal_on and real_mint:
-                    from session_calibrator import calibrate_from_mint_history
-                    cal_overrides = await asyncio.to_thread(
-                        calibrate_from_mint_history, str(real_mint), time.time()
-                    )
-                    # iter86d (user proposal — live chain fetch): thin mints
-                    # fetch their FULL on-chain history once, persist it, and
-                    # recalibrate.  Bounded (timeout ≤ 90s) — fits inside the
-                    # engine's 100-candle warmup, so no tradable window is
-                    # lost.  Persisted rows make future backtests of this
-                    # session see identical calibration (parity).
-                    _chain_on = float(
-                        primary_kwargs.get("v2_chain_fetch_enable",
-                                           _V2_DEFAULTS.get("v2_chain_fetch_enable", 0.0))
-                    ) > 0.0
-                    if _chain_on and not cal_overrides:
-                        try:
-                            from mint_chain_history import fetch_and_persist
-                            inserted = await asyncio.wait_for(
-                                fetch_and_persist(str(real_mint)), timeout=95.0
-                            )
-                            if inserted:
-                                logger.info(
-                                    f"[MintChain] {real_mint[:8]}… persisted "
-                                    f"{inserted} chain candles — recalibrating"
-                                )
-                                cal_overrides = await asyncio.to_thread(
-                                    calibrate_from_mint_history,
-                                    str(real_mint), time.time(),
-                                )
-                        except asyncio.TimeoutError:
-                            logger.warning("[MintChain] fetch timed out — population fallback")
-                        except Exception as _chain_err:
-                            logger.warning(f"[MintChain] fetch failed: {_chain_err}")
-                    _mint_layer_fired = bool(cal_overrides)
-                if not cal_overrides:
-                    cal_overrides = await calibrate_async()
-                # iter86c: mark mint-layer sessions only — the per-coin online
-                # refinement (requires-mintcal gate in the adapter) is
-                # evidence-backed on mint physics, noise on thin-mint popcal
-                # sessions (parity with the backtest layer).
-                _SDE_13 = ("sigma_mu", "lambda_mu", "kappa_mu", "sigma_phi",
-                           "alpha", "beta", "eta", "sigma_h", "theta",
-                           "sigma_ell", "zeta", "lambda_0", "tau_max")
-                if _mint_layer_fired and not any(
-                        k in primary_kwargs for k in _SDE_13):
-                    cal_overrides["_calibration_sourced"] = 1
-                # User params win over calibration (explicit beats implicit).
-                # NOTE: _calibration_sourced stays in the kwargs — the
-                # adapter reads it to arm the per-coin requires-mintcal gate.
-                merged = {**cal_overrides, **primary_kwargs}
-                merged.pop("v2_popcal_enable", None)
-                merged.pop("v2_mintcal_enable", None)
-                primary_kwargs = merged
-            else:
-                primary_kwargs.pop("v2_popcal_enable", None)
-                primary_kwargs.pop("v2_mintcal_enable", None)
-        except Exception as _cal_err:
-            logger.warning(f"[SessionCalibrator] calibration skipped: {_cal_err}")
+        calibration_audit = {}
+        if engine_version == 2 or 2 in fleet_versions:
+            primary_kwargs, calibration_audit = await initialize_calibration(
+                str(real_mint), calibration_started_at, primary_kwargs,
+            )
+        logger.info("[Calibration] %s %s", real_mint[:8], calibration_audit)
         live_trader = LiveTrader(
             token_mint=real_mint,
             keypair=keypair,
@@ -2414,8 +2340,10 @@ async def _get_or_create_live_session(
         )
 
         session.rec_id = data_store.create_recording(
-            real_mint, timeframe, token_name, token_symbol
+            real_mint, timeframe, token_name, token_symbol,
+            started_at=calibration_started_at,
         )
+        session.calibration_audit = calibration_audit
         logger.info(f"[LIVE] Auto-recording candles → recording {session.rec_id}")
         live_trader.set_session_meta(
             recording_id=session.rec_id, token_name=token_name,

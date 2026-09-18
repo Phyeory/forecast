@@ -91,6 +91,7 @@ SELECT id, started_at, stopped_at
 FROM recordings
 WHERE status='completed'
   AND stopped_at IS NOT NULL
+  AND stopped_at <= ?
   AND started_at < ?
   AND started_at > 0
 ORDER BY started_at DESC
@@ -100,10 +101,13 @@ LIMIT ?
 # ── SQL: get candles for a set of recording IDs ───────────────────────────────
 # Requires only that close > 0 (pool_sol may be 0 for pre-vault-diff recordings;
 # the per-recording estimator handles missing pool data gracefully).
+# Causal guard: only candles with time < before_unix are read, so a recording
+# that was still running at the calibration cutoff can never leak its tail.
 _CANDLE_QUERY = """
 SELECT recording_id, open, high, low, close, volume, buy_volume, sell_volume, pool_sol
 FROM candles
 WHERE recording_id IN ({placeholders})
+  AND time < ?
   AND close > 0
   AND open > 0
 ORDER BY recording_id, rowid
@@ -494,12 +498,13 @@ def calibrate_from_population(
         Returns _ALWAYS_EXPLICIT only on any error or thin population.
     """
     try:
+        before_unix = math.floor(float(before_unix))
         conn = sqlite3.connect(db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
 
         # 1. Fetch last N recordings before the session start
-        rows = cur.execute(_REC_QUERY, (before_unix, n_recs)).fetchall()
+        rows = cur.execute(_REC_QUERY, (before_unix, before_unix, n_recs)).fetchall()
         if len(rows) < MIN_RECS_REQUIRED:
             logger.info(
                 f"[SessionCalibrator] only {len(rows)} recordings before {before_unix:.0f},"
@@ -518,7 +523,7 @@ def calibrate_from_population(
         placeholders = ",".join("?" * len(rec_ids))
         candle_rows = cur.execute(
             _CANDLE_QUERY.format(placeholders=placeholders),
-            rec_ids,
+            [*rec_ids, before_unix],
         ).fetchall()
         conn.close()
 
@@ -583,9 +588,9 @@ SELECT c.time, c.open, c.high, c.low, c.close, c.volume,
 FROM candles c
 JOIN recordings r ON r.id = c.recording_id
 WHERE r.mint = ?
-  AND r.status = 'completed'
   AND r.started_at > 0
   AND r.started_at < ?
+  AND c.time >= ?
   AND c.time < ?
   AND c.close > 0 AND c.open > 0
 ORDER BY c.time ASC
@@ -596,6 +601,7 @@ def calibrate_from_mint_history(
     mint: str,
     started_at_unix: float,
     db_path: str = _DB_PATH,
+    lookback_seconds: float = 6000.0,
 ) -> dict:
     """Estimate SDE coefficients from THIS TOKEN's own prior tape.
 
@@ -615,9 +621,12 @@ def calibrate_from_mint_history(
         return {}
     try:
         conn = sqlite3.connect(db_path, timeout=10.0)
-        before = float(started_at_unix)
+        before = math.floor(float(started_at_unix))
+        lower = math.ceil(float(started_at_unix) - float(lookback_seconds))
+        if not math.isfinite(lookback_seconds) or lookback_seconds <= 0:
+            raise ValueError("lookback_seconds must be positive and finite")
         rows = conn.execute(
-            _MINT_CANDLE_QUERY, (mint, before, before)
+            _MINT_CANDLE_QUERY, (mint, before, lower, before)
         ).fetchall()
         # iter86d: union the persisted chain-fetch candles (live sessions on
         # mints this platform never recorded).  Same table, same filter —
@@ -627,9 +636,9 @@ def calibrate_from_mint_history(
                 """SELECT time, open, high, low, close, volume,
                           buy_volume, sell_volume, pool_sol
                    FROM mint_history_candles
-                   WHERE mint=? AND time < ? AND source='chain'
+                   WHERE mint=? AND time >= ? AND time < ? AND source='chain'
                    ORDER BY time ASC""",
-                (mint, float(started_at_unix)),
+                (mint, lower, before),
             ).fetchall()
         except sqlite3.OperationalError:
             chain_rows = []  # table not created yet
@@ -651,8 +660,8 @@ def calibrate_from_mint_history(
     # Keep only the rolling tail (most recent physics), then build the
     # (N, 9) candle array the estimator expects (rec-id column unused here).
     rows = rows[-MAX_MINT_CANDLES:]
-    arr = np.array([[0.0] + list(r) for r in rows], dtype=float)
-    duration_s = float(len(rows))  # 1s candles → duration ≈ candle count
+    arr = np.array([[0.0] + list(r[1:]) for r in rows], dtype=float)
+    duration_s = float(rows[-1][0] - rows[0][0] + 1)
 
     try:
         stats = _compute_rec_stats(arr, duration_s)
@@ -806,11 +815,12 @@ def summarize_population(before_unix: Optional[float] = None) -> dict:
     """
     if before_unix is None:
         before_unix = time.time()
+    before_unix = math.floor(float(before_unix))
     try:
         conn = sqlite3.connect(_DB_PATH, timeout=10.0)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-        rows = cur.execute(_REC_QUERY, (before_unix, N_POPULATION_RECS)).fetchall()
+        rows = cur.execute(_REC_QUERY, (before_unix, before_unix, N_POPULATION_RECS)).fetchall()
         if not rows:
             conn.close()
             return {"n_recs": 0}
@@ -821,7 +831,7 @@ def summarize_population(before_unix: Optional[float] = None) -> dict:
         }
         placeholders = ",".join("?" * len(rec_ids))
         candle_rows = cur.execute(
-            _CANDLE_QUERY.format(placeholders=placeholders), rec_ids
+            _CANDLE_QUERY.format(placeholders=placeholders), [*rec_ids, before_unix]
         ).fetchall()
         conn.close()
         by_rec: dict[int, list] = {}

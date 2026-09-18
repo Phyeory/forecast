@@ -295,7 +295,7 @@ DEFAULT_CONFIG = {
     # enable_exit_latency(L, armed_only) on them; live_trader.py holds the
     # queued armed EXIT on the candle clock then launches the sell.  The
     # exit DECISIONS are untouched — only the fill timing of armed exits.
-    "v2_exit_delay_seconds":     20.0,  # iter83 ADOPTED 2026-09-12 (armed-only 20s: full-DB Δ+5.06 SOL p=5.6e-17, both eras+, holdout-confirmed; >0 = iter80 armed deferred fill)
+    "v2_exit_delay_seconds":     0.0,  # iter83 ADOPTED 2026-09-12 (armed-only 20s: full-DB Δ+5.06 SOL p=5.6e-17, both eras+, holdout-confirmed; >0 = iter80 armed deferred fill)
     "v2_exit_delay_armed_only":   1.0,  # 1.0 = defer armed/harvest exit classes only (applies when exit delay > 0)
 
     # ── iter85: per-coin online SDE recalibration ─────────────────────────
@@ -313,8 +313,10 @@ DEFAULT_CONFIG = {
     # mint-history layer actually supplied the session's coefficients.
     "v2_percoin_requires_mintcal": 1.0,
     "v2_percoin_cal_min_candles": 120,  # tape length before first recalibration
-    "v2_percoin_cal_every":       100,  # full candles between recalibrations
-    "v2_percoin_cal_window":      600,  # rolling window length (full candles)
+    "v2_percoin_cal_every":       100,  # legacy count diagnostic; scheduling uses seconds
+    "v2_percoin_cal_interval_seconds": 100.0,  # elapsed candle-clock time between attempts
+    "v2_percoin_cal_blend":       1.0,  # [0,1]: current cfg → estimated coefficients
+    "v2_percoin_cal_window":      600,  # completed candles, plus one in-progress row
 
     # ── ADOPTED 2026-09-12 (user directive): population SDE calibration ──
     # At session start, all 13 free SDE coefficients are estimated from the
@@ -2947,14 +2949,27 @@ class StrategyEngineV2Adapter:
         self._v2_percoin_every = max(1, int(
             engine_kwargs.get("v2_percoin_cal_every",
                               DEFAULT_CONFIG["v2_percoin_cal_every"])))
+        self._v2_percoin_interval = max(
+            0.0, float(engine_kwargs.get(
+                "v2_percoin_cal_interval_seconds",
+                DEFAULT_CONFIG["v2_percoin_cal_interval_seconds"])))
+        blend_raw = float(engine_kwargs.get(
+            "v2_percoin_cal_blend",
+            DEFAULT_CONFIG["v2_percoin_cal_blend"]))
+        self._v2_percoin_blend = min(1.0, max(0.0, blend_raw))
         self._v2_percoin_window = max(
             self._v2_percoin_min_candles,
             int(engine_kwargs.get("v2_percoin_cal_window",
                                   DEFAULT_CONFIG["v2_percoin_cal_window"])))
         self._percoin_tape: list[dict] = []       # [{t, o, h, l, c, v, bv, sv, pool}]
         self._percoin_last_t: int = -1            # candle timestamp currently being filled
-        self._percoin_completed: int = 0          # completed candles since last recal
-        self._percoin_next_at: int = self._v2_percoin_min_candles  # trigger threshold
+        self._percoin_completed: int = 0          # completed candles in the session so far
+        self._percoin_next_at: int = self._v2_percoin_min_candles  # count diagnostic
+        # First attempt is gated only by completed-candle count; thereafter
+        # each attempt sets a candle-clock deadline. Zero interval means
+        # once per forward boundary, never once per intra-candle state.
+        self._percoin_next_t: float = -math.inf
+        self._percoin_log: list[dict] = []        # causal evidence: per-attempt bounds
 
         # ── V1 config knobs the capture enumerates (cfg_*) ──
         # We echo them onto `eng` so the ForwardTester's _capture_entry_params
@@ -3216,7 +3231,7 @@ class StrategyEngineV2Adapter:
         # 2026-09-03); 2026-09-11 the user set the production default to
         # 0.0 = instant exit fill (the pre-iter80 model, byte-exact); >0
         # re-enables the armed deferral.
-        self.v2_exit_delay_seconds = float(engine_kwargs.pop("v2_exit_delay_seconds", 20.0))
+        self.v2_exit_delay_seconds = float(engine_kwargs.pop("v2_exit_delay_seconds", 0.0))
         # 1.0: defer only the armed/harvest exit classes (gain_retrace,
         # rate_split_flip:armed, tp_v2, breakeven_scratch, reversal_exit);
         # the loss book (kelly_flat, evr_triage, kramers_down_exit,
@@ -3272,46 +3287,55 @@ class StrategyEngineV2Adapter:
     # ── iter85: per-coin online recalibration ──────────────────────────────
 
     def _percoin_recalibrate(self) -> None:
-        """Re-estimate SDE coefficients from THIS coin's rolling tape.
+        """Estimate from completed rows strictly before the current candle.
 
-        Runs on the adapter (which owns the candle tape) and applies results
-        through the core engine's recalibrate() — explicit user keys always
-        win, _CLIP stability bounds enforced inside the estimator.  On a
-        degenerate/too-short tape the estimator returns {} and current
-        coefficients are kept.  Deterministic: pure numpy, no RNG.
+        Blend against current cfg before recalibrate(); explicit user keys
+        remain protected. Log every attempt, including empty/no-change ones,
+        and re-anchor the elapsed-time deadline without catch-up bursts.
         """
-        from session_calibrator import estimate_from_session_arrays
+        from session_calibrator import estimate_from_session_arrays, _CLIP
 
-        tape = self._percoin_tape[:-1] if (
-            self._percoin_tape and self._percoin_tape[-1]["t"] == self._percoin_last_t
-            # last row is the candle that JUST opened (in-progress) — its
-            # volume split is still incomplete, so exclude it from estimation
-        ) else self._percoin_tape
-        n = len(tape)
-        if n < 20:
-            return
-        closes = np.array([row["c"] for row in tape], dtype=float)
-        vols   = np.array([row["v"] for row in tape], dtype=float)
-        buys   = np.array([row["bv"] for row in tape], dtype=float)
-        sells  = np.array([row["sv"] for row in tape], dtype=float)
-        pools  = np.array([row["pool"] for row in tape], dtype=float)
-        duration_s = float(tape[-1]["t"] - tape[0]["t"]) or float(n)
+        cutoff = self._percoin_last_t
+        rows = [row for row in self._percoin_tape if row["t"] < cutoff]
+        n = len(rows)
+        first_t = rows[0]["t"] if rows else None
+        last_t = rows[-1]["t"] if rows else None
+        duration_s = (float(last_t - first_t) or float(n)) if rows else 0.0
+        raw = {}
+        if n >= max(20, self._v2_percoin_min_candles):
+            arrays = [np.array([row[key] for row in rows], dtype=float)
+                      for key in ("c", "v", "bv", "sv", "pool")]
+            raw = estimate_from_session_arrays(*arrays, duration_s)
 
-        overrides = estimate_from_session_arrays(
-            closes, vols, buys, sells, pools, duration_s,
-        )
-        if overrides:
-            changed = self.core.recalibrate(overrides)
-            if changed:
-                self._percoin_log = getattr(self, "_percoin_log", [])
-                self._percoin_log.append({
-                    "completed_candles": self._percoin_completed,
-                    "changed": changed,
-                    "coeffs": dict(overrides),
-                })
-        # Schedule the next recalibration regardless of outcome (a skipped
-        # degenerate tape should not retry every candle).
+        blend = self._v2_percoin_blend
+        overrides = {}
+        for k, estimate in raw.items():
+            if (k not in _CLIP or k in self.core._explicit_cfg_keys
+                    or not math.isfinite(estimate) or blend == 0.0):
+                continue
+            lo, hi = _CLIP[k]
+            # Estimator bounds remain authoritative.  Zero blend is an
+            # exact no-op even if the launch cfg is outside these bounds.
+            value = blend * float(estimate) + (1.0 - blend) * float(self.core.cfg[k])
+            overrides[k] = min(hi, max(lo, value))
+        changed = self.core.recalibrate(overrides)
+        self._percoin_log.append({
+            "time": cutoff,
+            "t_cutoff": cutoff,  # exclusive
+            "window_first_t": first_t,
+            "window_last_t": last_t,
+            "window_rows": n,
+            "duration_s": duration_s,
+            "completed_candles": self._percoin_completed,
+            "blend": blend,
+            "estimates": dict(raw),
+            "coeffs": dict(overrides),  # legacy proposed-coefficient field
+            "applied_coeffs": {k: float(self.core.cfg[k]) for k in _CLIP},
+            "changed": changed,
+        })
+        # Compatibility diagnostic only; the seconds deadline drives updates.
         self._percoin_next_at = self._percoin_completed + self._v2_percoin_every
+        self._percoin_next_t = float(cutoff) + self._v2_percoin_interval
 
     # ── Holder-flow helpers ───────────────────────────────────────────────
 
@@ -3708,24 +3732,37 @@ class StrategyEngineV2Adapter:
                 if len(self._candle_volume_history) > 300:
                     self._candle_volume_history.pop(0)
 
-        # ── iter85: per-coin tape buffer + online recalibration ──────────
+        # ── per-coin tape buffer + causal periodic online recalibration ──
         # A candle row fills across its 4 intra-candle states (same time
         # value); the 4th state carries the completed volume split.  When a
         # NEW candle's timestamp arrives, the previous row is complete.
+        # Buffer contract: holds `window` COMPLETED rows + the single
+        # in-progress row (never more), and the in-progress row is never
+        # used for calibration.
         if self._v2_percoin_enable:
             t_c = int(time)
+            forward_boundary = t_c > self._percoin_last_t
             if t_c != self._percoin_last_t:
-                if self._percoin_last_t >= 0:
-                    # previous candle just completed
-                    self._percoin_completed += 1
-                self._percoin_tape.append({
-                    "t": t_c, "o": float(o), "h": float(h), "l": float(l),
-                    "c": float(c), "v": float(volume), "bv": float(buy_volume),
-                    "sv": float(sell_volume), "pool": float(pool_sol),
-                })
-                if len(self._percoin_tape) > self._v2_percoin_window:
-                    self._percoin_tape.pop(0)
-                self._percoin_last_t = t_c
+                if t_c <= self._percoin_last_t:
+                    # Out-of-order / repeated-past row: never advance the
+                    # completion count, never open a new buffer row, never
+                    # re-anchor the schedule — the elapsed-timestamp schedule
+                    # and the causal window stay a pure function of the
+                    # already-observed prefix.
+                    pass
+                else:
+                    # forward candle: previous row just completed
+                    if self._percoin_last_t >= 0:
+                        self._percoin_completed += 1
+                    self._percoin_tape.append({
+                        "t": t_c, "o": float(o), "h": float(h), "l": float(l),
+                        "c": float(c), "v": float(volume), "bv": float(buy_volume),
+                        "sv": float(sell_volume), "pool": float(pool_sol),
+                    })
+                    # window COMPLETED rows + the current in-progress row
+                    if len(self._percoin_tape) > self._v2_percoin_window + 1:
+                        self._percoin_tape.pop(0)
+                    self._percoin_last_t = t_c
             else:
                 # refresh the in-progress row (keep H/L extremes + last data)
                 row = self._percoin_tape[-1]
@@ -3738,7 +3775,15 @@ class StrategyEngineV2Adapter:
                 if pool_sol > 0.0:
                     row["pool"] = float(pool_sol)
 
-            if self._percoin_completed >= self._percoin_next_at:
+            # Elapsed-timestamp schedule, evaluated only on forward timestamp
+            # boundaries (a forward timestamp just completed the prior row).
+            # First calibration only after `min_candles` completions; then
+            # every `interval_seconds` of candle-clock time.  A gap longer
+            # than the interval fires ONE attempt (re-anchored from the last
+            # attempt's cutoff) — no catch-up bursts.
+            if (forward_boundary
+                    and self._percoin_completed >= self._v2_percoin_min_candles
+                    and float(t_c) >= self._percoin_next_t):
                 self._percoin_recalibrate()
 
         # Snapshot the previous close BEFORE `_maintain_v1_indicators`

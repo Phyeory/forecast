@@ -309,69 +309,15 @@ def run_backtest(
     if engine_params is None:
         engine_params = {}
 
-    # CRITICAL (2026-09-12 leak fix): never mutate the caller's dict.  Batch
-    # workers share ONE engine_params object across every task in a chunk
-    # (pickle memoizes the shared reference), so the old pop() removed the
-    # sentinel on the first task and left tasks 2..N defaulting into
-    # calibration — silently contaminating every NONCAL baseline batch since
-    # iter84 (iter84's byte-identical REGIME_B null and the first iter84b
-    # base_full were this leak).
+    from calibration_startup import initialize_calibration_sync
+    calibration_audit = {}
     engine_params = dict(engine_params)
-    # Population SDE calibration (iter84b estimator — last 50 completed
-    # recordings before this recording's started_at) as the base layer; cell
-    # params override on top.  ADOPTED 2026-09-12 (iter84b_cal_full cell:
-    # 777 trades / WR 68.3% / +4.86 SOL / exp +0.0063): the DEFAULT comes
-    # from the engine knob `v2_popcal_enable` — single source of truth, so
-    # backtest and live calibrate identically.  The per-call sentinel
-    # overrides it for cells:
-    #   {"use_session_calibration": false} → pure DEFAULT_CONFIG (NONCAL)
-    #   {"use_session_calibration": true}  → force calibration ON
-    #   absent                             → engine knob default (adopted: ON)
-    from strategy_engineV2 import DEFAULT_CONFIG as _V2_DEFAULTS
-    _popcal_default = bool(_V2_DEFAULTS.get("v2_popcal_enable", 0.0))
-    _use_cal = bool(engine_params.pop("use_session_calibration", _popcal_default))
-    if not _use_cal and "v2_percoin_cal_enable" not in engine_params:
-        # NONCAL sentinel semantics: disable ALL calibration layers, including
-        # the engine-native per-coin online recalibration (it is DEFAULT-ON
-        # since the iter86b adoption).  An explicit v2_percoin_cal_enable in
-        # the caller's params wins (surgical control stays possible).
-        engine_params["v2_percoin_cal_enable"] = 0.0
-    if _use_cal:
-        # iter86 mint-history layer (user proposal): THIS token's own prior
-        # candles (prior completed recordings of the same mint before
-        # started_at — no lookahead) take precedence over the population
-        # prior; thin/degenerate mint tapes fall through to population.
-        cal_base: dict = {}
-        _mint_layer_fired = False
-        _mintcal_on = float(
-            engine_params.get("v2_mintcal_enable",
-                              _V2_DEFAULTS.get("v2_mintcal_enable", 0.0))
-        ) > 0.0
-        if _mintcal_on:
-            from session_calibrator import calibrate_from_mint_history
-            cal_base = calibrate_from_mint_history(
-                str(recording.get("mint") or ""),
-                float(recording.get("started_at", 0.0)),
-            )
-            _mint_layer_fired = bool(cal_base)
-        if not cal_base:
-            cal_base = calibrate_from_history(float(recording.get("started_at", 0.0)))
-        # Mark SDE coefficients as calibration-sourced (iter86b) — but ONLY
-        # for mint-layer sessions (iter86c): the per-coin online refinement
-        # is evidence-backed on top of the mint layer's long prior tape; on
-        # popcal-fallback (thin-mint) sessions the online estimates are
-        # tape-noise (true full-DB burn: train −0.94 vs holdout +1.64
-        # imbalance), so those sessions must NOT carry the sentinel (the
-        # adapter's requires-mintcal gate then keeps per-coin off).
-        _SDE_13 = ("sigma_mu", "lambda_mu", "kappa_mu", "sigma_phi", "alpha",
-                   "beta", "eta", "sigma_h", "theta", "sigma_ell", "zeta",
-                   "lambda_0", "tau_max")
-        if _mint_layer_fired and not any(k in engine_params for k in _SDE_13):
-            cal_base["_calibration_sourced"] = 1
-        # Cell params win over calibration (explicit beats implicit); the
-        # mintcal trigger key never reaches the engine config.
-        engine_params = {**cal_base, **engine_params}
-        engine_params.pop("v2_mintcal_enable", None)
+    if engine_version == 2:
+        anchor = min(float(recording.get("started_at") or candles[0]["time"]),
+                     float(candles[0]["time"]))
+        engine_params, calibration_audit = initialize_calibration_sync(
+            str(recording.get("mint") or ""), anchor, engine_params,
+        )
 
     timeframe = recording["timeframe"]
 
@@ -570,6 +516,8 @@ def run_backtest(
         "candle_count":  len(candles),
         "stats":         stats,
         "trade_count":   len(trades),
+        "calibration": calibration_audit,
+        "calibration_updates": getattr(engine, "_percoin_log", []),
     }
 
 
