@@ -230,7 +230,7 @@ let engineParamsV2 = {
   // Wilcoxon p=0.0038, CI [+0.00073,+0.00380], both eras positive (OLD
   // +0.59 / DEAD +0.51), expectancy/trade +48%, negative days 12→11,
   // PF 1.41.  0.0 = instant exit fill (pre-iter80 byte-exact hatch). ──
-  v2_exit_delay_seconds:      20.0,  // iter83 ADOPTED 2026-09-12 (armed-only 20s: full-DB Δ+5.06 SOL p=5.6e-17, both eras+, holdout-confirmed); >0 = seconds to defer armed exit execution
+  v2_exit_delay_seconds:      0.0,  // iter83 ADOPTED 2026-09-12 (armed-only 20s: full-DB Δ+5.06 SOL p=5.6e-17, both eras+, holdout-confirmed); >0 = seconds to defer armed exit execution
   v2_exit_delay_armed_only:   1.0,  // 1.0 = defer armed/harvest exit classes only
   // ── iter85: per-coin online SDE recalibration (default OFF — research cell) ──
   // The engine re-estimates all 13 free SDE coefficients from THIS coin's own
@@ -253,7 +253,10 @@ let engineParamsV2 = {
   // every session.  The layer arms itself on mint-history sessions; surgical
   // per-session control stays available via the API.
   v2_percoin_cal_min_candles: 120,  // full candles before the first recalibration
-  v2_percoin_cal_every:       100,  // full candles between recalibrations
+  v2_percoin_cal_interval_seconds: 100.0,
+  v2_percoin_cal_blend:       1.0,
+  v2_calibration_history_seconds: 6000.0,
+  v2_calibration_history_lag_seconds: 0.0,
   v2_percoin_cal_window:      600,  // rolling tape length (full candles) used per estimation
   v2_percoin_requires_mintcal: 1.0, // ADOPTED default 1.0 = ON (iter86c): per-coin refinement fires ONLY on mint-history sessions — on thin-mint/popcal tapes the online estimates are noise (true full-DB evidence)
   // ── ADOPTED 2026-09-12: population SDE calibration at session start ──

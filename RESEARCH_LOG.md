@@ -908,3 +908,60 @@ program (validated on-chain: account exists, signatures returned).
 
 Chain-fetch smoke on real chain data: fetched + persisted + calibrated (65 candles from a
 live token; thin only because the token traded little). Suite 204, parity 10/10.
+
+---
+
+## iter89 — Causal calibration re-baseline (2026-09-17, user directive)
+
+User identified calibration look-ahead: the backtester calibrated from data the live trader
+cannot have. Audit confirmed three leaks; all fixed and regression-tested.
+
+**Leaks found**
+1. Population calibrator selected recordings by `started_at < cutoff` only — recordings that
+   had not yet *completed* at the cutoff contributed their full future tape (verified
+   side-by-side on rec 4320: 10 of its 50 population recordings ended 2,496–6,096 s AFTER the
+   cutoff; old 3/−0.050051 → causal 2/−0.064413). Fixed: membership requires
+   `stopped_at <= cutoff`, candles filtered `time < cutoff` (defends stale metadata too).
+2. Mint-history layer had the same full-tape leak (capped per-session to `time < cutoff`,
+   bounded by `v2_calibration_history_seconds` = 6000 s default lookback).
+3. Mint estimator row-layout bug: `[0]+list(r)` kept timestamp as the "open" column —
+   stats effectively ran on time/price mixes. Fixed to 9 columns `[0]+list(r[1:])`.
+
+**Periodic calibration (t-interval, no future data)**: per-coin online recalibration was
+already causal (rolling tape, in-progress candle excluded) but candle-COUNT scheduled;
+now time-scheduled via `v2_percoin_cal_interval_seconds` (default 100 s) with
+`v2_percoin_cal_blend` [0,1] (default 1.0), `_percoin_log` carries per-attempt cutoffs.
+Backtester must feed candles in time order (chunked parallel replays violate this).
+
+**On-chain pre-session init (live + backtest parity)**: new `calibration_startup.py` —
+both pipelines initialize from the SAME fixed cutoff `floor(started_at − lag_seconds)`
+(`v2_calibration_history_lag_seconds`, default 0) over a bounded
+`v2_calibration_history_seconds` (default 6000 s) window: mint-history → chain fetch
+(bounded historical slice, strict `[before−lookback, before)`) → population. Chain fetch
+(`mint_chain_history.py`) now paginates BACKWARD from the frozen cutoff so historical data
+is reachable; live probe returned 0 candles at 60-min lookback (RPC signature retention),
+fails closed to population — never present-day data. `create_recording(started_at=…)`
+lets live recordings backdate their metadata to the calibration anchor.
+
+**Knob re-tune + gates**: preregistered acceptance (Wilcoxon p<0.05, 10k bootstrap CI>0,
+≥50% breadth) on frozen mint-disjoint random subsets (96-screen/96-holdout, seed
+20260917, snapshot DB): gentle (blend .25), responsive (50 s/.5), stable (200 s/.5/w1200)
+→ **0/3 candidates changed any trade on screen; gentle Δ+0.00267 SOL holdout → REJECTED**.
+**Full 2,648-recording cohort** (1 excluded: rec 5022 marked completed with 0 candles,
+excluded symmetrically from both arms): baseline 887 trades / WR 68.21% / +5.306 SOL /
+exp +0.00598 vs gentle 881 trades / WR 68.67% / +5.483 SOL / exp +0.00622 —
+Δ+0.177 SOL, p=0.489, bootstrap CI [−0.00004, +0.00019] straddles 0, breadth 36/2647
+changed (0.76%); era split pre +0.055 p=0.72 / post +0.122 p=0.55 — both null.
+**VERDICT: NOT ADOPTED — causal defaults (blend 1.0, 100 s interval) stand.** The point of
+iter89 was correctness, not alpha: the production numbers are now honest (no future data),
+and the honest stack still clears the old headline bar (WR ~66–68%, +5.3 SOL full-DB).
+Artifacts: `backend/analysis/causal_calibration_results/` (manifest/frozen source hashes/
+per-recording rows/verdict.json), campaign scripts `causal_calibration_campaign.py` +
+`causal_calibration_finish.py` (snapshot-DB replay, source-hash guard, mint-disjoint
+screen/holdout split).
+
+**Re-baseline hazard**: every historical popcal batch (iter84b onward) silently included
+future-completed recordings — old baselines are not comparable to causal runs.
+Known failures staying red: 6 test_cat_stop (feature absent) + 2 test_iter80 (pin 0.0 exit
+delay vs adopted 20.0) — pre-existing, not calibration. Suite: 267 passed / 8 failed
+foreign / 1 skip; parity 10/10; causal/periodic/bounds/startup/chain-window tests 54+ green.

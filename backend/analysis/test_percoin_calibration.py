@@ -374,11 +374,10 @@ class TestLayerStacking:
     def test_backtester_sets_sentinel_only_without_user_sde(self):
         """The pipeline must NOT set _calibration_sourced when the caller
         passed SDE keys (user intent stays protected even with calibration)."""
-        import inspect
-        import backtester
-        src = inspect.getsource(backtester.run_backtest)
-        assert '_mint_layer_fired and not any(k in engine_params for k in _SDE_13)' in src
-        assert 'cal_base["_calibration_sourced"] = 1' in src
+        from calibration_startup import initialize_calibration_sync
+        params, _ = initialize_calibration_sync('', 1000, {'sigma_mu': .07})
+        assert '_calibration_sourced' not in params
+        assert params['sigma_mu'] == .07
 
     def test_stack_end_to_end(self):
         """mint coefficients at tick 0 + online recalibration refines them."""
@@ -430,7 +429,7 @@ class TestAdoptionHatchMatrix:
         """Rec 4320 is thin-mint: bare {} = population fallback (per-coin
         gated off by requires-mintcal — no noise layer on thin tapes)."""
         got = self._run({})
-        assert got == (3, -0.050051), (
+        assert got == (2, -0.064413), (
             f"bare-{{}} on thin-mint rec no longer matches popcal baseline: {got}"
         )
 
@@ -442,14 +441,14 @@ class TestAdoptionHatchMatrix:
 
     def test_popcal_only_matches_prior_adoption(self):
         got = self._run({"v2_mintcal_enable": 0.0, "v2_percoin_cal_enable": 0.0})
-        assert got == (3, -0.050051), (
+        assert got == (2, -0.064413), (
             f"popcal-only no longer matches the 09-12 adopted baseline: {got}"
         )
 
     def test_noncal_plus_percoin_explicit(self):
         got = self._run({"use_session_calibration": False,
                          "v2_percoin_cal_enable": 1.0})
-        assert got == (4, 0.023963), (
+        assert got == (4, 0.031856), (
             f"surgical NONCAL+percoin control changed: {got}"
         )
 
@@ -457,10 +456,9 @@ class TestAdoptionHatchMatrix:
         """The sentinel-false path must inject percoin-off when the caller
         didn't pass the knob — otherwise NONCAL baselines silently carry
         the online layer (iter86b adoption hazard)."""
-        import inspect
-        import backtester
-        src = inspect.getsource(backtester.run_backtest)
-        assert 'engine_params["v2_percoin_cal_enable"] = 0.0' in src
+        from calibration_startup import initialize_calibration_sync
+        params, _ = initialize_calibration_sync('', 1000, {'use_session_calibration': False})
+        assert params['v2_percoin_cal_enable'] == 0
 
 
 # ── iter86d: live chain fetch of mint history (user proposal) ────────────────
