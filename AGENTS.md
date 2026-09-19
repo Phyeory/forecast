@@ -198,7 +198,12 @@ re-add): whale-dump (iter72/78), SPE/P_zero (iter79), pool_drain (iter65), V1 tr
 EVR ON (120 s / 20% / 0.45 / veto 0.25) · holder-flow entry gate OFF · dev-sell exit OFF
 (iter62 user policy, 2026-08-23) · rate-split ON (10% / 0.55 / 12) · kelly_flat ON (60 ticks /
 40%) · entry delay 0.0 (iter83 REJECTED) · exit delay 20.0 armed_only 1.0 (iter83 ADOPTED
-2026-09-12) · warmup 100 · confidence_high 0.79.
+2026-09-12) · warmup 100 · confidence_high 0.79 · **calibration τ program = VR decision
+horizon** (`v2_tau_vr_enable` 1.0 / `v2_tau_vr_scale` 1.0, iter90e ADOPTED 2026-09-19:
+population/mint/per-coin layers set `tau_max = clip(H* × scale, 10, 60)` from the coin's
+variance-ratio trend-resolution timescale instead of the saturated 1/lambda_mu inversion;
+full-DB Δ+3.935 SOL p=0.00014 CI+ breadth 60%, holdout p=0.017 CI+, day-blocked permutation
+p=0.0005; trades 887→1,991, WR 68.2%→64.6%).
 The UI mirror is `frontend/js/app.js::engineParamsV2` — keep both in sync when changing defaults.
 
 ---
