@@ -230,7 +230,7 @@ let engineParamsV2 = {
   // Wilcoxon p=0.0038, CI [+0.00073,+0.00380], both eras positive (OLD
   // +0.59 / DEAD +0.51), expectancy/trade +48%, negative days 12→11,
   // PF 1.41.  0.0 = instant exit fill (pre-iter80 byte-exact hatch). ──
-  v2_exit_delay_seconds:      0.0,  // iter83 ADOPTED 2026-09-12 (armed-only 20s: full-DB Δ+5.06 SOL p=5.6e-17, both eras+, holdout-confirmed); >0 = seconds to defer armed exit execution
+  v2_exit_delay_seconds:      20.0,  // iter83 ADOPTED 2026-09-12 (armed-only 20s: full-DB Δ+5.06 SOL p=5.6e-17, both eras+, holdout-confirmed) — MUST mirror _ALWAYS_EXPLICIT (session_calibrator); a stale 0.0 here silently disabled the adoption on every UI batch (found 2026-09-19)
   v2_exit_delay_armed_only:   1.0,  // 1.0 = defer armed/harvest exit classes only
   // ── iter85: per-coin online SDE recalibration (default OFF — research cell) ──
   // The engine re-estimates all 13 free SDE coefficients from THIS coin's own
@@ -267,6 +267,17 @@ let engineParamsV2 = {
   // 1,311 / 63.5% / +4.47 / +0.0034.  Master switch for BOTH backtest and
   // live (the engine knob is the single source of truth).
   v2_popcal_enable:           1.0,  // ADOPTED default 1.0 = ON; 0.0 = OFF (pre-adoption byte-parity hatch)
+  // ── ADOPTED 2026-09-19 (iter90e): variance-ratio decision horizon ────
+  // The calibrator's tau program switched from the 1/lambda_mu inversion
+  // (saturated at its floor 10 on ~100% of sessions) to the VR estimator:
+  // tau_max = clip(scale × H*, 10, 60) where H* is the coin's
+  // trend-resolution timescale (argmax of directional variance per unit
+  // time over the causal tape).  ADOPTED CELL tauvr10 (full-DB 2,647
+  // recs): Δ+3.935 SOL p=0.00014 CI+ breadth 60%; HOLDOUT Δ+0.462 p=0.017
+  // CI+ 82% improved; eras both positive; day-blocked permutation
+  // p=0.0005.  Trades 887→1,991, WR 68.2%→64.6%, expectancy +0.0046/trade.
+  v2_tau_vr_enable:           1.0,  // ADOPTED default 1.0 = ON; 0.0 = OFF (legacy 1/lambda_mu tau, byte-parity hatch)
+  v2_tau_vr_scale:            1.0,  // tau_max = scale × H* (adopted cell scale 1.0)
 };
 
 /* Strategy Engine Parameters — V3 (newborn-coin dump-bottom recovery).
@@ -1405,6 +1416,58 @@ document.getElementById("bt-run-last-12h-btn").addEventListener("click", async (
   } finally {
     prog.classList.add("hidden");
     last12hBtn.disabled = false;
+    runAllBtn.disabled = false;
+    runBtn.disabled = false;
+    progLabel.textContent = "Running…";
+  }
+});
+
+document.getElementById("bt-run-last-7d-btn").addEventListener("click", async () => {
+  // Last 7 days = a rolling 7-day window ending at the moment the button is clicked.
+  const hi = Math.floor(Date.now() / 1000);
+  const lo = hi - 7 * 24 * 60 * 60;
+
+  const recordings = await apiFetch("/api/recordings");
+  const last7d = recordings.filter(r => r.status === "completed" && r.started_at >= lo && r.started_at <= hi);
+  if (!last7d.length) return alert("No completed recordings started in the last 7 days.");
+
+  const prog = document.getElementById("bt-progress");
+  const progLabel = document.getElementById("bt-progress-label");
+  const last7dBtn = document.getElementById("bt-run-last-7d-btn");
+  const runAllBtn = document.getElementById("bt-run-all-btn");
+  const runBtn = document.getElementById("bt-run-btn");
+  prog.classList.remove("hidden");
+  last7dBtn.disabled = true;
+  runAllBtn.disabled = true;
+  runBtn.disabled = true;
+  progLabel.textContent = `Running last 7 days' ${last7d.length} recordings in parallel…`;
+
+  try {
+    const testerConfig = {
+      buy_size_sol: parseFloat(document.getElementById("tester-buy-size").value) || 0.1,
+      slippage_pct: parseFloat(document.getElementById("tester-slippage").value) || 1.0,
+      priority_fee: parseFloat(document.getElementById("tester-priority-fee").value) || 0.0001,
+      bribe_fee: parseFloat(document.getElementById("tester-bribe-fee").value) || 0.00001
+    };
+
+    const result = await apiFetch("/api/backtest/batch", {
+      method: "POST",
+      body: JSON.stringify({
+        engine_params: getEngineParams(),
+        engine_version: engineVersion,
+        recording_ids: last7d.map(r => r.id),
+        last_days: 7,
+        ...testerConfig
+      }),
+    });
+    const msg = `Done: ${result.succeeded}/${result.total} backtests succeeded.`;
+    if (result.failed > 0) alert(msg);
+    loadBacktestsList();
+  } catch (e) {
+    alert(`Last-7-days batch backtest failed: ${e.message || e}`);
+  } finally {
+    prog.classList.add("hidden");
+    last7dBtn.disabled = false;
     runAllBtn.disabled = false;
     runBtn.disabled = false;
     progLabel.textContent = "Running…";

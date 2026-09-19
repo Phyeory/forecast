@@ -318,6 +318,57 @@ DEFAULT_CONFIG = {
     "v2_percoin_cal_blend":       1.0,  # [0,1]: current cfg → estimated coefficients
     "v2_percoin_cal_window":      600,  # completed candles, plus one in-progress row
 
+    # ── iter90: per-coin harvest-geometry calibration ──────────────────────
+    # Status 2026-09-18: REJECTED — the machinery stays (default OFF) because
+    # it is smoke-proven, causal and config-responsive, but the surface is
+    # measured-closed.  Evidence: (1) the preregistered campaign (iter90_
+    # geometry_results/) — screen cells all PnL-noise, chosen cell geo_gate
+    # holdout 0/96 recordings changed; (2) the (arm × give) trade-level
+    # counterfactual grid on the 887-trade causal baseline (analysis/
+    # cal_cf_geometry.py, cf_grid.json): EVERY geometry cell ≤ 0 vs the
+    # production lock (arm 10, give 0.5) — tighter arms −0.3..−1.0 SOL
+    # (marginal arming trades are net winners left unlocked), tighter gives
+    # −0.17..−1.05 SOL — the iter27/iter64 static optimum already sits at the
+    # surface optimum, and the marginal arming band's outcomes do not track
+    # the coin's prior-tape amplitude statistics.  Do NOT re-test arm/give
+    # per-coin calibration without a new data channel.
+    # The SDE-coefficient channel above remains the adopted calibration
+    # stack; its decision-inertness (iter89) is structural: saturation at
+    # stability floors + KDE-density-ratio direction decision.
+    "v2_harvestcal_enable":       0.0,  # iter90 candidate REJECTED (explicit 1.0 arms it; absent ≠ OFF applies post-adoption only)
+    "v2_harvest_arm_scale":       1.0,  # arm_pct = scale × runup_q50(%)
+    "v2_harvest_arm_min":         4.0,  # arm floor (quiet coins arm no lower)
+    "v2_harvest_arm_max":         14.0, # arm ceiling (hot coins keep a wide trail)
+    "v2_percoin_geo_enable":      1.0,  # per-coin online geometry refinement (requires _geometry_sourced or explicit pass; killed by v2_harvestcal_enable=0 and the NONCAL hatch)
+    "v2_percoin_geo_requires_mintcal": 0.0,  # 1.0 = refine geometry only on mint-sourced sessions (SDE-gate mirror; screening cell)
+
+    # ── iter90d: variance-ratio decision horizon (τ) calibration ───────────
+    # The legacy tau estimator (1/lambda_mu inversion) conflates the drift
+    # mean-reversion timescale with the DECISION HORIZON and saturates at its
+    # floor (tau=10) on ~100% of sessions — the engine runs P⁰-dominated and
+    # overly conservative.  Leverage experiment #2 (16 traded recordings, on
+    # top of production): tau60 +76 trades Δ+0.258 SOL (10/16 diverge),
+    # tau90 +95/+0.206, tau45 +58/+0.042 — the τ family is the ONLY surface
+    # with both decision leverage and positive raw direction.  The VR
+    # estimator maps the coin's trend-resolution timescale H* (argmax of
+    # directional variance per unit time; bimodal chop H*=15 vs trend
+    # H*≥30) to tau_max = clip(scale × H*, 10, 60): chop coins keep the
+    # conservative short horizon, trend coins commit.  All estimation layers
+    # (population/mint/per-coin) switch to VR when enabled; OFF = legacy
+    # byte-parity.
+    # ADOPTED 2026-09-19 (iter90e, preregistered campaign iter90e_tauvr_
+    # results/): full-DB 2,647 recs Δ+3.935 SOL (baseline +5.31 → +9.24),
+    # Wilcoxon p=0.00014, bootstrap CI [+0.0007,+0.0023], 565 changed with
+    # 61% improved, token breadth 60%; HOLDOUT Δ+0.462 p=0.017 CI+ 82%
+    # improved; eras pre +1.28 / post +2.65 both positive; day-blocked
+    # sign-flip permutation p=0.0005 (49 days, 31 positive).  Trades
+    # 887→1,991 (+124%), WR 68.2%→64.6% (added trades win ≈62%),
+    # expectancy +0.0060→+0.0046/trade.  The static tau60 reference was
+    # NOT adopted (+3.07 but p=0.83, diffuse); the per-coin VR selectivity
+    # concentrates the edge and is what makes it significant.
+    "v2_tau_vr_enable":           1.0,  # ADOPTED 2026-09-19 (iter90e): full-DB Δ+3.935 SOL p=0.00014 CI+ breadth 60% (565 changed, 61% improved), holdout Δ+0.462 p=0.017 CI+ 82% improved, both eras positive, day-blocked permutation p=0.0005
+    "v2_tau_vr_scale":            1.0, # tau_max = scale × H* (ADOPTED cell; screened 0.25/0.5/1.0/2.0 + static reference)
+
     # ── ADOPTED 2026-09-12 (user directive): population SDE calibration ──
     # At session start, all 13 free SDE coefficients are estimated from the
     # last 50 completed recordings before the session (physics-based
@@ -2971,6 +3022,53 @@ class StrategyEngineV2Adapter:
         self._percoin_next_t: float = -math.inf
         self._percoin_log: list[dict] = []        # causal evidence: per-attempt bounds
 
+        # ── iter90: per-coin harvest-geometry recalibration ────────────────
+        # The SDE-coefficient estimators saturate at the stability floors on
+        # ~100% of sessions (constant output → decision-neutral), while the
+        # harvest arm tracks a statistic that genuinely differentiates coins
+        # (median forward-60s run-up, p10→p90 ≈ 2.7%→17.1%).  The geometry
+        # layer estimates `gain_retrace_arm_pct` at tick 0 (init layers) and
+        # refines it on the same causal schedule as the SDE layer.
+        self._v2_harvestcal_enable = float(
+            engine_kwargs.get("v2_harvestcal_enable",
+                              DEFAULT_CONFIG["v2_harvestcal_enable"])) > 0.0
+        self._v2_harvest_arm_scale = float(
+            engine_kwargs.get("v2_harvest_arm_scale",
+                              DEFAULT_CONFIG["v2_harvest_arm_scale"]))
+        self._v2_harvest_arm_min = float(
+            engine_kwargs.get("v2_harvest_arm_min",
+                              DEFAULT_CONFIG["v2_harvest_arm_min"]))
+        self._v2_harvest_arm_max = float(
+            engine_kwargs.get("v2_harvest_arm_max",
+                              DEFAULT_CONFIG["v2_harvest_arm_max"]))
+        _geo_enable = float(
+            engine_kwargs.get("v2_percoin_geo_enable",
+                              DEFAULT_CONFIG["v2_percoin_geo_enable"])) > 0.0
+        _geo_explicit = "v2_percoin_geo_enable" in engine_kwargs
+        _geo_sourced = bool(engine_kwargs.get("_geometry_sourced", 0))
+        _geo_requires_mint = float(
+            engine_kwargs.get("v2_percoin_geo_requires_mintcal",
+                              DEFAULT_CONFIG["v2_percoin_geo_requires_mintcal"])) > 0.0
+        # User intent protection: an explicit gain_retrace_arm_pct that did
+        # NOT come from a calibration layer is never refined mid-session.
+        self._geom_arm_protected = (
+            "gain_retrace_arm_pct" in engine_kwargs and not _geo_sourced)
+        self._v2_percoin_geo_enable = (
+            self._v2_harvestcal_enable and _geo_enable
+            and (_geo_sourced or _geo_explicit)
+            and (not _geo_requires_mint or _mint_sourced or _geo_explicit))
+
+        # ── iter90d: VR decision-horizon flag for the per-coin layer ───────
+        # Threaded into estimate_from_session_arrays so the online refinement
+        # re-estimates tau from the same VR statistic the init layers used
+        # (OFF = legacy lambda_mu inversion, byte-parity).
+        self._v2_tau_vr_enable = float(
+            engine_kwargs.get("v2_tau_vr_enable",
+                              DEFAULT_CONFIG["v2_tau_vr_enable"])) > 0.0
+        self._v2_tau_vr_scale = float(
+            engine_kwargs.get("v2_tau_vr_scale",
+                              DEFAULT_CONFIG["v2_tau_vr_scale"]))
+
         # ── V1 config knobs the capture enumerates (cfg_*) ──
         # We echo them onto `eng` so the ForwardTester's _capture_entry_params
         # dictionary doesn't AttributeError.  All defaults, mirroring V1.
@@ -3292,8 +3390,13 @@ class StrategyEngineV2Adapter:
         Blend against current cfg before recalibrate(); explicit user keys
         remain protected. Log every attempt, including empty/no-change ones,
         and re-anchor the elapsed-time deadline without catch-up bursts.
+
+        iter90: also refines the harvest geometry (gain_retrace_arm_pct)
+        from the same causal window — governed by its own enable knob so it
+        fires on ALL sessions, not only mint-sourced ones.
         """
-        from session_calibrator import estimate_from_session_arrays, _CLIP
+        from session_calibrator import (estimate_from_session_arrays,
+                                        estimate_geometry_from_candles, _CLIP)
 
         cutoff = self._percoin_last_t
         rows = [row for row in self._percoin_tape if row["t"] < cutoff]
@@ -3302,10 +3405,12 @@ class StrategyEngineV2Adapter:
         last_t = rows[-1]["t"] if rows else None
         duration_s = (float(last_t - first_t) or float(n)) if rows else 0.0
         raw = {}
-        if n >= max(20, self._v2_percoin_min_candles):
+        if self._v2_percoin_enable and n >= max(20, self._v2_percoin_min_candles):
             arrays = [np.array([row[key] for row in rows], dtype=float)
                       for key in ("c", "v", "bv", "sv", "pool")]
-            raw = estimate_from_session_arrays(*arrays, duration_s)
+            raw = estimate_from_session_arrays(*arrays, duration_s,
+                                               tau_vr=self._v2_tau_vr_enable,
+                                               tau_scale=self._v2_tau_vr_scale)
 
         blend = self._v2_percoin_blend
         overrides = {}
@@ -3319,6 +3424,30 @@ class StrategyEngineV2Adapter:
             value = blend * float(estimate) + (1.0 - blend) * float(self.core.cfg[k])
             overrides[k] = min(hi, max(lo, value))
         changed = self.core.recalibrate(overrides)
+
+        # ── iter90: geometry refinement (same causal window) ───────────────
+        geom_raw: dict = {}
+        geom_applied: dict = {}
+        geom_changed = 0
+        if self._v2_percoin_geo_enable and n >= max(20, self._v2_percoin_min_candles):
+            # estimate_geometry_from_candles guards degenerate input and
+            # returns {} on thin tapes (same contract as the SDE estimator).
+            geom_raw = estimate_geometry_from_candles(
+                np.array([row["c"] for row in rows], dtype=float),
+                np.array([row["h"] for row in rows], dtype=float),
+                arm_scale=self._v2_harvest_arm_scale,
+                arm_bounds=(self._v2_harvest_arm_min, self._v2_harvest_arm_max),
+            )
+            if "gain_retrace_arm_pct" in geom_raw and not self._geom_arm_protected:
+                est = float(geom_raw["gain_retrace_arm_pct"])
+                val = blend * est + (1.0 - blend) * float(self._gain_retrace_arm_pct)
+                val = min(self._v2_harvest_arm_max, max(self._v2_harvest_arm_min, val))
+                if math.isfinite(val) and abs(val - self._gain_retrace_arm_pct) > 1e-9:
+                    self._gain_retrace_arm_pct = val
+                    geom_changed = 1
+                geom_applied["gain_retrace_arm_pct"] = float(self._gain_retrace_arm_pct)
+                geom_applied["runup_q50_pct"] = geom_raw.get("runup_q50_pct")
+
         self._percoin_log.append({
             "time": cutoff,
             "t_cutoff": cutoff,  # exclusive
@@ -3332,6 +3461,9 @@ class StrategyEngineV2Adapter:
             "coeffs": dict(overrides),  # legacy proposed-coefficient field
             "applied_coeffs": {k: float(self.core.cfg[k]) for k in _CLIP},
             "changed": changed,
+            "geometry_estimates": dict(geom_raw),
+            "geometry_applied": dict(geom_applied),
+            "geometry_changed": geom_changed,
         })
         # Compatibility diagnostic only; the seconds deadline drives updates.
         self._percoin_next_at = self._percoin_completed + self._v2_percoin_every
@@ -3739,7 +3871,7 @@ class StrategyEngineV2Adapter:
         # Buffer contract: holds `window` COMPLETED rows + the single
         # in-progress row (never more), and the in-progress row is never
         # used for calibration.
-        if self._v2_percoin_enable:
+        if self._v2_percoin_enable or self._v2_percoin_geo_enable:
             t_c = int(time)
             forward_boundary = t_c > self._percoin_last_t
             if t_c != self._percoin_last_t:

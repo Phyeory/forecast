@@ -546,6 +546,8 @@ async def run_backtest_batch_endpoint(body: dict = Body(default={})):
       - ``last_night``: if true, restrict to recordings started between
         10:00 PM local time of the previous day and 12:00 PM (noon) local
         time of the current day.
+      - ``last_days``: if > 0, restrict to recordings started within the
+        last N days (rolling window ending at the moment the batch runs).
     """
     engine_params = body.get("engine_params", {})
     engine_version = int(body.get("engine_version", 1))
@@ -555,6 +557,7 @@ async def run_backtest_batch_endpoint(body: dict = Body(default={})):
         recording_ids = [int(r) for r in recording_ids]
     last_night = bool(body.get("last_night", False))
     last_12h = bool(body.get("last_12h", False))
+    last_days = float(body.get("last_days") or 0)
     try:
         results = await asyncio.to_thread(
             run_backtest_batch,
@@ -570,6 +573,7 @@ async def run_backtest_batch_endpoint(body: dict = Body(default={})):
             recording_ids=recording_ids,
             last_night=last_night,
             last_12h=last_12h,
+            last_days=last_days,
             exec_model=body.get("exec_model", "instant"),
             entry_latency_seconds=float(body.get("entry_latency_seconds", 0.0)),
             exit_latency_seconds=float(body.get("exit_latency_seconds", 0.0)),

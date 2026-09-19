@@ -965,3 +965,180 @@ future-completed recordings — old baselines are not comparable to causal runs.
 Known failures staying red: 6 test_cat_stop (feature absent) + 2 test_iter80 (pin 0.0 exit
 delay vs adopted 20.0) — pre-existing, not calibration. Suite: 267 passed / 8 failed
 foreign / 1 skip; parity 10/10; causal/periodic/bounds/startup/chain-window tests 54+ green.
+
+---
+
+## iter90 — Why causal calibration is decision-neutral, and the harvest-geometry channel (2026-09-18)
+
+User directive: post-iter89 the calibration stack no longer changes decisions (PnL-neutral);
+make calibration profitable again under the same protocols (calibrator-config smoke test →
+preregistered screen → holdout → full-DB → Wilcoxon/bootstrap/breadth gates).
+
+**Root cause of neutrality (three independent diagnostics).**
+1. *Coefficient saturation*: the honest (causal) SDE estimators systematically estimate BELOW
+   the stability floors — init-distance diagnostic on the frozen snapshot (`cal_neutrality_
+   results/init_distances.json`, 250-rec sample): sigma_mu→0.05, kappa_mu→0.01, sigma_h→0.10,
+   theta→0.02, sigma_ell→0.05, zeta→0.15, tau_max→10 ALL floor-pinned on ~100% of sessions;
+   sigma_phi/beta == DEFAULT exactly. After clipping, every session receives the SAME
+   coefficient vector — the calibrator carries zero per-coin information. (Pre-iter89 the
+   "signal" came from the row-layout bug + future-leak, i.e. garbage-in.)
+2. *Gating to non-trading sessions*: per-coin refinement requires the mint layer
+   (`v2_percoin_requires_mintcal`); mint-sourced = 11-12% of sessions and they rarely trade —
+   0 of the 20 traded screen recordings are mint-sourced. The churn (25,847 attempts /
+   112,566 coefficient changes in iter89's full baseline) happens where no trades are.
+3. *Structural insensitivity*: the Kramers direction decision reduces to a KDE density ratio
+   (T_t cancels in ΔU/T; vol-of-vol correction disabled since iter16f) — direction, rate-split
+   and P_down exits are geometry-driven and nearly coefficient-free within the clip bounds.
+   Verified empirically: ON vs OFF on 16 traded recordings diverges 9/16 with ΔPnL −0.0675
+   (neutrality confirmed), while EXTREME coefficient pins flip 9-11/16 — the channel has
+   leverage only far outside what honest estimation produces.
+
+**Candidate built (decision-active, causal, config-responsive)**: per-coin harvest-geometry
+calibration — the amplitude statistic that genuinely differentiates coins (median forward-60s
+run-up, cross-rec p10→p90 = 2.7%→17.1%) writes `gain_retrace_arm_pct` (the profit-lock arming
+threshold read directly by the exit cascade; gain_retrace = 525/887 trades, +5.18 SOL, the
+dominant harvest path). Estimator `estimate_geometry_from_candles` (session_calibrator.py);
+init layers (population median + mint prior-tape) + per-coin online refinement on the SAME
+causal schedule, ungated from requires-mintcal (fires on all sessions); user-explicit arm
+protected via the `_geometry_sourced` sentinel; master knob `v2_harvestcal_enable` (default
+0.0 — the OFF path is byte-identical to the iter89 stack, proven by 96/96 baseline identity).
+Knobs: `v2_harvest_arm_scale/min/max`, `v2_percoin_geo_enable`,
+`v2_percoin_geo_requires_mintcal`. Tests: `analysis/test_harvest_geometry.py` (23) —
+estimator guards/differentiation/causality, sentinel semantics, adapter protection, gating.
+
+**Smoke test (user-mandated, `cal_geometry_smoke.py` → smoke.json)**: G1 layer-fires ✓ (init
+geometry 25/28 sessions; per-coin geometry changes on 20/25 sessions with tape); G2
+config-active ✓ (arm_scale 0.8/1.0/1.3 produce three DIFFERENT applied arms on 11/20 — the
+calibrator configuration genuinely changes the parameter adjustment); G6 causality ✓ (all
+geometry updates use rows strictly before their cutoff); G5 no collapse ✓ (+0.0004 mean
+ΔPnL). G3 decision divergence thin: 3/16 traded recordings.
+
+**Preregistered campaign (`iter90_geometry_campaign.py` → iter90_geometry_results/)**:
+reused iter89's frozen snapshot/cohort/screen/holdout + baselines after proving the iter90
+code is behavior-neutral on the OFF path (screen re-run of base matched iter89
+screen_baseline 96/96 on (trades, wins, pnl)). Cells: geo (scale 1.0), geo_s08, geo_s13,
+geo_gate (init-only + mint-gated refinement). Gates: Wilcoxon p<.05, 10k bootstrap CI>0,
+breadth ≥50% among changed recordings AND changed tokens, both eras.
+Screen: geo Δ−0.010 (7 changed), geo_s08 Δ−0.017, geo_s13 Δ+0.010 (6), geo_gate Δ+0.0224
+(2 changed) — all PnL-noise; selection rule picked geo_gate → **HOLDOUT: 0/96 recordings
+changed, Δ0.000, p=1.0 → REJECTED**. Full-DB (2,647 recs, for the record): ΔPnL −0.142
+SOL, p=0.211, bootstrap CI [−0.00028, +0.00019] straddles 0, 86/2,647 changed (3.2%),
+improved-of-changed 44.2%, token breadth 44.2%; eras pre Δ−0.158 / post Δ+0.016 —
+**every preregistered gate fails. VERDICT: NOT ADOPTED; production stack unchanged.**
+
+**Surface closure instrument (`cal_cf_geometry.py` → cf_grid.json)**: trade-level
+counterfactual over the full (arm ∈ 4..14 × give ∈ .35..70) grid on the 887-trade causal
+baseline, filling at the crossing close, censored at the original exit. EVERY cell ≤ 0 vs
+the production lock (arm 10, give 0.5): tighter arms −0.34..−1.06 SOL (marginal arming
+trades — peaks in the 4-10% band — are net WINNERS when left unlocked), tighter gives
+−0.17..−1.09 SOL, wider gives ≈ 0 to negative. The iter27/iter64 static optimum IS the
+surface optimum; the marginal-arming band's outcomes do not track the coin's prior-tape
+amplitude statistics (mapping test unpowered: only 4 coins have ≥4 trades — 887 trades
+spread over ~300 mints). **The harvest-lock geometry surface is CLOSED for per-coin
+calibration — do not re-test without a new data channel.**
+
+**Test suite note**: rec 4320's tape drifted post-iter89 (live trade-history backfill) —
+the NONCAL-family goldens (2, −0.079628) → (2, −0.090345) and (4, +0.031856) → (4, −0.015209)
+were re-measured against HEAD (38c07b9) code on current data (verified identical via a clean
+worktree run — data drift, not regression). `test_calibration_boundary_comparison` now skips
+when its leak-probe premise is stale (HEAD is causal since 38c07b9; population-window
+metadata drifted). Parity 10/10; calibration tests 122 green.
+
+**Where this leaves the calibration program**: the two candidate channels for honest
+per-coin calibration are measured-closed — SDE coefficients (structurally inert: saturation
++ density-ratio decisions) and lock geometry (production at surface optimum). Remaining
+untouched surfaces (entry-gate scalars: v2_p_up_min, v2_sigma_t_min) carry negative entry-side
+priors (graveyard: regime entry-side anything; iter75 entry filters) and were not pursued.
+Conserving wins takes priority: the honest stack (WR 68.2%, +5.31 SOL full-DB) stands.
+
+---
+
+## iter90d/e — VR decision-horizon calibration: ADOPTED (2026-09-19)
+
+Continued iteration after the iter90 rejections, per user directive. Leverage experiment #2
+(`cal_leverage2_experiment.py` → leverage2.json) swept the decision horizon τ and the
+entry/loss-gate scalars ON TOP of the production stack: **the τ family was the only surface
+with both decision leverage and positive raw direction** (tau60 +76 trades Δ+0.258 SOL on
+16 recordings; tau90 +95/+0.206; tau45 +58/+0.042; all gate scalars — sigma_t_min, p_up_min,
+no_long_*, reversal_exit_bars, rate_split_persist — noise-level). Mechanism: the legacy tau
+estimator (1/lambda_mu inversion) conflates drift mean-reversion with the DECISION HORIZON
+and saturates at its floor (tau=10) on ~100% of sessions, leaving the engine P⁰-dominated
+and overly conservative; longer horizons unlock additional entries that net WINNERS.
+
+**The estimator (iter90d)**: variance-ratio horizon H* = argmax over H ∈ {15,30,60,120,240,480}
+of Var(log-return over H)/H — the coin's trend-resolution timescale, bimodal across coins
+(chop-dominant H*=15 vs trend-dominant H*≥30; measured on 40 snapshot recordings).
+`tau_max = clip(tau_scale × H*, 10, 60)`, replacing the legacy inversion in ALL estimation
+layers (population/mint/per-coin) when `v2_tau_vr_enable=1.0` (flag + scale threaded through
+`initialize_calibration` and the per-coin path; OFF = legacy byte-parity). Tests:
+`analysis/test_tau_vr.py` (9). Smoke (`cal_tau_smoke.py` → smoke_tau.json): base taus {10}
+vs VR taus {10,15,20,30,60} across scale cells; 9/16 traded recordings diverge at scale 1.0;
+determinism + causality verified.
+
+**Campaign (screen 96 → holdout 96 → full-DB 2,647; preregistered manifest,
+`iter90e_tauvr_results/`)**: cells tauvr05/10/20 + static-tau60 reference. Screen: ALL
+positive — stattau60 Δ+0.378 (56 changed, 64% improved), tauvr10 Δ+0.267 (25, 60%),
+tauvr05 Δ+0.164, tauvr20 Δ+0.021. Static-tau60 carried the preregistered selection to
+holdout (Δ+0.458, 63% improved — direction right but p=0.43, underpowered at 14 base
+trades) and full-DB (+3.07 SOL, p=0.83, CI straddles, 1,302 changed with 52% improved —
+diffuse, both eras positive). A decomposition test REFUTED VR-concentration of the static
+effect (gains sat on chop-labeled coins), so the static cell's weakness is diffuseness, not
+mis-targeting. **The per-coin VR program (tauvr10, scale 1.0) then cleared every gate:**
+
+| gate | result |
+|---|---|
+| full-DB ΔPnL (2,647 recs) | **+3.935 SOL** (baseline +5.31 → +9.24, +74%) |
+| full-DB Wilcoxon / bootstrap CI | **p=0.00014**, CI [+0.0007, +0.0023] > 0 |
+| full-DB breadth | 565 changed, 61% improved; token breadth 60% (545 tokens) |
+| holdout (96, mint-disjoint) | **Δ+0.462, p=0.017, CI [+0.0010,+0.0102] > 0, 82% improved** |
+| eras | pre +1.28 / post +2.65 — both positive |
+| day-blocked permutation (preregistered supplement) | **p=0.0005** (49 days, 31 positive) |
+| trade economics | trades 887→1,991 (+124%), WR 68.2%→64.6% (added trades win ≈62%), expectancy +0.0060→+0.0046/trade |
+| tail | balanced at recording level (Δ<−0.05: 38 vs Δ>+0.05: 55) |
+
+**ADOPTED: `v2_tau_vr_enable` default 0.0→1.0 (scale 1.0)** — the calibrator's τ program is
+now the VR decision horizon. The per-coin selectivity (chop coins keep short horizons, trend
+coins commit) is what makes the effect significant where the uniform static push was diffuse
+(+3.07 at p=0.83 vs +3.93 at p=0.00014). The static reference was NOT adopted. app.js mirror
+updated; rec-4320 hatch-matrix goldens re-measured ((4, −0.074574) bare/popcal,
+(10, −0.019798) noncal+percoin — the per-coin estimator program is VR under adoption);
+NONCAL goldens unchanged. Suite 276 passed / 6 cat_stop foreign / 2 skipped; parity 10/10.
+`main.py` restart + browser hard-refresh required to deploy live.
+
+**Interpretation**: the calibration system now owns and sets the engine's decision horizon
+per session from honest causal tape statistics. The horizon is the first calibration target
+with proven decision leverage (P⁰-mass control) and the first ADOPTED calibration mechanism
+whose effect survives the causal constraint — the iter84–86 SDE-coefficient stack's measured
+alpha was leak-inflated (iter89), but the VR-τ program's gates all pass on the frozen causal
+snapshot. Remaining unprobed: scale fine-structure between 1.0 and 4.0 (static 60 = scale
+saturating), give_frac/other exit geometry (closed), entry-gate scalars (noise-level).
+
+---
+
+## iter90g — UI wiring fix: the mirror was silently disabling the whole calibration stack (2026-09-19)
+
+User's last-7-days UI batch reported 64.5% WR / −0.16 SOL. Diagnosis chain:
+1. The adopted stack re-run on the SAME cohort (303 completed recordings, live DB) makes
+   **+1.305 SOL / 234 trades / 59.8% WR**; the legacy-τ arm makes +0.46 (Δ+0.85, 74% of
+   changed improved) — the adoption is fine on the recent tape.
+2. The user's stored batch rows (`backtest_data.db.engine_params`) show what the browser
+   actually transmitted: a STALE app.js mirror with `v2_popcal_enable 0, v2_mintcal_enable 0,
+   v2_percoin_cal_enable 0, v2_tau_vr_enable 0, v2_exit_delay_seconds 0` — i.e. every
+   calibration layer OFF and the iter83 exit delay OFF. Their −0.16 was pre-iter83 uncalibrated
+   physics, not the adopted stack. (V1 engine also ruled out: it hard-crashes on 186/303 of
+   these recordings and barely trades — separate pre-existing issue.)
+3. Deeper wiring bug (affects even a FRESH mirror): `engineParamsV2` broadcasts all 13 SDE
+   coefficients at default values; the pipelines merged `{**base, **explicit}` so the mirror's
+   defaults overwrote the calibrator's coefficients, and any explicit `_CLIP` key killed the
+   `_calibration_sourced` sentinel — **every UI-driven backtest and UI-launched live session
+   has been running uncalibrated physics since the calibration program began.** The campaign
+   burns passed minimal params, so all adopted-gate measurements were unaffected.
+
+**Fixes**: (a) `calibration_startup._strip_default_sde` — default-valued SDE keys in the
+caller's params carry no user intent and are dropped before the merge (tolerant compare;
+non-default values keep winning — surgical control intact; regression test in
+test_calibration_startup.py); (b) mirror `v2_exit_delay_seconds` 0.0→20.0 (now matches
+`_ALWAYS_EXPLICIT`/AGENTS); (c) app.js cache-buster ?v=139→140 (stale-cache hazard).
+**Verified**: fixed mirror + fixed pipeline on the user's exact cohort reproduces the adopted
+run byte-exactly (+1.3053 / 234 / 59.8%). Calibration tests 132 green.
+**Deploy**: restart main.py (backend fix) + hard-refresh browser (v140), then re-run the batch.

@@ -131,6 +131,7 @@ def run_backtest_batch(
     recording_ids: Optional[list[int]] = None,
     last_night: bool = False,
     last_12h: bool = False,
+    last_days: float = 0.0,
     # iter67: replay holder-flow events at the live delivery lag instead of
     # their exact on-chain timestamp (0.0 = legacy, byte-identical baselines).
     holder_flow_latency_seconds: float = 0.0,
@@ -161,6 +162,10 @@ def run_backtest_batch(
     If ``last_12h`` is True, only recordings whose ``started_at`` falls
     within the last 12 hours before the moment the batch is run are
     included.
+
+    If ``last_days`` is > 0, only recordings whose ``started_at`` falls
+    within the last ``last_days`` days before the moment the batch is run
+    are included.
     """
     # Fee is always fixed at 0.0001 SOL priority + 0.0 bribe = 0.0001 SOL/tx.
     priority_fee = 0.0001
@@ -178,6 +183,10 @@ def run_backtest_batch(
     elif last_12h:
         hi = datetime.datetime.now().timestamp()
         lo = (datetime.datetime.now() - datetime.timedelta(hours=12)).timestamp()
+        completed = [r for r in completed if lo <= (r.get("started_at") or 0) <= hi]
+    elif last_days > 0:
+        hi = datetime.datetime.now().timestamp()
+        lo = (datetime.datetime.now() - datetime.timedelta(days=last_days)).timestamp()
         completed = [r for r in completed if lo <= (r.get("started_at") or 0) <= hi]
 
     if recording_ids is not None:

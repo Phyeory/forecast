@@ -310,8 +310,12 @@ class TestMintHistoryLayer:
         a = calibrate_from_mint_history(mint, float(last) + 3600.0)
         b = calibrate_from_mint_history(mint, float(last) + 3600.0)
         assert a == b, "mint-history estimator not deterministic"
+        from session_calibrator import GEOM_ARM_BOUNDS, GEOMETRY_KEYS
         for k, v in a.items():
-            lo, hi = _CLIP[k]
+            if k in GEOMETRY_KEYS:
+                lo, hi = GEOM_ARM_BOUNDS
+            else:
+                lo, hi = _CLIP[k]
             assert lo <= v <= hi
 
     def test_backtest_layer_precedence(self):
@@ -429,26 +433,34 @@ class TestAdoptionHatchMatrix:
         """Rec 4320 is thin-mint: bare {} = population fallback (per-coin
         gated off by requires-mintcal — no noise layer on thin tapes)."""
         got = self._run({})
-        assert got == (2, -0.064413), (
+        # 2026-09-19: iter90e adopted the VR decision-horizon calibrator
+        # (v2_tau_vr_enable default 1.0) — population tau is no longer the
+        # saturated floor value.
+        assert got == (4, -0.074574), (
             f"bare-{{}} on thin-mint rec no longer matches popcal baseline: {got}"
         )
 
     def test_noncal_is_pure_default(self):
         got = self._run({"use_session_calibration": False})
-        assert got == (2, -0.079628), (
+        # 2026-09-18: rec 4320's tape drifted post-iter89 (live backfill);
+        # re-measured against HEAD (38c07b9) code on current data.
+        assert got == (2, -0.090345), (
             f"NONCAL no longer byte-matches pure DEFAULT: {got}"
         )
 
     def test_popcal_only_matches_prior_adoption(self):
         got = self._run({"v2_mintcal_enable": 0.0, "v2_percoin_cal_enable": 0.0})
-        assert got == (2, -0.064413), (
+        # 2026-09-19: VR-horizon calibrator adopted (see bare-{} note above).
+        assert got == (4, -0.074574), (
             f"popcal-only no longer matches the 09-12 adopted baseline: {got}"
         )
 
     def test_noncal_plus_percoin_explicit(self):
         got = self._run({"use_session_calibration": False,
                          "v2_percoin_cal_enable": 1.0})
-        assert got == (4, 0.031856), (
+        # 2026-09-19: VR-horizon calibrator adopted — the per-coin layer's
+        # estimator program is now VR (explicit per-coin opt-in runs it).
+        assert got == (10, -0.019798), (
             f"surgical NONCAL+percoin control changed: {got}"
         )
 
@@ -565,8 +577,12 @@ class TestMintChainHistory:
         out = calibrate_from_mint_history("ChainMint", 1_700_000_000 + 500,
                                           db_path=db)
         assert out, "chain candles should calibrate a recording-free mint"
+        from session_calibrator import GEOM_ARM_BOUNDS, GEOMETRY_KEYS
         for k, v in out.items():
-            lo, hi = _CLIP[k]
+            if k in GEOMETRY_KEYS:
+                lo, hi = GEOM_ARM_BOUNDS
+            else:
+                lo, hi = _CLIP[k]
             assert lo <= v <= hi
 
     def test_no_lookahead_excludes_at_or_after_session(self, tmp_path):

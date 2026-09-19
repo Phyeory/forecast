@@ -114,6 +114,37 @@ ORDER BY recording_id, rowid
 """
 
 
+# ── iter90d: variance-ratio decision horizon (τ) ─────────────────────────────
+# The legacy tau formula (clamp(1/lambda_mu, 10, min(60, duration/8))) conflates
+# the drift mean-reversion timescale with the DECISION HORIZON and saturates at
+# its floor (tau=10) on ~100% of sessions.  The VR estimator instead measures
+# the horizon H* at which directional variance per unit time peaks — the coin's
+# trend-resolution timescale.  H* differentiates coins bimodally (chop-dominant
+# H*=15 vs trend-dominant H*≥30; measured on 40 snapshot recordings): chop
+# coins should keep the engine conservative (short horizon → high P⁰ mass),
+# trend coins reward commitment (long horizon → decisive P±).
+TAU_VR_LADDER = (15, 30, 60, 120, 240, 480)
+# Default scale mapping H* → tau_max; screened by campaign cells.
+TAU_VR_SCALE = 0.25
+
+
+def _tau_vr_from_closes(closes: "np.ndarray") -> Optional[float]:
+    """Argmax horizon of directional variance per unit time (None if too thin)."""
+    n = len(closes)
+    if n < 300:
+        return None
+    lc = np.log(np.maximum(np.asarray(closes, dtype=float), 1e-30))
+    best_h, best_v = None, -1.0
+    for H in TAU_VR_LADDER:
+        if n <= H + 10:
+            break
+        r = lc[H:] - lc[: n - H]
+        v = float(np.var(r)) / H
+        if v > best_v:
+            best_v, best_h = v, float(H)
+    return best_h
+
+
 # ── Per-recording statistics ──────────────────────────────────────────────────
 
 def _safe_lag1_autocorr(arr: np.ndarray) -> float:
@@ -345,6 +376,11 @@ def _compute_rec_stats(candles: np.ndarray, duration_s: float) -> Optional[dict]
         "sigma_h":   sigma_h_est,
         "duration_s": duration_s,
     }
+    # iter90d: VR decision-horizon statistic (cheap; the OVERRIDES application
+    # is gated by the caller's tau_vr flag — OFF keeps the legacy formula).
+    tau_vr = _tau_vr_from_closes(closes)
+    if tau_vr is not None:
+        stats["tau_vr"] = tau_vr
     if theta_est is not None:
         stats["theta"] = theta_est
     if sigma_ell_est is not None:
@@ -386,11 +422,16 @@ def _aggregate_population(rec_stats: list[dict]) -> dict:
 
 # ── Formula layer: population stats → coefficient overrides ──────────────────
 
-def _population_to_overrides(pop: dict) -> dict:
+def _population_to_overrides(pop: dict, tau_vr: bool = False,
+                             tau_scale: float = TAU_VR_SCALE) -> dict:
     """Apply physics formulas to translate population medians → SDE coefficients.
 
     Each formula inverts or maps an estimator derived from the token population
     to the corresponding engine coefficient, then clips to the physical range.
+
+    iter90d: when `tau_vr` is set and the population carries a `tau_vr` median,
+    tau_max comes from the variance-ratio horizon (scale × H*) instead of the
+    legacy lambda_mu inversion (which saturates at its floor on every tape).
     """
     overrides: dict = {}
 
@@ -453,11 +494,15 @@ def _population_to_overrides(pop: dict) -> dict:
         overrides["lambda_0"] = float(np.clip(lambda_0_est, lo, hi))
 
     # ── tau_max: decision horizon ─────────────────────────────────────────────
-    # Tied to the drift mean-reversion timescale (1/lambda_mu), but capped at
-    # a fraction of the typical recording duration so the engine doesn't try
-    # to project further than the typical token lifetime.
-    # tau_max = clamp(1/lambda_mu, 10, min(60, duration/8)), rounded to 5s.
-    if "lambda_mu" in overrides and overrides["lambda_mu"] > 0:
+    # iter90d VR path: tau_max = clamp(tau_scale × H*, _CLIP) where H* is the
+    # variance-ratio argmax horizon — the coin's trend-resolution timescale.
+    if tau_vr and "tau_vr" in pop and pop["tau_vr"]:
+        lo, hi = _CLIP["tau_max"]
+        tau_raw = float(np.clip(tau_scale * pop["tau_vr"], lo, hi))
+        tau_rounded = int(round(tau_raw / 5.0) * 5)
+        tau_rounded = max(min(tau_rounded, int(hi)), int(lo))
+        overrides["tau_max"] = tau_rounded
+    elif "lambda_mu" in overrides and overrides["lambda_mu"] > 0:
         tau_from_lm = 1.0 / overrides["lambda_mu"]
         # Upper-bound by a fraction of session duration (never project > duration/8)
         if "duration_s" in pop and pop["duration_s"] > 0:
@@ -473,12 +518,79 @@ def _population_to_overrides(pop: dict) -> dict:
     return overrides
 
 
+# ── iter90: per-coin harvest-geometry estimation ─────────────────────────────
+# WHY A SECOND PARAMETER CHANNEL: the 13 SDE-coefficient estimators saturate at
+# their stability floors on ~100% of sessions (init diagnostic 2026-09-18:
+# sigma_mu/kappa_mu/sigma_h/theta/sigma_ell/zeta/tau_max all floor-pinned,
+# sigma_phi/beta exactly DEFAULT) — after clipping, every session receives the
+# same coefficient vector, so the causal calibration stack carries ~zero
+# per-coin information and flips no decisions (iter89 screen: 0/96).
+# The harvest geometry DOES differentiate coins: median forward-60 s max-up
+# spans 2.7%→17.1% (p10→p90) across recordings — real, honest, per-coin signal
+# read directly by the exit cascade (gain_retrace arms at +ARM% peak gain).
+
+# Forward window (seconds) for the max-up statistic.
+GEOM_RUNUP_WINDOW_S = 60
+# Thinness bar, same as the SDE estimators (SMOOTH_W=10 coarse windows).
+GEOM_MIN_CANDLES = 120
+# arm_pct = GEOM_ARM_SCALE × runup_q50(%) clipped to bounds.
+GEOM_ARM_SCALE = 1.0
+GEOM_ARM_BOUNDS = (4.0, 14.0)
+
+# Keys produced by the geometry estimator (pipelines treat them like the SDE
+# clip keys for calibration-sourcing / audit purposes).
+GEOMETRY_KEYS = ("gain_retrace_arm_pct",)
+
+
+def estimate_geometry_from_candles(
+    closes: "np.ndarray",
+    highs: "np.ndarray",
+    arm_scale: float = GEOM_ARM_SCALE,
+    arm_bounds: tuple[float, float] = GEOM_ARM_BOUNDS,
+) -> dict:
+    """Estimate the harvest-arm threshold from a completed-candle tape.
+
+    For each candle i with at least GEOM_RUNUP_WINDOW_S following candles,
+    runup_i = max(high[i+1 .. i+K]) / close_i − 1.  The median runup is the
+    tape's typical peak supply; the profit-lock arm tracks it so quiet coins
+    arm the lock on their own scale and hot coins keep the wide trail.
+    Pure function of past candles — causal by construction.
+    Returns {} when the tape is too thin or degenerate.
+    """
+    c = np.asarray(closes, dtype=float)
+    h = np.asarray(highs, dtype=float)
+    n = len(c)
+    K = GEOM_RUNUP_WINDOW_S
+    if n < GEOM_MIN_CANDLES + K:
+        return {}
+    if not (np.all(np.isfinite(c)) and np.all(np.isfinite(h))):
+        return {}
+    if np.any(c <= 0) or np.any(h <= 0):
+        return {}
+    from numpy.lib.stride_tricks import sliding_window_view
+    # rows i = highs[i+1 .. i+K] (strictly forward — the current candle's
+    # own high is excluded so the statistic never sees the conditioning bar)
+    win = sliding_window_view(h, K + 1)[:, 1:]
+    fmax = win.max(axis=1)
+    runup = fmax / c[: len(fmax)] - 1.0
+    runup = runup[np.isfinite(runup)]
+    if len(runup) < GEOM_MIN_CANDLES:
+        return {}
+    q50 = float(np.median(runup)) * 100.0
+    if not math.isfinite(q50) or q50 <= 0.0:
+        return {}
+    arm = float(np.clip(arm_scale * q50, arm_bounds[0], arm_bounds[1]))
+    return {"gain_retrace_arm_pct": arm, "runup_q50_pct": q50}
+
+
 # ── Core calibration function ─────────────────────────────────────────────────
 
 def calibrate_from_population(
     db_path: str,
     before_unix: float,
     n_recs: int = N_POPULATION_RECS,
+    tau_vr: bool = False,
+    tau_scale: float = TAU_VR_SCALE,
 ) -> dict:
     """Estimate SDE coefficients from recent recording population.
 
@@ -490,6 +602,10 @@ def calibrate_from_population(
         Only use recordings that started before this timestamp (backtest-safe).
     n_recs : int
         Number of recent recordings to include in the population sample.
+    tau_vr : bool
+        iter90d: use the variance-ratio horizon for tau_max (default legacy).
+    tau_scale : float
+        iter90d: H* → tau_max mapping scale.
 
     Returns
     -------
@@ -539,12 +655,22 @@ def calibrate_from_population(
 
         # 4. Compute per-recording statistics
         rec_stats: list[dict] = []
+        geom_arms: list[float] = []
         for rid, crows in by_rec.items():
             arr = np.array(crows, dtype=float)
             dur = durations.get(rid, 0.0)
             stats = _compute_rec_stats(arr, dur)
             if stats is not None:
                 rec_stats.append(stats)
+            # iter90: per-recording harvest-geometry estimate (amplitude
+            # percentiles are robust on thin tapes where the SDE
+            # autocorrelation estimators saturate).
+            try:
+                geom = estimate_geometry_from_candles(arr[:, 4], arr[:, 2])
+            except Exception:
+                geom = {}
+            if "gain_retrace_arm_pct" in geom:
+                geom_arms.append(geom["gain_retrace_arm_pct"])
 
         if len(rec_stats) < MIN_RECS_REQUIRED:
             logger.info(
@@ -557,7 +683,11 @@ def calibrate_from_population(
         pop = _aggregate_population(rec_stats)
 
         # 6. Apply physics formulas to get coefficient overrides
-        overrides = _population_to_overrides(pop)
+        overrides = _population_to_overrides(pop, tau_vr=tau_vr, tau_scale=tau_scale)
+
+        # 6b. iter90: population harvest-geometry override (median arm).
+        if geom_arms:
+            overrides["gain_retrace_arm_pct"] = float(np.median(geom_arms))
 
         # 7. Merge with the explicit delay/gate knobs
         result = {**overrides, **_ALWAYS_EXPLICIT}
@@ -602,6 +732,8 @@ def calibrate_from_mint_history(
     started_at_unix: float,
     db_path: str = _DB_PATH,
     lookback_seconds: float = 6000.0,
+    tau_vr: bool = False,
+    tau_scale: float = TAU_VR_SCALE,
 ) -> dict:
     """Estimate SDE coefficients from THIS TOKEN's own prior tape.
 
@@ -671,7 +803,26 @@ def calibrate_from_mint_history(
     if stats is None:
         return {}
 
-    overrides = _population_to_overrides(stats)
+    overrides = _population_to_overrides(stats, tau_vr=tau_vr, tau_scale=tau_scale)
+
+    # iter90: harvest geometry from the same prior tape (the token's own
+    # peak supply at tick 0).  Merged into the same overrides dict so it
+    # rides the same calibration-sourcing / audit path as the coefficients.
+    try:
+        geom = estimate_geometry_from_candles(
+            np.array([r[4] for r in rows], dtype=float),   # close
+            np.array([r[2] for r in rows], dtype=float),   # high
+        )
+    except Exception as e:
+        logger.warning(f"[MintCal] geometry estimator error: {e}")
+        geom = {}
+    # copy ONLY the override keys (runup_q50_pct is a diagnostic, not an
+    # engine parameter — layer outputs must stay within the _CLIP/GEOMETRY
+    # key contract)
+    for gk in GEOMETRY_KEYS:
+        if gk in geom:
+            overrides[gk] = geom[gk]
+
     if not overrides:
         return {}
 
@@ -722,6 +873,8 @@ def estimate_from_session_arrays(
     sell_volumes: "np.ndarray",
     pool_sols: "np.ndarray",
     duration_s: float,
+    tau_vr: bool = False,
+    tau_scale: float = TAU_VR_SCALE,
 ) -> dict:
     """Estimate SDE coefficients from ONE coin's own candle tape.
 
@@ -757,7 +910,7 @@ def estimate_from_session_arrays(
     if stats is None:
         return {}
 
-    overrides = _population_to_overrides(stats)
+    overrides = _population_to_overrides(stats, tau_vr=tau_vr, tau_scale=tau_scale)
     if not overrides:
         return {}
     return overrides

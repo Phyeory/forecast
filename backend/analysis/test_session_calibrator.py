@@ -463,7 +463,9 @@ class TestPopcalAdoption:
         except Exception:
             pytest.skip("recording 4320 / DB unavailable")
         st = s["stats"]
-        assert (st["total_trades"], round(st["total_pnl_sol"], 6)) == (2, -0.064413), (
+        # 2026-09-19: iter90e VR decision-horizon calibrator adopted —
+        # population tau is no longer the saturated floor value.
+        assert (st["total_trades"], round(st["total_pnl_sol"], 6)) == (4, -0.074574), (
             "bare-params backtest no longer reproduces the adopted gated "
             "stack — adoption default broken"
         )
@@ -477,7 +479,9 @@ class TestPopcalAdoption:
         except Exception:
             pytest.skip("recording 4320 / DB unavailable")
         st = s["stats"]
-        assert (st["total_trades"], round(st["total_pnl_sol"], 6)) == (2, -0.079628), (
+        # 2026-09-18: re-measured against HEAD (38c07b9) on current data —
+        # rec 4320's tape drifted post-iter89 (live trade-history backfill).
+        assert (st["total_trades"], round(st["total_pnl_sol"], 6)) == (2, -0.090345), (
             "use_session_calibration=false no longer restores pure DEFAULT"
         )
 
