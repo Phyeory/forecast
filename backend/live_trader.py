@@ -15,6 +15,7 @@ Architecture (private-key mode):
 from __future__ import annotations
 import asyncio
 import base64
+import os
 import random
 import re
 import time
@@ -226,6 +227,16 @@ NONSIMULATION_ABORT_CODES = frozenset({6024, 1, 0x1771})  # swallowed — handle
 PRIORITY_FEE_ESCALATION  = [100_000, 100_000, 100_000, 100_000]  # micro-lamports — fixed 0.0001 SOL
 MAX_PRIORITY_FEE         = 100_000  # micro-lamports — 0.0001 SOL, never exceeded
 
+# ── BUY SLIPPAGE BUDGET ───────────────────────────────────────────────────────
+# A BUY is broadcast exactly once — there is no retry, ever.  The slippage
+# budget is therefore the only lever that decides whether the one shot lands:
+# measured on-chain landing gaps (blockTime vs broadcast) need ~3500 bps to
+# cover the 97th percentile on thin pump.fun tokens; the historical default
+# (1000–1500 bps) rejected landings that had actually executed on-chain,
+# leaving the wallet holding an untracked bag.  Sells keep the configurable
+# knob + escalation ladder below — they land in ~0.5–2 s and never failed.
+BUY_SLIPPAGE_BPS = 3500
+
 # ── BUY-FAILURE RE-ENTRY BLOCK ────────────────────────────────────────────────
 # After a buy fails (broadcast rejected, TX dead, never landed) NO further
 # automatic buy may fire for this many seconds.  The engine is notified FLAT
@@ -432,6 +443,7 @@ class LiveTrader:
             meta={
                 "buy_size_sol": buy_size_sol,
                 "slippage_bps": slippage_bps,
+                "buy_slippage_bps": BUY_SLIPPAGE_BPS,
                 "engine_version": engine_version,
                 "engine_kwargs": engine_kwargs,
                 "min_market_cap_usd": min_market_cap_usd,
@@ -439,6 +451,8 @@ class LiveTrader:
             },
         )
         self._journal_ctx_token = _active_journal.set(self.journal)
+        # iter90j intake-audit file handle (opened lazily on first candle)
+        self._intake_audit_fh = None
         logger.info(
             f"[SESSION] Logging to {self.journal.dir} "
             f"(console.log + trades.jsonl)"
@@ -454,6 +468,9 @@ class LiveTrader:
         self._signal_capture_enabled: bool = True
         self.buy_size_sol = buy_size_sol
         self.slippage_bps = slippage_bps
+        # Buy-side budget is a fixed constant (BUY_SLIPPAGE_BPS): the sell-side
+        # knob/ladder below must never silently narrow the one-shot buy window.
+        self.buy_slippage_bps = BUY_SLIPPAGE_BPS
         self.priority_fee_lamports = 100_000  # fixed: 0.0001 SOL per transaction
         self.skip_simulation = skip_simulation
 
@@ -519,6 +536,15 @@ class LiveTrader:
         # deferred fill, so live must anchor the exit geometry the same way.
         self.exit_delay_seconds: float = float(getattr(
             self.engine, "v2_exit_delay_seconds", 0.0))
+        # iter90j: mode mirror.  run_backtest switches the ForwardTester into
+        # exec_mode="latency" iff ANY engine delay knob is > 0 (entry or
+        # exit); latency mode resolves EVERY fill on the first state strictly
+        # after its target second and notifies the engine there.  With all
+        # knobs at 0.0 the tester stays in pure instant mode (same-state
+        # fills, same-state notifies) — the iter73/iter80 escape hatch.  The
+        # live trader mirrors whichever mode the engine knobs select.
+        self._bt_latency_mode: bool = (
+            self.entry_delay_seconds > 0.0 or self.exit_delay_seconds > 0.0)
         self.exit_delay_armed_only: bool = float(getattr(
             self.engine, "v2_exit_delay_armed_only", 0.0)) > 0.0
         self._ARMED_EXIT_REASONS = frozenset({
@@ -527,11 +553,32 @@ class LiveTrader:
         })
         self._pending_exit_delay_until_t: float = 0.0
         self._exit_delay_hold_logged: bool = False
-        # Engine anchor captured at SIGNAL time (signal-state close × (1 +
-        # engine slippage)) so a BUY that retries after a blocked launch
-        # still notifies the engine on the same price basis the backtester's
-        # instant model registered for that signal state (decision parity).
+        # Engine anchor captured at SIGNAL time so a BUY that retries after a
+        # blocked launch still notifies the engine on the same price basis the
+        # backtester registered for that signal.  iter90j basis: the SIGNAL
+        # SECOND'S CANDLE OPEN × (1 + engine slippage) — the backtester's
+        # latency model anchors entries at path_price_at(target_ts) with
+        # frac=0 (= the candle open) plus _open_long's slippage multiplier.
         self._pending_buy_anchor: Optional[float] = None
+        # iter90j parity: the ENGINE's position state mirrors the backtester's
+        # latency-mode fill resolution, NOT the real swap lifecycle.  The
+        # backtester (exec overlay ON ⇒ exec_mode="latency") resolves every
+        # fill on the first candle-state strictly AFTER its target second and
+        # notifies the engine there:
+        #   entries  → notify_trade_opened at first state with t > sig_t
+        #   armed exits → notify_trade_closed at first state with
+        #                t > sig_t + exit_delay
+        # (loss-book exits close at the signal state — same-state notify).
+        # The real swap attaches asynchronously and never feeds its timing
+        # back into the engine.
+        self._buy_engine_open_boundary_t: Optional[float] = None
+        self._buy_engine_open_pending: bool = False
+        self._exit_engine_close_boundary_t: Optional[float] = None
+        self._exit_engine_close_pending: bool = False
+        # Signal second of the queued BUY — the backtester stamps
+        # entry_time = int(target_ts) (the signal second) even when the fill
+        # resolves on a later candle.
+        self._pending_buy_sig_t: Optional[int] = None
         # Set while update_historical_candle() replays warm-up candles so the
         # pending executor can never launch a real swap during warm-up.
         self._warming_up: bool = False
@@ -1030,13 +1077,20 @@ class LiveTrader:
 
     # ── Jupiter helpers ───────────────────────────────────────────────────────
 
-    async def _get_quote(self, input_mint: str, output_mint: str, amount: int) -> Optional[dict]:
-        """Fetch a Jupiter swap quote via the Swap API v1."""
+    async def _get_quote(self, input_mint: str, output_mint: str, amount: int,
+                         slippage_bps: Optional[int] = None) -> Optional[dict]:
+        """Fetch a Jupiter swap quote via the Swap API v1.
+
+        slippage_bps overrides the instance knob (the buy path pins its own
+        BUY_SLIPPAGE_BPS budget; sells use self.slippage_bps so the sell
+        escalation ladder keeps working).
+        """
         params = {
             "inputMint": input_mint,
             "outputMint": output_mint,
             "amount": str(amount),
-            "slippageBps": str(self.slippage_bps),
+            "slippageBps": str(self.slippage_bps if slippage_bps is None
+                               else slippage_bps),
             # Exclude Meteora DLMM — sells routed through it consistently
             # timeout while Pump.fun Amm routes confirm in ~1s.  Forcing
             # Jupiter to skip Meteora keeps buys and sells on the same
@@ -1812,7 +1866,8 @@ class LiveTrader:
             # ── Single quote → swap → broadcast (NO retry) ───────────────────
             fee = PRIORITY_FEE_ESCALATION[0]
 
-            quote = await self._get_quote(WSOL_MINT, self.token_mint, amount_lam)
+            quote = await self._get_quote(WSOL_MINT, self.token_mint, amount_lam,
+                                          slippage_bps=self.buy_slippage_bps)
             if not quote:
                 logger.error("[BUY FAILED] Jupiter quote failed")
                 self._journal_event("buy_rejected", reason=reason, error="jupiter_quote_failed")
@@ -1957,6 +2012,18 @@ class LiveTrader:
         self._pending_buy = False
         self._pending_buy_reason = ""
         self._pending_buy_anchor = None
+        # iter90j: cancel the queued-buy engine boundary and any exit that
+        # was detected against the phantom engine position (the engine is
+        # reset flat by notify_trade_closed() below — the same reset the
+        # backtester never needs because its fills never fail).
+        self._buy_engine_open_pending = False
+        self._buy_engine_open_boundary_t = None
+        self._pending_buy_sig_t = None
+        self._exit_engine_close_pending = False
+        self._exit_engine_close_boundary_t = None
+        self._pending_exit = False
+        self._pending_exit_reason = ""
+        self._pending_exit_delay_until_t = 0.0
         # No automatic buy for the re-entry block window — a failed buy must
         # never be immediately re-attempted by a lingering engine signal.
         self._buy_failed_until = time.time() + BUY_FAIL_REENTRY_BLOCK_S
@@ -3413,6 +3480,29 @@ class LiveTrader:
 
         now = time.time()
 
+        # ── iter90j: engine position-state boundaries (BT latency mirror) ──
+        # Latency mode only: runs BEFORE the engine consumes this state —
+        # exactly where the backtester's Step-0 fill resolution notifies the
+        # engine (its Step 0 precedes Step 2's engine.update on the same
+        # state).  Pure instant mode (all delay knobs 0.0) keeps the
+        # same-state notify schedule and never reaches here.
+        if t is not None and self._bt_latency_mode:
+            if (self._buy_engine_open_pending
+                    and float(t) > float(self._buy_engine_open_boundary_t)):
+                self._buy_engine_open_pending = False
+                self._buy_engine_open_boundary_t = None
+                anchor = self._pending_buy_anchor
+                self._pending_buy_anchor = None
+                self._pending_buy_sig_t = None
+                self.engine.notify_trade_opened(
+                    anchor if anchor is not None else self._last_price,
+                    Direction.UP)
+            if (self._exit_engine_close_pending
+                    and float(t) > float(self._exit_engine_close_boundary_t)):
+                self._exit_engine_close_pending = False
+                self._exit_engine_close_boundary_t = None
+                self.engine.notify_trade_closed()
+
         if self._pending_buy:
             if self.current_trade is None and not self._swap_in_flight \
                     and not self._is_buy_pending() \
@@ -3436,65 +3526,59 @@ class LiveTrader:
                         )
                         self._delay_hold_logged = True
                     return
-                if now - self._pending_buy_ts > self.pending_signal_max_age_seconds:
-                    logger.info(
-                        f"[SIGNAL EXPIRY] Dropping stale BUY signal "
-                        f"(age {now - self._pending_buy_ts:.1f}s > "
-                        f"{self.pending_signal_max_age_seconds:.0f}s) — never placed"
-                    )
-                    self._pending_buy = False
-                    self._pending_buy_reason = ""
-                    self._pending_buy_anchor = None
-                    self._pending_buy_delay_until_t = 0.0
-                else:
-                    buy_reason = self._pending_buy_reason
-                    # Engine anchor basis.  Two regimes:
-                    #  • iter78 deferred-entry (the adopted cell): the
-                    #    backtester's latency model notifies the engine at
-                    #    the DEFERRED FILL (t_signal+5 s on the recorded
-                    #    path), so live must anchor on the LAUNCH state's
-                    #    close × (1 + engine slippage) — the signal-time
-                    #    anchor would desynchronise the engine's exit
-                    #    geometry (arm/retrace levels) from the backtest's.
-                    #  • instant launch (pre-iter78 / delay=0): the frozen
-                    #    signal-state anchor, so a launch blocked by guards
-                    #    (sell settling, swap in flight) still notifies on
-                    #    the backtester's instant basis.  The real on-chain
-                    #    fill overwrites entry_price at confirmation.
-                    if self.entry_delay_seconds > 0.0:
-                        fill = sc * (1.0 + self.engine_fill_slippage_pct / 100.0)
-                    elif self._pending_buy_anchor is not None:
-                        fill = self._pending_buy_anchor
-                    else:
-                        fill = sc * (1.0 + self.engine_fill_slippage_pct / 100.0)
-                    self._pending_buy_anchor = None
-                    trade = LiveTrade(
-                        token_mint=self.token_mint,
-                        entry_time=t,
-                        entry_price=fill,
-                        size_sol=self.buy_size_sol,
-                        size_tokens=0,
-                        entry_reason=buy_reason,
-                        status="pending",
-                    )
-                    self.current_trade = trade
-                    self._last_trade_action = "buy"
-                    self._last_motion_ts = now  # reset no-motion clock at position open
-                    # If the buy later fails on-chain, _fail_buy_flat() rolls
-                    # back with notify_trade_closed().
+                # iter90j: the age-based SIGNAL EXPIRY is removed — the
+                # backtester NEVER drops a queued signal (it fills at the
+                # signal's target whenever the position frees up, however
+                # long the previous trade's settle/retries take).  Dropping
+                # here deleted exactly the re-entries the BT traded.  The
+                # buy-FAIL re-entry block (_buy_failed_until) above is user
+                # policy and stays.
+                buy_reason = self._pending_buy_reason
+                # iter90j: the engine is NOT notified here.  The
+                # backtester's latency model notifies the engine at the
+                # FILL RESOLUTION (first candle-state strictly after the
+                # target second) with the fill price (candle open ×
+                # (1+engine slippage)) — the boundary hook at the top of
+                # this method reproduces that exactly.  The anchor frozen
+                # at detection survives until the hook fires.
+                fill = self._pending_buy_anchor
+                if fill is None:
+                    fill = sc * (1.0 + self.engine_fill_slippage_pct / 100.0)
+                entry_t = (self._pending_buy_sig_t
+                           if self._pending_buy_sig_t is not None else t)
+                trade = LiveTrade(
+                    token_mint=self.token_mint,
+                    entry_time=int(entry_t) if entry_t is not None else t,
+                    entry_price=fill,
+                    size_sol=self.buy_size_sol,
+                    size_tokens=0,
+                    entry_reason=buy_reason,
+                    status="pending",
+                )
+                self.current_trade = trade
+                self._last_trade_action = "buy"
+                self._last_motion_ts = now  # reset no-motion clock at position open
+                # If the buy later fails on-chain, _fail_buy_flat() rolls
+                # back with notify_trade_closed().
+                if not self._bt_latency_mode:
+                    # Pure instant mode: notify the engine at the launch —
+                    # the backtester's instant model opens the position at
+                    # the signal state itself.
                     self.engine.notify_trade_opened(fill, Direction.UP)
-                    self._pending_buy = False
-                    self._pending_buy_reason = ""
+                    self._pending_buy_anchor = None
+                    self._pending_buy_sig_t = None
+                self._pending_buy = False
+                self._pending_buy_reason = ""
 
-                    asyncio.ensure_future(self.execute_buy(buy_reason))
+                asyncio.ensure_future(self.execute_buy(buy_reason))
 
-                    self._last_swap_request = {
-                        "action": "buy",
-                        "token": self.token_mint,
-                        "amount_sol": self.buy_size_sol,
-                        "reason": buy_reason,
-                        "price": sc,
-                    }
+                self._last_swap_request = {
+                    "action": "buy",
+                    "token": self.token_mint,
+                    "amount_sol": self.buy_size_sol,
+                    "reason": buy_reason,
+                    "price": sc,
+                }
 
         elif self._pending_exit and self.current_trade is not None \
                 and not self._swap_in_flight:
@@ -3514,15 +3598,24 @@ class LiveTrader:
                     )
                     self._exit_delay_hold_logged = True
                 return
+            was_deferred = self._pending_exit_delay_until_t > 0.0
             self._pending_exit_delay_until_t = 0.0
             exit_reason = self._pending_exit_reason
             self.current_trade.status = "closing"
             self.current_trade.exit_reason = exit_reason
             self._last_trade_action = "exit"
-            # Notify the engine IMMEDIATELY that the position is closed —
-            # this matches the backtester where _close_long() calls
-            # notify_trade_closed() synchronously at Step 1 of the candle.
-            self.engine.notify_trade_closed()
+            # iter90j: engine flat-flip timing.  A deferred (armed) exit's
+            # engine flip belongs to the boundary hook (the backtester's
+            # latency model closes the trade at the first state strictly
+            # after signal+delay).  An instant (loss-book) exit matches the
+            # backtester's same-state _close_long: notify here.  If the hook
+            # already fired (the boundary passed while the launch was
+            # guard-blocked), the engine is flat already — the idempotent
+            # notify below is a no-op then.
+            if not was_deferred or not self._exit_engine_close_pending:
+                self._exit_engine_close_pending = False
+                self._exit_engine_close_boundary_t = None
+                self.engine.notify_trade_closed()
             self._pending_exit = False
             self._pending_exit_reason = ""
 
@@ -3538,37 +3631,41 @@ class LiveTrader:
     def _queue_signal_from_state(self, result: dict, t: Optional[int] = None,
                                  so: Optional[float] = None, sh: Optional[float] = None,
                                  sl: Optional[float] = None, sc: Optional[float] = None) -> None:
-        """Signal detection + INSTANT execution (2026-08-30 signal-instant model).
+        """Signal detection + INSTANT execution (signal-instant model).
 
         Mirrors ForwardTester.update() Step 3 for detection, but the swap is
-        fired on the SAME intra-candle state that generated the signal — no
-        next-state hop, no N+1-bar wait.  The engine is notified
-        synchronously at the signal state with the signal-instant price
-        anchor (state close × (1 + engine slippage)), the same basis the
-        backtester's exec_model="instant" registers.
+        fired on the SAME intra-candle state that generated the signal.  The
+        ENGINE is notified on the backtester's latency-mode schedule: at the
+        first candle-state strictly after the target second (entries: sig_t;
+        armed exits: sig_t + exit_delay), with the fill-price anchor — see
+        the boundary hook in _execute_pending_signals.  The real swap fires
+        at the signal state and attaches to the engine asynchronously.
 
         Signals that CANNOT execute right now (a swap still in flight, a
         buy-failure re-entry block, mcap/no-motion stop) fall back to the
         pending queue and are retried by _execute_pending_signals on every
-        subsequent state / boundary / swap settle — the iter57 retry
-        semantics are unchanged."""
+        subsequent state / boundary / swap settle.  Queued BUYs never expire
+        (the backtester never drops a queued signal); exits never expire
+        (risk-reducing)."""
         if self._warming_up or self.completed_candle_count < self.warmup_candles:
             return
 
         detected_signal = result.get("signal", "none")
         detected_regime = result.get("regime", "")
 
-        if detected_signal == Signal.BUY.value and not self._pending_buy and (
+        if detected_signal == Signal.BUY.value and not self._pending_buy \
+                and not self.engine.in_position and (
                 self.current_trade is None
                 or getattr(self.current_trade, "status", "") == "closing"):
-            # NOTE: a BUY is queueable while the previous trade is "closing"
-            # (its sell swap still settling) — the engine is already flat
-            # (notify_trade_closed fired at the exit signal), and the pending
-            # executor guards prevent the buy from firing until the sell
-            # settles (current_trade cleared) and the drain retries it.  The
-            # backtester's instant model re-enters on the same candle-state
-            # sequence; dropping the queued BUY here would break decision
-            # parity on every exit→re-entry within one settle window.
+            # iter90j gate `not engine.in_position`: while the ENGINE still
+            # holds a position (an armed exit's fill boundary has not passed),
+            # the backtester's latency model has _latency_pending set and
+            # DROPS every BUY signal — so live must drop them here too, not
+            # queue them.  A BUY detected while the engine is FLAT but the
+            # real sell is still settling (status "closing") IS queueable:
+            # the backtester fills those at the signal's target second, and
+            # the boundary hook flips the engine in-position on the BT's
+            # schedule regardless of the real swap.
             if time.time() < self._buy_failed_until:
                 # A previous buy failed — NO further automatic buys until the
                 # re-entry block window elapses.  A failed buy is never
@@ -3585,6 +3682,9 @@ class LiveTrader:
                 self._pending_buy = False
                 self._pending_buy_reason = ""
                 self._pending_buy_anchor = None
+                self._buy_engine_open_pending = False
+                self._buy_engine_open_boundary_t = None
+                self._pending_buy_sig_t = None
             else:
                 self._pending_buy = True
                 self._pending_buy_reason = f"buy_{detected_regime}"
@@ -3623,11 +3723,29 @@ class LiveTrader:
                 # fill at t+5 s).
                 self._pending_buy_delay_until_t = float(t or 0) + self.entry_delay_seconds
                 self._delay_hold_logged = False
-                # Freeze the engine anchor on the signal state's close so
-                # later retries (blocked launch → post-settle drain) notify the
-                # engine on the same basis the backtester used.
-                if sc is not None:
-                    self._pending_buy_anchor = sc * (1.0 + self.engine_fill_slippage_pct / 100.0)
+                if self._bt_latency_mode:
+                    # iter90j (latency mode): freeze the engine anchor on the
+                    # SIGNAL SECOND'S CANDLE OPEN × (1 + engine slippage) —
+                    # the backtester's latency model resolves the fill at
+                    # path_price_at(sig_t) with frac=0 (= the candle open)
+                    # plus _open_long's slippage multiplier.  `so` is the
+                    # candle open in all four states.  The engine notify-open
+                    # boundary is the first state strictly after the target
+                    # second (sig_t + entry_delay; delay is 0.0 in
+                    # production) — handled by the boundary hook.
+                    if so is not None:
+                        self._pending_buy_anchor = so * (1.0 + self.engine_fill_slippage_pct / 100.0)
+                    elif sc is not None:
+                        self._pending_buy_anchor = sc * (1.0 + self.engine_fill_slippage_pct / 100.0)
+                    self._pending_buy_sig_t = int(t) if t is not None else None
+                    self._buy_engine_open_boundary_t = float(t or 0) + self.entry_delay_seconds
+                    self._buy_engine_open_pending = True
+                else:
+                    # Pure instant mode: the backtester notifies the engine at
+                    # the signal state with the signal-state close basis —
+                    # the launch below reproduces that schedule.
+                    if sc is not None:
+                        self._pending_buy_anchor = sc * (1.0 + self.engine_fill_slippage_pct / 100.0)
                 self._pending_exit = False
                 # Instant execution: fire the buy on THIS state's prices —
                 # unless the iter78 entry delay is armed, in which case the
@@ -3681,6 +3799,11 @@ class LiveTrader:
                     or reason in self._ARMED_EXIT_REASONS):
                 self._pending_exit_delay_until_t = float(t or 0) + self.exit_delay_seconds
                 self._exit_delay_hold_logged = False
+                # iter90j: the ENGINE flips flat at the fill boundary (first
+                # state strictly after signal+delay) — the backtester's
+                # latency model closes the trade there, NOT at the launch.
+                self._exit_engine_close_boundary_t = self._pending_exit_delay_until_t
+                self._exit_engine_close_pending = True
             else:
                 self._pending_exit_delay_until_t = 0.0
             # Instant execution: fire the sell on THIS state's prices.
@@ -3719,6 +3842,23 @@ class LiveTrader:
                                    sell_vol: float = 0.0,
                                    market_cap_usd: float = 0.0,
                                    pool_sol: float = 0.0) -> dict:
+        # iter90j intake audit: record the EXACT candle the engine is about
+        # to expand into intake_audit.jsonl (separate from trades.jsonl).
+        # Diffing this journal against the recording's final rows is the
+        # zero-divergence intake check — any late-trade rewrite or
+        # aggregation mismatch shows up as a row mismatch instead of a
+        # mysterious decision divergence hours later.
+        try:
+            if self._intake_audit_fh is None:
+                self._intake_audit_fh = open(
+                    os.path.join(self.journal.dir, "intake_audit.jsonl"), "a",
+                    buffering=1)
+            self._intake_audit_fh.write(json.dumps(
+                {"t": int(t), "o": o, "h": h, "l": l, "c": c,
+                 "vol": vol, "buy_vol": buy_vol, "sell_vol": sell_vol}
+            ) + "\n")
+        except Exception:
+            pass
         """
         Mirror ForwardTester.update() — called once per completed candle,
         once per intra-candle state:
@@ -3883,6 +4023,11 @@ class LiveTrader:
         self._pending_buy = False
         self._pending_buy_reason = ""
         self._pending_buy_anchor = None
+        self._buy_engine_open_pending = False
+        self._buy_engine_open_boundary_t = None
+        self._pending_buy_sig_t = None
+        self._exit_engine_close_pending = False
+        self._exit_engine_close_boundary_t = None
         self._last_trade_action = "exit"
         self.engine.notify_trade_closed()
         asyncio.ensure_future(self.execute_sell(exit_reason))
@@ -4164,7 +4309,15 @@ class LiveTrader:
             # A later delayed buy may land after this adopted bag is sold —
             # re-allow orphan adoption so the next bag is never invisible.
             self._adopted_bag = False
-        self.engine.notify_trade_closed()
+        if self._exit_engine_close_pending:
+            # iter90j: a deferred (armed) exit's engine flat-flip belongs to
+            # the boundary hook (first state strictly after signal+delay —
+            # the backtester's latency-model close).  Notifying here would
+            # flip the engine flat one settle early and let it re-enter a
+            # second before the backtest does.  The hook fires within ~1 s.
+            pass
+        else:
+            self.engine.notify_trade_closed()
         # iter57 parity: the position is gone — any lingering pending EXIT is
         # consumed (whatever closed the trade replaced it), and a pending BUY
         # (re-entry queued while this sell was settling) retries immediately

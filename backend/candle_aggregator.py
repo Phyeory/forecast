@@ -66,6 +66,19 @@ class CandleAggregator:
     ):
         bucket = self._bucket(timestamp)
 
+        # iter90j: OUT-OF-ORDER (late) trade guard.  A trade whose on-chain
+        # timestamp is older than the current candle's second (RPC latency,
+        # stream reorder) must NEVER reopen an old second: reopening
+        # (a) replaced the recorded candle row for that second (losing the
+        # original trades) and (b) fed the engine a duplicate, partially-
+        # populated candle — the live engine's input stream then diverged
+        # from the recording the backtester replays (rec5343, 2026-09-20:
+        # a 428 s re-entry miss).  Clamp late trades into the CURRENT
+        # candle so the engine and the recording always see the same
+        # candle sequence.  Forward buckets keep the normal close/open path.
+        if self.current_candle is not None and bucket < self.current_candle.time:
+            bucket = self.current_candle.time
+
         if self.current_candle is None:
             buy_vol = volume if is_buy is True else 0.0
             sell_vol = volume if is_buy is False else 0.0
