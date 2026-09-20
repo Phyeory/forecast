@@ -126,13 +126,28 @@ def _feed_ft(candles, engine_kwargs=None):
     2026-09-11: the backtester fill default reverted to exec_model="legacy"
     (n+1 mid-bar), but the live trader still executes signal-instant — this
     test's contract is decision parity with LIVE, so the reference FT is
-    pinned to exec_model="instant" regardless of the backtest default."""
+    pinned to exec_model="instant" regardless of the backtest default."
+
+    iter90j UPDATE: the production backtester applies the ENGINE-keyed
+    delay overlays AFTER construction (run_backtest: engine
+    v2_exit_delay_seconds=20 armed_only ⇒ enable_exit_latency →
+    exec_mode="latency"; v2_entry_delay_seconds>0 ⇒ enable_entry_latency).
+    Under latency mode the fill resolves on the first state strictly after
+    the target second and the engine is notified there — the live trader's
+    iter90j boundary hook mirrors exactly that schedule.  The reference FT
+    below therefore applies the same engine-keyed injection as
+    run_backtest."""
     from forward_tester import ForwardTester
     ft = ForwardTester(engine_version=2, engine_kwargs=engine_kwargs,
                        slippage_pct=1.0, exec_model="instant")
     _delay = float(getattr(ft.engine, "v2_entry_delay_seconds", 0.0))
     if _delay > 0.0:
         ft.enable_entry_latency(_delay)
+    _exit_delay = float(getattr(ft.engine, "v2_exit_delay_seconds", 0.0))
+    if _exit_delay > 0.0:
+        ft.enable_exit_latency(
+            _exit_delay,
+            armed_only=float(getattr(ft.engine, "v2_exit_delay_armed_only", 0.0)) > 0.0)
     last = None
     for cd in candles:
         t, o, h, l, c = cd["time"], cd["open"], cd["high"], cd["low"], cd["close"]
@@ -332,8 +347,10 @@ def test_pending_buy_retries_after_slow_sell_confirm():
     asyncio.run(drive())
 
 
-def test_pending_buy_expires_when_stale():
-    """BUY retries expire after pending_signal_max_age_seconds."""
+def test_pending_buy_never_expires():
+    """iter90j contract: the backtester NEVER drops a queued signal — a
+    stale pending BUY must launch when the guards pass, however old it is.
+    (The old 15 s expiry deleted exactly the re-entries the BT traded.)"""
     trader = _make_trader(pending_signal_max_age_seconds=0.05)
     t0 = 1_700_000_000
 
@@ -341,11 +358,12 @@ def test_pending_buy_expires_when_stale():
         trader.update(time_val=t0, o=1.0, h=1.0, l=1.0, c=1.0, volume=0.0, is_new=False)
         trader._pending_buy = True
         trader._pending_buy_reason = "buy_stale"
-        trader._pending_buy_ts = time.time() - 1.0  # already stale
+        trader._pending_buy_ts = time.time() - 3600.0  # very stale
         trader.update(time_val=t0 + 1, o=1.0, h=1.0, l=1.0, c=1.0, volume=0.0, is_new=True)
-        await asyncio.sleep(0)
-        assert not trader._pending_buy, "stale BUY was not expired"
-        assert all(e[0] != "buy" for e in trader._events)
+        await asyncio.sleep(0.3)
+        assert trader._pending_buy is False, "pending BUY neither launched nor cleared"
+        assert any(e[0] == "buy" and e[1] == "buy_stale" for e in trader._events), (
+            f"stale BUY was dropped instead of launched: {trader._events}")
 
     asyncio.run(drive())
 
