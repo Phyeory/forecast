@@ -295,7 +295,7 @@ DEFAULT_CONFIG = {
     # enable_exit_latency(L, armed_only) on them; live_trader.py holds the
     # queued armed EXIT on the candle clock then launches the sell.  The
     # exit DECISIONS are untouched — only the fill timing of armed exits.
-    "v2_exit_delay_seconds":     0.0,  # iter83 ADOPTED 2026-09-12 (armed-only 20s: full-DB Δ+5.06 SOL p=5.6e-17, both eras+, holdout-confirmed; >0 = iter80 armed deferred fill)
+    "v2_exit_delay_seconds":     20.0,  # iter83 ADOPTED 2026-09-12 (armed-only 20s: full-DB Δ+5.06 SOL p=5.6e-17, both eras+, holdout-confirmed; >0 = iter80 armed deferred fill)
     "v2_exit_delay_armed_only":   1.0,  # 1.0 = defer armed/harvest exit classes only (applies when exit delay > 0)
 
     # ── iter85: per-coin online SDE recalibration ─────────────────────────
@@ -3329,7 +3329,7 @@ class StrategyEngineV2Adapter:
         # 2026-09-03); 2026-09-11 the user set the production default to
         # 0.0 = instant exit fill (the pre-iter80 model, byte-exact); >0
         # re-enables the armed deferral.
-        self.v2_exit_delay_seconds = float(engine_kwargs.pop("v2_exit_delay_seconds", 0.0))
+        self.v2_exit_delay_seconds = float(engine_kwargs.pop("v2_exit_delay_seconds", 20.0))
         # 1.0: defer only the armed/harvest exit classes (gain_retrace,
         # rate_split_flip:armed, tp_v2, breakeven_scratch, reversal_exit);
         # the loss book (kelly_flat, evr_triage, kramers_down_exit,
