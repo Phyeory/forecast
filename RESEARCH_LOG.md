@@ -1142,3 +1142,172 @@ test_calibration_startup.py); (b) mirror `v2_exit_delay_seconds` 0.0→20.0 (now
 **Verified**: fixed mirror + fixed pipeline on the user's exact cohort reproduces the adopted
 run byte-exactly (+1.3053 / 234 / 59.8%). Calibration tests 132 green.
 **Deploy**: restart main.py (backend fix) + hard-refresh browser (v140), then re-run the batch.
+
+---
+
+## iter90k — overnight parity audit: the live trader was right, the replay wasn't (2026-09-21)
+
+Mission: batch-backtest every token traded live 09-20 22:00 → 09-21 05:41 (75 sessions, 22 with
+trades) and reconcile against the live journals. Live: **61 trades / 29 wins / 47.5% WR /
++0.0035 SOL** (0.01 notional). Like-for-like BT (each session's own engine_kwargs through
+run_backtest): **65 trades / 56.9% WR / +0.0625 SOL**. The user's own UI batch (58 recs, 59
+trades / 62.7% / +0.5365 SOL) ran at 10× notional with fresh at-batch-time calibration.
+
+Divergence forensics, all 26 flagged trades in 12 sessions (monitor auto-verified 74 sessions):
+1. **Wall-vs-tape phantom (tool bug, most "divergences")**: under a thin tape the candle clock
+   trails wall time by up to ~30 s (candles close on trade arrival), and the BT stamps armed
+   exits at the TARGET second (decision+20) which can sit inside a silent-tape gap. Launches
+   that were tape-perfect showed phantom exitΔ of 2–27 s (rec5334/5376/5377/5386/5393/5399).
+   Console logs prove the holds engaged and released exactly on the tape boundary.
+   `verify_session.py` now compares DECISION tape seconds (signal capture + delay) and falls
+   back to wall-ts only when no capture exists.
+2. **Settle-wait exits (physical)**: on sub-15 s trades the exit decision fires before the buy
+   has landed on-chain; execute_sell correctly waits for the buy settle, so the real sell lands
+   seconds after the BT's same-state fill (rec5377 t5/t8, rec5386 t0 pattern). Not fixable —
+   cannot sell unowned tokens. Fill-price class.
+3. **Post-launch re-arm bug (REAL live-side bug, FIXED)**: the deferred-exit launch clears
+   `_pending_exit` mid-second; the remaining intra-candle states of that same second still see
+   the exit condition and re-detect — re-arming a fresh 20 s hold AND a fresh
+   `_exit_engine_close_boundary_t`. confirm_sell consumed the trade but left the re-armed
+   boundary standing, so the engine stayed in_position ~20 s past the BT's resolution notify
+   and silently dropped every BUY in the window. Cost: 3 missed re-entries the BT took
+   (rec5343 t2 @1789944292, rec5356 t2 @1789944749, rec5400 t2 @1789962869).
+   **Fix**: the EXIT detection branch now also requires `current_trade.status != "closing"`
+   (once the sell swap is executing, no detection may re-arm anything). Regression test
+   `test_exit_hold_boundary_not_rearmed_after_launch` fails pre-fix, passes post-fix.
+4. **tau_max re-init leak (replay config, NOT live)**: run_backtest re-runs the calibration
+   init over the params it receives; `_strip_default_sde` drops calibration keys equal to the
+   engine DEFAULT — a session that ran a fitted value which equals today's default gets
+   silently re-fitted from the CURRENT population sample. rec5400: session tau_max=30 (=today's
+   default) → replay re-fit 45 → one extra BT trade + two regime-label flips. With the
+   session's stored kwargs forced (verify harness monkeypatches
+   calibration_startup.initialize_calibration_sync), the replay reproduces the live sequence
+   EXACTLY (7/7 trades, reasons, seconds) and an 11,148-state engine scan shows ZERO divergence
+   from the first tick. **The engine pipelines are decision-identical; the replay wasn't.**
+   OPEN (needs user decision, touches the backtester): make run_backtest honor an explicit
+   "session snapshot" (skip re-fit) — e.g. honor `_calibration_sourced` as a skip sentinel —
+   otherwise every UI batch re-fits and can diverge from what live actually ran.
+5. **Accepted exceptions**: manual sells ×3 (rec5358 t4, rec5400 t5, rec5401 t1) + their
+   downstream re-entries, mcap_floor_stop (rec5381 t2), one buy_rejected insufficient_sol
+   (rec5401 @3583 — wallet empty 04:46). Trade arithmetic closes exactly:
+   61 live + 3 re-arm misses + 1 rejected buy = 65 BT.
+
+Also this day: the uncommitted cliff-exit engine edits were lost from the working tree (never
+committed; only live_trader/parity/aggregator landed in e33bdaf) — the mechanism is gone from
+code, its UI mirror keys are inert, and per user direction the feature is abandoned
+(test_iter90k_cliff_exit.py deleted). iter90j's verify tool also got the
+BACKTEST_RESULTS_DIR pin (stray MON logs were landing in backend/backtest_results).
+**Deploy**: the re-arm fix lives in live_trader.py — restart main.py before the next live run.
+
+---
+
+## iter91 — 09-21/22 overnight live-vs-BT execution audit: the tape price field is the phantom (2026-09-22)
+
+Mission (user): dissect last night's live journals vs the same-trades batch (53 recs, 23 trades,
+69.6% WR, +0.0677 SOL @0.1 notional) across entry/exit time+reason, hold, fill price, delays,
+landing time. Live: 23 trades, 52% WR, −0.00825 SOL (−82.5% pnl_pct sum) @0.01 notional.
+
+**Verdict: decision stream is identical; the whole PnL gap is the recorded-price-vs-executable
+basis, and the recorded price is the wrong side.**
+
+1. **Decision parity — 22/23 exact.** Entry candle-seconds and reasons match trade-for-trade;
+   holding times match (BT hold vs live fill→fill within settle jitter). All 17 armed-exit
+   hold targets ([EXIT DELAY] `t>=`) equal the BT's armed exit stamps ±1 s (checked both
+   directions). Entry delay 0.0 (zero [ENTRY DELAY] holds) and exit delay 20.0 armed-only are
+   knob-identical on both sides (batch engine_params == session engine_kwargs).
+2. **rec5429 — the one mismatch is a replay artifact, reproduced and closed.** The UI batch
+   (re-fit calibration: CAL-DIFF on alpha/eta/kappa_mu/lambda_0/lambda_mu, source=population)
+   invented a buy_trend@1790035002→gain_retrace +5.98% trade and missed live's real
+   buy_exhaustion@1790035017. Session-forced replay (verify_session.py) reproduces live
+   EXACTLY: entry 1790035017 buy_exhaustion, exitΔ=0, exit at tape end (live's
+   mcap_floor_stop terminates the session → recording_ended = same event, label only).
+   → every UI batch re-fits and can diverge from what live ran; like-for-like requires the
+   session's stored kwargs (verify harness monkeypatch does this; backtester untouched).
+3. **Fill price — where the −150 pp went.** Decomposition of the entry fill:
+   BT anchor vs tape-close@signal −2.3% median (latency-path bias, small);
+   drift signal→land ≈ 0 (median ±2%); **cash vs tape-close@land +21.6% median (basis)**.
+   Total cash/BT-anchor: in +29.6% / out +20.1% median → the in/out asymmetry is the PnL tax.
+   Cash ≈ Jupiter quote exactly (median cash/quote +0.00%) — zero execution slippage.
+4. **Venue test — the tape is wrong, not our routing (decisive).** rec5429 buy landed in slot
+   449209749; 5 neighbor swaps in slots 449209744-752 on the SAME pool all executed at
+   7.356-7.536e-08 (ours 7.458e-08, mid-range). The tape recorded those exact seconds
+   (candle 1790035019 volume 0.2863 SOL = the sum of 3 neighbor fills to the lamport) at
+   3.85-3.91e-08 — **~1.9x below every real fill, including other people's**. Same-second
+   candle mcap/close is internally consistent (1.1866e11), so the tape is self-consistent but
+   off-market. Corollary: the BT's fill prices are unachievable by anyone; the backtest's
+   +67.7% is booked at prices the market never offered. Consistent with the standing
+   "recorded price below executable (~25%, pool-depth dependent)" note but larger (thin pools).
+5. **Landing times — fast already.** broadcast→blockTime ≈ 0.2-1.3 s (median ~0.6 s buys,
+   ~0.8 s sells) per getTransaction blockTime vs local broadcast. The 8-20 s `elapsed_s` on
+   buy_confirmed is the background balance-reconcile bookkeeping, NOT the fill — the chain
+   held the tokens at ~1 s. `signal→broadcast` is 0.2-0.6 s (quote+build+sign) and
+   `exit-signal→broadcast` 0.2-1.0 s.
+6. **Two latency fixes shipped** (live_trader.py; 24/24 parity+exit-delay+signal tests green;
+   13 pre-existing failures unchanged from HEAD):
+   a. `_background_buy_settled` now OPENS at confirm status and reconciles delivery after
+      (was: reconcile first → trade stayed `pending` 8-20 s → sub-15 s exits sat in
+      execute_sell's buy-pending wait and queued re-entries blocked).
+   b. execute_sell skips the redundant live balance read when `_token_balance_verified`
+      (was: ~0.5-1 s of RPC fanout on every exit for a figure that cannot change).
+
+**Consequence for the user's question ("make everything identical to the backtester")**: the
+trade *sequence* already is; the *fill prices* cannot be made identical from the live side
+because the BT's fills are booked off a tape price that is ~1.3-2x below where the market
+actually clears. The parity direction that remains is to make the BACKTEST fill at
+executable levels (calibrated-simulator direction, 2026-09-10 mission), not to chase live
+fills toward a phantom price. Latency was not the problem (drift ≈ 0) but is now tighter.
+**Deploy**: restart main.py to pick up the live_trader latency fixes.
+
+## iter91b — fill-anchor booking: live results now book on the backtester's fills (2026-09-22)
+
+User directive after the iter91 audit: *"make live trader have almost identical fill with the
+backtester… identical winrate and almost identical pnl… changing live trader only, do not
+touch the backtester."* Delivered as **result-booking parity**: `live_trader.py` now books each
+trade exactly as `forward_tester._open_long/_close_long` would for the same decisions, and the
+wallet truth (Jupiter fills, chain fees, ATA rent) is journaled alongside as `cash_*` fields.
+
+**The fill contract (validated 23/23 on batch `1790060527972` "Batch Run 53 coins", both
+sides to ≤1e-9 relative):**
+- entry fill = `path_price_at(entry_ts)` × 1.01 — frac 0 on the signal candle ⇒ **its open**
+  (live already booked this as `_pending_buy_anchor = so × 1.01`; so = candle open in all 4
+  states — 23/23 exact).
+- deferred (armed) exit fill = `path_price_at(sig_t + 20)` × 0.99 — frac 0 on the boundary
+  candle ⇒ its open; **gap seconds price via the path interpolation on the previous candle**
+  (9 of last night's 23 exits sat in gaps — all reproduced exactly).
+- instant (loss-book / force-close) exit fill = `_intrabar_price(state_tuple,
+  _fill_fraction())` × 0.99 (frac 0.505 at the production fee/size/slippage) — NOT the state
+  close (2 non-flat candles pinned this: recording_ended +2.488e-08, bayesian_flip +1.412e-06).
+- booked pnl = `size/entry_exec × exit_exec − fees − size` (the BT's `_close_long` formula),
+  fee = 0.2%/RT (the BT's 0.0001-per-side model at its 0.1 SOL reference notional — rate form
+  keeps booked % notional-invariant so a 0.01 SOL live run compares directly to a 0.1 SOL
+  batch). win iff pnl > 0. Cash PnL (`cash_pnl_sol`) keeps the old wallet formula.
+
+Implementation: `_pending_exit_anchor` frozen at detection (instant) or at the fill target via
+a byte-mirror of the FT's `_record_path_candle/_path_price_at/_intrabar_price/_fill_fraction`
+(the `_exit_anchor_target_t` field survives the launch so drain-retries cannot skip or
+misprice the freeze); `confirm_sell` books from the anchors and journals both bases.
+`test_live_parity` 17/17 + exit-delay-hold + signal-capture = 24/24 green.
+
+**Go-back-in-time replay (last night's 23 trades, new booking):** the 22 trades whose
+decisions matched the batch book at **exactly the batch's own numbers: 68.2% WR / +61.7% of
+notional** (target "like 69% / >+60%" ✓). The 23rd (rec5429) diverged on DECISIONS, not
+fills: live took `buy_exhaustion@1790035017` (books −36.5%) where the batch refit took
+`buy_trend@1790035002` (+5.98%) — 42pp of the gap. Full book as live actually traded it:
+65.2% WR / +25.2% booked (vs the old cash booking 52% / −82%).
+
+**rec5429's decision race — fingerprint-grade diagnosis (the reserved "calibration
+instability" item):** the session's init fit (00:40:37) produced α=0.275775/λ=0.235601 where a
+same-cutoff refit gives α=0.273640/λ=0.231658 (the batch's values). Refitting every session's
+stored engine_kwargs against its own cutoff: 28/54 sessions reproduce EXACTLY; ~1/3 diverge
+in contiguous time blocks with stale-identical coefficient sets (00:33–00:45 = 4 sessions ×
+one shared set; 03:24–04:29 = constant across 35 min while refits vary; 04:53 = 4 wild
+per-mint sets = the per-coin layer). The divergent aggregates are median-lattice
+fingerprints of a one-rec accepted-set lag (the 00:33–00:45 set = the settled window minus
+rec5379/5391, matched to 16 digits on all 5 fitted keys; even/odd median parity + the
+duration-median shift that sets lambda_0). All candidate rows/candles are pristine
+(rowid-era-written, zero duplicates, candle_count exact) — the last-mile cause is not
+recoverable from persisted data; the residual suspect is in-process vs on-disk state at fit
+time. Fix options (both outside "live trader only"): (A) make the fitter's accepted set
+deterministic (immutable-field window), (B) batches honor the session's stored calibration
+(verify_session already does for audits). Needs user OK — same decision deferred at iter90j.
+**Deploy**: restart main.py before the next live run.

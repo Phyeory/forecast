@@ -15,6 +15,7 @@ Architecture (private-key mode):
 from __future__ import annotations
 import asyncio
 import base64
+import math
 import os
 import random
 import re
@@ -344,6 +345,16 @@ class LiveTrade:
     status: str = "open"  # open, closing, closed, failed
     cost_sol: float = 0.0  # ACTUAL SOL spent on the buy incl. fees (0 = fall back to size_sol)
 
+    # iter91 backtester-basis booking: pnl_sol / pnl_pct / exit_price are
+    # booked on the SAME fill anchors the backtester registers (tape price ×
+    # (1 ± engine slippage), its _close_long fee formula), so live WR/PnL are
+    # directly comparable to batch runs at any notional.  Wallet truth stays
+    # in the cash_* fields (real Jupiter fills incl. chain fees and rent).
+    exit_price_actual: Optional[float] = None  # cash fill price per token
+    cash_sol_received: float = 0.0  # net SOL credited by the sell swap
+    cash_pnl_sol: float = 0.0  # cash_sol_received − buy basis
+    fee_sol: float = 0.0  # fees deducted in the booked pnl
+
     def to_dict(self) -> dict:
         return asdict(self)
 
@@ -560,6 +571,24 @@ class LiveTrader:
         # latency model anchors entries at path_price_at(target_ts) with
         # frac=0 (= the candle open) plus _open_long's slippage multiplier.
         self._pending_buy_anchor: Optional[float] = None
+        # iter91 fill-anchor booking (SELL side): the backtester's _close_long
+        # fill is path_price_at(target_ts) × (1 − engine slippage) for
+        # deferred (armed) exits — frac 0 on the boundary candle ⇒ its open —
+        # and the detection state's close × (1 − slip) for instant (loss-book)
+        # exits.  Frozen at detection (instant) or when the boundary candle
+        # arrives (deferred); consumed by confirm_sell.
+        self._pending_exit_anchor: Optional[float] = None
+        # iter91: the deferred exit's fill-target second — survives the launch
+        # clearing _pending_exit / _pending_exit_delay_until_t so the anchor
+        # still freezes if the launch ran early (drain) or the sell is still
+        # settling when the boundary candle completes.
+        self._exit_anchor_target_t: Optional[float] = None
+        # iter91 fill-path buffer — byte-mirror of the backtester's
+        # _record_path_candle/_path_price_at (forward_tester.py is the
+        # read-only fill-contract reference), so deferred-exit book anchors
+        # price on the recorded intra-candle path (incl. gap seconds).
+        self._fill_path_times: list = []
+        self._fill_path_candles: dict = {}
         # iter90j parity: the ENGINE's position state mirrors the backtester's
         # latency-mode fill resolution, NOT the real swap lifecycle.  The
         # backtester (exec overlay ON ⇒ exec_mode="latency") resolves every
@@ -2162,10 +2191,23 @@ class LiveTrader:
                     )
                     break
                 if status.get("confirmationStatus") in ("confirmed", "finalized"):
-                    # Confirmed — reconcile the real balance and open.
-                    await self._verify_buy_settled(sig, expected_amount)
+                    # Confirmed — OPEN FIRST, reconcile after (iter91 latency).
+                    # Buy-finality clause 1: confirmation status alone resolves
+                    # the buy.  The exact-delivery reconcile used to run BEFORE
+                    # the open and held the trade `pending` for 8-20 s of
+                    # balance/ledger probing (6 probes + 3 spaced tx parses)
+                    # while the chain already held the tokens at ~1 s.  Every
+                    # sub-15 s exit sat in execute_sell's buy-pending wait for
+                    # that window (the "settle-wait exits" class) and every
+                    # queued BUY re-entry was blocked behind it.  Opening at
+                    # confirm status is safe: `_confirm_open` deliberately does
+                    # NOT set `_token_balance_verified`, so a fast exit still
+                    # takes the sell path's exact-ledger clamp (one
+                    # getTransaction) before quoting and can never over-quote
+                    # the provisional outAmount.
                     bal = self._token_balance or expected_amount
                     await _confirm_open(bal, "signature_status")
+                    await self._verify_buy_settled(sig, expected_amount)
                     return
 
             # ── 2. Wallet-balance probe (catches landed-but-unseen TXs) ───────
@@ -2625,10 +2667,21 @@ class LiveTrader:
             # quote, so a wrong first amount costs one 6024 round-trip at
             # most — not nine seconds.
             fresh_bal = 0
-            try:
-                fresh_bal = await self._get_token_balance()
-            except Exception:
-                fresh_bal = 0
+            # iter91 latency: an ADOPTED cache is already the authoritative
+            # on-chain figure (exact delivery read at buy settle / prior live
+            # read) — re-reading it burns ~0.5-1 s of RPC fanout on the exit
+            # hot path for a number that cannot have changed under sole-
+            # trader custody.  The live read still runs whenever the cache is
+            # provisional (buy-quote outAmount, inflated 0.3-2 %) or empty,
+            # and every retry group re-reads before its quote regardless — a
+            # stale-high first amount costs one 6024 round-trip at most.
+            if self._token_balance_verified and self._token_balance > 0:
+                fresh_bal = self._token_balance
+            else:
+                try:
+                    fresh_bal = await self._get_token_balance()
+                except Exception:
+                    fresh_bal = 0
             if fresh_bal > 0:
                 if fresh_bal != self._token_balance:
                     logger.info(
@@ -3480,6 +3533,22 @@ class LiveTrader:
 
         now = time.time()
 
+        # iter91 fill-anchor booking: freeze a DEFERRED (armed) exit's book
+        # anchor at its boundary — the backtester prices that fill at
+        # path_price_at(sig_t + exit_delay) (frac 0 on the boundary candle ⇒
+        # its open; the path lookup reproduces gap-second pricing exactly).
+        # Frozen HERE — before the exit launch below can clear _pending_exit —
+        # and via the path buffer (not this call's `so`), so drain retries
+        # with synthetic tuples cannot misprice it.
+        if (self._exit_anchor_target_t is not None
+                and self._pending_exit_anchor is None
+                and int(self._exit_anchor_target_t) in self._fill_path_candles):
+            raw = self._path_price_at(self._exit_anchor_target_t)
+            self._exit_anchor_target_t = None
+            if raw > 0:
+                self._pending_exit_anchor = raw * (
+                    1.0 - self.engine_fill_slippage_pct / 100.0)
+
         # ── iter90j: engine position-state boundaries (BT latency mirror) ──
         # Latency mode only: runs BEFORE the engine consumes this state —
         # exactly where the backtester's Step-0 fill resolution notifies the
@@ -3628,6 +3697,61 @@ class LiveTrader:
                 "price": sc,
             }
 
+    # ── iter91 fill-path pricing ──────────────────────────────────────────
+    # Byte-mirror of forward_tester._intrabar_price / _fill_fraction /
+    # _record_path_candle / _path_price_at (that file is the read-only
+    # fill-contract reference — do not diverge).
+
+    @staticmethod
+    def _intrabar_price(o: float, h: float, l: float, c: float, frac: float) -> float:
+        bullish = c >= o
+        if bullish:
+            p0, p1, p2, p3 = o, h, l, c
+        else:
+            p0, p1, p2, p3 = o, l, h, c
+        if frac <= 1 / 3:
+            tt = frac * 3
+            return p0 + (p1 - p0) * tt
+        elif frac <= 2 / 3:
+            tt = (frac - 1 / 3) * 3
+            return p1 + (p2 - p1) * tt
+        else:
+            tt = (frac - 2 / 3) * 3
+            return p2 + (p3 - p2) * tt
+
+    def _fill_fraction(self) -> float:
+        # forward_tester._fill_fraction with the live's fee/size/slippage
+        # (its _REFERENCE_FEE=0.0001 SOL, _REFERENCE_SIZE=0.1 SOL).
+        total_fee = max(self.priority_fee_lamports / 1e9, 1e-12)
+        base_delay = 0.0001 / (0.0001 + total_fee)
+        size_penalty = 1.0 + math.log10(max(1.0, self.buy_size_sol / 0.1))
+        slippage_factor = 1.0 + self.engine_fill_slippage_pct / 100.0
+        return max(0.02, min(0.98, base_delay * size_penalty * slippage_factor))
+
+    def _record_path_candle(self, time, o: float, h: float, l: float, c: float) -> None:
+        t = int(time)
+        if t not in self._fill_path_candles:
+            self._fill_path_times.append(t)
+        self._fill_path_candles[t] = (o, h, l, c)
+
+    def _path_price_at(self, target_ts: float) -> float:
+        import bisect
+        if not self._fill_path_times:
+            return 0.0
+        t0 = int(target_ts)
+        idx = bisect.bisect_right(self._fill_path_times, t0) - 1
+        if idx < 0:
+            o, _h, _l, _c = self._fill_path_candles[self._fill_path_times[0]]
+            return o
+        t = self._fill_path_times[idx]
+        o, h, l, c = self._fill_path_candles[t]
+        if idx + 1 < len(self._fill_path_times):
+            span = self._fill_path_times[idx + 1] - t
+        else:
+            span = 1
+        frac = max(0.0, min(1.0, (target_ts - t) / span))
+        return self._intrabar_price(o, h, l, c, frac)
+
     def _queue_signal_from_state(self, result: dict, t: Optional[int] = None,
                                  so: Optional[float] = None, sh: Optional[float] = None,
                                  sl: Optional[float] = None, sc: Optional[float] = None) -> None:
@@ -3755,7 +3879,8 @@ class LiveTrader:
                     self._execute_pending_signals(t, so, sh, sl, sc)
 
         elif detected_signal == Signal.EXIT.value and self.current_trade is not None \
-                and not self._pending_exit:
+                and not self._pending_exit \
+                and getattr(self.current_trade, "status", "") != "closing":
             # Parity guard (mirrors FT's `and self._latency_pending is None`):
             # the FIRST detected exit owns the deferred-exit hold.  While an
             # exit is pending, later states that still detect the same exit
@@ -3764,6 +3889,19 @@ class LiveTrader:
             # exit only launched when the condition finally dropped, e.g.
             # session 20260904_221902_PfU7LdzwTo8B: −26.7% vs the BT's
             # signal+20s scratch).
+            #
+            # iter90k: the `status != "closing"` guard closes the same hole
+            # on the far side of the launch.  The launch clears
+            # `_pending_exit` mid-second; the remaining intra-candle states
+            # of THAT second still see the exit condition and re-detect —
+            # re-arming a fresh 20 s hold and (worse) a fresh
+            # `_exit_engine_close_boundary_t`, so the engine's flat-flip
+            # waits ~20 s longer than the backtester's resolution-state
+            # notify and every BUY signal in that window is dropped by the
+            # `not engine.in_position` gate (session 20260920_223221: the
+            # BT's t2 re-entry at 1789944292 never fired live).  Once the
+            # sell swap is executing, the exit owns the trade; no further
+            # detection may re-arm anything.
             reason = result.get("exit_reason")
             if not reason:
                 reason = "exit_signal"
@@ -3806,6 +3944,24 @@ class LiveTrader:
                 self._exit_engine_close_pending = True
             else:
                 self._pending_exit_delay_until_t = 0.0
+            # iter91 fill-anchor booking (see _pending_exit_anchor): an
+            # instant (loss-book) exit books at the detection state's close ×
+            # (1 − slip) — the backtester's same-state _close_long fill.  A
+            # deferred (armed) exit books at its BOUNDARY candle's open — the
+            # anchor freezes there (top of _execute_pending_signals), not here.
+            if self._pending_exit_delay_until_t > 0.0:
+                self._pending_exit_anchor = None
+                self._exit_anchor_target_t = self._pending_exit_delay_until_t
+            elif so is not None:
+                # iter91: instant (loss-book) exits book at the backtester's
+                # non-deferred _close_long fill — the intrabar path of THIS
+                # state's tuple at _fill_fraction() (NOT the state close).
+                sh_ = sh if sh is not None else so
+                sl_ = sl if sl is not None else so
+                sc_ = sc if sc is not None else so
+                raw = self._intrabar_price(so, sh_, sl_, sc_, self._fill_fraction())
+                self._pending_exit_anchor = raw * (
+                    1.0 - self.engine_fill_slippage_pct / 100.0)
             # Instant execution: fire the sell on THIS state's prices.
             self._execute_pending_signals(t, so, sh, sl, sc)
 
@@ -3885,6 +4041,15 @@ class LiveTrader:
             mid_first, mid_second = h, l
         else:
             mid_first, mid_second = l, h
+
+        # iter91: feed the fill-path buffer (the backtester's Step-0
+        # _record_path_candle writes the same four progressive state tuples
+        # per candle) so boundary-anchor lookups price on the recorded path.
+        for _st in ((o, o, o, o),
+                    (o, max(o, mid_first), min(o, mid_first), mid_first),
+                    (o, h, l, mid_second),
+                    (o, h, l, c)):
+            self._record_path_candle(t, *_st)
 
         final_signal = None
         final_regime = None
@@ -4255,7 +4420,8 @@ class LiveTrader:
             return
         trade = self.current_trade
         trade.tx_hash_sell = tx_hash
-        trade.exit_price = actual_price
+        trade.exit_price_actual = actual_price
+        trade.cash_sol_received = sol_received
         trade.exit_time = time.time()
         # Cost basis = the nominal BUY SIZE (the SOL committed to this trade).
         # The on-chain-measured spend (trade.cost_sol) is deliberately NOT used
@@ -4264,19 +4430,52 @@ class LiveTrader:
         # 0.01 SOL buy), which reported profitable trades as deep losses.
         # PnL is always presented as: pnl = SOL received on the sell − buy size.
         basis = trade.size_sol if trade.size_sol > 0 else trade.cost_sol
+        trade.cash_pnl_sol = (sol_received - basis) if basis > 0 else sol_received
+
+        # ── iter91 backtester-basis booking ──────────────────────────────────
+        # The recorded result is the backtester's _close_long formula on the
+        # SAME fill anchors (entry_price was booked as the signal candle's
+        # open × (1+slip) at detection; exit as the fill-instant tape price ×
+        # (1−slip)):  tokens = size/entry_exec, proceeds = tokens·exit_exec −
+        # fees, pnl = proceeds − size, pnl_pct = pnl/size·100, win iff pnl>0.
+        # Cash flows (cost_sol / cash_sol_received / cash_pnl_sol) keep the
+        # wallet truth — the tape basis is ~pool-depth-discounted vs real
+        # fills, so booked and cash PnL legitimately differ.
+        slip_frac = self.engine_fill_slippage_pct / 100.0
+        exit_anchor = self._pending_exit_anchor
+        self._pending_exit_anchor = None
+        self._exit_anchor_target_t = None
+        if exit_anchor is None:
+            # Risk stops / manual sells (accepted parity exceptions) never
+            # armed a deferred hold — book them on the current tape price so
+            # they stay on the same basis as engine exits.
+            base = self._last_price or actual_price
+            exit_anchor = (base * (1.0 - slip_frac)) if base else actual_price
+        trade.exit_price = exit_anchor
+        entry_exec = trade.entry_price or 0.0
         # Adopted-orphan / zero-cost-basis trades carry size_sol=0.0 — guard
         # the division and treat the entire proceeds as the PnL (there is no
         # known entry cost to subtract).
-        if basis > 0:
-            trade.pnl_sol = sol_received - basis
+        if basis > 0 and entry_exec > 0 and exit_anchor > 0:
+            # Booked fee = the backtester's fee model (0.0001 SOL per side =
+            # its total_fees_per_trade) at its 0.1 SOL reference notional ⇒
+            # 0.2% per round trip.  Rate form keeps booked percentages
+            # notional-invariant, so a 0.01 SOL live run compares directly to
+            # a 0.1 SOL batch run (the absolute-fee form would overstate the
+            # drag 10x at the smaller notional).
+            fees = basis * 0.002
+            trade.fee_sol = fees
+            tokens = basis / entry_exec
+            proceeds = tokens * exit_anchor
+            trade.pnl_sol = proceeds - fees - basis
             trade.pnl_pct = (trade.pnl_sol / basis) * 100
         else:
-            trade.pnl_sol = sol_received
+            trade.pnl_sol = trade.cash_pnl_sol
             # Zero-basis trades (adopted orphans) have no SOL cost to compare
             # against — report the percentage as the monitored price move over
             # the holding window instead of a misleading hardcoded "+0.00%".
-            if trade.entry_price > 0 and actual_price > 0:
-                trade.pnl_pct = (actual_price - trade.entry_price) / trade.entry_price * 100
+            if trade.entry_price > 0 and exit_anchor > 0:
+                trade.pnl_pct = (exit_anchor - trade.entry_price) / trade.entry_price * 100
             else:
                 trade.pnl_pct = 0.0
         trade.status = "closed"
@@ -4334,8 +4533,10 @@ class LiveTrader:
             "trade_closed", trade=trade,
             tx_hash_buy=trade.tx_hash_buy or None,
             tx_hash_sell=trade.tx_hash_sell or None,
-            sol_received=sol_received, exit_price=actual_price,
-            pnl_sol=trade.pnl_sol, pnl_pct=trade.pnl_pct,
+            sol_received=sol_received, exit_price=trade.exit_price,
+            exit_price_actual=actual_price,
+            cash_sol_received=sol_received, cash_pnl_sol=trade.cash_pnl_sol,
+            pnl_sol=trade.pnl_sol, pnl_pct=trade.pnl_pct, fee_sol=trade.fee_sol,
             hold_time_s=(trade.exit_time - trade.entry_time) if trade.exit_time else None,
             stats=self.stats.to_dict(),
         )
