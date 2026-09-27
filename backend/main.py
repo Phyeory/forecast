@@ -924,6 +924,9 @@ def _record_server_trade_event(*, mint: str, token_symbol: str, event: str, payl
             "price": ct.get("exit_price") or 0.0,
             "pnl_sol": ct.get("pnl_sol") or 0.0,
             "pnl_pct": ct.get("pnl_pct") or 0.0,
+            # iter95 display truth: wallet-basis cash PnL rides along so
+            # the portfolio can show model vs wallet side by side.
+            "cash_pnl_sol": ct.get("cash_pnl_sol", ct.get("pnl_sol") or 0.0),
             "tx_hash": sig,
             "status": "confirmed",
         })
@@ -1438,9 +1441,12 @@ class _LiveSession:
             # Wake up any remaining viewers so their UIs reflect the end
             self.broadcast({"type": "session_ended", "reason": self.stop_reason or "session_ended"})
             # iter77 fleet: completed-session stats aggregate every engine.
+            # iter95: wallet-truth fields aggregate alongside the model PnL.
             _fleet_stats = {
                 "total_trades": 0, "total_pnl_sol": 0.0,
                 "winning_trades": 0, "losing_trades": 0, "engines": [],
+                "total_cash_pnl_sol": 0.0, "total_fees_sol": 0.0,
+                "total_rent_sol": 0.0, "wallet_delta_sol": 0.0,
             }
             for ev, _tr in zip(self.engine_versions, traders):
                 _s = _tr.stats.to_dict()
@@ -1448,6 +1454,10 @@ class _LiveSession:
                 _fleet_stats["total_pnl_sol"] += float(_s.get("total_pnl_sol", 0.0))
                 _fleet_stats["winning_trades"] += int(_s.get("winning_trades", 0))
                 _fleet_stats["losing_trades"] += int(_s.get("losing_trades", 0))
+                _fleet_stats["total_cash_pnl_sol"] += float(_s.get("total_cash_pnl_sol", 0.0))
+                _fleet_stats["total_fees_sol"] += float(_s.get("total_fees_sol", 0.0))
+                _fleet_stats["total_rent_sol"] += float(_s.get("total_rent_sol", 0.0))
+                _fleet_stats["wallet_delta_sol"] += float(_s.get("wallet_delta_sol", 0.0))
                 _fleet_stats["engines"].append({"engine_version": ev, "stats": _s})
             _completed_live_sessions.append({
                 "mint": real_mint,
@@ -1882,6 +1892,10 @@ async def live_status():
     winning_trades = 0
     losing_trades = 0
     total_trades = 0
+    # iter95 display truth: wallet-basis aggregates alongside the model PnL.
+    total_cash_pnl = 0.0
+    total_fees = 0.0
+    total_rent = 0.0
 
     # 1. Completed sessions in this server run — in-memory only, so the
     # session performance (pnl / winrate) resets whenever the program
@@ -1895,6 +1909,9 @@ async def live_status():
         winning_trades += st.get("winning_trades", 0)
         losing_trades += st.get("losing_trades", 0)
         total_trades += st.get("total_trades", 0)
+        total_cash_pnl += st.get("total_cash_pnl_sol", 0.0)
+        total_fees += st.get("total_fees_sol", 0.0)
+        total_rent += st.get("total_rent_sol", 0.0)
 
     # 2. Active sessions
     for mint, session in _active_live_traders.items():
@@ -1906,6 +1923,9 @@ async def live_status():
         winning_trades += st.get("winning_trades", 0)
         losing_trades += st.get("losing_trades", 0)
         total_trades += st.get("total_trades", 0)
+        total_cash_pnl += st.get("total_cash_pnl_sol", 0.0)
+        total_fees += st.get("total_fees_sol", 0.0)
+        total_rent += st.get("total_rent_sol", 0.0)
 
         if trader.current_trade and trader._last_price > 0 and trader.current_trade.entry_price > 0:
             upnl = (trader._last_price - trader.current_trade.entry_price) / trader.current_trade.entry_price * trader.current_trade.size_sol
@@ -1938,6 +1958,13 @@ async def live_status():
             "total_trades": total_trades,
             "win_rate": round(win_rate, 2),
             "tokens_traded": len(seen_mints),
+            # iter95 display truth: wallet-basis aggregates.  total_pnl_sol
+            # is the backtest-basis model PnL; wallet_delta_sol is the
+            # all-in wallet change (cash − fees − net rent).
+            "total_cash_pnl_sol": round(total_cash_pnl, 6),
+            "total_fees_sol": round(total_fees, 6),
+            "total_rent_sol": round(total_rent, 6),
+            "wallet_delta_sol": round(total_cash_pnl - total_fees - total_rent, 6),
         },
         "trades": _server_trade_events,
     })
@@ -2102,6 +2129,7 @@ async def portfolio_status():
             "ts": ev.get("timestamp"),
             "pnl_sol": ev.get("pnl_sol", 0.0),
             "pnl_pct": ev.get("pnl_pct", 0.0),
+            "cash_pnl_sol": ev.get("cash_pnl_sol", ev.get("pnl_sol", 0.0)),
             "tx_hash": ev.get("tx_hash", ""),
         })
 
@@ -2117,6 +2145,9 @@ async def portfolio_status():
                 "exit_price": t.get("exit_price"),
                 "pnl_sol": t.get("pnl_sol", 0.0),
                 "pnl_pct": t.get("pnl_pct", 0.0),
+                # iter95: wallet-basis cash PnL (ledgers pre-iter91b lack
+                # the field — fall back to the booked figure).
+                "cash_pnl_sol": t.get("cash_pnl_sol", t.get("pnl_sol", 0.0)),
                 "exit_reason": t.get("exit_reason", ""),
                 "tx_hash": t.get("tx_hash_sell") or "",
             })
@@ -2124,6 +2155,7 @@ async def portfolio_status():
     closed.sort(key=lambda t: t.get("ts") or 0, reverse=True)
 
     realized_pnl = sum(t.get("pnl_sol", 0.0) for t in closed)
+    realized_cash_pnl = sum(t.get("cash_pnl_sol", t.get("pnl_sol", 0.0)) for t in closed)
     winning = sum(1 for t in closed if (t.get("pnl_sol") or 0.0) > 0)
     losing = len(closed) - winning
     win_rate = (winning / len(closed) * 100.0) if closed else 0.0
@@ -2149,6 +2181,8 @@ async def portfolio_status():
             "realized_pnl_sol": round(realized_pnl, 6),
             "unrealized_pnl_sol": round(unrealized_pnl, 6),
             "total_pnl_sol": round(realized_pnl + unrealized_pnl, 6),
+            # iter95 display truth: wallet-basis realized cash PnL.
+            "realized_cash_pnl_sol": round(realized_cash_pnl, 6),
             "winning_trades": winning,
             "losing_trades": losing,
             "total_trades": len(closed),

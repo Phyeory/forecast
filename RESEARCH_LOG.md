@@ -402,6 +402,57 @@ rejection BEFORE broadcast (no fee burn), `required_sol` journaled.
 `analysis/test_first_buy_rent_preflight.py` 4/4. Operations: a 0.01-SOL-notional wallet
 trading fresh mints needs ≳0.0137 SOL per session start — **fund the wallet**.
 
+## Iter 95 — display truth + live-vs-BT fidelity audit (2026-09-27, GLM-FIX branch)
+
+**A. Display truth (shipped on GLM-FIX, uncommitted).** The session card showed
+`SUM(pnl_pct)` as SOL (−85.3%) while the wallet lost −225% cash and −474% all-in
+(20260927_0[0-8]* block, 44 trades): `starting_balance` was overwritten post-every-buy
+(card showed the last post-buy balance, never the session start); gross rent double-counted
+the WSOL temp ATA (created AND closed in-tx — repeat-buy delta −0.010019 = input + fee
+exactly, net rent 0); retry-path sells booked under a reverted rebroadcast sig with
+wallet-delta proceeds absorbing the failed retry's fee burn (JACK t2:
+`saGqT8…` reverted 0x1788 AFTER `2ZDTnY…` had already delivered +0.011025).
+Fix: `starting_balance` set-once from the balance-cache loop + `current_balance` seeded
+there; new stats `total_cash_pnl_sol` / `total_fees_sol` (measured both sides, no second
+fetch — `_get_tx_sol_proceeds` now returns `(received, fee)`) / `total_rent_sol` (NET via
+`_get_tx_rent_net_fee`: `net = −wallet_delta − fee − input`, floored) / `wallet_balance` +
+derived `wallet_delta_sol = cash − fees − rent`; `_resolve_landed_sell_sig`
+(`getSignaturesForAddress` window walk) books the true landed sig as `tx_delta_resolved`
+in verified-empty/watchdog paths, de-contaminating the shared-wallet delta under fleet;
+`main.py` aggregates cash/fees/rent/wallet-Δ in `live_status` + portfolio (`cash_pnl_sol`
+per trade, `realized_cash_pnl_sol`); frontend shows **Model PnL vs Wallet Δ** side by side,
+labelled, with tooltips. Failed-tx burns stay journaled, out of stats (bridge reconciles).
+`analysis/test_display_truth.py` 7/7.
+
+**B. Which branch reproduces the backtester? Main — by calibration + landing, not booking.**
+Paired proof (15-rec audit block, V2/0.01/production defaults, both trees): 45 trades,
++0.008586 both, per-trade Δ = 0 (backtest-path files checksum-identical; BT never imports
+the trader). Booking anchors verified exact on both branches — entry = signal-candle OPEN
+×(1+1%) (production `_bt_latency_mode`, NOT state close), deferred exit = boundary-candle
+OPEN ×(1−1%), loss-book exit = intrabar(state, frac≈0.505) ×(1−1%) with frac inputs equal
+(live reads *configured* fee — immune to escalation). Main wins on (1) the parallel
+iter95 calibration fix (`main.py`: re-`initialize_calibration(mint, anchor, {})` like
+`run_backtest`, discarding the dashboard's stale `engineParamsV2` mirror — the Luna
+11-vs-8 divergence, tc 0.7908 vs 0.7349; stale physics also flips armed/loss-book anchor
+*class*), and (2) landing completeness (fee escalation 100k→60/100/200/400k, buy slip
+3500→7000bps, sell ×2 ≈ BT's 100%-landing assumption; booked anchor stays at 1%, so
+per-fill cash may sit further from booked). GLM-FIX contributes nothing to booked-vs-BT
+(resolver moves cash/sig attribution only — correct for BT reproduction) but is the better
+*measuring instrument* (main's headline overwrites booked with estimated `wallet_pnl`).
+End state: rebase GLM-FIX onto main; keep main's execution+calibration, GLM-FIX's
+resolver/accounting/dual display; retire estimated `wallet_pnl`.
+
+**C. Residual risks (both branches).** Frac-input drift is silent (buy_size > 0.1 or a fee
+change moves loss-book anchors — no test pins `_fill_fraction` parity); bare
+`ForwardTester()` defaults `slippage_pct=10.0` vs 1.0 everywhere else (foot-gun for ad-hoc
+harnesses); live-only exit classes (mcap floor, mid-position session stop, manual/risk —
+`_last_price` fallback, no anchor/slip model) vs BT force-close at last-candle intrabar
+(0 occurrences in-block: 25 gain_retrace + 2 armed rate-split deferred, 16 loss-book
+instant, 1 verified-empty). Gates: parity 10/10, VR 20/20, preflight 4/4, display-truth
+7/7. Full suite: 117 passed, 8 failed — all 8 pre-existing (verified identical on the
+pristine tree; `test_live_chain_parity.py` + `test_real_entry_basis.py` target the
+stashed iter92/93 `buy_wallet_delta_sol` API, never merged).
+
 ---
 
 ## Graveyard — do NOT re-test without a new data channel
