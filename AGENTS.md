@@ -80,7 +80,8 @@ graph TD
 - **`main.py`** — REST (`/api/token/*`, `/api/recorder/*`, `/api/backtest*`, `/api/live/*`),
   WS (`/ws/{mint}`, `/ws/live/{mint}`, `/ws/autofeed`). Server-side live sessions (trader,
   stream, auto-recording, 1 s holder-flow pump + immediate exit dispatch, multi-engine fleet
-  registry) survive tab closure. Backend restart does NOT auto-resume autofeed.
+  registry) survive tab closure. Backend restart does NOT auto-resume autofeed. `live_status`
+  / portfolio aggregate cash/fees/rent/wallet-Δ alongside model PnL (iter95, GLM-FIX).
 - **`pumpfun_client.py`** — mint/pool resolution + streaming (PumpPortal WS, pump.fun REST,
   RPC `accountSubscribe` vault-diff, DexScreener), `Semaphore(8)`. FD-leak fix (4731969):
   `stop()` force-closes the aiohttp session — do not remove. Hub resolves per-mint
@@ -99,7 +100,16 @@ graph TD
   emergency sell + entry block + terminate (idle breach = immediate terminate). Fill-anchor
   booking (iter91b): books BT-identical fills, journals wallet truth as `cash_*`;
   first-buy account rent journaled separately (`rent_sol`), `exit_price_actual` = ledger
-  price (iter94).
+  price (iter94). Display truth (iter95, GLM-FIX uncommitted): `starting_balance` set-once
+  (balance-cache seed) + `current_balance` seeded there; wallet-truth stats
+  (`total_cash_pnl_sol`, `total_fees_sol` measured both sides, `total_rent_sol` NET via
+  `rent_sol_net`, `wallet_balance`, derived `wallet_delta_sol`); `_resolve_landed_sell_sig`
+  books retry-path fills under the true landed sig (`tx_delta_resolved`). Booking anchors
+  verified BT-exact: entry = signal-candle OPEN, deferred exit = boundary-candle OPEN,
+  loss-book exit = intrabar(frac≈0.505) — all ×(1±1%); live `_fill_fraction` reads the
+  *configured* fee. NOTE: main branch (parallel iter95) additionally re-calibrates V2
+  from `{}` like `run_backtest` (stale dashboard `engineParamsV2` caused the Luna 11-vs-8
+  divergence) + fee escalation/slippage widening — not yet in GLM-FIX; rebase to inherit.
 - **`backtester.py`** — replay via ForwardTester + ProcessPool (`guard_parent`), persists to
   `backtest_data.db` + `v2_results/`.
 - **`signal_capture.py` / `autofeed.py` / `newpairs*.py` / `process_watchdog.py`** — live
@@ -107,6 +117,8 @@ graph TD
   newborn recorder (separate DB, default OFF), orphan protection.
 - **`analysis/`** — paired_diff, aggregate_results, test suite, per-iteration artifacts.
 - **`frontend/`** — vanilla JS + LightweightCharts; `app.js::engineParamsV2` mirrors all knobs.
+  Session/trader cards + portfolio show **Model PnL vs Wallet Δ** side by side, labelled
+  (iter95, GLM-FIX); trade rows carry a Cash PnL column.
 
 Removed (graveyard — need a new data channel to resurrect): futures, sniper, MSM/HMM gate (reverted
 2026-09-11), iter57 Q-layer, whale-dump/SPE/pool-drain exits, V1 trailing stop, mayhem V7.
@@ -152,14 +164,20 @@ post-iter72 ~full.
   journal method); `v2_results` JSONs are survivor-conditioned; pool workers freeze code at
   spawn; thin tapes need random-sample probes; subset burns can't reconstruct engine-native
   layers (iter86c); UI batches re-fit calibration — like-for-like replay needs session kwargs.
+  Live sessions inherit dashboard `engineParamsV2` incl. stale calibration (Luna 11-vs-8;
+  main-branch iter95 recalibrates from `{}` — GLM-FIX still exposed, rebase to inherit).
 
 ## Testing / Ops
 
 - `test_live_parity.py` (parity gate), `test_exit_delay_hold_reset.py`,
   `test_signal_capture.py`, `test_client_fd_leak.py`,
-  `test_pool_virtual_reserves.py` (iter94 effective-basis gate). Standard run = command
-  block above. Pre-iter94 rot note: 44 failures belong to the stashed iter92/93
-  realistic-exec WIP (stash@{0}) — see iter94 in RESEARCH_LOG before resurrecting.
+  `test_pool_virtual_reserves.py` (iter94 effective-basis gate),
+  `test_display_truth.py` (iter95 wallet-Δ gate), `test_first_buy_rent_preflight.py`.
+  Standard run = command block above. Rot note (verified 2026-09-27 on pristine tree):
+  8 failures in `test_live_chain_parity.py` + `test_real_entry_basis.py` target the
+  stashed iter92/93 `buy_wallet_delta_sol` API (never merged) — see iter94/95 in
+  RESEARCH_LOG before resurrecting. Bare `ForwardTester()` defaults `slippage_pct=10.0`
+  vs 1.0 in `run_backtest`/live — always pass slippage explicitly in harnesses.
 - Deploy: restart `main.py` + hard-refresh browser (app.js cached). Live audits use
   `backend/data/live_logs/<session>/` (`trades.jsonl`, `signals.jsonl`), not dashboard counters.
 - Fill forensics: `analysis/iter94_wedge_study.py` (on-chain fill vs tape),
