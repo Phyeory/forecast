@@ -264,7 +264,7 @@ def get_recording(recording_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
-def get_recording_candles(recording_id: int) -> list[dict]:
+def get_recording_candles(recording_id: int, effective_basis: bool = True) -> list[dict]:
     """
     Return one completed candle per time bucket, ordered by time.
 
@@ -274,6 +274,15 @@ def get_recording_candles(recording_id: int) -> list[dict]:
     updating the existing one.  We deduplicate here by taking the row with the
     highest id (most recently written = most complete accumulated OHLCV state)
     for each time bucket.
+
+    iter94 effective-basis correction: recordings started BEFORE
+    PUMPSWAP_VR_FIX_EPOCH store PumpSwap-era prices as the RAW VAULT ratio,
+    while executable pricing runs on vault + virtual_quote_reserves.  With
+    ``effective_basis`` (default) those recordings are lifted to the
+    executable basis at load time using each candle's stored vault depth
+    (pool_sol), graduation-aware (curve-era prefix untouched, volumes real).
+    Pass ``effective_basis=False`` for a byte-exact phantom-basis replay of
+    the pre-iter94 era.
     """
     conn = _get_price_read_conn()
     rows = conn.execute(
@@ -294,8 +303,20 @@ def get_recording_candles(recording_id: int) -> list[dict]:
         """,
         (recording_id,),
     ).fetchall()
+    rec_row = conn.execute(
+        "SELECT mint, started_at FROM recordings WHERE id = ?",
+        (recording_id,),
+    ).fetchone()
     conn.close()
-    return [dict(r) for r in rows]
+    candles = [dict(r) for r in rows]
+    if effective_basis and rec_row is not None:
+        try:
+            from pool_virtual_reserves import correct_candles_to_effective_basis
+            correct_candles_to_effective_basis(
+                candles, rec_row["mint"], float(rec_row["started_at"] or 0.0))
+        except Exception:
+            pass  # never fail a replay because the basis fix is unavailable
+    return candles
 
 
 def delete_recording(recording_id: int):

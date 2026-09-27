@@ -199,6 +199,20 @@ def run_backtest_batch(
     if engine_params is None:
         engine_params = {}
 
+    # iter94: pre-resolve PumpSwap virtual quote reserves for every distinct
+    # mint in the batch (DexScreener 30-mint batches + RPC getMultipleAccounts)
+    # so pool workers replay corrected recordings without touching the
+    # network.  Cached sidecar rows make this a no-op after the first burn.
+    try:
+        from pool_virtual_reserves import prewarm_mints, vr_fix_enabled
+        if vr_fix_enabled():
+            mints = sorted({r.get("mint") for r in completed if r.get("mint")})
+            n = prewarm_mints(mints)
+            if n:
+                print(f"[iter94] prewarmed pool basis for {n} mints")
+    except Exception as _exc:
+        print(f"[iter94] prewarm skipped: {_exc!r}")
+
     common_kwargs = dict(
         engine_params=engine_params,
         buy_size_sol=buy_size_sol,

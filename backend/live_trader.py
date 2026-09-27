@@ -354,6 +354,10 @@ class LiveTrade:
     cash_sol_received: float = 0.0  # net SOL credited by the sell swap
     cash_pnl_sol: float = 0.0  # cash_sol_received − buy basis
     fee_sol: float = 0.0  # fees deducted in the booked pnl
+    # iter94: one-time account-creation rent inside the BUY tx (WSOL/token
+    # ATA ~0.0015 SOL each).  Real wallet cost, excluded from trade PnL
+    # (basis is size_sol) — the backtester never creates accounts.
+    rent_sol: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -634,6 +638,14 @@ class LiveTrader:
 
         # Async swap task tracker (so we don't overlap swaps)
         self._swap_in_flight: bool = False
+
+        # iter94: True until this session's first buy confirms on-chain.  The
+        # first buy of a fresh mint creates the token ATA (≈0.0015 SOL) and
+        # the WSOL ATA (≈0.0015 SOL) INSIDE the swap tx — hard on-chain
+        # liquidity requirements the pre-flight check must include (a
+        # 0.0131-SOL wallet broadcasts a doomed tx that fails with
+        # pump Custom:1 and burns the priority fee).
+        self._session_first_buy: bool = True
 
         # Persistent aiohttp session — reusing TCP connections eliminates
         # per-request handshake overhead (~50-150 ms per call).
@@ -1883,13 +1895,31 @@ class LiveTrader:
                 await self._fail_buy_flat("RPC balance check failed", reason)
                 return None
 
-            if sol_bal * 1e9 < amount_lam + 50_000:  # buy size + gas buffer
-                logger.error(f"[BUY FAILED] Insufficient balance: {sol_bal:.4f} SOL but need ~{self.buy_size_sol} SOL")
+            # ── iter94: rent-aware liquidity pre-flight ─────────────────────
+            # A fresh mint's first buy creates the token ATA (+ the WSOL ATA
+            # when Jupiter re-opens it) inside the swap tx — ≈0.0030 SOL of
+            # rent on top of the swap amount and fees.  The old check
+            # (buy + 50k lamports) passed with 0.0131 SOL while the tx
+            # actually needed ≈0.0131+ SOL, so every fresh-mint buy failed
+            # on-chain with Custom:1 and burned the priority fee each time.
+            first_buy = self._session_first_buy
+            gas_floor = 0.00025
+            rent_floor = 0.0034 if first_buy else 0.0
+            required_sol = self.buy_size_sol + gas_floor + rent_floor
+            if sol_bal < required_sol:
+                logger.error(
+                    f"[BUY FAILED] Insufficient balance: {sol_bal:.4f} SOL but need "
+                    f"~{required_sol:.4f} SOL"
+                    f"{' (first buy: swap + ATA rent + fees)' if first_buy else ' (swap + fees)'}"
+                )
                 self._journal_event(
                     "buy_rejected", reason=reason, error="insufficient_sol",
-                    sol_balance=sol_bal, required_sol=self.buy_size_sol,
+                    sol_balance=sol_bal, required_sol=required_sol,
+                    first_buy=first_buy,
                 )
-                await self._fail_buy_flat(f"Insufficient SOL ({sol_bal:.4f} available)", reason)
+                await self._fail_buy_flat(
+                    f"Insufficient SOL ({sol_bal:.4f} available, "
+                    f"{required_sol:.4f} required)", reason)
                 return None
 
             # ── Single quote → swap → broadcast (NO retry) ───────────────────
@@ -2013,6 +2043,7 @@ class LiveTrader:
                 self._token_balance_verified = True
                 failed.status = "open"
                 failed.size_tokens = on_chain / (10 ** self._token_decimals)
+                self._session_first_buy = False  # tokens landed ⇒ ATA rent was paid
                 self._journal_event(
                     "buy_confirmed", trade=failed, reason=reason,
                     via="fail_aborted_balance_probe", original_error=detail,
@@ -2159,7 +2190,13 @@ class LiveTrader:
             if ct is not None and ct.tx_hash_buy == sig:
                 ct.status = "open"
                 ct.size_tokens = balance / (10 ** self._token_decimals)
+            self._session_first_buy = False  # ATA rent paid — later buys need only swap+fees
             await self._refresh_sol_balance_async()
+            # iter94: journal one-time account-creation rent (WSOL/token
+            # ATA) inside the buy tx separately from the fill — 15–30% of a
+            # 0.01 SOL first buy, invisible in trade PnL by design (the
+            # backtester has no account costs).
+            asyncio.ensure_future(self._journal_buy_rent(sig))
             await self._broadcast_status(
                 "buy_confirmed", sig, "signal",
                 tokens=(self.current_trade.size_tokens if self.current_trade else 0),
@@ -2398,6 +2435,59 @@ class LiveTrader:
         except Exception as e:
             logger.warning(f"[PROCEEDS] parse failed for {sig[:8]}…: {e}")
             return None
+
+    def _actual_fill_price(self, sol_received: float, tokens_sold: float) -> float:
+        """iter94: real on-chain fill price = proceeds / tokens actually sold.
+
+        The pre-iter94 code passed ``self._last_price`` (the TAPE price) as
+        ``actual_price``, so ``exit_price_actual`` was a fiction of the
+        recording basis rather than the fill.  With the tape now on the
+        executable basis the two agree within fees — but the journal should
+        still record the ledger truth."""
+        if sol_received > 0 and tokens_sold > 0:
+            return sol_received / tokens_sold
+        return self._last_price or 0.0
+
+    async def _get_tx_rent_sol(self, sig: str) -> float:
+        """One-time account-creation rent inside a confirmed BUY tx.
+
+        The first buy of a session creates the wallet's WSOL ATA (~0.0015 SOL,
+        once per wallet lifetime) and the token ATA (~0.0015 SOL, once per
+        mint) — 15–30% of a 0.01 SOL notional when they land inside the swap
+        tx.  They are refundable deposits, not swap costs, so they must be
+        journaled separately from the fill for wallet truth to reconcile
+        with the booked (backtester-basis) PnL."""
+        result = await self._get_tx_result(sig)
+        if not result:
+            return 0.0
+        try:
+            meta = result.get("meta") or {}
+            if meta.get("err"):
+                return 0.0
+            rent = 0
+            for inner in meta.get("innerInstructions") or []:
+                for ins in inner.get("instructions") or []:
+                    parsed = ins.get("parsed") or {}
+                    info = parsed.get("info") or {}
+                    if parsed.get("type") in ("createAccount", "create") and \
+                            "lamports" in info:
+                        rent += int(info.get("lamports") or 0)
+            return rent / 1e9
+        except Exception:
+            return 0.0
+
+    async def _journal_buy_rent(self, sig: str):
+        """Best-effort rent journaling for a confirmed buy (never blocks)."""
+        try:
+            rent = await self._get_tx_rent_sol(sig)
+            if rent > 0:
+                ct = self.current_trade
+                if ct is not None and ct.tx_hash_buy == sig:
+                    ct.rent_sol = rent
+                self._journal_event("buy_rent", tx_hash=sig, rent_sol=rent,
+                                    trade=self.current_trade)
+        except Exception:
+            pass
 
     async def _get_tx_token_delivered(self, sig: str) -> Optional[int]:
         """EXACT raw token amount a confirmed BUY delivered to this wallet,
@@ -2951,7 +3041,11 @@ class LiveTrader:
                     self._last_exit_signal_ts = 0.0  # clear watchdog on the happy path
                     closed_trade = None
                     if self.current_trade:
-                        closed_trade = self.confirm_sell(sig, sol_received, self._last_price)
+                        tokens_sold_ui = token_balance / (10 ** self._token_decimals) \
+                            if token_balance else self.current_trade.size_tokens
+                        closed_trade = self.confirm_sell(
+                            sig, sol_received,
+                            self._actual_fill_price(sol_received, tokens_sold_ui))
 
                     # Post-confirm balance verification in the background: if
                     # tokens survived (partial fill / program error) the
@@ -3052,7 +3146,9 @@ class LiveTrader:
                         closed_trade = None
                         if self.current_trade:
                             closed_trade = self.confirm_sell(
-                                self._last_sell_sig or "", proceeds, self._last_price
+                                self._last_sell_sig or "", proceeds,
+                                self._actual_fill_price(
+                                    proceeds, self.current_trade.size_tokens)
                             )
                         self._journal_event(
                             "sell_confirmed", trade=closed_trade, reason=reason,
@@ -3351,7 +3447,9 @@ class LiveTrader:
                     if self.current_trade is not None:
                         self.current_trade.exit_reason = "watchdog_finalise"
                         closed_trade = self.confirm_sell(
-                            self._last_sell_sig or "", proceeds, self._last_price
+                            self._last_sell_sig or "", proceeds,
+                            self._actual_fill_price(
+                                proceeds, self.current_trade.size_tokens)
                         )
                         self._journal_event(
                             "sell_confirmed", trade=closed_trade,

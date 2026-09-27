@@ -465,7 +465,11 @@ class TestPopcalAdoption:
         st = s["stats"]
         # 2026-09-19: iter90e VR decision-horizon calibrator adopted —
         # population tau is no longer the saturated floor value.
-        assert (st["total_trades"], round(st["total_pnl_sol"], 6)) == (4, -0.074574), (
+        # 2026-09-26: iter94 golden re-measured on the executable basis —
+        # recordings now replay with PumpSwap virtual-quote-reserves
+        # corrected candles (pool_virtual_reserves.py), so the pinned
+        # adopted-stack numbers shifted (4/-0.0746 → 6/-0.0240).
+        assert (st["total_trades"], round(st["total_pnl_sol"], 6)) == (6, -0.024031), (
             "bare-params backtest no longer reproduces the adopted gated "
             "stack — adoption default broken"
         )
@@ -481,7 +485,9 @@ class TestPopcalAdoption:
         st = s["stats"]
         # 2026-09-18: re-measured against HEAD (38c07b9) on current data —
         # rec 4320's tape drifted post-iter89 (live trade-history backfill).
-        assert (st["total_trades"], round(st["total_pnl_sol"], 6)) == (2, -0.090345), (
+        # 2026-09-26: iter94 golden re-measured on the executable basis
+        # (PumpSwap virtual-quote-reserves corrected candles).
+        assert (st["total_trades"], round(st["total_pnl_sol"], 6)) == (1, -0.049801), (
             "use_session_calibration=false no longer restores pure DEFAULT"
         )
 
