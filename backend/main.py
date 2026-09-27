@@ -1947,9 +1947,11 @@ def _load_ledger_sessions(limit: int = 20) -> list[dict]:
     """Recent completed live-trading sessions with their closed trades.
 
     Read from each session's physical trades.jsonl ledger (survives restarts
-    and sessions that ended before the page was opened).  Consumed by
-    /api/live/history and /api/portfolio so both surfaces see the same
-    durable trade stream.
+    and sessions that ended before the page was opened).  Feeds /api/portfolio
+    only — the Live Execution tab deliberately does NOT consume this (2026-09-27:
+    its trade history is the in-memory current-run list and must clear on
+    server restart).  The ledgers themselves stay on disk as the audit trail
+    (parity guard, fill forensics).
     """
     from live_session_logger import LOG_ROOT
     sessions = []
