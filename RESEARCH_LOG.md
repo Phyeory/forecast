@@ -402,6 +402,22 @@ rejection BEFORE broadcast (no fee burn), `required_sol` journaled.
 `analysis/test_first_buy_rent_preflight.py` 4/4. Operations: a 0.01-SOL-notional wallet
 trading fresh mints needs ≳0.0137 SOL per session start — **fund the wallet**.
 
+## GLM-FIX reference note (2026-09-27 — branch pushed, worktree removed)
+
+The `GLM-FIX` branch (`origin/GLM-FIX`, commit `adeed4f`) holds the iter95
+display-truth work: set-once `starting_balance`, wallet-truth stats
+(`total_cash_pnl_sol` / measured `total_fees_sol` / NET `total_rent_sol` /
+`wallet_delta_sol`), `_resolve_landed_sell_sig` (JACK-t2 rebroadcast class),
+Model-vs-Wallet-Δ display. Its local-only audit trail was relocated here before
+the worktree was deleted (all gitignored reference copies — NOT part of builds):
+`backend/analysis/GLM-FIX/` (11 files: `test_display_truth.py`, 5 `iter95_*`
+forensic/replay scripts + 5 JSONs, `README.md` — the test fails 6/7 on main BY
+DESIGN, it gates GLM-FIX-only API) + 15 `*_iter95_141244_*.json` replay logs in
+`backend/v2_results/` (paired proof: 45 trades, +0.008586 both branches, Δ=0).
+Full narrative: `origin/GLM-FIX` RESEARCH_LOG "Iter 95". Merge direction when
+ready: rebase GLM-FIX onto main (keep main's calibration + execution changes;
+keep GLM-FIX's resolver/accounting/dual display; retire estimated `wallet_pnl`).
+
 ---
 
 ## Graveyard — do NOT re-test without a new data channel

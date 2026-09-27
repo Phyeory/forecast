@@ -24,6 +24,7 @@ import logging
 import json
 from contextvars import ContextVar
 from dataclasses import dataclass, field, asdict
+from pumpfun_client import report_fill_price
 from typing import Optional
 
 import aiohttp
@@ -225,8 +226,20 @@ BUY_SETTLE_POLL_S:       float = 0.4   # settle-loop iteration cadence (fast)
 # Jupiter outAmount inflated by slippage or a partial fill).
 QUOTE_RETRIES_PER_GROUP = 3          # fresh quotes fetched per sell attempt group
 NONSIMULATION_ABORT_CODES = frozenset({6024, 1, 0x1771})  # swallowed — handled by re-quote
-PRIORITY_FEE_ESCALATION  = [100_000, 100_000, 100_000, 100_000]  # micro-lamports — fixed 0.0001 SOL
-MAX_PRIORITY_FEE         = 100_000  # micro-lamports — 0.0001 SOL, never exceeded
+# iter95: sells are retryable, so start below market and escalate hard on
+# failure; buys stay at index [0] only when a one-shot must land (the caller
+# pins the fee).  Measured cost at 100_000 µL/CU ≈ 0.000016-0.000021 SOL/tx.
+PRIORITY_FEE_ESCALATION  = [60_000, 100_000, 200_000, 400_000]  # micro-lamports/CU
+MAX_PRIORITY_FEE         = 400_000  # micro-lamports — never exceeded
+
+# iter96 buy-quote retry policy (measured on lite-api 2026-09-27: p50 0.039 s,
+# p95 0.117 s, max 0.118 s over 16 probes; a hung request is a hang, not a
+# slow quote — abandon fast and retry inside the entry-value window)
+QUOTE_ATTEMPTS   = 3
+QUOTE_TIMEOUT_S  = 1.5    # per-attempt — 13× p95 healthy latency
+QUOTE_DEADLINE_S = 4.5    # total wall clock for all attempts (iter78/82: entry value decays past ~5 s)
+QUOTE_HEDGE_DELAY_S = 0.35  # ~9× p50 — at this point the primary is likely on a dead
+                            # keepalive connection or in a server-side tail: hedge
 
 # ── BUY SLIPPAGE BUDGET ───────────────────────────────────────────────────────
 # A BUY is broadcast exactly once — there is no retry, ever.  The slippage
@@ -236,7 +249,8 @@ MAX_PRIORITY_FEE         = 100_000  # micro-lamports — 0.0001 SOL, never excee
 # (1000–1500 bps) rejected landings that had actually executed on-chain,
 # leaving the wallet holding an untracked bag.  Sells keep the configurable
 # knob + escalation ladder below — they land in ~0.5–2 s and never failed.
-BUY_SLIPPAGE_BPS = 3500
+# iter95 (2026-09-27): doubled 3500 → 7000 per user directive.
+BUY_SLIPPAGE_BPS = 7000
 
 # ── BUY-FAILURE RE-ENTRY BLOCK ────────────────────────────────────────────────
 # After a buy fails (broadcast rejected, TX dead, never landed) NO further
@@ -353,6 +367,13 @@ class LiveTrade:
     exit_price_actual: Optional[float] = None  # cash fill price per token
     cash_sol_received: float = 0.0  # net SOL credited by the sell swap
     cash_pnl_sol: float = 0.0  # cash_sol_received − buy basis
+    # iter95: wallet truth — the SOL the round trip actually moved the wallet,
+    # = cash_pnl_sol − buy-tx priority fee.  The sell tx's SOL delta already
+    # nets the sell fee and the WSOL-ATA rent refund (closeAccount inside the
+    # sell); the token-ATA rent is a wash once reclaimed after the sell.
+    wallet_pnl_sol: float = 0.0
+    wallet_pnl_pct: float = 0.0
+    buy_fee_sol: float = 0.0  # iter95: real buy-tx fee from meta (reconciles the estimate)
     fee_sol: float = 0.0  # fees deducted in the booked pnl
     # iter94: one-time account-creation rent inside the BUY tx (WSOL/token
     # ATA ~0.0015 SOL each).  Real wallet cost, excluded from trade PnL
@@ -371,6 +392,8 @@ class LiveTraderStats:
     winning_trades: int = 0
     losing_trades: int = 0
     total_pnl_sol: float = 0.0
+    total_wallet_pnl_sol: float = 0.0  # iter95: sum of trade.wallet_pnl_sol (wallet truth)
+    wallet_winning_trades: int = 0     # iter95: wins on the wallet basis
     total_fees_paid: float = 0.0
     max_drawdown_pct: float = 0.0
     peak_balance: float = 0.0
@@ -1118,15 +1141,9 @@ class LiveTrader:
 
     # ── Jupiter helpers ───────────────────────────────────────────────────────
 
-    async def _get_quote(self, input_mint: str, output_mint: str, amount: int,
-                         slippage_bps: Optional[int] = None) -> Optional[dict]:
-        """Fetch a Jupiter swap quote via the Swap API v1.
-
-        slippage_bps overrides the instance knob (the buy path pins its own
-        BUY_SLIPPAGE_BPS budget; sells use self.slippage_bps so the sell
-        escalation ladder keeps working).
-        """
-        params = {
+    def _quote_params(self, input_mint: str, output_mint: str, amount: int,
+                      slippage_bps: Optional[int]) -> dict:
+        return {
             "inputMint": input_mint,
             "outputMint": output_mint,
             "amount": str(amount),
@@ -1147,29 +1164,97 @@ class LiveTrader:
             # "0") triggers fee-collection code paths that can cause
             # IncorrectTokenProgramID (error 6014) on Token-2022 mints.
         }
-        logger.info(f"[QUOTE] Fetching quote: {input_mint[:8]}… → {output_mint[:8]}… amount={amount}")
+
+    async def _quote_fetch(self, session: aiohttp.ClientSession, url: str,
+                           params: dict, timeout_s: Optional[float]) -> Optional[dict]:
+        t0 = time.monotonic()
         try:
-            s = await self._get_session()
-            async with s.get(
-                JUPITER_QUOTE_URL,
+            async with session.get(
+                url,
                 params=params,
-                timeout=aiohttp.ClientTimeout(total=JUPITER_API_TIMEOUT_S),
+                timeout=aiohttp.ClientTimeout(total=timeout_s or JUPITER_API_TIMEOUT_S),
             ) as r:
                 body = await r.text()
+                dt = (time.monotonic() - t0) * 1000.0
                 if r.status != 200:
-                    logger.error(f"[QUOTE FAILED] HTTP {r.status}: {body}")
+                    logger.error(f"[QUOTE FAILED] HTTP {r.status}: {body} ({dt:.0f} ms)")
                     return None
                 quote = json.loads(body)
                 out_amt = quote.get('outAmount', '?')
                 route_plan = quote.get('routePlan', [])
                 swaps = [rp.get('swapInfo', {}).get('label', '?') for rp in route_plan]
-                logger.info(f"[QUOTE OK] outAmount={out_amt} route={'→'.join(swaps)} priceImpact={quote.get('priceImpactPct', '?')}%")
+                logger.info(f"[QUOTE OK {dt:.0f} ms] outAmount={out_amt} route={'→'.join(swaps)} priceImpact={quote.get('priceImpactPct', '?')}%")
                 return quote
         except Exception as e:
             # asyncio.TimeoutError stringifies empty — always carry the type
             # so blind "[QUOTE ERROR] " lines can't happen again.
-            logger.error(f"[QUOTE ERROR] {type(e).__name__}: {e}")
+            dt = (time.monotonic() - t0) * 1000.0
+            logger.error(f"[QUOTE ERROR {dt:.0f} ms] {type(e).__name__}: {e}")
             return None
+
+    async def _get_quote(self, input_mint: str, output_mint: str, amount: int,
+                         slippage_bps: Optional[int] = None,
+                         timeout_s: Optional[float] = None) -> Optional[dict]:
+        """Fetch a Jupiter swap quote via the Swap API v1.
+
+        slippage_bps overrides the instance knob (the buy path pins its own
+        BUY_SLIPPAGE_BPS budget; sells use self.slippage_bps so the sell
+        escalation ladder keeps working).
+        """
+        params = self._quote_params(input_mint, output_mint, amount, slippage_bps)
+        logger.info(f"[QUOTE] Fetching quote: {input_mint[:8]}… → {output_mint[:8]}… amount={amount}")
+        s = await self._get_session()
+        return await self._quote_fetch(s, JUPITER_QUOTE_URL, params, timeout_s)
+
+    async def _get_quote_fresh(self, input_mint: str, output_mint: str, amount: int,
+                               slippage_bps: Optional[int] = None,
+                               timeout_s: Optional[float] = None) -> Optional[dict]:
+        """Same quote on a BRAND-NEW session (fresh TCP+TLS) — immune to a
+        poisoned pooled keepalive connection, which is the classic cause of a
+        request hanging for its full timeout while the endpoint is healthy."""
+        params = self._quote_params(input_mint, output_mint, amount, slippage_bps)
+        async with aiohttp.ClientSession(
+                headers={"Content-Type": "application/json"}) as s:
+            return await self._quote_fetch(s, JUPITER_QUOTE_URL, params, timeout_s)
+
+    async def _get_quote_hedged(self, input_mint: str, output_mint: str, amount: int,
+                                slippage_bps: Optional[int] = None,
+                                timeout_s: Optional[float] = None) -> Optional[dict]:
+        """Quote with a hedge (iter96): the primary rides the pooled session;
+        if nothing answers within QUOTE_HEDGE_DELAY_S (~9× p50 — dead keepalive
+        connection or a server-side tail), a hedge request fires on a fresh
+        one-off session.  First successful quote wins; losers are cancelled.
+        Both attempts are bounded by timeout_s, so the worst case stays ≤
+        QUOTE_HEDGE_DELAY_S + timeout_s instead of a full 8 s hang."""
+        primary = asyncio.ensure_future(self._get_quote(
+            input_mint, output_mint, amount, slippage_bps=slippage_bps,
+            timeout_s=timeout_s))
+        done, pending = await asyncio.wait({primary}, timeout=QUOTE_HEDGE_DELAY_S)
+        for d in done:
+            r = d.result()  # _quote_fetch never raises
+            if r:
+                return r
+            break  # primary failed fast — fall through to the hedge
+        hedge = asyncio.ensure_future(self._get_quote_fresh(
+            input_mint, output_mint, amount, slippage_bps=slippage_bps,
+            timeout_s=timeout_s))
+        tasks = {hedge}
+        if not primary.done():
+            tasks.add(primary)
+        result = None
+        while tasks:
+            done, tasks = await asyncio.wait(
+                tasks, timeout=timeout_s or QUOTE_TIMEOUT_S,
+                return_when=asyncio.FIRST_COMPLETED)
+            for d in done:
+                r = d.result()
+                if r:
+                    result = r
+            if result:
+                for t in tasks:
+                    t.cancel()
+                break
+        return result
 
     async def _get_swap_tx(self, quote: dict, priority_fee_override: Optional[int] = None) -> Optional[str]:
         """
@@ -1922,14 +2007,33 @@ class LiveTrader:
                     f"{required_sol:.4f} required)", reason)
                 return None
 
-            # ── Single quote → swap → broadcast (NO retry) ───────────────────
+            # ── Quote (3 attempts, ≤4.5 s total) → swap → broadcast ──────────
+            # iter96: one Jupiter quote timeout used to kill the entry outright
+            # (RAMP 2026-09-27 19:30 — BT +69% trade lost to a single 8 s hang).
+            # Measured lite-api quote latency: p50 0.039 s / p95 0.117 s, so a
+            # hung attempt is abandoned at QUOTE_TIMEOUT_S = 1.5 s (≈13× p95)
+            # and retried inside QUOTE_DEADLINE_S = 4.5 s — the iter78/82
+            # entry-value curve decays past ~5 s, so later fills are not worth
+            # waiting for.  The broadcast itself remains one-shot.
             fee = PRIORITY_FEE_ESCALATION[0]
 
-            quote = await self._get_quote(WSOL_MINT, self.token_mint, amount_lam,
-                                          slippage_bps=self.buy_slippage_bps)
+            quote = None
+            quote_deadline = time.monotonic() + QUOTE_DEADLINE_S
+            for quote_attempt in range(1, QUOTE_ATTEMPTS + 1):
+                quote = await self._get_quote_hedged(WSOL_MINT, self.token_mint, amount_lam,
+                                              slippage_bps=self.buy_slippage_bps,
+                                              timeout_s=QUOTE_TIMEOUT_S)
+                if quote:
+                    break
+                if quote_attempt >= QUOTE_ATTEMPTS or time.monotonic() >= quote_deadline:
+                    break
+                self._journal_event("buy_quote_retry", reason=reason,
+                                    attempt=quote_attempt)
+                await asyncio.sleep(0.25 * quote_attempt)
             if not quote:
-                logger.error("[BUY FAILED] Jupiter quote failed")
-                self._journal_event("buy_rejected", reason=reason, error="jupiter_quote_failed")
+                logger.error("[BUY FAILED] Jupiter quote failed (3 attempts)")
+                self._journal_event("buy_rejected", reason=reason,
+                                    error="jupiter_quote_failed")
                 await self._fail_buy_flat("Jupiter quote failed", reason)
                 return None
 
@@ -2043,6 +2147,9 @@ class LiveTrader:
                 self._token_balance_verified = True
                 failed.status = "open"
                 failed.size_tokens = on_chain / (10 ** self._token_decimals)
+                if failed.size_tokens > 0:
+                    self._report_fill(failed.size_sol or self.buy_size_sol,
+                                      failed.size_tokens)
                 self._session_first_buy = False  # tokens landed ⇒ ATA rent was paid
                 self._journal_event(
                     "buy_confirmed", trade=failed, reason=reason,
@@ -2190,6 +2297,8 @@ class LiveTrader:
             if ct is not None and ct.tx_hash_buy == sig:
                 ct.status = "open"
                 ct.size_tokens = balance / (10 ** self._token_decimals)
+                if ct.size_tokens > 0:
+                    self._report_fill(ct.size_sol or self.buy_size_sol, ct.size_tokens)
             self._session_first_buy = False  # ATA rent paid — later buys need only swap+fees
             await self._refresh_sol_balance_async()
             # iter94: journal one-time account-creation rent (WSOL/token
@@ -2472,20 +2581,34 @@ class LiveTrader:
                     if parsed.get("type") in ("createAccount", "create") and \
                             "lamports" in info:
                         rent += int(info.get("lamports") or 0)
-            return rent / 1e9
+            return rent / 1e9, fee_sol
         except Exception:
-            return 0.0
+            return 0.0, 0.0
 
     async def _journal_buy_rent(self, sig: str):
-        """Best-effort rent journaling for a confirmed buy (never blocks)."""
+        """Best-effort rent + real-fee journaling for a confirmed buy (never
+        blocks).  When the trade already closed (fast exit), the wallet truth
+        is reconciled against the exact meta.fee and the stats corrected."""
         try:
-            rent = await self._get_tx_rent_sol(sig)
-            if rent > 0:
-                ct = self.current_trade
-                if ct is not None and ct.tx_hash_buy == sig:
-                    ct.rent_sol = rent
-                self._journal_event("buy_rent", tx_hash=sig, rent_sol=rent,
-                                    trade=self.current_trade)
+            rent, fee_sol = await self._get_tx_rent_sol(sig)
+            ct = self.current_trade
+            if ct is None or ct.tx_hash_buy != sig:
+                for h in reversed(self.trade_history):
+                    if h.tx_hash_buy == sig:
+                        ct = h
+                        break
+            if ct is not None and ct.tx_hash_buy == sig:
+                ct.rent_sol = rent
+                if fee_sol > 0:
+                    ct.buy_fee_sol = fee_sol
+                    if ct.status == "closed" and ct.size_sol > 0:
+                        # iter95: reconcile the wallet truth to the exact fee
+                        old = ct.wallet_pnl_sol
+                        ct.wallet_pnl_sol = ct.cash_pnl_sol - fee_sol
+                        ct.wallet_pnl_pct = (ct.wallet_pnl_sol / ct.size_sol) * 100.0
+                        self.stats.total_wallet_pnl_sol += ct.wallet_pnl_sol - old
+            self._journal_event("buy_rent", tx_hash=sig, rent_sol=rent,
+                                buy_fee_sol=fee_sol, trade=ct)
         except Exception:
             pass
 
@@ -2633,6 +2756,9 @@ class LiveTrader:
                 else:
                     self.stats.losing_trades -= 1
                 self.stats.total_pnl_sol -= closed_trade.pnl_sol
+                self.stats.total_wallet_pnl_sol -= closed_trade.wallet_pnl_sol
+                if closed_trade.wallet_pnl_sol > 0:
+                    self.stats.wallet_winning_trades -= 1
                 self.stats.current_balance -= closed_trade.pnl_sol
                 if self.stats.total_trades > 0:
                     self.stats.win_rate = self.stats.winning_trades / self.stats.total_trades * 100
@@ -2907,7 +3033,8 @@ class LiveTrader:
                             # Transient RPC gap — stick with the last-known balance.
                             pass
 
-                    quote = await self._get_quote(self.token_mint, WSOL_MINT, token_balance)
+                    quote = await self._get_quote_hedged(self.token_mint, WSOL_MINT, token_balance,
+                                                          timeout_s=QUOTE_TIMEOUT_S)
                     swap_tx = (
                         await self._get_swap_tx(quote, priority_fee_override=fee)
                         if quote else None
@@ -4513,6 +4640,19 @@ class LiveTrader:
 
     # ── Trade confirmation (called internally after TX confirmed) ─────────────
 
+    def _report_fill(self, sol_moved: float, tokens_moved: float):
+        """iter95: report a real fill to the pump hub — the executable ground
+        truth calibrates the pool's virtual reserves when the resolver lags
+        or locks onto the wrong pool.  Never blocks, never raises."""
+        try:
+            if sol_moved > 0 and tokens_moved and tokens_moved > 0:
+                v = report_fill_price(self.token_mint, sol_moved / tokens_moved,
+                                      time.time())
+                if v:
+                    self._journal_event("basis_calibrated", v_sol=v)
+        except Exception:
+            pass
+
     def confirm_sell(self, tx_hash: str, sol_received: float, actual_price: float):
         if self.current_trade is None:
             return
@@ -4577,9 +4717,27 @@ class LiveTrader:
             else:
                 trade.pnl_pct = 0.0
         trade.status = "closed"
+        if trade.size_tokens and trade.size_tokens > 0:
+            self._report_fill(sol_received, trade.size_tokens)
+
+        # iter95: wallet truth (displays must show wallet truth — user
+        # directive 2026-09-23).  cash_pnl_sol = sell tx SOL delta − size,
+        # which already nets the sell fee and the WSOL-ATA rent refund; the
+        # only component outside the cash flows is the buy tx's priority
+        # fee.  With the post-sell ATA reclaim the token-ATA rent is a wash.
+        # measured mean at 100_000 µL/CU (≈ CU 156k + base); reconciled to the
+        # exact meta.fee by _journal_buy_rent once the tx is fetched
+        buy_fee = trade.buy_fee_sol or 2.06e-05
+        trade.wallet_pnl_sol = trade.cash_pnl_sol - buy_fee
+        trade.wallet_pnl_pct = (
+            (trade.wallet_pnl_sol / basis) * 100.0 if basis > 0 else 0.0
+        )
 
         self.stats.total_trades += 1
         self.stats.total_pnl_sol += trade.pnl_sol
+        self.stats.total_wallet_pnl_sol += trade.wallet_pnl_sol
+        if trade.wallet_pnl_sol > 0:
+            self.stats.wallet_winning_trades += 1
         if trade.pnl_sol > 0:
             self.stats.winning_trades += 1
         else:

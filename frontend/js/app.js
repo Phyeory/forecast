@@ -1836,9 +1836,11 @@ function updateSessionStats(summary = null, serverTraders = null) {
   let pnl = 0, upnl = 0, wr = 0, trades = 0, tokens = 0;
 
   if (_ltServerSummary) {
-    pnl = _ltServerSummary.total_pnl_sol || 0;
+    // iter95: wallet truth is the headline (user directive 2026-09-23) —
+    // falls back to the booked basis on payloads from before the field existed.
+    pnl = (_ltServerSummary.total_wallet_pnl_sol ?? _ltServerSummary.total_pnl_sol) || 0;
     upnl = _ltServerSummary.unrealized_pnl_sol || 0;
-    wr = _ltServerSummary.win_rate || 0;
+    wr = (_ltServerSummary.wallet_win_rate ?? _ltServerSummary.win_rate) || 0;
     trades = _ltServerSummary.total_trades || 0;
     tokens = _ltServerSummary.tokens_traded || 0;
   } else {
@@ -1848,9 +1850,9 @@ function updateSessionStats(summary = null, serverTraders = null) {
     let wins = 0;
     for (const t of traders) {
       const st = t.stats || {};
-      pnl += st.total_pnl_sol || 0;
+      pnl += (st.total_wallet_pnl_sol ?? st.total_pnl_sol) || 0;
       upnl += t.unrealizedPnl || 0;
-      wins += st.winning_trades || 0;
+      wins += st.wallet_winning_trades || 0;
       trades += st.total_trades || 0;
     }
     wr = trades > 0 ? (wins / trades) * 100 : 0;
@@ -1984,8 +1986,8 @@ function updateTraderCard(mint) {
 
   document.getElementById(`lt-stats-${mint}`).innerHTML = `
     <div class="bt-stat"><span class="bt-stat-label">Trades</span><span class="bt-stat-value">${st.total_trades || 0}</span></div>
-    <div class="bt-stat"><span class="bt-stat-label">Win Rate</span><span class="bt-stat-value">${(st.win_rate || 0).toFixed(1)}%</span></div>
-    <div class="bt-stat"><span class="bt-stat-label">PnL</span><span class="bt-stat-value ${pnlClass}">${(st.total_pnl_sol || 0) >= 0 ? "+" : ""}${(st.total_pnl_sol || 0).toFixed(4)}</span></div>
+    <div class="bt-stat"><span class="bt-stat-label">Win Rate (wallet)</span><span class="bt-stat-value">${st.total_trades ? ((((st.wallet_winning_trades ?? st.winning_trades) || 0) / st.total_trades) * 100).toFixed(1) : "0.0"}%</span></div>
+    <div class="bt-stat"><span class="bt-stat-label">PnL (wallet)</span><span class="bt-stat-value ${pnlClass}" title="Wallet truth — booked backtest-basis PnL: ${(st.total_pnl_sol || 0) >= 0 ? "+" : ""}${(st.total_pnl_sol || 0).toFixed(4)} SOL">${((st.total_wallet_pnl_sol ?? st.total_pnl_sol) || 0) >= 0 ? "+" : ""}${((st.total_wallet_pnl_sol ?? st.total_pnl_sol) || 0).toFixed(4)}</span></div>
   `;
 
   document.getElementById(`lt-upnl-${mint}`).innerHTML = hasPos ? `
@@ -2240,7 +2242,7 @@ function startLiveTrader(mint, _delayOverride = null, opts = {}) {
           if (msg.event === "sell_confirmed") {
             const ct = msg.closed_trade || msg.current_trade;
             if (ct) {
-              addLtTradeRow(ctx, "SELL", ct.exit_price || 0, ct.pnl_sol || 0, ct.pnl_pct || 0, sig, "confirmed");
+              addLtTradeRow(ctx, "SELL", ct.exit_price || 0, (ct.wallet_pnl_sol ?? ct.pnl_sol) || 0, (ct.wallet_pnl_pct ?? ct.pnl_pct) || 0, sig, "confirmed");
             }
             if (msg.sol_received) {
               addTraderEvent(ctx, "sell", `Received ${msg.sol_received.toFixed(6)} SOL`);
@@ -2390,44 +2392,13 @@ function refreshLiveSessions() {
         updateSessionStats(null, st.traders);
       }
       if (Array.isArray(st.trades)) {
+        // Trade history is current-run only (in-memory server list): it resets
+        // to empty when the backend restarts, by design.  Do NOT re-add the
+        // old /api/live/history ledger backfill here — the user explicitly
+        // removed it (2026-09-27): this table must not survive a restart.
+        // On-disk trades.jsonl ledgers remain the audit trail (parity guard,
+        // fill forensics) and still feed the Portfolio tab via /api/portfolio.
         renderLtTradeTable(st.trades);
-        // Durable backfill: the in-memory trade list resets on every server
-        // restart, so a refresh after a restart hid earlier fills (e.g. an
-        // overnight trade visible on-chain but missing from the dashboard).
-        // Merge the on-disk session ledgers so the table survives restarts.
-        // In-memory rows win on tx_hash collisions (they carry symbols).
-        apiFetch("/api/live/history?limit=20")
-          .then(hist => {
-            try {
-              const sessions = hist && hist.sessions;
-              if (!Array.isArray(sessions)) return;
-              const symByMint = {};
-              for (const t of (st.traders || [])) {
-                if (t && t.mint) symByMint[t.mint] = t.token_symbol || "";
-              }
-              const seen = new Set(st.trades.map(t => t.tx_hash).filter(Boolean));
-              const extra = [];
-              for (const s of sessions) {
-                const mint = s.token_mint || "";
-                for (const t of (s.trades || [])) {
-                  const buySig = t.tx_hash_buy || "";
-                  const sellSig = t.tx_hash_sell || "";
-                  if (buySig && !seen.has(buySig)) {
-                    seen.add(buySig);
-                    extra.push({ action: "BUY", price: t.entry_price || 0, pnl_sol: 0, pnl_pct: 0, timestamp: t.entry_time || t.event_ts || 0, tx_hash: buySig, status: "confirmed", token_symbol: symByMint[mint] || "", mint });
-                  }
-                  if (sellSig && !seen.has(sellSig)) {
-                    seen.add(sellSig);
-                    extra.push({ action: "SELL", price: t.exit_price || 0, pnl_sol: t.pnl_sol || 0, pnl_pct: t.pnl_pct || 0, timestamp: t.exit_time || t.event_ts || 0, tx_hash: sellSig, status: "confirmed", token_symbol: symByMint[mint] || "", mint });
-                  }
-                }
-              }
-              if (extra.length) {
-                renderLtTradeTable([...st.trades, ...extra].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)));
-              }
-            } catch { /* keep the in-memory table */ }
-          })
-          .catch(() => { /* keep the in-memory table */ });
       }
       if (Array.isArray(st.traders)) {
         // Sync the engine toggle from any running session — the server holds

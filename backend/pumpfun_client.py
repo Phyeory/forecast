@@ -499,6 +499,13 @@ class _SharedPumpPortalHub:
         # ({"pool_address", "v_sol", "pair_created_at"}).  None / absent =
         # no pumpswap pool yet (bonding-curve era) — prices pass through.
         self._vq: dict[str, Optional[dict]] = {}
+        self._latest_vaults: dict[str, tuple[float, float, float]] = {}
+        # iter95: per-mint fill-calibrated virtual-reserve measurements
+        # (SOL) — the trader's own real fills are the executable ground
+        # truth, used when the DexScreener resolver lags or locks onto the
+        # wrong pool (a just-created second pool whose virtual reserves are
+        # still zero silently disabled the iter94 wedge on moneropad).
+        self._fill_cal: dict[str, dict] = {}
         self._vq_tasks: dict[str, asyncio.Task] = {}
 
     # ── Internal helpers ──────────────────────────────────────────────
@@ -529,6 +536,10 @@ class _SharedPumpPortalHub:
                     # never mask a mid-session graduation
                     resolved = await resolve_mint_pool_async(mint, force=True)
                     if resolved and resolved.get("v_sol"):
+                        # iter95: a fill-engaged calibration is measured from
+                        # real execution — never overwritten by the resolver
+                        if self._fill_cal.get(mint, {}).get("engaged"):
+                            return
                         self._vq[mint] = resolved
                         logger.info(
                             f"[PumpHub] {mint[:8]}… pumpswap V="
@@ -537,7 +548,11 @@ class _SharedPumpPortalHub:
                     # no pool yet — retry while a consumer still cares
                     if first:
                         first = False
-                        self._vq[mint] = resolved if resolved else None
+                        # iter95: never clobber a fill-engaged calibration
+                        # with a v_sol=0 row (moneropad 2026-09-27: that
+                        # silently disengaged the executable-basis tape)
+                        if not self._fill_cal.get(mint, {}).get("engaged"):
+                            self._vq[mint] = resolved if resolved else None
                     await asyncio.sleep(_VQ_POLL_S)
                     if not self._queues.get(mint):
                         return
@@ -589,6 +604,77 @@ class _SharedPumpPortalHub:
             except asyncio.QueueFull:
                 pass  # slow consumer — drop rather than back-pressure the hub
 
+    def report_fill_price(self, mint: str, real_price: float, ts: float) -> Optional[float]:
+        """iter95: calibrate the pool's virtual quote reserves from a REAL fill.
+
+        The trader's own fill is the executable ground truth: real_price =
+        SOL moved / tokens moved at (approximately) the current pool state.
+        Combined with the stream's live vault balances this yields the
+        pool's virtual quote reserves directly — no DexScreener, no pool
+        archaeology, engaged within two fills of the first execution — and
+        the correction then rides the existing ``vq`` path in _normalise.
+
+        Engages after two agreeing measurements, or a single measurement
+        within the protocol constant's tolerance (current pools carry
+        V = 17.5845 SOL).  Curve-era tokens self-disable: their fills
+        measure V ≈ 0, below the plausibility floor.  Returns the engaged
+        V (SOL) or None when no calibration was applied.
+        """
+        if real_price <= 0:
+            return None
+        cal = self._fill_cal.setdefault(mint, {"v": [], "engaged": False})
+        if cal.get("engaged"):
+            # drift tracking: keep the engaged V honest as the vault moves
+            engaged = self._vq.get(mint) or {}
+            old = engaged.get("v_sol") or 0.0
+            v = self._measure_v(mint, real_price, ts)
+            if v is not None and old > 0 and abs(v - old) / max(old, 1e-9) < 0.35:
+                self._vq[mint]["v_sol"] = 0.5 * (old + v)
+            return self._vq.get(mint, {}).get("v_sol")
+        v = self._measure_v(mint, real_price, ts)
+        if v is None:
+            return None
+        cal["v"].append(v)
+        cal["v"] = cal["v"][-3:]
+        engage, V_use = False, None
+        if len(cal["v"]) >= 2:
+            a, b = cal["v"][-2], cal["v"][-1]
+            if abs(a - b) / max(a, b) < 0.25:
+                engage, V_use = True, 0.5 * (a + b)
+        if not engage and abs(v - 17.5845) < 1.0:
+            engage, V_use = True, 17.5845
+        if engage:
+            cal["engaged"] = True
+            self._vq[mint] = {
+                "pool_address": "", "v_sol": V_use,
+                "pair_created_at": None, "source": "fill",
+            }
+            logger.info(
+                f"[PumpHub] {mint[:8]}… fill-calibrated V={V_use:.4f} SOL — "
+                f"tape moved to the executable basis"
+            )
+            return V_use
+        return None
+
+    def _measure_v(self, mint: str, real_price: float, ts: float) -> Optional[float]:
+        """Derive the pool's virtual quote reserves from a real fill and the
+        stream's latest vault snapshot:  V = real_price·vault_tokens − vault_sol.
+        None when the snapshot is stale/implausible."""
+        v = self._latest_vaults.get(mint)
+        if not v:
+            return None
+        vs_raw, vt_raw, vts = v
+        if abs(ts - vts) > 3.0:
+            return None  # vault snapshot too stale to trust
+        vault_sol = vs_raw / 1e9
+        vault_tok = vt_raw / 1e6
+        if vault_sol <= 0 or vault_tok <= 0:
+            return None
+        V = real_price * vault_tok - vault_sol
+        if not (0.2 <= V <= 120.0):
+            return None  # implausible for any current pool — ignore
+        return V
+
     async def _run(self):
         backoff = 0.1
         while True:
@@ -636,6 +722,19 @@ class _SharedPumpPortalHub:
                             continue
                         if "txType" in msg:
                             mint = msg.get("mint", "")
+                            # iter95: remember the pool's live vault balances —
+                            # the raw material for fill-calibrated virtual
+                            # reserves when the DexScreener resolver lags or
+                            # resolves the wrong pool.
+                            try:
+                                vs = msg.get("vSolInBondingCurve")
+                                vt = msg.get("vTokensInBondingCurve")
+                                if vs and vt:
+                                    self._latest_vaults[mint] = (
+                                        float(vs), float(vt), time.time(),
+                                    )
+                            except (TypeError, ValueError):
+                                pass
                             trade = PumpFunWSClient._normalise(msg, self._vq.get(mint))
                             if trade:
                                 self._fan_out(trade)
@@ -696,11 +795,23 @@ class _SharedPumpPortalHub:
                 del self._queues[mint]
         if last_consumer:
             self._cancel_vq_refresh(mint)
+            # iter95: drop per-mint caches with the last consumer (bounded memory)
+            self._latest_vaults.pop(mint, None)
+            self._fill_cal.pop(mint, None)
             await self._unsubscribe(mint)
 
 
 # Process-global singleton
 _pump_hub = _SharedPumpPortalHub()
+
+
+def report_fill_price(mint: str, real_price: float, ts: float) -> Optional[float]:
+    """iter95: report a real fill to the hub — see
+    _SharedPumpPortalHub.report_fill_price.  Never raises."""
+    try:
+        return _pump_hub.report_fill_price(mint, real_price, ts)
+    except Exception:
+        return None
 
 
 class PumpFunWSClient:

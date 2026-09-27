@@ -922,8 +922,12 @@ def _record_server_trade_event(*, mint: str, token_symbol: str, event: str, payl
             "action": "SELL",
             "timestamp": ts,
             "price": ct.get("exit_price") or 0.0,
-            "pnl_sol": ct.get("pnl_sol") or 0.0,
-            "pnl_pct": ct.get("pnl_pct") or 0.0,
+            # iter95: wallet truth is the displayed PnL; booked (BT basis) kept
+            # for backtest comparison.
+            "pnl_sol": (ct.get("wallet_pnl_sol") if ct.get("wallet_pnl_sol") is not None
+                        else ct.get("pnl_sol") or 0.0),
+            "pnl_pct": (ct.get("wallet_pnl_pct") if ct.get("wallet_pnl_pct") is not None
+                        else ct.get("pnl_pct") or 0.0),
             "tx_hash": sig,
             "status": "confirmed",
         })
@@ -1878,6 +1882,8 @@ async def live_status():
     seen_mints = set()
 
     total_pnl = 0.0
+    total_wallet = 0.0  # iter95: wallet truth
+    wallet_wins = 0
     unrealized_pnl = 0.0
     winning_trades = 0
     losing_trades = 0
@@ -1892,6 +1898,8 @@ async def live_status():
             seen_mints.add(m)
         st = cs.get("stats", {})
         total_pnl += st.get("total_pnl_sol", 0.0)
+        total_wallet += st.get("total_wallet_pnl_sol", 0.0)
+        wallet_wins += st.get("wallet_winning_trades", 0)
         winning_trades += st.get("winning_trades", 0)
         losing_trades += st.get("losing_trades", 0)
         total_trades += st.get("total_trades", 0)
@@ -1903,6 +1911,8 @@ async def live_status():
         if mint:
             seen_mints.add(mint)
         total_pnl += st.get("total_pnl_sol", 0.0)
+        total_wallet += st.get("total_wallet_pnl_sol", 0.0)
+        wallet_wins += st.get("wallet_winning_trades", 0)
         winning_trades += st.get("winning_trades", 0)
         losing_trades += st.get("losing_trades", 0)
         total_trades += st.get("total_trades", 0)
@@ -1932,6 +1942,8 @@ async def live_status():
         "count": len(traders),
         "session_summary": {
             "total_pnl_sol": round(total_pnl, 6),
+            "total_wallet_pnl_sol": round(total_wallet, 6),
+            "wallet_win_rate": round(wallet_wins / total_trades * 100.0, 2) if total_trades else 0.0,
             "unrealized_pnl_sol": round(unrealized_pnl, 6),
             "winning_trades": winning_trades,
             "losing_trades": losing_trades,
@@ -1947,9 +1959,11 @@ def _load_ledger_sessions(limit: int = 20) -> list[dict]:
     """Recent completed live-trading sessions with their closed trades.
 
     Read from each session's physical trades.jsonl ledger (survives restarts
-    and sessions that ended before the page was opened).  Consumed by
-    /api/live/history and /api/portfolio so both surfaces see the same
-    durable trade stream.
+    and sessions that ended before the page was opened).  Feeds /api/portfolio
+    only — the Live Execution tab deliberately does NOT consume this (2026-09-27:
+    its trade history is the in-memory current-run list and must clear on
+    server restart).  The ledgers themselves stay on disk as the audit trail
+    (parity guard, fill forensics).
     """
     from live_session_logger import LOG_ROOT
     sessions = []
@@ -2235,6 +2249,11 @@ async def _get_or_create_live_session(
         if not key_str:
             return None, False
 
+        # iter95 (2026-09-27): execution slippage DOUBLED per user directive —
+        # whatever the dashboard field / endpoint default supplies is executed
+        # at 2×.  Buy-side matches via BUY_SLIPPAGE_BPS (3500 → 7000).
+        slippage_bps = int(slippage_bps) * 2
+
         try:
             keypair = keypair_from_private_key(key_str)
         except Exception as e:
@@ -2291,12 +2310,47 @@ async def _get_or_create_live_session(
 
         from calibration_startup import initialize_calibration
         calibration_started_at = time.time()
-        primary_kwargs = dict(engine_params or {})
         calibration_audit = {}
         if engine_version == 2 or 2 in fleet_versions:
-            primary_kwargs, calibration_audit = await initialize_calibration(
-                str(real_mint), calibration_started_at, primary_kwargs,
-            )
+            # iter95 (2026-09-27): calibrate EXACTLY like run_backtest does —
+            # from {} at the recording anchor.  The dashboard mirror payload
+            # (engineParamsV2) re-sends stale calibration values from a
+            # previous session's runtime broadcast (frozen SDE coefficients,
+            # default tau_max=30 instead of the VR-horizon value); as explicit
+            # params they override the fresh causal base, so the live engine
+            # ran different physics than the backtest replaying the same
+            # recording (the 2026-09-27 live-vs-BT decision divergence: Luna
+            # tc 0.7908 vs 0.7349 at the same bar → razor-thin gates flipped).
+            # Retries guard the population read against transient DB
+            # contention with this process's own candle writer.
+            primary_kwargs = {}
+            calibration_resolved = False
+            for _attempt in range(3):
+                try:
+                    primary_kwargs, calibration_audit = await initialize_calibration(
+                        str(real_mint), calibration_started_at, {},
+                    )
+                    if calibration_audit.get("source") not in (None, "defaults"):
+                        calibration_resolved = True
+                        break
+                    logger.warning(
+                        "[Calibration] %s attempt %d fell back to source=%s — retrying",
+                        real_mint[:8], _attempt + 1, calibration_audit.get("source"),
+                    )
+                except Exception as _cal_exc:
+                    logger.error(
+                        "[Calibration] %s attempt %d raised %r — retrying",
+                        real_mint[:8], _attempt + 1, _cal_exc,
+                    )
+                await asyncio.sleep(1.0)
+            if not calibration_resolved:
+                logger.error(
+                    "[Calibration] %s UNRESOLVED after retries (source=%s) — session "
+                    "runs default physics (live-vs-backtest divergence risk)",
+                    real_mint[:8], calibration_audit.get("source"),
+                )
+        else:
+            primary_kwargs = dict(engine_params or {})
         logger.info("[Calibration] %s %s", real_mint[:8], calibration_audit)
         live_trader = LiveTrader(
             token_mint=real_mint,

@@ -60,6 +60,19 @@ per-trade logs from `backend/v2_results/`.
     corrects pre-FIX_EPOCH recordings via `(pool_sol+V)/pool_sol`, pairCreatedAt-gated
     (curve-era prefix untouched). Escape hatches: `effective_basis=False` (loader param),
     `PUMPCHART_DISABLE_VR_FIX=1` (global). Never reintroduce raw-vault pricing.
+    **Fill-calibrated V (iter95)**: the resolver can silently miss a pool (newest-pair
+    selection, stale negative `v_sol=0.0` rows) — the trader reports every real fill to
+    the hub (`report_fill_price`), which derives the pool's virtual reserves from the
+    fill + live vaults and engages the same `vq` correction within 2 fills; the resolver
+    can never clobber a fill-engaged calibration. Journal: `basis_calibrated`.
+12. **Live calibration = the backtest call (iter95)** — `_get_or_create_live_session`
+    calibrates via `initialize_calibration(mint, recording_anchor, {})` — identical to
+    `run_backtest`; the dashboard `engineParamsV2` payload is BARRED from calibration
+    keys (it re-sends stale values from a previous session's runtime broadcast, which
+    once ran live on different physics than any replay). Regression signature:
+    session_open kwargs with the defaults-triple (alpha=0.2 AND eta=0.1 AND
+    lambda_0=6.9444e-05). tau_max varies by population window (15 morning / 30 evening
+    both legitimate — the VR horizon follows the sample).
 
 ## Architecture
 
@@ -87,7 +100,11 @@ graph TD
   PumpSwap virtual quote reserves (iter94) so pool-era prints are on the executable basis.
 - **`pool_virtual_reserves.py`** — iter94 V resolver (DexScreener pair → pool decode),
   sidecar cache (`pool_virtual_resolves` in price_data.db), `prewarm_mints()` for batch
-  workers (hooked in `run_backtest_batch`).
+  workers (hooked in `run_backtest_batch`). iter95 hazard: DexScreener's newest pair can
+  be a pool created *after* the trades, and its decode can transiently read 0 — the
+  stored negative row then silently disables the wedge; the fill-calibrated V in the hub
+  supersedes it (live-side), and the hub's `_refresh` never clobbers an engaged
+  calibration.
 - **`candle_aggregator.py`** — trades → OHLCV with 4-state expansion.
 - **`data_store.py`** — SQLite recordings + holder-flow persistence (`get_holder_flow_since`).
 - **`holder_flow.py`** — insider/whale sells: realtime watcher (≥$100 stream sells tick-time +
@@ -99,7 +116,9 @@ graph TD
   emergency sell + entry block + terminate (idle breach = immediate terminate). Fill-anchor
   booking (iter91b): books BT-identical fills, journals wallet truth as `cash_*`;
   first-buy account rent journaled separately (`rent_sol`), `exit_price_actual` = ledger
-  price (iter94).
+  price (iter94). Wallet truth (iter95): `wallet_pnl_sol/pct` = cash_pnl − real buy fee
+  (meta.fee via `_journal_buy_rent`, reconciles closed trades); reports every real fill
+  to the hub for basis calibration; `basis_calibrated` journal event on engagement.
 - **`backtester.py`** — replay via ForwardTester + ProcessPool (`guard_parent`), persists to
   `backtest_data.db` + `v2_results/`.
 - **`signal_capture.py` / `autofeed.py` / `newpairs*.py` / `process_watchdog.py`** — live
@@ -129,6 +148,10 @@ Removed (graveyard — need a new data channel to resurrect): futures, sniper, M
   EVR ON (120 s/20%/0.45/veto 0.25) · HF entry gate OFF · dev-sell exit OFF (iter62 policy)
   · rate-split ON (10%/0.55/12) · kelly_flat ON (60/40%) · entry delay 0.0 · exit delay 20.0
   armed-only · warmup 100 · confidence_high 0.79 · popcal/mintcal/per-coin(gated) ON ·
+  · execution (iter95): buy slippage budget 7000 bps, sell ladder ×2 at the session
+  boundary (journal shows 2000), priority fee 100_000 µL/CU with sell escalation to
+  400k (real fee ≈0.000037/rt — µL/CU ≠ flat lamports), wallet truth = cash_pnl − real
+  buy fee (meta.fee) displayed everywhere, booked BT-basis kept for audits ·
   harvestcal OFF · **τ program = VR horizon** (`v2_tau_vr_enable/scale` 1.0/1.0, iter90e:
   `tau_max=clip(H*×scale,10,60)`; +3.935 p=0.00014, breadth 60%, holdout p=0.017).
 
@@ -160,10 +183,22 @@ post-iter72 ~full.
   `test_pool_virtual_reserves.py` (iter94 effective-basis gate). Standard run = command
   block above. Pre-iter94 rot note: 44 failures belong to the stashed iter92/93
   realistic-exec WIP (stash@{0}) — see iter94 in RESEARCH_LOG before resurrecting.
-- Deploy: restart `main.py` + hard-refresh browser (app.js cached). Live audits use
-  `backend/data/live_logs/<session>/` (`trades.jsonl`, `signals.jsonl`), not dashboard counters.
+- Deploy: restart `main.py` + hard-refresh browser (app.js cached — **bump `?v=` on every
+  app.js edit and `node --check` it before deploying**; an unparenthesized `??`/`||` mix
+  kills the whole dashboard). Live audits use
+  `backend/data/live_logs/<session>/` (`trades.jsonl`, `signals.jsonl`,
+  `intake_audit.jsonl` — logs `basis_calibrated` when the fill-calibrated wedge
+  engages), not dashboard counters.
+- **Hourly parity guard** (`automation-294c0b66`, hourly :13): `parity_monitor_check.py`
+  scans journals → initialize({}) replay → on-chain tx verification → wallet balance;
+  on ANY divergence it stops autofeed + `stop_all`, reports, and deletes itself
+  (self-pause). Re-arm via CronCreate; re-init the cursor with `--init` after any
+  pipeline change. Wallet floor: keep ≥0.015 SOL or buys die Custom:1.
 - Fill forensics: `analysis/iter94_wedge_study.py` (on-chain fill vs tape),
   `analysis/iter94_validate_fix.py` (post-fix fill/PnL parity per session).
+  GLM-FIX audit trail (reference only, gitignored): `analysis/GLM-FIX/` (forensic
+  scripts + `test_display_truth.py` — fails on main by design, gates GLM-FIX API)
+  + 15 `*_iter95_141244_*.json` in `v2_results/`; note in RESEARCH_LOG.
 - External: pump.fun/Cloudflare blocks curl (use browser API-proxy); DexScreener 30-mint
   batches; DefiLlama newest `dexs/solana` row is copy-forward; CoinGecko SOL cached 60 s.
 - Stash hazard: stale `ce4a316`-era stash merges into selective pops — check
