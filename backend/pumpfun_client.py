@@ -37,6 +37,10 @@ def _get_rpc_lock() -> asyncio.Lock:
     return _rpc_lock
 
 PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
+
+# iter94: re-poll cadence for a mint's pumpswap pool while a consumer is
+# still attached and no pool has appeared (mid-session graduation pickup).
+_VQ_POLL_S = 120.0
 PUMP_API_V3   = "https://frontend-api-v3.pump.fun"
 DEXSCREENER   = "https://api.dexscreener.com"
 # HTTP RPC moved to publicnode (mainnet-beta is too rate-limited for the
@@ -235,9 +239,14 @@ def _pubkey_str(buf: bytes, offset: int) -> str:
 
 
 def _decode_pool_account(data: bytes) -> dict:
-    """Decode PumpSwap Pool account fields needed for pricing."""
-    # 8 discriminator + u8 + u16 + 5 pubkeys + u64 + pubkey + bool + optionBool...
-    return {
+    """Decode PumpSwap Pool account fields needed for pricing.
+
+    iter94: current pools carry an appended i128 virtual_quote_reserves at
+    offset 245 (after is_mayhem/is_cashback u8s).  Swap pricing uses
+    effective_quote_reserves = vault + virtual, so the price feed must add
+    it — pools created before the rollout simply have no appended field (0).
+    """
+    pool = {
         "pool_bump": data[8],
         "index": int.from_bytes(data[9:11], "little"),
         "creator": _pubkey_str(data, 11),
@@ -249,6 +258,12 @@ def _decode_pool_account(data: bytes) -> dict:
         "lp_supply": _u64_le(data, 203),
         "coin_creator": _pubkey_str(data, 211),
     }
+    try:
+        from pool_virtual_reserves import decode_virtual_quote_lamports
+        pool["virtual_quote_reserves_lamports"] = decode_virtual_quote_lamports(data)
+    except Exception:
+        pool["virtual_quote_reserves_lamports"] = 0
+    return pool
 
 
 def _decode_spl_token_amount(data: bytes) -> int:
@@ -480,8 +495,66 @@ class _SharedPumpPortalHub:
         self._pending_subscribe: set[str] = set()
         # reference to the live websockets connection (to send subscribe msgs)
         self._ws = None
+        # iter94: mint -> resolved PumpSwap pool virtual-quote-reserves info
+        # ({"pool_address", "v_sol", "pair_created_at"}).  None / absent =
+        # no pumpswap pool yet (bonding-curve era) — prices pass through.
+        self._vq: dict[str, Optional[dict]] = {}
+        self._vq_tasks: dict[str, asyncio.Task] = {}
 
-    # ── Internal helpers ──────────────────────────────────────────────────
+    # ── Internal helpers ──────────────────────────────────────────────
+
+    def _schedule_vq_refresh(self, mint: str, delay: float = 0.0):
+        """Resolve (or re-resolve) a mint's pool virtual reserves off the hot
+        path.  Sessions on graduated tokens resolve once; newborn-curve
+        sessions re-poll every _VQ_POLL_S until the pool appears (mid-session
+        graduation) or the mint's last consumer unsubscribes."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        existing = self._vq_tasks.get(mint)
+        if existing is not None and not existing.done():
+            return  # a refresh is already in flight / scheduled
+        info = self._vq.get(mint)
+        if info and info.get("v_sol"):
+            return  # positive resolve — nothing further to learn
+
+        async def _refresh():
+            from pool_virtual_reserves import resolve_mint_pool_async
+            try:
+                await asyncio.sleep(delay)
+                first = True
+                while True:
+                    # force=True so a batch-written negative sidecar row can
+                    # never mask a mid-session graduation
+                    resolved = await resolve_mint_pool_async(mint, force=True)
+                    if resolved and resolved.get("v_sol"):
+                        self._vq[mint] = resolved
+                        logger.info(
+                            f"[PumpHub] {mint[:8]}… pumpswap V="
+                            f"{resolved['v_sol']:.4f} SOL — tape on effective basis")
+                        return
+                    # no pool yet — retry while a consumer still cares
+                    if first:
+                        first = False
+                        self._vq[mint] = resolved if resolved else None
+                    await asyncio.sleep(_VQ_POLL_S)
+                    if not self._queues.get(mint):
+                        return
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.debug(f"[PumpHub] vq refresh {mint[:8]}… failed: {e}")
+
+        try:
+            self._vq_tasks[mint] = asyncio.ensure_future(_refresh())
+        except RuntimeError:
+            pass
+
+    def _cancel_vq_refresh(self, mint: str):
+        task = self._vq_tasks.pop(mint, None)
+        if task is not None and not task.done():
+            task.cancel()
 
     async def _subscribe(self, mint: str):
         """Send a subscribe message if connection is live."""
@@ -544,17 +617,39 @@ class _SharedPumpPortalHub:
                         )
                         self._pending_subscribe.clear()
                         logger.info(f"[PumpHub] Subscribed {len(all_mints)} mints on reconnect")
+                        # iter94: migration events flip a mint onto its
+                        # PumpSwap pool — the VQ resolver re-resolves then.
+                        # Best-effort: if PumpPortal ignores the method the
+                        # _VQ_POLL_S re-poll still picks graduations up.
+                        try:
+                            await ws.send(json.dumps(
+                                {"method": "subscribeMigration", "keys": all_mints}))
+                        except Exception:
+                            pass
+                        for m in all_mints:
+                            self._schedule_vq_refresh(m)
 
                     async for raw in ws:
                         try:
                             msg = json.loads(raw)
                         except json.JSONDecodeError:
                             continue
-                        if "txType" not in msg:
-                            continue
-                        trade = PumpFunWSClient._normalise(msg)
-                        if trade:
-                            self._fan_out(trade)
+                        if "txType" in msg:
+                            mint = msg.get("mint", "")
+                            trade = PumpFunWSClient._normalise(msg, self._vq.get(mint))
+                            if trade:
+                                self._fan_out(trade)
+                        elif "mint" in msg:
+                            # migration / lifecycle events carry the mint but
+                            # no txType — a graduation re-resolves V now.
+                            m = msg.get("mint", "")
+                            if m:
+                                logger.info(
+                                    f"[PumpHub] migration/lifecycle event for "
+                                    f"{m[:8]}… — re-resolving pool basis")
+                                self._vq.pop(m, None)
+                                self._cancel_vq_refresh(m)
+                                self._schedule_vq_refresh(m)
 
             except (ConnectionClosed, asyncio.TimeoutError, OSError) as e:
                 logger.warning(f"[PumpHub] {e} — reconnecting in {backoff:.1f}s")
@@ -585,6 +680,9 @@ class _SharedPumpPortalHub:
             q: asyncio.Queue = asyncio.Queue(maxsize=512)
             self._queues[mint].add(q)
             first_for_mint = len(self._queues[mint]) == 1
+        # iter94: resolve the mint's pumpswap virtual quote reserves so
+        # pool-era prints are priced on the executable basis.
+        self._schedule_vq_refresh(mint)
         if first_for_mint:
             await self._subscribe(mint)
         return q
@@ -597,6 +695,7 @@ class _SharedPumpPortalHub:
             if last_consumer:
                 del self._queues[mint]
         if last_consumer:
+            self._cancel_vq_refresh(mint)
             await self._unsubscribe(mint)
 
 
@@ -643,7 +742,7 @@ class PumpFunWSClient:
             await _pump_hub.unregister(self.mint, q)
 
     @staticmethod
-    def _normalise(msg: dict) -> Optional[dict]:
+    def _normalise(msg: dict, vq: Optional[dict] = None) -> Optional[dict]:
         try:
             # ── Timestamp ───────────────────────────────────────────────────
             ts_raw = msg.get("timestamp") or msg.get("tradeCreatedAt")
@@ -652,14 +751,32 @@ class PumpFunWSClient:
             else:
                 ts = time.time()
 
-            # ── Spot price from bonding-curve virtual reserves (most accurate) ──
+            # ── Spot price from reserves ──────────────────────────────────
+            # For bonding-curve tokens these fields are the curve's VIRTUAL
+            # reserves (CPMM prices on them directly — correct as-is).  For a
+            # graduated token PumpPortal reuses the same fields for the
+            # PumpSwap pool's RAW VAULT balances, but swap pricing runs on
+            # effective_quote_reserves = vault + virtual_quote_reserves
+            # (iter94: V = 17.5845 SOL protocol constant on current pools).
+            # ``vq`` (resolved per-mint by the hub, graduation-gated via the
+            # pool's pairCreatedAt) lifts pool-era prints to the executable
+            # basis so the tape, engine and fills agree.
             v_sol = float(msg.get("vSolInBondingCurve", 0))
             v_tok = float(msg.get("vTokensInBondingCurve", 0))
+            mcap_wedge = 1.0
             if v_sol > 0 and v_tok > 0:
                 # vSol is in lamports (1e9/SOL), vTokens in raw units (1e6/token)
-                price = (v_sol / 1e9) / (v_tok / 1e6)
+                sol_term = v_sol / 1e9
+                mcap_wedge = 1.0
+                if vq and vq.get("v_sol"):
+                    created = vq.get("pair_created_at")
+                    if created is None or ts >= created - 1.0:
+                        sol_term += float(vq["v_sol"])
+                        mcap_wedge = sol_term / (v_sol / 1e9)
+                price = sol_term / (v_tok / 1e6)
             else:
                 # Fallback: derive price from this trade's own amounts
+                # (already an effective, executable print — never corrected)
                 sol = float(msg.get("solAmount", msg.get("sol_amount", 0))) / 1e9
                 tok = float(msg.get("tokenAmount", msg.get("token_amount", 0))) / 1e6
                 if tok <= 0 or sol <= 0:
@@ -667,6 +784,12 @@ class PumpFunWSClient:
                 price = sol / tok
 
             sol_amount = float(msg.get("solAmount", msg.get("sol_amount", 0))) / 1e9
+
+            mcap_sol = float(msg.get("marketCapSol", 0))
+            if mcap_sol > 0:
+                mcap_sol *= mcap_wedge
+            else:
+                mcap_sol = price * 1_000_000_000
 
             return {
                 "mint":           msg.get("mint", ""),
@@ -677,10 +800,11 @@ class PumpFunWSClient:
                 "timestamp":      ts,
                 "trader":         msg.get("traderPublicKey", ""),
                 "tx_hash":        msg.get("signature", ""),
-                "market_cap_sol": float(msg.get("marketCapSol", 0)) if float(msg.get("marketCapSol", 0)) > 0 else (price * 1_000_000_000),
-                # iter28: pool liquidity depth (SOL in bonding curve) — the live
-                # signal that flags dead-coin liquidity-drain dumps, absent from
-                # OHLCV.  0.0 when the source message does not carry reserves.
+                "market_cap_sol": mcap_sol,
+                # iter28: pool liquidity depth (SOL in bonding curve / pool
+                # vault) — the live signal that flags dead-coin
+                # liquidity-drain dumps, absent from OHLCV.  0.0 when the
+                # source message does not carry reserves.
                 "pool_sol":       (v_sol / 1e9) if v_sol > 0 else 0.0,
             }
         except Exception:
@@ -952,6 +1076,9 @@ class PumpSwapRPCClient:
         self._pool: Optional[dict] = None
         self._base_amount_raw: Optional[int] = None
         self._quote_amount_raw: Optional[int] = None
+        # iter94: pool's virtual_quote_reserves (SOL).  Vault-balance pricing
+        # without it sits below the executable price by (vault+V)/vault.
+        self._vq_sol: float = 0.0
         self._last_emitted: Optional[tuple[int, int]] = None
         self._last_emit_ts = 0.0
         self._market_cap_usd = 0.0
@@ -1073,8 +1200,13 @@ class PumpSwapRPCClient:
         pool["quote_decimals"] = _decode_mint_decimals(quote_mint_data)
         pool["base_supply_raw"] = _decode_mint_supply(base_mint_data)
         self._pool = pool
+        self._vq_sol = float(pool.get("virtual_quote_reserves_lamports") or 0) / 1e9
         self._base_amount_raw = _decode_spl_token_amount(base_vault_data)
         self._quote_amount_raw = _decode_spl_token_amount(quote_vault_data)
+        if self._vq_sol > 0:
+            logger.info(
+                f"[PumpSwapRPC] pool {self.pair_address[:8]}… virtual_quote_reserves="
+                f"{self._vq_sol:.4f} SOL — pricing on effective basis")
 
     async def _refresh_market_caps(self, session: aiohttp.ClientSession):
         pair = await _ds_pair(session, self.pair_address)
@@ -1122,8 +1254,15 @@ class PumpSwapRPCClient:
         if base <= 0 or quote <= 0:
             return None
 
+        # iter94: price on EFFECTIVE reserves — the pool's swap math runs on
+        # quote_vault + virtual_quote_reserves (V, a protocol liquidity
+        # credit on current pools; 0.0 on pre-rollout pools = exact legacy
+        # vault ratio).  Without V every emitted price understates the
+        # executable level by (vault+V)/vault and live fills look
+        # "impossibly" above the tape.
+        vq = self._vq_sol if self._pool["quote_mint"] == WSOL_MINT else 0.0
         if self._pool["quote_mint"] == WSOL_MINT:
-            price = quote / base
+            price = (quote + vq) / base
         elif self._pool["base_mint"] == WSOL_MINT:
             price = base / quote
         else:

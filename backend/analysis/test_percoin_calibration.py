@@ -436,7 +436,9 @@ class TestAdoptionHatchMatrix:
         # 2026-09-19: iter90e adopted the VR decision-horizon calibrator
         # (v2_tau_vr_enable default 1.0) — population tau is no longer the
         # saturated floor value.
-        assert got == (4, -0.074574), (
+        # 2026-09-26: iter94 golden re-measured on the executable basis
+        # (PumpSwap virtual-quote-reserves corrected candles).
+        assert got == (6, -0.024031), (
             f"bare-{{}} on thin-mint rec no longer matches popcal baseline: {got}"
         )
 
@@ -444,14 +446,18 @@ class TestAdoptionHatchMatrix:
         got = self._run({"use_session_calibration": False})
         # 2026-09-18: rec 4320's tape drifted post-iter89 (live backfill);
         # re-measured against HEAD (38c07b9) code on current data.
-        assert got == (2, -0.090345), (
+        # 2026-09-26: iter94 golden re-measured on the executable basis
+        # (PumpSwap virtual-quote-reserves corrected candles).
+        assert got == (1, -0.049801), (
             f"NONCAL no longer byte-matches pure DEFAULT: {got}"
         )
 
     def test_popcal_only_matches_prior_adoption(self):
         got = self._run({"v2_mintcal_enable": 0.0, "v2_percoin_cal_enable": 0.0})
         # 2026-09-19: VR-horizon calibrator adopted (see bare-{} note above).
-        assert got == (4, -0.074574), (
+        # 2026-09-26: iter94 golden re-measured on the executable basis
+        # (PumpSwap virtual-quote-reserves corrected candles).
+        assert got == (6, -0.024031), (
             f"popcal-only no longer matches the 09-12 adopted baseline: {got}"
         )
 
@@ -460,7 +466,9 @@ class TestAdoptionHatchMatrix:
                          "v2_percoin_cal_enable": 1.0})
         # 2026-09-19: VR-horizon calibrator adopted — the per-coin layer's
         # estimator program is now VR (explicit per-coin opt-in runs it).
-        assert got == (10, -0.019798), (
+        # 2026-09-26: iter94 golden re-measured on the executable basis
+        # (PumpSwap virtual-quote-reserves corrected candles).
+        assert got == (5, -0.029928), (
             f"surgical NONCAL+percoin control changed: {got}"
         )
 
