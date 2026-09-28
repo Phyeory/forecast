@@ -3893,14 +3893,34 @@ class LiveTrader:
         # Frozen HERE — before the exit launch below can clear _pending_exit —
         # and via the path buffer (not this call's `so`), so drain retries
         # with synthetic tuples cannot misprice it.
+        #
+        # Sparse-tape fix (2026-09-28 koinu audit): thin tapes often have NO
+        # candle at the exact target second (e.g. signal 1790548994 +20s =
+        # 1790549014, but candles only at ...9008, 9016...).  The exact-match
+        # condition below then never fires and confirm_sell falls back to
+        # `_last_price` at settle time — booking the model exit 20-40s late
+        # at whatever the pump/dump did meanwhile (koinu trade1: model
+        # 2.429e-07 vs BT 2.128e-07, +14%).  Mirror ForwardTester's
+        # `_resolve_latency_fill` instead: resolve at the first state with
+        # t > target via `_path_price_at` interpolation (containing candle +
+        # successor span), which is defined on sparse tapes.
         if (self._exit_anchor_target_t is not None
-                and self._pending_exit_anchor is None
-                and int(self._exit_anchor_target_t) in self._fill_path_candles):
-            raw = self._path_price_at(self._exit_anchor_target_t)
-            self._exit_anchor_target_t = None
-            if raw > 0:
-                self._pending_exit_anchor = raw * (
-                    1.0 - self.engine_fill_slippage_pct / 100.0)
+                and self._pending_exit_anchor is None):
+            _tgt = float(self._exit_anchor_target_t)
+            _exact = int(self._exit_anchor_target_t) in self._fill_path_candles
+            _sparse_ready = False
+            if not _exact and t is not None and float(t) > _tgt \
+                    and self._fill_path_times:
+                import bisect as _bisect
+                _idx = _bisect.bisect_right(
+                    self._fill_path_times, int(_tgt)) - 1
+                _sparse_ready = _idx >= 0
+            if _exact or _sparse_ready:
+                raw = self._path_price_at(self._exit_anchor_target_t)
+                self._exit_anchor_target_t = None
+                if raw > 0:
+                    self._pending_exit_anchor = raw * (
+                        1.0 - self.engine_fill_slippage_pct / 100.0)
 
         # ── iter90j: engine position-state boundaries (BT latency mirror) ──
         # Latency mode only: runs BEFORE the engine consumes this state —
