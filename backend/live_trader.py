@@ -225,6 +225,10 @@ BUY_SETTLE_POLL_S:       float = 0.4   # settle-loop iteration cadence (fast)
 # account balance) caused by a stale/overstated cached figure (e.g. the buy's
 # Jupiter outAmount inflated by slippage or a partial fill).
 QUOTE_RETRIES_PER_GROUP = 3          # fresh quotes fetched per sell attempt group
+SELL_GROUP_TIME_BUDGET_S = 4.0       # wall-clock budget per ladder group — time
+                                     # escalates the ladder even if quote
+                                     # attempts haven't been exhausted (4akev
+                                     # t2: 22.7s at G1 while the market gapped)
 NONSIMULATION_ABORT_CODES = frozenset({6024, 1, 0x1771})  # swallowed — handled by re-quote
 # iter95: sells are retryable, so start below market and escalate hard on
 # failure; buys stay at index [0] only when a one-shot must land (the caller
@@ -531,6 +535,9 @@ class LiveTrader:
         self._journal_ctx_token = _active_journal.set(self.journal)
         # iter90j intake-audit file handle (opened lazily on first candle)
         self._intake_audit_fh = None
+        # iter96c decision-telemetry file handle (opened lazily on first
+        # open-position candle — see the decision telemetry block in update())
+        self._decision_audit_fh = None
         logger.info(
             f"[SESSION] Logging to {self.journal.dir} "
             f"(console.log + trades.jsonl)"
@@ -737,6 +744,16 @@ class LiveTrader:
         self._pending_buy_reason: str = ""
         self._pending_exit: bool = False
         self._pending_exit_reason: str = ""
+
+        # ── Exit-cascade observability (2026-09-28 4akev incident) ─────────
+        # The −75% hold: engine fed every candle yet queued ZERO exit signals
+        # for 43 min while offside — invisible because nothing journaled the
+        # engine's decision state between signals.  The counter lets the
+        # watchdog alarm distinguish "engine silent" from "dispatch blocked";
+        # decision_audit.jsonl (written per candle while a trade is open)
+        # makes the engine's beliefs replayable after the fact.
+        self._exit_eval_count: int = 0
+        self._exit_eval_count_at_entry: int = 0
 
         # ── Lifecycle / watchdog state ─────────────────────────────────────
         # Never give up on a sell: if the on-chain balance still shows tokens
@@ -2350,6 +2367,9 @@ class LiveTrader:
                 ct.size_tokens = balance / (10 ** self._token_decimals)
                 if ct.size_tokens > 0:
                     self._report_fill(ct.size_sol or self.buy_size_sol, ct.size_tokens)
+                # Exit-cascade observability: baseline the alarm counter at
+                # the moment this position actually becomes monitored.
+                self._exit_eval_count_at_entry = self._exit_eval_count
             self._session_first_buy = False  # ATA rent paid — later buys need only swap+fees
             await self._refresh_sol_balance_async()
             # iter94: journal one-time account-creation rent (WSOL/token
@@ -3241,6 +3261,29 @@ class LiveTrader:
                 for inner in range(1, QUOTE_RETRIES_PER_GROUP + 1):
                     label = f"G{attempt_group}/Q{inner}"
 
+                    # Time-based ladder acceleration (2026-09-28 4akev t2):
+                    # a group that burns its wall-clock budget while the
+                    # confirm windows and quote backoffs tick must not hold
+                    # the base 2000 bps band while the market gaps — the
+                    # 22.7s-in-G1 grind landed −53% under the anchor.  Every
+                    # group gets ~4s × group-index; past it, escalate to the
+                    # next fee/slippage rung even if quote attempts remain.
+                    if (inner > 1 and attempt_group < len(PRIORITY_FEE_ESCALATION)
+                            and (time.time() - sell_start)
+                            > SELL_GROUP_TIME_BUDGET_S * attempt_group):
+                        logger.warning(
+                            f"[SELL LADDER ↑] G{attempt_group} exceeded its "
+                            f"{SELL_GROUP_TIME_BUDGET_S * attempt_group:.0f}s "
+                            f"wall-clock budget ({time.time() - sell_start:.1f}s "
+                            f"elapsed) — escalating to G{attempt_group + 1}"
+                        )
+                        self._journal_event(
+                            "sell_ladder_time_escalation", reason=reason,
+                            group=attempt_group,
+                            elapsed_s=round(time.time() - sell_start, 2),
+                        )
+                        break
+
                     # Authoritative on-chain balance re-fetch at the START of
                     # EVERY attempt after the first (cheap single read).  A
                     # partial fill — or a 6024 clamp from the previous attempt
@@ -3680,6 +3723,51 @@ class LiveTrader:
                         f"{self.no_motion_stop_seconds:.0f}s — idle session stopped",
                     )
                     continue
+
+                # ── Silent-position alarm (2026-09-28 4akev incident) ─────
+                # An open trade that is ≥20% offside for ≥3 min with ZERO
+                # exit-family signals generated since entry means the exit
+                # cascade is not seeing the decline (engine-state divergence
+                # from replay physics — the −75% hold class).  Alert loudly;
+                # do NOT auto-sell (loss-cap policy is a user decision), but
+                # the dashboard status + journal make it un-missable and give
+                # the parity guard a concrete divergence signature.
+                _alarm_ct = self.current_trade
+                if (_alarm_ct is not None
+                        and getattr(_alarm_ct, "status", "") == "open"
+                        and _alarm_ct.entry_price > 0):
+                    _alarm_px = self._last_price or 0.0
+                    _alarm_off = ((_alarm_px / _alarm_ct.entry_price - 1.0) * 100.0
+                                  if _alarm_px > 0 else 0.0)
+                    _alarm_age = time.time() - (_alarm_ct.entry_time or time.time())
+                    _alarm_new_evals = (self._exit_eval_count
+                                        - self._exit_eval_count_at_entry)
+                    if (_alarm_off <= -20.0 and _alarm_age >= 180.0
+                            and _alarm_new_evals == 0
+                            and time.time() - getattr(
+                                self, "_last_silent_alarm_ts", 0.0) >= 60.0):
+                        self._last_silent_alarm_ts = time.time()
+                        logger.warning(
+                            f"[EXIT CASCADE SILENT] {_alarm_ct.token_mint[:8]}… "
+                            f"offside {_alarm_off:.1f}% for {_alarm_age:.0f}s "
+                            f"with {_alarm_new_evals} exit signals since entry "
+                            f"(pending_exit={self._pending_exit} "
+                            f"swap_in_flight={self._swap_in_flight} "
+                            f"buy_pending={self._is_buy_pending()}) — engine "
+                            f"may be diverged from replay physics"
+                        )
+                        self._journal_event(
+                            "exit_cascade_silent", trade=_alarm_ct,
+                            offside_pct=round(_alarm_off, 2),
+                            age_s=round(_alarm_age, 1),
+                            exit_evals_since_entry=_alarm_new_evals,
+                        )
+                        asyncio.ensure_future(self._broadcast_status(
+                            "exit_cascade_silent",
+                            f"Position {_alarm_off:.1f}% offside for "
+                            f"{_alarm_age:.0f}s with no exit signal — "
+                            f"engine may be diverged",
+                        ))
 
                 # ── Orphaned-bag adoption (backstop) ──────────────────────────
                 # If the wallet holds tokens but NO trade is tracked and no buy
@@ -4309,6 +4397,13 @@ class LiveTrader:
         detected_signal = result.get("signal", "none")
         detected_regime = result.get("regime", "")
 
+        # Exit-cascade observability: count every exit-family signal the
+        # engine produces, BEFORE any dispatch gate — the watchdog alarm
+        # compares this against the entry-time snapshot.
+        if detected_signal not in (Signal.NONE.value, "none",
+                                   Signal.BUY.value):
+            self._exit_eval_count += 1
+
         if detected_signal == Signal.BUY.value and not self._pending_buy \
                 and not self.engine.in_position and (
                 self.current_trade is None
@@ -4656,6 +4751,39 @@ class LiveTrader:
             if self._last_motion_price == 0.0 or c != self._last_motion_price:
                 self._last_motion_price = c
                 self._last_motion_ts = time.time()
+
+        # ── Decision telemetry (2026-09-28 4akev incident) ─────────────────
+        # While a position is open, journal the engine's exit-cascade beliefs
+        # once per candle into decision_audit.jsonl.  The −75% hold was a
+        # silent engine on a fed tape with NO state journal between signals —
+        # this makes "why didn't it exit" answerable from the journals alone
+        # (engine bullishness, offside, and whether the trader's own dispatch
+        # flags were stuck).
+        _ct = self.current_trade
+        if _ct is not None and getattr(_ct, "status", "") == "open":
+            try:
+                if self._decision_audit_fh is None:
+                    self._decision_audit_fh = open(
+                        os.path.join(self.journal.dir, "decision_audit.jsonl"),
+                        "a", buffering=1)
+                _px = self._last_price or c
+                _off = ((_px / _ct.entry_price - 1.0) * 100.0
+                        if (_px > 0 and _ct.entry_price > 0) else None)
+                self._decision_audit_fh.write(json.dumps({
+                    "t": int(t), "c": c, "entry": _ct.entry_price,
+                    "offside_pct": round(_off, 3) if _off is not None else None,
+                    "exit_eval_count": self._exit_eval_count,
+                    "pending_exit": self._pending_exit,
+                    "swap_in_flight": self._swap_in_flight,
+                    "buy_pending": self._is_buy_pending(),
+                    **{k: getattr(self.engine, k, None) for k in (
+                        "v2_regime", "v2_mu", "v2_h", "v2_phi", "v2_var_phi",
+                        "v2_L_t", "m_hat", "p_hat", "momentum_acceleration",
+                        "signal_strength", "trend_confidence", "is_trending",
+                        "bar_count")},
+                }) + "\n")
+            except Exception:
+                pass
 
         self.completed_candle_count += 1
         return result

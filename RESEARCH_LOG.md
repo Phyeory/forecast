@@ -568,6 +568,32 @@ booked fee = `basis × 0.001` (rate form, one close side — at the 0.1 referenc
 that is exactly FT's 0.0001). Full-suite failure set after the fix is byte-identical to
 before minus the overnight test. Tooltip copy updated (0.2% → 0.1% booked fee).
 
+**4akev silent-engine fix + sell-ladder consolidation (2026-09-28, full-fix):**
+- **Decision telemetry**: while a position is open, `decision_audit.jsonl` gets one row
+  per candle — offside_pct, exit_eval_count, pending_exit/swap_in_flight/buy_pending
+  flags, and the engine's cascade beliefs (v2_regime/mu/h/phi, m_hat, trend_confidence…).
+  The −75% hold was a silent engine on a fed tape with NO state journal between signals;
+  this makes "why didn't it exit" answerable from journals alone and distinguishes
+  engine-silent from dispatch-blocked (stuck flags would show in every row).
+- **Exit-signal counter + watchdog alarm**: `_exit_eval_count` (bumped in
+  `_queue_signal_from_state` before any dispatch gate, baselined at
+  `_confirm_open`) drives a `_monitor_trade` alarm: open ≥180s + offside ≤ −20% +
+  zero exit signals since entry → `[EXIT CASCADE SILENT]` warning + journal +
+  dashboard broadcast every 60s. No auto-sell (loss-cap policy is a user decision).
+- **Sell-ladder time acceleration**: each retry group now has a wall-clock budget of
+  4s × group index (`SELL_GROUP_TIME_BUDGET_S`); past it, escalate to the next
+  fee/slippage rung even with quote attempts remaining. 4akev trade 2 sat 22.7s in G1
+  (2000 bps / 60k µL) while the market gapped −53%; with the accelerator G3
+  (8000 bps / 200k) starts by ~12s. Booking anchors untouched (signal-time anchor,
+  BT-exact) — this only changes how fast execution accepts reality.
+- Q2/Q3 answer (from the console): the sell failure was on-chain `Custom: 6024`
+  (slippage — InstructionError instruction 3) at G1/Q1, retried with fresh quotes +
+  amount trim (3119534762 → 3057144066), landing 22.7s later at `wallet_delta`
+  proceeds −53% under the anchor; the BUY failure was a 12s confirm-probe TIMEOUT
+  (RPC confirm lag — the tx actually landed; the settle task adopted it 3s later).
+  6024 is the market gapping through the quote band; the consolidation lever is
+  ladder speed, not eliminating the error.
+
 ---
 
 ## Graveyard — do NOT re-test without a new data channel
