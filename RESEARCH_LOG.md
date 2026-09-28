@@ -402,24 +402,6 @@ rejection BEFORE broadcast (no fee burn), `required_sol` journaled.
 `analysis/test_first_buy_rent_preflight.py` 4/4. Operations: a 0.01-SOL-notional wallet
 trading fresh mints needs ≳0.0137 SOL per session start — **fund the wallet**.
 
-## GLM-FIX reference note (2026-09-27 — branch pushed, worktree removed)
-
-The `GLM-FIX` branch (`origin/GLM-FIX`, commit `adeed4f`) holds the iter95
-display-truth work: set-once `starting_balance`, wallet-truth stats
-(`total_cash_pnl_sol` / measured `total_fees_sol` / NET `total_rent_sol` /
-`wallet_delta_sol`), `_resolve_landed_sell_sig` (JACK-t2 rebroadcast class),
-Model-vs-Wallet-Δ display. Its local-only audit trail was relocated here before
-the worktree was deleted (all gitignored reference copies — NOT part of builds):
-`backend/analysis/GLM-FIX/` (11 files: `test_display_truth.py`, 5 `iter95_*`
-forensic/replay scripts + 5 JSONs, `README.md` — the test fails 6/7 on main BY
-DESIGN, it gates GLM-FIX-only API) + 15 `*_iter95_141244_*.json` replay logs in
-`backend/v2_results/` (paired proof: 45 trades, +0.008586 both branches, Δ=0).
-Full narrative: `origin/GLM-FIX` RESEARCH_LOG "Iter 95". Merge direction when
-ready: rebase GLM-FIX onto main (keep main's calibration + execution changes;
-keep GLM-FIX's resolver/accounting/dual display; retire estimated `wallet_pnl`).
-
----
-
 ## Iter 96b — The calibration sample was mutable: live-vs-BT decision divergence root cause (2026-09-27) — SHIPPED
 
 User's A/B on the 22:43–22:45 wave: BT +0.0611 / 7W-2L over 9 trades vs live
@@ -466,6 +448,118 @@ backtests (bt11013–11018) + session journals:
   −11.6%/−14.9% wallet vs +1.9%/+3.1% booked) are real fills below tape, not
   decisions; per-coin re-calibration determinism during long sessions not
   audited (interval 100 s) — revisit if exit timing drifts appear again.
+
+---
+
+## GLM-FIX reference note (2026-09-27 — MERGED 2026-09-28 via `full-fix`)
+
+The `GLM-FIX` branch (`origin/GLM-FIX`, commit `adeed4f`) held the iter95
+display-truth work: set-once `starting_balance`, wallet-truth stats
+(`total_cash_pnl_sol` / measured `total_fees_sol` / NET `total_rent_sol` /
+`wallet_delta_sol`), `_resolve_landed_sell_sig` (JACK-t2 rebroadcast class),
+Model-vs-Wallet-Δ display. Its local-only audit trail was relocated here before
+the worktree was deleted (all gitignored reference copies — NOT part of builds):
+`backend/analysis/GLM-FIX/` (11 files: `test_display_truth.py`, 5 `iter95_*`
+forensic/replay scripts + 5 JSONs, `README.md` — the test failed 6/7 on main BY
+DESIGN, it gates GLM-FIX-only API) + 15 `*_iter95_141244_*.json` replay logs in
+`backend/v2_results/` (paired proof: 45 trades, +0.008586 both branches, Δ=0).
+**Merge executed 2026-09-28 on `full-fix`** (= main-fix `de55cf1` × GLM-fix
+`01cd620`, incl. the sparse-tape exit-anchor fix): kept main's calibration +
+execution changes and GLM-FIX's resolver/accounting/dual display; per-trade
+wallet truth is the meta.fee-reconciled `wallet_pnl_sol` (cash − real buy fee)
+feeding trade rows + stats, booked BT-basis kept for audits, session headline =
+labelled Model PnL | Wallet Δ | wallet-basis WR. `test_display_truth.py`
+promoted to `analysis/` (passes on the merged tree). GLM-fix retained as
+reference only. Full narrative: the Iter 95 section below.
+
+---
+
+## Iter 95 — display truth + live-vs-BT fidelity audit (2026-09-27, GLM-FIX branch)
+
+**A. Display truth (shipped on GLM-FIX, uncommitted).** The session card showed
+`SUM(pnl_pct)` as SOL (−85.3%) while the wallet lost −225% cash and −474% all-in
+(20260927_0[0-8]* block, 44 trades): `starting_balance` was overwritten post-every-buy
+(card showed the last post-buy balance, never the session start); gross rent double-counted
+the WSOL temp ATA (created AND closed in-tx — repeat-buy delta −0.010019 = input + fee
+exactly, net rent 0); retry-path sells booked under a reverted rebroadcast sig with
+wallet-delta proceeds absorbing the failed retry's fee burn (JACK t2:
+`saGqT8…` reverted 0x1788 AFTER `2ZDTnY…` had already delivered +0.011025).
+Fix: `starting_balance` set-once from the balance-cache loop + `current_balance` seeded
+there; new stats `total_cash_pnl_sol` / `total_fees_sol` (measured both sides, no second
+fetch — `_get_tx_sol_proceeds` now returns `(received, fee)`) / `total_rent_sol` (NET via
+`_get_tx_rent_net_fee`: `net = −wallet_delta − fee − input`, floored) / `wallet_balance` +
+derived `wallet_delta_sol = cash − fees − rent`; `_resolve_landed_sell_sig`
+(`getSignaturesForAddress` window walk) books the true landed sig as `tx_delta_resolved`
+in verified-empty/watchdog paths, de-contaminating the shared-wallet delta under fleet;
+`main.py` aggregates cash/fees/rent/wallet-Δ in `live_status` + portfolio (`cash_pnl_sol`
+per trade, `realized_cash_pnl_sol`); frontend shows **Model PnL vs Wallet Δ** side by side,
+labelled, with tooltips. Failed-tx burns stay journaled, out of stats (bridge reconciles).
+`analysis/test_display_truth.py` 7/7.
+
+**B. Which branch reproduces the backtester? Main — by calibration + landing, not booking.**
+Paired proof (15-rec audit block, V2/0.01/production defaults, both trees): 45 trades,
++0.008586 both, per-trade Δ = 0 (backtest-path files checksum-identical; BT never imports
+the trader). Booking anchors verified exact on both branches — entry = signal-candle OPEN
+×(1+1%) (production `_bt_latency_mode`, NOT state close), deferred exit = boundary-candle
+OPEN ×(1−1%), loss-book exit = intrabar(state, frac≈0.505) ×(1−1%) with frac inputs equal
+(live reads *configured* fee — immune to escalation). Main wins on (1) the parallel
+iter95 calibration fix (`main.py`: re-`initialize_calibration(mint, anchor, {})` like
+`run_backtest`, discarding the dashboard's stale `engineParamsV2` mirror — the Luna
+11-vs-8 divergence, tc 0.7908 vs 0.7349; stale physics also flips armed/loss-book anchor
+*class*), and (2) landing completeness (fee escalation 100k→60/100/200/400k, buy slip
+3500→7000bps, sell ×2 ≈ BT's 100%-landing assumption; booked anchor stays at 1%, so
+per-fill cash may sit further from booked). GLM-FIX contributes nothing to booked-vs-BT
+(resolver moves cash/sig attribution only — correct for BT reproduction) but is the better
+*measuring instrument* (main's headline overwrites booked with estimated `wallet_pnl`).
+End state: rebase GLM-FIX onto main; keep main's execution+calibration, GLM-FIX's
+resolver/accounting/dual display; retire estimated `wallet_pnl`.
+
+**C. Residual risks (both branches).** Frac-input drift is silent (buy_size > 0.1 or a fee
+change moves loss-book anchors — no test pins `_fill_fraction` parity); bare
+`ForwardTester()` defaults `slippage_pct=10.0` vs 1.0 everywhere else (foot-gun for ad-hoc
+harnesses); live-only exit classes (mcap floor, mid-position session stop, manual/risk —
+`_last_price` fallback, no anchor/slip model) vs BT force-close at last-candle intrabar
+(0 occurrences in-block: 25 gain_retrace + 2 armed rate-split deferred, 16 loss-book
+instant, 1 verified-empty). Gates: parity 10/10, VR 20/20, preflight 4/4, display-truth
+7/7. Full suite: 117 passed, 8 failed — all 8 pre-existing (verified identical on the
+pristine tree; `test_live_chain_parity.py` + `test_real_entry_basis.py` target the
+stashed iter92/93 `buy_wallet_delta_sol` API, never merged).
+
+---
+
+## full-fix merge — one parity trunk (2026-09-28) — SHIPPED
+
+`full-fix` = main-fix (`de55cf1`: calibration-from-`{}`, iter96b sample immutability +
+`calibration_audit`, fill-calibrated V, fee escalation 60k→400k, buy slip 7000, group-level
+sell ladder) × GLM-fix (`adeed4f` display truth + `01cd620` sparse-tape exit anchor), merged
+on a new branch so both source branches stay untouched as references. Conflict policy
+executed: main-fix owns calibration/execution; GLM-FIX owns accounting/display; the two
+`_journal_buy_rent` lineages combined (GLM-FIX NET rent `_get_tx_rent_net_fee` + stats
+accumulation, main-fix's closed-trade meta.fee reconciliation); trade-event contract is a
+superset (booked `pnl_sol` headline + `wallet_pnl_sol/pct` + `cash_pnl_sol` ride-alongs) so
+the Live-tab rows stay wallet-truth (`wallet_pnl_sol ?? pnl_sol`) while Portfolio keeps
+Model + Cash columns; per-trader card = Trades | Win Rate (booked) | Model | Wallet Δ |
+Wallet WR; session card labels carry their own basis (the auto-merge had put wallet truth
+under the "Model PnL" label — fixed). Frontend is main-fix's base: the durable
+`/api/live/history` backfill stays REMOVED (user directive 2026-09-27); `?v=` → 146.
+Orphaned gates committed: `test_display_truth.py` promoted from the gitignored
+`analysis/GLM-FIX/` dir (its GLM-FIX-only API is mainline now; the dir's reference copy
+renamed `.glmfix-ref` so pytest collection can't collide), `test_population_determinism.py`,
+`parity_monitor_check.py`. Engine/replay files byte-identical to main-fix (V2 engine,
+V1 engine untouched; session_calibrator = main-fix blob).
+
+**Gates on the merged tree:** display-truth 7/7 (was 6/7-fail by design on main-fix — now
+passes), population determinism 5/5, parity 10/10, session calibrator + VR suites green;
+node --check clean. Full suite: 319 passed / 43 failed — every failure cross-checked
+against pristine main-fix worktree runs (identical or skip-artifact): stashed iter92/93
+API rot + pre-existing flakes. Zero merge regressions; the merge FIXED 8 previously-failing
+tests (6 display-truth + deferred-exit-anchor freeze + calibration boundary).
+
+**Newly documented pre-existing gap (NOT a merge regression):**
+`test_overnight_gap_exit_anchor_matches_forward_tester` — on an overnight silent gap the
+live deferred exit settles at tape end one fee side (0.1pp) below the BT deferred-anchor
+booking; identical on main-fix and GLM-fix, predates iter95. Top Phase-D candidate: root-
+cause the settle-path fee/anchor asymmetry, fix live toward BT, never the reverse.
 
 ---
 

@@ -100,7 +100,8 @@ graph TD
 - **`main.py`** — REST (`/api/token/*`, `/api/recorder/*`, `/api/backtest*`, `/api/live/*`),
   WS (`/ws/{mint}`, `/ws/live/{mint}`, `/ws/autofeed`). Server-side live sessions (trader,
   stream, auto-recording, 1 s holder-flow pump + immediate exit dispatch, multi-engine fleet
-  registry) survive tab closure. Backend restart does NOT auto-resume autofeed.
+  registry) survive tab closure. Backend restart does NOT auto-resume autofeed. `live_status`
+  / portfolio aggregate cash/fees/rent/wallet-Δ alongside model PnL (iter95, GLM-FIX).
 - **`pumpfun_client.py`** — mint/pool resolution + streaming (PumpPortal WS, pump.fun REST,
   RPC `accountSubscribe` vault-diff, DexScreener), `Semaphore(8)`. FD-leak fix (4731969):
   `stop()` force-closes the aiohttp session — do not remove. Hub resolves per-mint
@@ -123,9 +124,19 @@ graph TD
   emergency sell + entry block + terminate (idle breach = immediate terminate). Fill-anchor
   booking (iter91b): books BT-identical fills, journals wallet truth as `cash_*`;
   first-buy account rent journaled separately (`rent_sol`), `exit_price_actual` = ledger
-  price (iter94). Wallet truth (iter95): `wallet_pnl_sol/pct` = cash_pnl − real buy fee
-  (meta.fee via `_journal_buy_rent`, reconciles closed trades); reports every real fill
-  to the hub for basis calibration; `basis_calibrated` journal event on engagement.
+  price (iter94). Wallet truth (iter95, full-fix merge): `wallet_pnl_sol/pct` = cash_pnl −
+  real buy fee (meta.fee via `_journal_buy_rent`, reconciles closed trades; NET persistent
+  rent via `rent_sol_net` — in-tx-refunded WSOL accounts excluded); session wallet-truth
+  stats (`total_cash_pnl_sol`, `total_fees_sol` measured both sides, `total_rent_sol` NET,
+  `wallet_balance`, derived `wallet_delta_sol`); `starting_balance` set-once (balance-cache
+  seed); `_resolve_landed_sell_sig` books retry-path fills under the true landed sig
+  (`tx_delta_resolved`); reports every real fill to the hub for basis calibration;
+  `basis_calibrated` journal event on engagement. Booking anchors verified BT-exact:
+  entry = signal-candle OPEN, deferred exit = boundary-candle OPEN, loss-book exit =
+  intrabar(frac≈0.505) — all ×(1±1%); live `_fill_fraction` reads the *configured* fee.
+  Sparse-tape exit anchor (2026-09-28 koinu audit): latency-target seconds with no exact
+  candle resolve via `_path_price_at` interpolation (ForwardTester `_resolve_latency_fill`
+  mirror) instead of falling back to `_last_price` at settle.
 - **`backtester.py`** — replay via ForwardTester + ProcessPool (`guard_parent`), persists to
   `backtest_data.db` + `v2_results/`.
 - **`signal_capture.py` / `autofeed.py` / `newpairs*.py` / `process_watchdog.py`** — live
@@ -133,6 +144,8 @@ graph TD
   newborn recorder (separate DB, default OFF), orphan protection.
 - **`analysis/`** — paired_diff, aggregate_results, test suite, per-iteration artifacts.
 - **`frontend/`** — vanilla JS + LightweightCharts; `app.js::engineParamsV2` mirrors all knobs.
+  Session/trader cards + portfolio show **Model PnL vs Wallet Δ** side by side, labelled
+  (iter95, GLM-FIX); trade rows carry a Cash PnL column.
 
 Removed (graveyard — need a new data channel to resurrect): futures, sniper, MSM/HMM gate (reverted
 2026-09-11), iter57 Q-layer, whale-dump/SPE/pool-drain exits, V1 trailing stop, mayhem V7.
@@ -182,14 +195,31 @@ post-iter72 ~full.
   journal method); `v2_results` JSONs are survivor-conditioned; pool workers freeze code at
   spawn; thin tapes need random-sample probes; subset burns can't reconstruct engine-native
   layers (iter86c); UI batches re-fit calibration — like-for-like replay needs session kwargs.
+  Live calibration MUST come from `initialize_calibration(mint, anchor, {})` — the
+  dashboard `engineParamsV2` payload re-sends stale runtime values (Luna 11-vs-8
+  divergence; invariant 12). UI batches re-fit calibration — like-for-like replay needs
+  session kwargs.
 
 ## Testing / Ops
 
 - `test_live_parity.py` (parity gate), `test_exit_delay_hold_reset.py`,
   `test_signal_capture.py`, `test_client_fd_leak.py`,
-  `test_pool_virtual_reserves.py` (iter94 effective-basis gate). Standard run = command
-  block above. Pre-iter94 rot note: 44 failures belong to the stashed iter92/93
-  realistic-exec WIP (stash@{0}) — see iter94 in RESEARCH_LOG before resurrecting.
+  `test_pool_virtual_reserves.py` (iter94 effective-basis gate),
+  `test_display_truth.py` (iter95 wallet-Δ gate), `test_first_buy_rent_preflight.py`,
+  `test_population_determinism.py` (iter96b sample-immutability gate).
+  Standard run = command block above. Rot note (verified 2026-09-28 on the full-fix
+  merge, cross-checked against pristine main-fix/GLM-fix worktrees): failures in
+  `test_sell_quote_prefetch.py` (13) + `test_real_entry_basis.py` (4) +
+  `test_confirm_sell_keeps_exact_wallet_chain_pnl` target the stashed iter92/93
+  `buy_wallet_delta_sol` API (never merged) — see iter94/95 in RESEARCH_LOG before
+  resurrecting; `test_first_buy_rent_preflight.py` 2 failures + percoin
+  `TestMintHistoryLayer` OperationalError are pre-existing flakes. **NOT rot**:
+  `test_overnight_gap_exit_anchor_matches_forward_tester` pins a REAL pre-existing
+  live-vs-BT booking gap (overnight-gap deferred exit settles at tape end one fee
+  side = 0.1pp below the BT deferred anchor; identical on main-fix and GLM-fix,
+  predates iter95) — fix live toward BT in a separate iteration, never in a merge.
+  Bare `ForwardTester()` defaults `slippage_pct=10.0`
+  vs 1.0 in `run_backtest`/live — always pass slippage explicitly in harnesses.
 - Deploy: restart `main.py` + hard-refresh browser (app.js cached — **bump `?v=` on every
   app.js edit and `node --check` it before deploying**; an unparenthesized `??`/`||` mix
   kills the whole dashboard). Live audits use

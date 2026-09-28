@@ -379,6 +379,11 @@ class LiveTrade:
     # ATA ~0.0015 SOL each).  Real wallet cost, excluded from trade PnL
     # (basis is size_sol) — the backtester never creates accounts.
     rent_sol: float = 0.0
+    # iter95: rent that PERSISTS in the wallet after the buy tx settles —
+    # the gross rent minus accounts the same tx closed and refunded
+    # (Jupiter's ephemeral WSOL ATA is created AND closed inside one swap,
+    # so only the token-ATA part is a real cost until the ATA is swept).
+    rent_sol_net: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -398,9 +403,31 @@ class LiveTraderStats:
     max_drawdown_pct: float = 0.0
     peak_balance: float = 0.0
     win_rate: float = 0.0
+    # ── iter95 display truth ──────────────────────────────────────────
+    # total_pnl_sol above is the BACKTEST-BASIS booking (iter91b): tape
+    # fill anchors + the model's 0.2% round-trip fee.  It is NOT what the
+    # wallet paid.  The fields below carry the wallet truth so every
+    # surface can show both, labelled:
+    #   total_cash_pnl_sol — Σ cash_pnl_sol (real swap proceeds − nominal)
+    #   total_fees_sol    — actual base+priority fees of confirmed txs
+    #   total_rent_sol    — NET persistent rent (in-tx-refunded WSOL
+    #                       accounts excluded — see LiveTrade.rent_sol_net)
+    #   wallet_balance    — latest on-chain SOL read
+    # Derived: wallet_delta_sol = cash − fees − rent is the all-in change
+    # of the wallet attributable to this session's round trips.  Failed-tx
+    # fee burns are journaled (swap_failed / sell journal) but are not in
+    # the stats counters — the audit bridge reconciles them.
+    total_cash_pnl_sol: float = 0.0
+    total_fees_sol: float = 0.0
+    total_rent_sol: float = 0.0
+    wallet_balance: float = 0.0
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        d["wallet_delta_sol"] = (
+            self.total_cash_pnl_sol - self.total_fees_sol - self.total_rent_sol
+        )
+        return d
 
 
 # ── Main LiveTrader class ─────────────────────────────────────────────────────
@@ -944,6 +971,17 @@ class LiveTrader:
                 if sol is not None:
                     self._cached_sol_balance = sol
                     self._cached_balance_ts = time.time()
+                    # iter95 display truth: seed the session's starting
+                    # balance ONCE from the first successful read (the old
+                    # code overwrote starting_balance after every buy, so
+                    # the card showed the last post-buy balance), and keep
+                    # the on-chain wallet balance fresh for the all-in
+                    # display.  current_balance is the model-basis
+                    # evolution and is seeded from the same first read.
+                    self.stats.wallet_balance = sol
+                    if self.stats.starting_balance <= 0.0:
+                        self.stats.starting_balance = sol
+                        self.stats.current_balance = sol
                 if tok > 0:
                     self._cached_token_balance = tok
                     self._token_balance = tok
@@ -2451,13 +2489,13 @@ class LiveTrader:
         """
         bal = await self._get_sol_balance()
         if bal is not None and bal > 0:
-            self.stats.starting_balance = bal
+            self.stats.wallet_balance = bal
             self._post_buy_sol_balance = bal
             if bal >= self._cached_sol_balance and self._cached_sol_balance > 0:
                 await asyncio.sleep(0.4)
                 bal2 = await self._get_sol_balance()
                 if bal2 is not None and bal2 > 0:
-                    self.stats.starting_balance = bal2
+                    self.stats.wallet_balance = bal2
                     self._post_buy_sol_balance = bal2
             # Actual SOL spent on the buy (incl. priority + base fees) —
             # measured as the wallet delta, stored on the trade as its real
@@ -2510,8 +2548,11 @@ class LiveTrader:
         ``post − pre + fee`` — no quotes, no slippage bands, no price
         estimates, and immune to fee burns from unrelated failed attempts.
 
-        Returns None if the TX can't be read yet (not finalized / RPC miss);
-        callers fall back to the wallet-delta measurement.
+        Returns ``(received_sol, fee_sol)`` or None if the TX can't be read
+        yet (not finalized / RPC miss); callers fall back to the
+        wallet-delta measurement.  iter95: the fee is returned alongside so
+        the confirmed-sell path can accumulate real chain costs without a
+        second TX fetch.
         """
         # getTransaction frequently misses on the first poll right after a TX
         # confirms (indexing lag ≤ a second) — retry briefly before declaring
@@ -2552,10 +2593,76 @@ class LiveTrader:
             if pre_w is None or post_w is None:
                 return None
             received = (post_w - pre_w + fee) / 1e9
+            fee_sol = fee / 1e9
             logger.info(f"[PROCEEDS] tx={sig[:8]}… wallet {post_w - pre_w:+d} lamports, fee={fee} → received={received:.8f} SOL")
-            return max(0.0, received)
+            return (max(0.0, received), fee_sol)
         except Exception as e:
             logger.warning(f"[PROCEEDS] parse failed for {sig[:8]}…: {e}")
+            return None
+
+    async def _resolve_landed_sell_sig(
+        self, sell_start_ts: float, min_proceeds_sol: float = 0.0
+    ) -> Optional[tuple]:
+        """Find whichever sell sig in this attempt window actually landed.
+
+        iter95 (JACK t2 class): the sell loop re-broadcasts with a FRESH
+        blockhash when a confirm poll misses (CONFIRM_REBROADCAST), so
+        ``_last_sell_sig`` can be a LATER sig that reverted on-chain
+        (slippage error 0x1788) while an EARLIER sig in the same window
+        already delivered the proceeds.  Booking under the failed sig's
+        hash misattributes the trade and (worse) the fallback wallet-delta
+        then absorbs that failed retry's fee burn as if it were the fill.
+
+        Walks the wallet's recent signatures (confirmed commitment,
+        chronological), probes each sig inside the sell window for success,
+        and returns ``(sig, proceeds_sol, fee_sol)`` for the first one
+        whose tx-delta proceeds clear ``min_proceeds_sol`` — or None when
+        no landed sell is provable.  Best-effort: never raises.
+        """
+        try:
+            payload = {
+                "jsonrpc": "2.0", "id": 1,
+                "method": "getSignaturesForAddress",
+                "params": [
+                    self.wallet_pubkey,
+                    {"limit": 12, "commitment": "confirmed"},
+                ],
+            }
+
+            def _extract(data: dict):
+                res = data.get("result") if isinstance(data, dict) else None
+                return res if isinstance(res, list) and res else None
+
+            sigs = await self._rpc_fanout_first_wins(
+                payload, timeout_s=2.0, result_fn=_extract
+            )
+            if not sigs:
+                return None
+            window = [
+                s for s in sigs
+                if isinstance(s, dict)
+                and (s.get("blockTime") or 0) >= sell_start_ts - 5
+                and not (s.get("err"))
+            ]
+            window.sort(key=lambda s: (s.get("blockTime") or 0))
+            for s in window:
+                sig = s.get("signature")
+                if not sig or sig == self._last_sell_sig:
+                    continue
+                got = await self._get_tx_sol_proceeds(sig)
+                if got is not None:
+                    proceeds, fee = got
+                    if proceeds >= min_proceeds_sol > 0 or (
+                            min_proceeds_sol <= 0 and proceeds > 0):
+                        logger.info(
+                            f"[SELL RESOLVE] landed sell sig={sig[:8]}… "
+                            f"proceeds={proceeds:.6f} (last broadcast "
+                            f"{(self._last_sell_sig or '')[:8]}… reverted/missed)"
+                        )
+                        return (sig, proceeds, fee)
+            return None
+        except Exception as e:
+            logger.debug(f"[SELL RESOLVE] probe failed: {e}")
             return None
 
     def _actual_fill_price(self, sol_received: float, tokens_sold: float) -> float:
@@ -2598,30 +2705,113 @@ class LiveTrader:
         except Exception:
             return 0.0, 0.0
 
-    async def _journal_buy_rent(self, sig: str):
-        """Best-effort rent + real-fee journaling for a confirmed buy (never
-        blocks).  When the trade already closed (fast exit), the wallet truth
-        is reconciled against the exact meta.fee and the stats corrected."""
+    async def _get_tx_rent_net_fee(
+        self, sig: str, input_sol: float
+    ) -> tuple:
+        """Gross rent, NET persistent rent, and tx fee for a confirmed BUY tx.
+
+        iter95: Jupiter creates an ephemeral WSOL ATA inside almost every
+        SOL→token swap and closes it in the SAME tx, refunding its rent.
+        Gross rent (createAccount lamports) therefore overstates the real
+        cost ~2x on repeat buys (gross 0.001488, net ~0 — verified on the
+        2026-09-27 block: repeat-buy wallet delta −0.010019 = input + fee
+        exactly).  Net rent comes from the tx's own wallet delta, which the
+        ledger reports exactly:
+
+            wallet_delta = −input − fee − gross_rent + same_tx_refunds
+            net_rent     = −wallet_delta − fee − input   (floored at 0)
+
+        ``input_sol`` is the swap's SOL input = the trade's size_sol.
+        Returns ``(gross_rent, net_rent, fee_sol)``; (0,0,0) when unreadable.
+        """
+        result = await self._get_tx_result(sig)
+        if not result:
+            return (0.0, 0.0, 0.0)
         try:
-            rent, fee_sol = await self._get_tx_rent_sol(sig)
+            meta = result.get("meta") or {}
+            if meta.get("err"):
+                return (0.0, 0.0, 0.0)
+            fee_sol = (meta.get("fee") or 0) / 1e9
+            gross = 0
+            for inner in meta.get("innerInstructions") or []:
+                for ins in inner.get("instructions") or []:
+                    parsed = ins.get("parsed") or {}
+                    info = parsed.get("info") or {}
+                    if parsed.get("type") in ("createAccount", "create") and \
+                            "lamports" in info:
+                        gross += int(info.get("lamports") or 0)
+            gross_sol = gross / 1e9
+            net_sol = 0.0
+            if input_sol > 0:
+                pre = meta.get("preBalances") or []
+                post = meta.get("postBalances") or []
+                msg = result.get("transaction", {}).get("message", {})
+                keys = msg.get("accountKeys") or []
+                wallet_idx = None
+                for i, k in enumerate(keys):
+                    pk = k if isinstance(k, str) else (
+                        k.get("pubkey") if isinstance(k, dict) else None)
+                    if pk == self.wallet_pubkey:
+                        wallet_idx = i
+                        break
+                if wallet_idx is None:
+                    wallet_idx = 0
+                if wallet_idx < len(pre) and wallet_idx < len(post):
+                    delta = (post[wallet_idx] - pre[wallet_idx]) / 1e9
+                    net_sol = max(0.0, -delta - fee_sol - input_sol)
+            return (gross_sol, net_sol, fee_sol)
+        except Exception:
+            return (0.0, 0.0, 0.0)
+
+    async def _journal_buy_rent(self, sig: str):
+        """Best-effort rent+fee journaling for a confirmed buy (never blocks).
+
+        iter95: journals the tx's real base+priority fee and the NET
+        persistent rent alongside the legacy gross rent, and accumulates
+        both into the wallet-truth stats (total_fees_sol / total_rent_sol).
+        Gross stays on the trade for continuity; the wallet-Δ derivation
+        uses the net figure.  When the trade already closed (fast exit),
+        the per-trade wallet truth is reconciled against the exact meta.fee
+        and the stats corrected (main-fix lineage).
+        """
+        try:
             ct = self.current_trade
-            if ct is None or ct.tx_hash_buy != sig:
+            input_sol = (
+                ct.size_sol if ct is not None and ct.tx_hash_buy == sig else 0.0
+            )
+            gross, net, fee = await self._get_tx_rent_net_fee(sig, input_sol)
+            if fee > 0:
+                self.stats.total_fees_sol += fee
+            if net > 0 or gross > 0:
+                if ct is not None and ct.tx_hash_buy == sig:
+                    ct.rent_sol = gross
+                    ct.rent_sol_net = net
+                self.stats.total_rent_sol += net
+            target = ct
+            if target is None or target.tx_hash_buy != sig:
                 for h in reversed(self.trade_history):
                     if h.tx_hash_buy == sig:
-                        ct = h
+                        target = h
                         break
-            if ct is not None and ct.tx_hash_buy == sig:
-                ct.rent_sol = rent
-                if fee_sol > 0:
-                    ct.buy_fee_sol = fee_sol
-                    if ct.status == "closed" and ct.size_sol > 0:
-                        # iter95: reconcile the wallet truth to the exact fee
-                        old = ct.wallet_pnl_sol
-                        ct.wallet_pnl_sol = ct.cash_pnl_sol - fee_sol
-                        ct.wallet_pnl_pct = (ct.wallet_pnl_sol / ct.size_sol) * 100.0
-                        self.stats.total_wallet_pnl_sol += ct.wallet_pnl_sol - old
-            self._journal_event("buy_rent", tx_hash=sig, rent_sol=rent,
-                                buy_fee_sol=fee_sol, trade=ct)
+            if target is not None and target.tx_hash_buy == sig and fee > 0:
+                target.buy_fee_sol = fee
+                if target.status == "closed" and target.size_sol > 0:
+                    # iter95: reconcile the wallet truth to the exact fee
+                    old = target.wallet_pnl_sol
+                    target.wallet_pnl_sol = target.cash_pnl_sol - fee
+                    target.wallet_pnl_pct = (
+                        (target.wallet_pnl_sol / target.size_sol) * 100.0)
+                    self.stats.total_wallet_pnl_sol += target.wallet_pnl_sol - old
+            if net > 0 or gross > 0:
+                self._journal_event(
+                    "buy_rent", tx_hash=sig, rent_sol=gross,
+                    rent_sol_net=net, buy_fee_sol=fee,
+                    trade=target)
+            elif fee > 0:
+                self._journal_event(
+                    "buy_rent", tx_hash=sig, rent_sol=0.0,
+                    rent_sol_net=0.0, buy_fee_sol=fee,
+                    trade=target)
         except Exception:
             pass
 
@@ -3182,9 +3372,13 @@ class LiveTrader:
                     expected_floor = PROCEEDS_SANITY_FRAC * max(quote_out_sol, est_sol)
                     sol_received = max(0.0, quote_out_sol)
                     proceeds_source = "quote_estimate"
+                    sell_fee_sol = 0.0
                     measured = await self._get_tx_sol_proceeds(sig)
                     if measured is not None:
-                        sol_received, proceeds_source = measured, "tx_delta"
+                        sol_received, sell_fee_sol = measured
+                        proceeds_source = "tx_delta"
+                        if sell_fee_sol > 0:
+                            self.stats.total_fees_sol += sell_fee_sol
                     else:
                         measured = await self._measure_sell_proceeds(
                             min_plausible_sol=expected_floor
@@ -3232,6 +3426,7 @@ class LiveTrader:
                         sol_received=sol_received, attempt_group=attempt_group,
                         elapsed_s=round(elapsed, 3),
                         proceeds_source=proceeds_source,
+                        sell_fee_sol=sell_fee_sol,
                         estimated=(proceeds_source not in ("tx_delta", "wallet_delta")),
                         pnl_sol=(closed_trade.pnl_sol if closed_trade else None),
                         pnl_pct=(closed_trade.pnl_pct if closed_trade else None),
@@ -3259,18 +3454,29 @@ class LiveTrader:
                     # is still wrong.  Closing here with 0 proceeds produced
                     # the phantom "-100% PnL" trades seen in production.
                     # We only declare "verified empty" when a sell is PROVEN:
+                    #   0. an EARLIER sig in this window landed while the last
+                    #      broadcast reverted (iter95 JACK-t2 rebroadcast
+                    #      class — resolved first, see _resolve_landed_sell_sig),
                     #   1. the last broadcast sig's status shows confirmed, or
                     #   2. the SOL-balance delta measures proceeds > 0.
                     # Otherwise the buy never delivered tokens → reconcile as
                     # a FAILED BUY (never a -100% close).
                     confirmed_sell = False
                     proceeds = None
+                    sell_fee_sol = 0.0
+                    proceeds_source = "verified_empty_wallet"
+                    resolved_sig = None
                     if self._last_sell_sig:
                         st = await self._get_signature_status(self._last_sell_sig)
                         if (st is not None and not st.get("err")
                                 and st.get("confirmationStatus") in ("confirmed", "finalized")):
                             confirmed_sell = True
-                            proceeds = await self._get_tx_sol_proceeds(self._last_sell_sig)
+                            got = await self._get_tx_sol_proceeds(self._last_sell_sig)
+                            if got is not None:
+                                proceeds, sell_fee_sol = got
+                                proceeds_source = "tx_delta"
+                                if sell_fee_sol > 0:
+                                    self.stats.total_fees_sol += sell_fee_sol
                     # Sanity-floored wallet delta: a stale post-sell balance read
                     # (≈ fee-sized delta) must never be booked as "measured" —
                     # see PROCEEDS_SANITY_FRAC (phantom −100% guard).  Floor is
@@ -3281,45 +3487,68 @@ class LiveTrader:
                         if _ve_px > 0:
                             _ve_est = self.current_trade.size_tokens * _ve_px
                     if proceeds is None:
-                        proceeds = await self._measure_sell_proceeds(
+                        # The last broadcast may have reverted AFTER an
+                        # earlier sig in this window already landed (a fresh-
+                        # blockhash rebroadcast whose quote went stale while
+                        # the original confirm poll missed).  Resolve the true
+                        # landed sig before falling back to the shared-wallet
+                        # delta, which siblings' concurrent swaps contaminate.
+                        resolved = await self._resolve_landed_sell_sig(
+                            sell_start,
+                            min_proceeds_sol=PROCEEDS_SANITY_FRAC * _ve_est,
+                        )
+                        if resolved is not None:
+                            resolved_sig, proceeds, sell_fee_sol = resolved
+                            confirmed_sell = True
+                            proceeds_source = "tx_delta_resolved"
+                            if sell_fee_sol > 0:
+                                self.stats.total_fees_sol += sell_fee_sol
+                    if proceeds is None:
+                        measured = await self._measure_sell_proceeds(
                             min_plausible_sol=PROCEEDS_SANITY_FRAC * _ve_est
                         )
+                        if measured is not None:
+                            proceeds = measured
+                            proceeds_source = "wallet_delta"
 
                     if confirmed_sell or (proceeds is not None and proceeds > 0):
                         # A sell DID land on-chain (even though the confirm
-                        # poll in this loop missed it).  Measure the EXACT
-                        # proceeds from the last broadcast sig's own balance
-                        # change; fall back to the wallet-delta, then a
-                        # price×tokens estimate.
-                        estimated = proceeds is None
+                        # poll in this loop missed it).  Prefer the EXACT
+                        # tx-delta of whichever sig landed; fall back to the
+                        # wallet-delta, then a price×tokens estimate.
+                        estimated = proceeds_source not in ("tx_delta", "tx_delta_resolved", "wallet_delta")
                         if proceeds is None:
                             proceeds = 0.0
                             if self.current_trade:
                                 est_price = self._last_price or self.current_trade.entry_price
                                 if est_price > 0 and self.current_trade.size_tokens > 0:
                                     proceeds = self.current_trade.size_tokens * est_price
+                            proceeds_source = "price_estimate"
+                        close_sig = resolved_sig or self._last_sell_sig or ""
                         logger.info(
                             "[SELL VERIFIED] Wallet is now empty and a sell is "
                             "confirmed on-chain — exiting sell loop cleanly "
-                            f"(sol_received={proceeds:.6f}"
-                            f"{' estimated' if estimated else ' measured via balance delta'})."
+                            f"(sol_received={proceeds:.6f} via={proceeds_source}"
+                            f"{' estimated' if estimated else ''})."
                         )
                         self._token_balance = 0
                         self._last_exit_signal_ts = 0.0
                         closed_trade = None
                         if self.current_trade:
                             closed_trade = self.confirm_sell(
-                                self._last_sell_sig or "", proceeds,
+                                close_sig, proceeds,
                                 self._actual_fill_price(
                                     proceeds, self.current_trade.size_tokens)
                             )
                         self._journal_event(
                             "sell_confirmed", trade=closed_trade, reason=reason,
-                            tx_hash=self._last_sell_sig or None,
-                            solscan=(f"https://solscan.io/tx/{self._last_sell_sig}"
-                                     if self._last_sell_sig else None),
+                            tx_hash=close_sig or None,
+                            solscan=(f"https://solscan.io/tx/{close_sig}"
+                                     if close_sig else None),
                             via="verified_empty_wallet",
                             sol_received=proceeds, estimated=estimated,
+                            proceeds_source=proceeds_source,
+                            sell_fee_sol=sell_fee_sol,
                             attempt_group=attempt_group,
                             pnl_sol=(closed_trade.pnl_sol if closed_trade else None),
                             pnl_pct=(closed_trade.pnl_pct if closed_trade else None),
@@ -3329,7 +3558,7 @@ class LiveTrader:
                         # from that event, so these trades were permanently
                         # missing from the trade history table.
                         await self._broadcast_status(
-                            "sell_confirmed", self._last_sell_sig or "", reason,
+                            "sell_confirmed", close_sig, reason,
                             sol_received=proceeds, closed_trade=closed_trade,
                         )
                         return "verified_empty"
@@ -3544,12 +3773,20 @@ class LiveTrader:
                     # phantom -100% PnL (the production bug this guards).
                     confirmed_sell = False
                     proceeds = None
+                    sell_fee_sol = 0.0
+                    proceeds_source = "watchdog_finalise"
+                    resolved_sig = None
                     if self._last_sell_sig:
                         st = await self._get_signature_status(self._last_sell_sig)
                         if (st is not None and not st.get("err")
                                 and st.get("confirmationStatus") in ("confirmed", "finalized")):
                             confirmed_sell = True
-                            proceeds = await self._get_tx_sol_proceeds(self._last_sell_sig)
+                            got = await self._get_tx_sol_proceeds(self._last_sell_sig)
+                            if got is not None:
+                                proceeds, sell_fee_sol = got
+                                proceeds_source = "tx_delta"
+                                if sell_fee_sol > 0:
+                                    self.stats.total_fees_sol += sell_fee_sol
                     # Sanity-floored wallet delta: a stale post-sell balance read
                     # (≈ fee-sized delta) must never be booked as "measured" —
                     # see PROCEEDS_SANITY_FRAC (phantom −100% guard).  Floor is
@@ -3560,9 +3797,27 @@ class LiveTrader:
                         if _ve_px > 0:
                             _ve_est = self.current_trade.size_tokens * _ve_px
                     if proceeds is None:
-                        proceeds = await self._measure_sell_proceeds(
+                        # iter95: same rebroadcast-class resolution as the
+                        # verified-empty path — window starts at the last
+                        # exit signal (bounded to the last 10 min).
+                        resolved = await self._resolve_landed_sell_sig(
+                            max(self._last_exit_signal_ts,
+                                time.time() - 600.0),
+                            min_proceeds_sol=PROCEEDS_SANITY_FRAC * _ve_est,
+                        )
+                        if resolved is not None:
+                            resolved_sig, proceeds, sell_fee_sol = resolved
+                            confirmed_sell = True
+                            proceeds_source = "tx_delta_resolved"
+                            if sell_fee_sol > 0:
+                                self.stats.total_fees_sol += sell_fee_sol
+                    if proceeds is None:
+                        measured = await self._measure_sell_proceeds(
                             min_plausible_sol=PROCEEDS_SANITY_FRAC * _ve_est
                         )
+                        if measured is not None:
+                            proceeds = measured
+                            proceeds_source = "wallet_delta"
 
                     if not confirmed_sell and (proceeds is None or proceeds <= 0):
                         # NEVER reconcile an open position as a failed buy:
@@ -3583,44 +3838,48 @@ class LiveTrader:
                         continue
 
                     # Swap already completed on-chain but local state was stale.
-                    # Measure the EXACT proceeds from the last broadcast sig's
-                    # own balance change; fall back to the wallet-delta, then a
-                    # price×tokens estimate.
-                    estimated = proceeds is None
+                    # Prefer the EXACT tx-delta of whichever sig landed;
+                    # fall back to the wallet-delta, then a price×tokens
+                    # estimate.
+                    estimated = proceeds_source not in ("tx_delta", "tx_delta_resolved", "wallet_delta")
                     if proceeds is None:
                         proceeds = 0.0
                         if self.current_trade:
                             est_price = self._last_price or self.current_trade.entry_price
                             if est_price > 0 and self.current_trade.size_tokens > 0:
                                 proceeds = self.current_trade.size_tokens * est_price
+                        proceeds_source = "price_estimate"
+                    close_sig = resolved_sig or self._last_sell_sig or ""
                     logger.info(
                         f"[WATCHDOG] On-chain balance = 0 and sell confirmed — "
                         f"finalising trade locally "
-                        f"(sol_received={proceeds:.6f}"
-                        f"{' estimated' if estimated else ' measured via balance delta'})"
+                        f"(sol_received={proceeds:.6f} via={proceeds_source}"
+                        f"{' estimated' if estimated else ''})"
                     )
                     if self.current_trade is not None:
                         self.current_trade.exit_reason = "watchdog_finalise"
                         closed_trade = self.confirm_sell(
-                            self._last_sell_sig or "", proceeds,
+                            close_sig, proceeds,
                             self._actual_fill_price(
                                 proceeds, self.current_trade.size_tokens)
                         )
                         self._journal_event(
                             "sell_confirmed", trade=closed_trade,
                             reason="watchdog_finalise",
-                            tx_hash=self._last_sell_sig or None,
-                            solscan=(f"https://solscan.io/tx/{self._last_sell_sig}"
-                                     if self._last_sell_sig else None),
+                            tx_hash=close_sig or None,
+                            solscan=(f"https://solscan.io/tx/{close_sig}"
+                                     if close_sig else None),
                             via="watchdog_finalise",
                             sol_received=proceeds, estimated=estimated,
+                            proceeds_source=proceeds_source,
+                            sell_fee_sol=sell_fee_sol,
                             pnl_sol=(closed_trade.pnl_sol if closed_trade else None),
                             pnl_pct=(closed_trade.pnl_pct if closed_trade else None),
                         )
                         # Previously this close never broadcast sell_confirmed,
                         # so the UI never showed the SELL row for it.
                         await self._broadcast_status(
-                            "sell_confirmed", self._last_sell_sig or "",
+                            "sell_confirmed", close_sig,
                             "watchdog_finalise",
                             sol_received=proceeds, closed_trade=closed_trade,
                         )
@@ -3793,14 +4052,34 @@ class LiveTrader:
         # Frozen HERE — before the exit launch below can clear _pending_exit —
         # and via the path buffer (not this call's `so`), so drain retries
         # with synthetic tuples cannot misprice it.
+        #
+        # Sparse-tape fix (2026-09-28 koinu audit): thin tapes often have NO
+        # candle at the exact target second (e.g. signal 1790548994 +20s =
+        # 1790549014, but candles only at ...9008, 9016...).  The exact-match
+        # condition below then never fires and confirm_sell falls back to
+        # `_last_price` at settle time — booking the model exit 20-40s late
+        # at whatever the pump/dump did meanwhile (koinu trade1: model
+        # 2.429e-07 vs BT 2.128e-07, +14%).  Mirror ForwardTester's
+        # `_resolve_latency_fill` instead: resolve at the first state with
+        # t > target via `_path_price_at` interpolation (containing candle +
+        # successor span), which is defined on sparse tapes.
         if (self._exit_anchor_target_t is not None
-                and self._pending_exit_anchor is None
-                and int(self._exit_anchor_target_t) in self._fill_path_candles):
-            raw = self._path_price_at(self._exit_anchor_target_t)
-            self._exit_anchor_target_t = None
-            if raw > 0:
-                self._pending_exit_anchor = raw * (
-                    1.0 - self.engine_fill_slippage_pct / 100.0)
+                and self._pending_exit_anchor is None):
+            _tgt = float(self._exit_anchor_target_t)
+            _exact = int(self._exit_anchor_target_t) in self._fill_path_candles
+            _sparse_ready = False
+            if not _exact and t is not None and float(t) > _tgt \
+                    and self._fill_path_times:
+                import bisect as _bisect
+                _idx = _bisect.bisect_right(
+                    self._fill_path_times, int(_tgt)) - 1
+                _sparse_ready = _idx >= 0
+            if _exact or _sparse_ready:
+                raw = self._path_price_at(self._exit_anchor_target_t)
+                self._exit_anchor_target_t = None
+                if raw > 0:
+                    self._pending_exit_anchor = raw * (
+                        1.0 - self.engine_fill_slippage_pct / 100.0)
 
         # ── iter90j: engine position-state boundaries (BT latency mirror) ──
         # Latency mode only: runs BEFORE the engine consumes this state —
@@ -4763,6 +5042,11 @@ class LiveTrader:
 
         self.stats.total_trades += 1
         self.stats.total_pnl_sol += trade.pnl_sol
+        # iter95 display truth: accumulate the wallet-basis cash PnL
+        # alongside the backtest-basis booking so the card can show both,
+        # plus the per-trade wallet truth (cash − real buy fee) and its
+        # wallet-basis win count.
+        self.stats.total_cash_pnl_sol += trade.cash_pnl_sol
         self.stats.total_wallet_pnl_sol += trade.wallet_pnl_sol
         if trade.wallet_pnl_sol > 0:
             self.stats.wallet_winning_trades += 1

@@ -114,14 +114,15 @@
                   <th>Exit Time</th>
                   <th>Entry Price</th>
                   <th>Exit Price</th>
-                  <th>PnL SOL</th>
+                  <th title="Backtest-basis model PnL (tape fill anchors + 0.2% fee model)">Model PnL</th>
                   <th>PnL %</th>
+                  <th title="Realized swap cash: on-chain SOL received minus nominal buy size">Cash PnL</th>
                   <th>Exit Reason</th>
                   <th>TX</th>
                 </tr>
               </thead>
               <tbody id="pf-trades-tbody">
-                <tr><td colspan="8" class="cell-empty">No closed trades yet.</td></tr>
+                <tr><td colspan="9" class="cell-empty">No closed trades yet.</td></tr>
               </tbody>
             </table>
           </div>
@@ -342,8 +343,12 @@
           <!-- Session Stats (aggregated across active traders) -->
           <div class="deck-zone deck-stats" id="lt-session-card" style="display:none">
             <div class="bt-stat">
-              <span class="bt-stat-label">Wallet PnL</span>
+              <span class="bt-stat-label" title="Backtest-basis model PnL (tape fill anchors + 0.2% fee model) — what the strategy earned, comparable to batch backtests">Model PnL</span>
               <span class="bt-stat-value" id="lts-pnl">+0.0000 SOL</span>
+            </div>
+            <div class="bt-stat">
+              <span class="bt-stat-label" title="All-in wallet change: realized swap cash minus actual chain fees minus persistent account rent">Wallet Δ</span>
+              <span class="bt-stat-value" id="lts-wallet">+0.0000 SOL</span>
             </div>
             <div class="bt-stat">
               <span class="bt-stat-label">Unrealized</span>
@@ -902,7 +907,7 @@
       setTimeout(check, 1000);
     })();
   </script>
-  <script src="/static/js/app.js?v=145"></script>
+  <script src="/static/js/app.js?v=146"></script>
 </body>
 
 </html>
