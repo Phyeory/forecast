@@ -638,6 +638,11 @@ class LiveTrader:
         })
         self._pending_exit_delay_until_t: float = 0.0
         self._exit_delay_hold_logged: bool = False
+        # iter90j restoration (2026-09-28): the deferred-exit launch deadline
+        # is MONOTONIC WALL CLOCK — a future candle timestamp must never
+        # bypass the delay, and a thin tape with no new candles must not
+        # hold the exit forever (the 4akev −75% hold class).
+        self._exit_delay_deadline_monotonic: float = 0.0
         # Engine anchor captured at SIGNAL time so a BUY that retries after a
         # blocked launch still notifies the engine on the same price basis the
         # backtester registered for that signal.  iter90j basis: the SIGNAL
@@ -4276,8 +4281,8 @@ class LiveTrader:
             # candle clock reaches signal_ts + exit_delay_seconds.  The
             # notify + swap launch move together — matching the backtester's
             # latency model, which closes the trade at the deferred fill.
-            if self._pending_exit_delay_until_t > 0.0 and t is not None \
-                    and float(t) < self._pending_exit_delay_until_t:
+            if self._pending_exit_delay_until_t > 0.0 \
+                    and time.monotonic() < self._exit_delay_deadline_monotonic:
                 if not self._exit_delay_hold_logged:
                     logger.info(
                         f"[EXIT DELAY] holding EXIT {self._pending_exit_reason} "
@@ -4564,6 +4569,9 @@ class LiveTrader:
                     or reason in self._ARMED_EXIT_REASONS):
                 self._pending_exit_delay_until_t = float(t or 0) + self.exit_delay_seconds
                 self._exit_delay_hold_logged = False
+                self._exit_delay_deadline_monotonic = (
+                    time.monotonic() + self.exit_delay_seconds)
+                asyncio.ensure_future(self._exit_delay_timer())
                 # iter90j: the ENGINE flips flat at the fill boundary (first
                 # state strictly after signal+delay) — the backtester's
                 # latency model closes the trade there, NOT at the launch.
@@ -4591,6 +4599,18 @@ class LiveTrader:
                     1.0 - self.engine_fill_slippage_pct / 100.0)
             # Instant execution: fire the sell on THIS state's prices.
             self._execute_pending_signals(t, so, sh, sl, sc)
+
+    async def _exit_delay_timer(self) -> None:
+        """iter90j restoration (2026-09-28 4akev audit): a deferred exit must
+        launch on a WALL-CLOCK timer — the candle-state retry paths starve on
+        a thin tape, and an armed exit otherwise never fires (the −75% hold).
+        The wake only DRAINS: the launch still respects the monotonic
+        deadline and the swap-in-flight guard (blocked exits stay pending)."""
+        await asyncio.sleep(max(0.0, self.exit_delay_seconds))
+        try:
+            self._drain_pending_signals()
+        except Exception as e:
+            logger.debug(f"[EXIT DELAY TIMER] drain error: {e}")
 
     def _drain_pending_signals(self) -> None:
         """Retry pending signals after a swap settled (sell confirmed / buy

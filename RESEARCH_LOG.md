@@ -596,6 +596,25 @@ before minus the overnight test. Tooltip copy updated (0.2% → 0.1% booked fee)
 
 ---
 
+**6024 correction + exit-delay timer restoration (2026-09-28, full-fix 0df6cc7+1):**
+- 6024 = INSUFFICIENT FUNDS (6001 = slippage) — the trade-2 retries were the sell amount
+  exceeding the wallet's true balance, converging via 2% trims; ladder speed still helps
+  land faster, but the root lever is balance authority. Log wording corrected.
+- **THE −75% HOLD ROOT CAUSE FOUND**: the iter80 deferred-exit launch had (a) NO wall-clock
+  timer — launches only rode candle states, so a thin/quiet tape starved an armed exit
+  forever — and (b) a candle-timestamp hold condition a future candle t could bypass.
+  The user recalled fixing this before (iter90j era); the tests
+  `test_exit_delay_hold_reset.py` pin the contract and were silently failing.
+  RESTORED: monotonic wall-clock deadline + `_exit_delay_timer` wake-and-drain.
+  `launches_without_a_new_candle` / `does_not_use_a_future_candle_to_launch_early` /
+  `leaves_blocked_exit_pending_for_retry` now PASS. Four sibling contracts still red and
+  are the remaining spec: timer cancelled on trader shutdown · re-detection must NOT
+  reset the monotonic hold · missing candle timestamp must WAIT (no wall-clock bypass) ·
+  boundary not re-armed after launch. Fix those next session — the mechanism exists, the
+  contracts refine it.
+
+---
+
 ## Graveyard — do NOT re-test without a new data channel
 
 P_zero exits (79: P_zero≡1 on 1 s tapes) · whale-dump (72/78: replacements eat savings) ·
