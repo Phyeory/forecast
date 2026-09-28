@@ -65,12 +65,16 @@ def _seed_db(tmpdir, recs):
     """recs: list of (rec_id, started_at, stopped_at, closes, vols, buys, pool)."""
     db = os.path.join(tmpdir, "test_pop.db")
     conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE recordings (id INTEGER PRIMARY KEY, started_at REAL, stopped_at REAL, status TEXT)")
+    # candle_count mirrors the production schema (written atomically with
+    # stopped_at by stop_recording) — the population membership filter
+    # (MIN_POPULATION_CANDLES) reads it.
+    conn.execute("CREATE TABLE recordings (id INTEGER PRIMARY KEY, started_at REAL, stopped_at REAL, status TEXT, candle_count INTEGER)")
     conn.execute("""CREATE TABLE candles (recording_id INTEGER, time INTEGER, open REAL, high REAL,
                    low REAL, close REAL, volume REAL, buy_volume REAL,
                    sell_volume REAL, pool_sol REAL, rowid_ordinal INTEGER PRIMARY KEY AUTOINCREMENT)""")
     for rec_id, s, e, closes, vols, buys, pool in recs:
-        conn.execute("INSERT INTO recordings VALUES (?,?,?,'completed')", (rec_id, s, e))
+        conn.execute("INSERT INTO recordings VALUES (?,?,?,'completed',?)",
+                     (rec_id, s, e, len(closes)))
         for i, c in enumerate(closes):
             conn.execute(
                 "INSERT INTO candles (recording_id,time,open,high,low,close,volume,buy_volume,sell_volume,pool_sol) VALUES (?,?,?,?,?,?,?,?,?,?)",

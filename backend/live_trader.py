@@ -433,6 +433,11 @@ class LiveTrader:
         priority_fee_lamports: int = 100_000,
         min_market_cap_usd: float = 3_000.0,
         engine_kwargs: Optional[dict] = None,
+        # Resolved calibration audit from initialize_calibration (cutoff,
+        # window, source, coefficients) — journaled with session_open so
+        # live-vs-BT forensics can compare the exact physics this session
+        # ran against what a later replay computes (2026-09-27 divergence).
+        calibration_audit: Optional[dict] = None,
 
         # Skip on-chain simulation on the hot path (saves ~300 ms per swap).
         # Simulation is still run on explicit test buys if desired.
@@ -464,6 +469,7 @@ class LiveTrader:
     ):
         if engine_kwargs is None:
             engine_kwargs = {}
+        self.calibration_audit = calibration_audit
 
         self.engine = create_engine(engine_version, **engine_kwargs)
         self.token_mint = token_mint
@@ -484,6 +490,13 @@ class LiveTrader:
                 "buy_slippage_bps": BUY_SLIPPAGE_BPS,
                 "engine_version": engine_version,
                 "engine_kwargs": engine_kwargs,
+                # 2026-09-27: persist the resolved calibration audit (cutoff,
+                # window, source, coefficients) so live-vs-BT forensics can
+                # diff the exact physics this session was calibrated with
+                # against what a later replay computes — the population
+                # sample used to mutate after the fact (recordings cleanup)
+                # and the divergence was undebuggable from journals alone.
+                "calibration_audit": self.calibration_audit,
                 "min_market_cap_usd": min_market_cap_usd,
                 "skip_simulation": skip_simulation,
             },
@@ -2487,7 +2500,7 @@ class LiveTrader:
             logger.warning(f"[TX] getTransaction failed for {sig[:8]}…: {e}")
             return None
 
-    async def _get_tx_sol_proceeds(self, sig: str) -> Optional[float]:
+    async def _get_tx_sol_proceeds(self, sig: str) -> Optional[tuple]:
         """EXACT on-chain SOL received by a swap, read from the transaction's
         own balance-change fields.
 
@@ -2784,9 +2797,10 @@ class LiveTrader:
               cached buy-quote outAmount inflated by slippage / partial fill)
               is the root cause of `Custom: 6024` on Pump.fun.
           3.  Priority-fee escalation per group.
-          4.  Slippage escalation ladder: 1x → 1.5x → 2x → 2.5x of the
-              configured `slippage_bps` (capped at 9000 bps) — panicked markets
-              need wider slippage bands rather than a failed TX.
+          4.  Slippage escalation ladder, applied at EVERY retry group:
+              2x per group of the configured `slippage_bps` (capped at
+              9000 bps) — panicked markets need wider slippage bands
+              rather than a failed TX.
           5.  After success, the sold amount used for PnL is the actual amount
               requested (verified by re-querying the balance).
         """
@@ -3002,6 +3016,28 @@ class LiveTrader:
                 fee = PRIORITY_FEE_ESCALATION[
                     min(attempt_group - 1, len(PRIORITY_FEE_ESCALATION) - 1)
                 ]
+                # Slippage escalation ladder — GROUP-level, unconditional.
+                # 2026-09-27 Pikachu: the ladder lived on the balance>0 retry
+                # tail only, but every failing group routed through the
+                # blind-reads branch (fresh balance reads return 0/failed
+                # while the cached figure stays nonzero) which continues
+                # BEFORE the ladder — 10 groups burned at the base 2000 bps
+                # over 5m22s in a crash (booked −8% → wallet −56.6%).  In a
+                # failing tape, waiting minutes costs far more than the
+                # widened price band; ×2 per group reaches the 9000 bps cap
+                # by group 4, matching the fee ladder's cadence.  `finally`
+                # restores the original value.
+                if attempt_group >= 2:
+                    new_slip = min(
+                        int(original_slippage * (2 ** (attempt_group - 1))),
+                        9000,
+                    )
+                    if new_slip != self.slippage_bps:
+                        logger.warning(
+                            f"[SELL SLIPPAGE ↑] {self.slippage_bps} → {new_slip} bps "
+                            f"(group {attempt_group})"
+                        )
+                        self.slippage_bps = new_slip
                 logger.info(
                     f"[SELL] Attempt group {attempt_group} "
                     f"(fee={fee} micro-lamports, slippage={self.slippage_bps} bps)"
@@ -3326,17 +3362,9 @@ class LiveTrader:
                     continue
                 token_balance = bal
 
-                # Slippage escalation ladder.
-                if attempt_group >= 2:
-                    new_slip = min(
-                        int(original_slippage * (1.5 ** (attempt_group - 1))),
-                        9000,
-                    )
-                    if new_slip != self.slippage_bps:
-                        logger.warning(
-                            f"[SELL SLIPPAGE ↑] {self.slippage_bps} → {new_slip} bps"
-                        )
-                        self.slippage_bps = new_slip
+                # (Slippage escalation moved to the group header — the buried
+                # tail-path ladder was unreachable whenever retries routed
+                # through the blind-reads branch, 2026-09-27 Pikachu.)
 
                 # Retry immediately — only a tiny yield so we don't spin the
                 # event loop while still re-quoting right away.

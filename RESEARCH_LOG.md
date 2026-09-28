@@ -420,6 +420,55 @@ keep GLM-FIX's resolver/accounting/dual display; retire estimated `wallet_pnl`).
 
 ---
 
+## Iter 96b — The calibration sample was mutable: live-vs-BT decision divergence root cause (2026-09-27) — SHIPPED
+
+User's A/B on the 22:43–22:45 wave: BT +0.0611 / 7W-2L over 9 trades vs live
+36.4% WR / −0.0114 wallet over 11 trades. Per-token diff against the UI
+backtests (bt11013–11018) + session journals:
+
+- **Gacha (6012), Nick (6013): byte-exact parity** (entry price, exit price,
+  rule, time). Pikachu/Traincat/Kabuto/Poke: same ENTRY times everywhere, but
+  exits flipped rule or fired 20 s–5 min late, one extra live entry (Kabuto
+  21:49), Traincat BT `rate_split_flip:armed` +38.8% vs live `gain_retrace` +3.2%.
+- Root cause 1 — **population sample mutability**. Live calibrates at open,
+  the BT replay recomputes `initialize_calibration(mint, rec_start, {})` later;
+  the population query ("50 newest completed recs before cutoff") returned
+  DIFFERENT rows. Live session_open kwargs vs replay: eta 0.13890 vs 0.13592,
+  lambda_0 0.000296 vs 0.000279, lambda_mu 0.2570 vs 0.2588 (alpha identical —
+  median-robust). Two mutation channels: (a) 1–3 s retry recordings (Wtf/
+  Robopad/Strak/GiftTok reconnect waves) churning the newest-50 window;
+  (b) a `/api/recordings/cleanup` click between 20:59 and 21:36 UTC deleting
+  ≥7 short recordings (5982-84, 5986-88, 5996) that the 20:43–20:59 sessions
+  had calibrated on. Gacha/Nick opened AFTER the last mutation → parity. Same
+  cutoff replayed today reproduces the BT values, not the live values — proof
+  the DB changed under the live session. Fix (shared calibrator, backtester
+  untouched): `_REC_QUERY` membership requires `candle_count >= 100`
+  (`MIN_POPULATION_CANDLES`) — written atomically with stopped_at by
+  `stop_recording`, so the sample for a fixed cutoff is immutable; retry
+  recs can never join, cleanup can never reap a member. Cleanup threshold
+  clamped to 100 in `data_store.cleanup_small_recordings` (any requested
+  min_candles). Verified: deleting every short recording from the real DB
+  leaves the coefficients byte-identical; `test_population_determinism.py`
+  (5 tests) pins the contract.
+- Root cause 2 — **sell slippage ladder unreachable** (Pikachu). Exit signal
+  fired ON TIME (21:13:35 vs BT 21:13:34), then 10 retry groups over 5m22s all
+  at base 2000 bps: the `×1.5^group` ladder lived only on the balance>0 tail
+  path, while every failing group routed through `sell_retry_blind_reads`
+  (fresh balance reads return 0/err; cached figure nonzero) which continues
+  BEFORE the ladder. Final fill `exit_price_actual` 1.94e-7 vs booked 4.09e-7
+  (booked −7.99%, wallet −56.63%). Fix: escalation moved to the group header,
+  unconditional ×2 per group capped 9000 bps (fee ladder already caps at G4);
+  `finally` restores. Fill-price divergence shrinks from −53% to ≤~9% budget.
+- Observability: session_open now journals `calibration_audit` (cutoff,
+  window, source, coefficients) via the LiveTrader `calibration_audit` kwarg —
+  future forensics diff live physics vs replay physics from the journals.
+- Still-open watch items: wallet-vs-booked gaps on thin books (Kabuto trades
+  −11.6%/−14.9% wallet vs +1.9%/+3.1% booked) are real fills below tape, not
+  decisions; per-coin re-calibration determinism during long sessions not
+  audited (interval 100 s) — revisit if exit timing drifts appear again.
+
+---
+
 ## Graveyard — do NOT re-test without a new data channel
 
 P_zero exits (79: P_zero≡1 on 1 s tapes) · whale-dump (72/78: replacements eat savings) ·

@@ -339,7 +339,16 @@ def cleanup_small_recordings(min_candles: int = 100) -> int:
     """
     Delete recordings with fewer than `min_candles` candles (and their associated candles).
     Returns the count of deleted recordings.
+
+    `min_candles` is CLAMPED to MIN_POPULATION_CANDLES (100): the population
+    calibrator's sample membership starts exactly at that threshold, so a
+    cleanup with a higher threshold would retroactively delete sample members
+    and change what any replay of an already-calibrated session computes
+    (2026-09-27 live-vs-BT decision divergence).  Short retry recordings
+    (< 100 candles) are never population members, so reaping them is safe.
     """
+    from session_calibrator import MIN_POPULATION_CANDLES
+    min_candles = min(int(min_candles), MIN_POPULATION_CANDLES)
     conn = _get_price_conn()
     rows = conn.execute(
         """

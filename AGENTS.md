@@ -72,7 +72,14 @@ per-trade logs from `backend/v2_results/`.
     once ran live on different physics than any replay). Regression signature:
     session_open kwargs with the defaults-triple (alpha=0.2 AND eta=0.1 AND
     lambda_0=6.9444e-05). tau_max varies by population window (15 morning / 30 evening
-    both legitimate — the VR horizon follows the sample).
+    both legitimate — the VR horizon follows the sample). **The population sample is
+    immutable per cutoff (iter96b)**: membership requires `candle_count >= 100`
+    (written atomically with stopped_at; 1–3 s retry recordings can never join) and
+    the recordings cleanup clamps min_candles to 100 — a cleanup click must never
+    retroactively change what a replay computes (2026-09-27 divergence: 4 of 6
+    sessions ran different eta/lambda_0/lambda_mu than their own replays). The
+    resolved calibration is journaled per session (`calibration_audit` in
+    session_open) — diff it against a replay before blaming the engine.
 
 ## Architecture
 

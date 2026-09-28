@@ -496,6 +496,13 @@ async def delete_recording_endpoint(recording_id: int):
 @app.post("/api/recordings/cleanup")
 @app.delete("/api/recordings/cleanup")
 async def cleanup_recordings_endpoint(min_candles: int = Query(default=100)):
+    # 2026-09-27: the population calibrator's sample membership starts at
+    # MIN_POPULATION_CANDLES (session_calibrator.py) — reaping a recording the
+    # calibrator can select retroactively changes what any replay of an
+    # already-calibrated session computes (live-vs-BT decision divergence).
+    # Cleanup therefore may never delete a recording with >= 100 candles,
+    # regardless of the requested threshold.
+    min_candles = min(int(min_candles), 100)
     deleted_count = data_store.cleanup_small_recordings(min_candles=min_candles)
     return JSONResponse({"status": "cleaned", "deleted_count": deleted_count, "min_candles": min_candles})
 
@@ -2359,6 +2366,7 @@ async def _get_or_create_live_session(
             slippage_bps=slippage_bps,
             priority_fee_lamports=100_000,
             engine_kwargs=primary_kwargs,
+            calibration_audit=calibration_audit,
             skip_simulation=skip_sim,
             engine_version=engine_version,
             # User policy (2026-08-26): terminate motionless coins to free
@@ -2376,6 +2384,7 @@ async def _get_or_create_live_session(
                 slippage_bps=slippage_bps,
                 priority_fee_lamports=100_000,
                 engine_kwargs=dict(primary_kwargs),   # fresh dict per engine
+                calibration_audit=calibration_audit,
                 skip_simulation=skip_sim,
                 engine_version=ev,
                 no_motion_stop_seconds=120.0,

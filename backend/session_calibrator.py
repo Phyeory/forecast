@@ -52,6 +52,24 @@ N_POPULATION_RECS = 50
 # ── Minimum recordings required to output calibrated values ──────────────────
 MIN_RECS_REQUIRED = 10
 
+# ── Minimum candle count for a recording to join the population sample ───────
+# 2026-09-27 live-vs-BT decision divergence: the population sample ("50 newest
+# completed recordings before the cutoff") was MUTABLE after the fact.  1-3 s
+# retry recordings (no-motion stops, reconnect waves) churned the newest-50
+# window as they appeared, and the /api/recordings/cleanup endpoint (default
+# min_candles=100) deleted short recordings that live sessions had already
+# calibrated on — so the replay of the same recording at the same cutoff
+# computed a different sample → different eta/lambda_0/lambda_mu → different
+# engine physics (Pikachu/Kabuto/Traincat/Poke diverged while Gacha/Nick, which
+# opened after the last cleanup, replayed byte-exact).  Membership is therefore
+# restricted to recordings the cleanup can NEVER reap: candle_count >= 100.
+# candle_count is written atomically with stopped_at/status by
+# stop_recording(), so for completed recordings it is immutable — the sample
+# for a fixed cutoff is now identical at live-open time and at any later
+# replay.  The cleanup endpoint clamps min_candles to this value (main.py) so
+# the coupling holds from both sides.
+MIN_POPULATION_CANDLES = 100
+
 # ── Always-explicit knobs (invariant 4: prevent pop-fallback drift) ───────────
 _ALWAYS_EXPLICIT: dict = {
     "v2_exit_delay_seconds":     20.0,
@@ -86,7 +104,7 @@ _CLIP: dict[str, tuple[float, float]] = {
 }
 
 # ── SQL: fetch last N completed recordings before a timestamp ─────────────────
-_REC_QUERY = """
+_REC_QUERY = f"""
 SELECT id, started_at, stopped_at
 FROM recordings
 WHERE status='completed'
@@ -94,6 +112,7 @@ WHERE status='completed'
   AND stopped_at <= ?
   AND started_at < ?
   AND started_at > 0
+  AND COALESCE(candle_count, 0) >= {MIN_POPULATION_CANDLES}
 ORDER BY started_at DESC
 LIMIT ?
 """
