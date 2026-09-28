@@ -555,11 +555,18 @@ against pristine main-fix worktree runs (identical or skip-artifact): stashed it
 API rot + pre-existing flakes. Zero merge regressions; the merge FIXED 8 previously-failing
 tests (6 display-truth + deferred-exit-anchor freeze + calibration boundary).
 
-**Newly documented pre-existing gap (NOT a merge regression):**
-`test_overnight_gap_exit_anchor_matches_forward_tester` — on an overnight silent gap the
-live deferred exit settles at tape end one fee side (0.1pp) below the BT deferred-anchor
-booking; identical on main-fix and GLM-fix, predates iter95. Top Phase-D candidate: root-
-cause the settle-path fee/anchor asymmetry, fix live toward BT, never the reverse.
+**Newly documented gap → FIXED same day (booked fee = one close side):**
+`test_overnight_gap_exit_anchor_matches_forward_tester` exposed a real live-vs-BT booking
+gap: every model exit was overbooked by exactly 0.1pp. Root cause — the live booked-fee
+model charged BOTH fee sides (`basis × 0.002`, from a mis-reading of FT's model as
+"0.0001 per side"), but the backtester's `trade.pnl` reflects only the CLOSE-side fee
+(`total_fees_per_trade = priority_fee + bribe_fee = 0.0001` absolute, deducted once inside
+`_close_long`'s proceeds; the open-side fee reduces balance and `fees_paid`, never pnl).
+The 10/10 parity gate never caught it because `test_live_parity.py` asserts no pnl values
+— only entry/exit anchors and decisions. Fix (live toward BT, backtester untouched):
+booked fee = `basis × 0.001` (rate form, one close side — at the 0.1 reference notional
+that is exactly FT's 0.0001). Full-suite failure set after the fix is byte-identical to
+before minus the overnight test. Tooltip copy updated (0.2% → 0.1% booked fee).
 
 ---
 

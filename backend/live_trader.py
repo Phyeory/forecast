@@ -5002,13 +5002,19 @@ class LiveTrader:
         # the division and treat the entire proceeds as the PnL (there is no
         # known entry cost to subtract).
         if basis > 0 and entry_exec > 0 and exit_anchor > 0:
-            # Booked fee = the backtester's fee model (0.0001 SOL per side =
-            # its total_fees_per_trade) at its 0.1 SOL reference notional ⇒
-            # 0.2% per round trip.  Rate form keeps booked percentages
-            # notional-invariant, so a 0.01 SOL live run compares directly to
-            # a 0.1 SOL batch run (the absolute-fee form would overstate the
-            # drag 10x at the smaller notional).
-            fees = basis * 0.002
+            # Booked fee = ONE close-side fee, mirroring what the backtester's
+            # trade.pnl actually reflects: FT charges total_fees_per_trade
+            # (0.0001 SOL absolute at its 0.1 SOL reference = priority_fee +
+            # bribe_fee) once, inside _close_long's proceeds — the open-side
+            # fee hits the balance but NOT trade.pnl.  At the reference
+            # notional that is 0.1% ⇒ rate form 0.001 × basis.  Rate form
+            # keeps booked percentages notional-invariant, so a 0.01 SOL live
+            # run compares directly to a 0.1 SOL batch run (the absolute-fee
+            # form would overstate the drag 10x at the smaller notional).
+            # (iter95 fix: this used to book 0.002 — both sides — overbooking
+            # every model exit by 0.1pp vs the BT replay; pinned by
+            # test_overnight_gap_exit_anchor_matches_forward_tester.)
+            fees = basis * 0.001
             trade.fee_sol = fees
             tokens = basis / entry_exec
             proceeds = tokens * exit_anchor

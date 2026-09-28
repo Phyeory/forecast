@@ -1890,7 +1890,7 @@ function updateSessionStats(summary = null, serverTraders = null) {
 
   const pnlEl = $("lts-pnl"), upnlEl = $("lts-upnl");
   pnlEl.textContent = fmt(pnl); pnlEl.className = "bt-stat-value " + cls(pnl);
-  pnlEl.title = "Model PnL — backtest-basis booking (tape fill anchors + 0.2% fee model)";
+  pnlEl.title = "Model PnL — backtest-basis booking (tape fill anchors + 0.1% booked fee — one close side, mirroring the BT pnl model)";
   upnlEl.textContent = fmt(upnl); upnlEl.className = "bt-stat-value " + cls(upnl);
   const wEl = $("lts-wallet");
   if (wEl) {
@@ -2017,7 +2017,7 @@ function updateTraderCard(mint) {
   document.getElementById(`lt-stats-${mint}`).innerHTML = `
     <div class="bt-stat"><span class="bt-stat-label">Trades</span><span class="bt-stat-value">${st.total_trades || 0}</span></div>
     <div class="bt-stat"><span class="bt-stat-label" title="Booked model-basis win rate — comparable to backtests">Win Rate</span><span class="bt-stat-value">${(st.win_rate || 0).toFixed(1)}%</span></div>
-    <div class="bt-stat"><span class="bt-stat-label" title="Model PnL — backtest-basis booking (tape fill anchors + 0.2% fee model)">Model</span><span class="bt-stat-value ${pnlClass}">${(st.total_pnl_sol || 0) >= 0 ? "+" : ""}${(st.total_pnl_sol || 0).toFixed(4)}</span></div>
+    <div class="bt-stat"><span class="bt-stat-label" title="Model PnL — backtest-basis booking (tape fill anchors + 0.1% booked fee — one close side, mirroring the BT pnl model)">Model</span><span class="bt-stat-value ${pnlClass}">${(st.total_pnl_sol || 0) >= 0 ? "+" : ""}${(st.total_pnl_sol || 0).toFixed(4)}</span></div>
     <div class="bt-stat"><span class="bt-stat-label" title="Wallet Δ — swap cash minus chain fees minus persistent rent">Wallet Δ</span><span class="bt-stat-value ${wClass}">${wDelta >= 0 ? "+" : ""}${wDelta.toFixed(4)}</span></div>
     <div class="bt-stat"><span class="bt-stat-label" title="On-chain wallet-basis win rate (cash − real buy fee per trade)">Wallet WR</span><span class="bt-stat-value">${st.total_trades ? ((((st.wallet_winning_trades ?? st.winning_trades) || 0) / st.total_trades) * 100).toFixed(1) : "0.0"}%</span></div>
   `;

@@ -213,11 +213,12 @@ post-iter72 ~full.
   `test_confirm_sell_keeps_exact_wallet_chain_pnl` target the stashed iter92/93
   `buy_wallet_delta_sol` API (never merged) — see iter94/95 in RESEARCH_LOG before
   resurrecting; `test_first_buy_rent_preflight.py` 2 failures + percoin
-  `TestMintHistoryLayer` OperationalError are pre-existing flakes. **NOT rot**:
-  `test_overnight_gap_exit_anchor_matches_forward_tester` pins a REAL pre-existing
-  live-vs-BT booking gap (overnight-gap deferred exit settles at tape end one fee
-  side = 0.1pp below the BT deferred anchor; identical on main-fix and GLM-fix,
-  predates iter95) — fix live toward BT in a separate iteration, never in a merge.
+  `TestMintHistoryLayer` OperationalError are pre-existing flakes. **Fixed 2026-09-28
+  (full-fix)**: `test_overnight_gap_exit_anchor_matches_forward_tester` had pinned a real
+  live-vs-BT booking gap — the booked fee modelled both fee sides (0.002 rate) while the
+  BT's trade.pnl reflects only the close-side fee (total_fees_per_trade = 0.0001 absolute
+  at the 0.1 reference ⇒ 0.001 rate; the open-side fee hits balance, not pnl). Booked fee
+  is now basis × 0.001; booked pnl ≡ BT replay.
   Bare `ForwardTester()` defaults `slippage_pct=10.0`
   vs 1.0 in `run_backtest`/live — always pass slippage explicitly in harnesses.
 - Deploy: restart `main.py` + hard-refresh browser (app.js cached — **bump `?v=` on every
