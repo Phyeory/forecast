@@ -3188,6 +3188,18 @@ class LiveTrader:
             logger.info(
                 f"[SELL] Authoritative balance: {token_balance} units (on-chain={fresh_bal > 0})"
             )
+            # 2026-09-28 6024 audit: the requested amount must be chain-VERIFIED.
+            # A provisional Jupiter buy-quote figure (kept when the verify probes
+            # lagged) overstates delivery ~1.7–2% and chains 6024s on the sell.
+            if not self._token_balance_verified and fresh_bal > 0:
+                token_balance = min(token_balance, fresh_bal)
+                self._token_balance = token_balance
+                self._cached_token_balance = token_balance
+                self._token_balance_verified = True
+                logger.info(
+                    f"[SELL AMOUNT VERIFIED] provisional figure reconciled to "
+                    f"confirmed on-chain balance: {token_balance} units"
+                )
 
             # ── iter77 fleet clamp: shared wallet, per-engine positions ──────
             # With multiple engines on one wallet+mint, the on-chain balance
@@ -3358,7 +3370,12 @@ class LiveTrader:
                         # same inflated amount (the observed 6024×N chains).
                         if _custom_error_code(tx_error) in NONSIMULATION_ABORT_CODES:
                             try:
-                                live_bal = await self._get_token_balance()
+                                # 6024 = INSUFFICIENT FUNDS (a wrong requested
+                                # amount — never "market reality").  Re-read at
+                                # CONFIRMED commitment: a processed read can
+                                # itself be the overstatement that caused it.
+                                live_bal = await self._get_token_balance(
+                                    commitment="confirmed")
                             except Exception:
                                 live_bal = 0
                             if live_bal > 0 and live_bal < token_balance:
