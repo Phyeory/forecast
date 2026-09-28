@@ -4789,9 +4789,14 @@ class LiveTrader:
                 _px = self._last_price or c
                 _off = ((_px / _ct.entry_price - 1.0) * 100.0
                         if (_px > 0 and _ct.entry_price > 0) else None)
+                # EVR-veto inputs (iter50 permanent latch: one evaluation
+                # tick with 1s sell share > v2_evr_skip_sell_conc_min kills
+                # evr_triage for the WHOLE trade — the 4akev root cause).
+                _ss = (sell_vol / vol) if vol > 0 else None
                 self._decision_audit_fh.write(json.dumps({
                     "t": int(t), "c": c, "entry": _ct.entry_price,
                     "offside_pct": round(_off, 3) if _off is not None else None,
+                    "candle_sell_share": round(_ss, 3) if _ss is not None else None,
                     "exit_eval_count": self._exit_eval_count,
                     "pending_exit": self._pending_exit,
                     "swap_in_flight": self._swap_in_flight,

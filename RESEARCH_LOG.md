@@ -596,6 +596,20 @@ before minus the overnight test. Tooltip copy updated (0.2% → 0.1% booked fee)
 
 ---
 
+**4akev ROOT CAUSE (read-the-code, 2026-09-28): the iter50 EVR concentration veto is a
+PERMANENT per-trade latch on a stochastic input.** `v2_evr_skip_sell_conc_min = 0.25`:
+the first evr_triage evaluation (~120s after entry) during distributed panic selling sees
+a 1s sell share > 0.25 almost surely → evr_triage — the exact rule the replay exited by
+(−22.7% @ 20:13:38) — is dead for the whole trade. The replay passed only because its
+evaluation tick fell on a quiet second; real-time tick phase latched the veto. Same code,
+same candles, opposite outcomes BY CONSTRUCTION of the permanent latch. The rest of the
+cascade (kelly E*≤0 × 60 ticks + no-long, kramers P⁻≥0.5, bayesian, reversal) genuinely
+never crossed on a slow grind — model belief, now verifiable per candle via
+decision_audit.jsonl (extended with `candle_sell_share`, the veto's direct input).
+An engine-semantics fix (windowed re-arm instead of permanent latch) changes BT results
+too → needs the full acceptance-gate pipeline; user decision. Telemetry + alarm shipped
+(0df6cc7) make the latch observable and the hold un-missable.
+
 **6024 correction + exit-delay timer restoration (2026-09-28, full-fix 0df6cc7+1):**
 - 6024 = INSUFFICIENT FUNDS (6001 = slippage) — the trade-2 retries were the sell amount
   exceeding the wallet's true balance, converging via 2% trims; ladder speed still helps
