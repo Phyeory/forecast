@@ -145,6 +145,84 @@ def fleet_trader_count(wallet_pubkey: str, mint: str) -> int:
             _fleet_claim_key(wallet_pubkey, mint), {}).values() if v > 0)
 
 
+# ── Fleet sell mutex + wallet SOL reservations (2026-09-28 consolidation) ───
+# Two shared-wallet races manufacture on-chain failures that the backtester
+# (synchronous fills, infinite wallet) never sees:
+#
+#   1. Concurrent sellers on one (wallet, mint) quote the same full balance
+#      simultaneously — the loser's TX fails with `Custom: 6024`
+#      (insufficient token balance).  The per-trader `_swap_in_flight` flag
+#      cannot see siblings.  `fleet_acquire_sell` serialises sellers per
+#      (wallet, mint) with a bounded wait; the holder re-reads CONFIRMED
+#      balance after acquiring, so a sibling's just-landed sale is visible
+#      before quoting.  Loop-agnostic spin flag (no asyncio.Lock objects —
+#      tests and main.py run different loops).
+#
+#   2. Concurrent buyers on one wallet each pass their own SOL check against
+#      the same full balance and overspend into `insufficient_sol` deaths.
+#      Pending buys RESERVE `buy_size + gas + rent` against the wallet;
+#      the gate subtracts reservations before comparing.  Released when the
+#      buy resolves (confirm or fail) — post-confirm the spend is real and
+#      visible in the refreshed balance, so holding it would double-count.
+# {(wallet, mint): acquire-timestamp} — at most one seller in flight.
+_fleet_sell_inflight: dict[tuple[str, str], float] = {}
+# {wallet: SOL reserved by not-yet-resolved buys}.
+_wallet_sol_reserved: dict[str, float] = {}
+
+
+async def fleet_acquire_sell(trader: "LiveTrader", timeout_s: float = 30.0) -> bool:
+    """Wait until no sibling sells on this (wallet, mint), then hold the slot.
+
+    Returns True when the slot was acquired (caller MUST release via
+    `fleet_release_sell`), False on timeout — the caller proceeds anyway
+    with a fresh CONFIRMED read (never deadlock; the watchdog backstops).
+    """
+    import asyncio as _aio
+    import time as _time
+    key = _fleet_claim_key(trader.wallet_pubkey, trader.token_mint)
+    start = _time.time()
+    while True:
+        with _fleet_share_lock:
+            if key not in _fleet_sell_inflight:
+                _fleet_sell_inflight[key] = _time.time()
+                return True
+        if _time.time() - start >= timeout_s:
+            return False
+        await _aio.sleep(0.1)
+
+
+def fleet_release_sell(trader: "LiveTrader") -> None:
+    """Release this trader's fleet sell slot (idempotent)."""
+    with _fleet_share_lock:
+        _fleet_sell_inflight.pop(
+            _fleet_claim_key(trader.wallet_pubkey, trader.token_mint), None)
+
+
+def wallet_sol_reserved(wallet_pubkey: str) -> float:
+    """SOL currently reserved by unresolved buys on this wallet."""
+    with _fleet_share_lock:
+        return _wallet_sol_reserved.get(str(wallet_pubkey), 0.0)
+
+
+def wallet_add_reserve(wallet_pubkey: str, amount_sol: float) -> None:
+    """Reserve SOL for a pending buy (advisory accounting)."""
+    if amount_sol <= 0:
+        return
+    with _fleet_share_lock:
+        w = str(wallet_pubkey)
+        _wallet_sol_reserved[w] = _wallet_sol_reserved.get(w, 0.0) + amount_sol
+
+
+def wallet_release_reserve(wallet_pubkey: str, amount_sol: float) -> None:
+    """Release a prior SOL reservation (floored at 0, idempotent-safe)."""
+    if amount_sol <= 0:
+        return
+    with _fleet_share_lock:
+        w = str(wallet_pubkey)
+        _wallet_sol_reserved[w] = max(
+            0.0, _wallet_sol_reserved.get(w, 0.0) - amount_sol)
+
+
 # ── Jupiter & Solana constants ────────────────────────────────────────────────
 # NOTE: Using the newer Swap API v1 (lite-api.jup.ag) instead of the V6 API
 # (public.jupiterapi.com). The V6 on-chain program (JUP6L...) does NOT handle
@@ -666,6 +744,11 @@ class LiveTrader:
         # Async swap task tracker (so we don't overlap swaps)
         self._swap_in_flight: bool = False
 
+        # 2026-09-28 consolidation: SOL reserved against the shared wallet
+        # by THIS trader's unresolved buy (buy_size + gas + rent).  Released
+        # when the buy resolves (confirm or fail) — see wallet_*_reserve.
+        self._sol_reserved: float = 0.0
+
         # iter94: True until this session's first buy confirms on-chain.  The
         # first buy of a fresh mint creates the token ATA (≈0.0015 SOL) and
         # the WSOL ATA (≈0.0015 SOL) INSIDE the swap tx — hard on-chain
@@ -873,6 +956,13 @@ class LiveTrader:
         # iter77 fleet: drop this trader's token claim first — sibling
         # traders' sell caps unclamp immediately even if close is aborted.
         fleet_release_claim(self)
+        # 2026-09-28 consolidation: drop any unresolved SOL reservation too
+        # (idempotent — the settle task's confirm/fail path releases again
+        # harmlessly if it still resolves after teardown).
+        try:
+            self._release_sol_reserve()
+        except Exception:
+            pass
         for task_attr in ("_watchdog_task", "_balance_cache_task", "_blockhash_task"):
             task = getattr(self, task_attr, None)
             if task is not None and not task.done():
@@ -1030,6 +1120,16 @@ class LiveTrader:
 
     def _get_cached_token_balance(self) -> int:
         return self._cached_token_balance
+
+    def _release_sol_reserve(self) -> None:
+        """Release THIS trader's wallet SOL reservation (idempotent)."""
+        amt = float(getattr(self, "_sol_reserved", 0.0) or 0.0)
+        if amt > 0:
+            try:
+                wallet_release_reserve(self.wallet_pubkey, amt)
+            except Exception:
+                pass
+            self._sol_reserved = 0.0
 
     def _get_fresh_blockhash(self) -> Optional[tuple]:
         """Return ``(blockhash, last_valid_block_height)`` if still fresh."""
@@ -1944,21 +2044,28 @@ class LiveTrader:
             gas_floor = 0.00025
             rent_floor = 0.0034 if first_buy else 0.0
             required_sol = self.buy_size_sol + gas_floor + rent_floor
-            if sol_bal < required_sol:
+            # 2026-09-28 consolidation: subtract sibling sessions' pending-buy
+            # reservations on this wallet before comparing.  Without this, N
+            # concurrent sessions each see the full balance and overspend
+            # into on-chain insufficient-SOL deaths the backtester never has.
+            reserved_sol = wallet_sol_reserved(self.wallet_pubkey)
+            if sol_bal < required_sol + reserved_sol:
                 logger.error(
                     f"[BUY FAILED] Insufficient balance: {sol_bal:.4f} SOL but need "
-                    f"~{required_sol:.4f} SOL"
+                    f"~{required_sol:.4f} SOL (+{reserved_sol:.4f} reserved by siblings)"
                     f"{' (first buy: swap + ATA rent + fees)' if first_buy else ' (swap + fees)'}"
                 )
                 self._journal_event(
                     "buy_rejected", reason=reason, error="insufficient_sol",
                     sol_balance=sol_bal, required_sol=required_sol,
-                    first_buy=first_buy,
+                    reserved_sol=reserved_sol, first_buy=first_buy,
                 )
                 await self._fail_buy_flat(
                     f"Insufficient SOL ({sol_bal:.4f} available, "
                     f"{required_sol:.4f} required)", reason)
                 return None
+            wallet_add_reserve(self.wallet_pubkey, required_sol)
+            self._sol_reserved = required_sol
 
             # ── Single quote → swap → broadcast (NO retry) ───────────────────
             fee = PRIORITY_FEE_ESCALATION[0]
@@ -2061,6 +2168,11 @@ class LiveTrader:
         update).  A failed buy is never retried; the engine re-emitting a BUY
         on subsequent candles is NOT allowed to become an implicit retry.
         """
+        # 2026-09-28 consolidation: the buy resolved (dead or landed-and-
+        # adopted below) — release this trader's wallet SOL reservation.
+        # Post-confirm the spend is real and visible in balances; holding
+        # the reservation too would double-count it for siblings.
+        self._release_sol_reserve()
         if self.current_trade is not None:
             failed = self.current_trade
             # Defensive final probe: never fail a buy whose tokens are
@@ -2230,6 +2342,10 @@ class LiveTrader:
                 ct.size_tokens = balance / (10 ** self._token_decimals)
             self._session_first_buy = False  # ATA rent paid — later buys need only swap+fees
             await self._refresh_sol_balance_async()
+            # 2026-09-28 consolidation: buy resolved — the SOL spend is now
+            # real (see refreshed balance above); release the reservation so
+            # siblings stop discounting it (holding it would double-count).
+            self._release_sol_reserve()
             # iter94: journal one-time account-creation rent (WSOL/token
             # ATA) inside the buy tx separately from the fill — 15–30% of a
             # 0.01 SOL first buy, invisible in trade PnL by design (the
@@ -2902,6 +3018,23 @@ class LiveTrader:
                     )
                     return None
 
+            # ── 2026-09-28 consolidation: fleet sell mutex ─────────────────
+            # Serialize sellers per (wallet, mint).  Without this, sibling
+            # engines quote the same full balance simultaneously and the
+            # loser's TX dies with `Custom: 6024`.  Bounded wait — on
+            # timeout proceed anyway with a fresh CONFIRMED read below
+            # (never deadlock; the watchdog backstops).
+            _sell_mutex_held = await fleet_acquire_sell(self, timeout_s=30.0)
+            if not _sell_mutex_held:
+                logger.warning(
+                    "[SELL] Fleet sell slot busy >30s — proceeding anyway "
+                    "with a fresh confirmed balance read"
+                )
+                self._journal_event(
+                    "sell_mutex_timeout", reason=reason,
+                    detail="proceeding_with_confirmed_read",
+                )
+
             # ── Pre-sell SOL baseline for proceeds measurement ────────────────
             # The proceeds of the sell are MEASURED as the on-chain SOL-balance
             # delta from this baseline (see _measure_sell_proceeds).  Prefer
@@ -2982,6 +3115,7 @@ class LiveTrader:
                 # restart the very 6024 chain this correction exists to kill.
                 token_balance = self._token_balance
                 ct = self.current_trade
+                _exact_known = False
                 if ct and ct.tx_hash_buy and not self._token_balance_verified:
                     try:
                         exact = await self._get_tx_token_delivered(ct.tx_hash_buy)
@@ -2995,6 +3129,53 @@ class LiveTrader:
                         token_balance = exact
                         self._token_balance = exact
                         self._cached_token_balance = exact
+                        _exact_known = True
+                if token_balance > 0 and not self._token_balance_verified \
+                        and not _exact_known:
+                    # 2026-09-28 consolidation: quoting a PROVISIONAL
+                    # (quote-inflated 0.3–2%) amount is a guaranteed first-
+                    # attempt 6024.  Haircut 3% PROACTIVELY instead of
+                    # burning a full TX cycle to discover it reactively —
+                    # the residual dust is swept by _verify_sell_settled /
+                    # watchdog exactly like the old probe-trim residue.
+                    _haircut = int(token_balance * 0.97)
+                    if _haircut > 0:
+                        logger.info(
+                            f"[SELL] Provisional balance haircut (unverified, "
+                            f"no ledger figure): {token_balance} → {_haircut} units"
+                        )
+                        self._journal_event(
+                            "sell_provisional_haircut", reason=reason,
+                            cached_balance=token_balance, quoted_balance=_haircut,
+                        )
+                        token_balance = _haircut
+                        self._token_balance = _haircut
+                        self._cached_token_balance = _haircut
+
+            # 2026-09-28 consolidation: post-mutex CONFIRMED truth.  A sibling
+            # engine may have sold while this seller waited for the fleet
+            # slot — clamp DOWN to the confirmed balance (monotonic: a
+            # lagging read must never ratchet the amount back UP over
+            # already-sold tokens, which restarts the 6024 chain).
+            # Skipped for verified sole-claimant sellers (no sibling exists
+            # to race; keeps the exit hot path free of the extra RPC read).
+            _needs_truth_read = (not self._token_balance_verified) or (
+                fleet_trader_count(self.wallet_pubkey, self.token_mint) > 1)
+            if _needs_truth_read:
+                try:
+                    _post_mutex_bal = await self._get_token_balance(
+                        commitment="confirmed")
+                except Exception:
+                    _post_mutex_bal = 0
+                if _post_mutex_bal > 0 and _post_mutex_bal < token_balance:
+                    logger.info(
+                        f"[SELL] Post-mutex confirmed clamp: "
+                        f"{token_balance} → {_post_mutex_bal} units"
+                    )
+                    token_balance = _post_mutex_bal
+                    self._token_balance = _post_mutex_bal
+                    self._cached_token_balance = _post_mutex_bal
+                    self._token_balance_verified = True
 
             if token_balance <= 0:
                 # No on-chain balance AND no cached balance.  Do NOT give up —
@@ -3079,18 +3260,28 @@ class LiveTrader:
                     # EVERY attempt after the first (cheap single read).  A
                     # partial fill — or a 6024 clamp from the previous attempt
                     # — must be reflected in the next quote.
+                    # 2026-09-28 consolidation: monotonic DECREASE only, on
+                    # CONFIRMED commitment.  A lagging processed read can
+                    # return the PRE-sell full balance after a partial fill
+                    # landed — adopting it re-quotes sold tokens and chains
+                    # another 6024.  Confirmed costs ~0.5s on retries only;
+                    # the first attempt keeps the fast path above.
                     if attempt_group > 1 or inner > 1:
-                        live_bal = await self._get_token_balance()
-                        if live_bal > 0:
-                            if live_bal != token_balance:
-                                logger.info(
-                                    f"[SELL] Balance refreshed on {label}: "
-                                    f"{token_balance} → {live_bal}"
-                                )
+                        try:
+                            live_bal = await self._get_token_balance(
+                                commitment="confirmed")
+                        except Exception:
+                            live_bal = 0
+                        if live_bal > 0 and live_bal < token_balance:
+                            logger.info(
+                                f"[SELL] Balance refreshed on {label}: "
+                                f"{token_balance} → {live_bal}"
+                            )
                             token_balance = live_bal
                             self._token_balance = token_balance
                         elif token_balance > 0:
-                            # Transient RPC gap — stick with the last-known balance.
+                            # Transient RPC gap — or a lagging read ABOVE the
+                            # working amount: stick with the smaller figure.
                             pass
 
                     quote = await self._get_quote(self.token_mint, WSOL_MINT, token_balance)
@@ -3452,6 +3643,12 @@ class LiveTrader:
         finally:
             self.slippage_bps = original_slippage
             self._swap_in_flight = False
+            # 2026-09-28 consolidation: always release the fleet sell slot
+            # (idempotent — covers every early return above).
+            try:
+                fleet_release_sell(self)
+            except Exception:
+                pass
 
     async def _broadcast_status(self, event: str, detail: str, reason: str = "",
                                  tokens: float = 0, sol_received: float = 0, closed_trade=None):
