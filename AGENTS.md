@@ -107,9 +107,25 @@ graph TD
   books retry-path fills under the true landed sig (`tx_delta_resolved`). Booking anchors
   verified BT-exact: entry = signal-candle OPEN, deferred exit = boundary-candle OPEN,
   loss-book exit = intrabar(frac≈0.505) — all ×(1±1%); live `_fill_fraction` reads the
-  *configured* fee. NOTE: main branch (parallel iter95) additionally re-calibrates V2
+  *configured* fee. Iter96 hardening (GLM-FIX): deferred-exit anchor freezes two-tier
+  (provisional at launch, BT-exact upgrade once a buffered time exceeds the target —
+  drain-launches ahead of the boundary candle no longer misprice wicked candles);
+  detection freezes buy anchor/sig_t once, boundary hook and launch both READ without
+  consuming (either order starved the other), values overwritten at next detection and
+  cleared on fail/close paths — engine/trader/BT entry unified; fleet sell mutex per
+  (wallet,mint) + wallet SOL reservations + monotonic confirmed-balance sell amounts
+  (≈zero first-attempt 6024s). Session journals now carry `code_commit`/`code_dirty` in
+  `session_open`, `recalibration` events, `engine_heartbeat` (position/entry/peak/counters
+  per 15 candle-s + pending ages + flat decision snapshot + suppression totals),
+  `engine_ticks.jsonl` (per-state cascade telemetry while in position),
+  `signal_suppressed` (throttled per guard + cumulative totals),
+  `signal_launch` (sig_t/launch_t/via/fill-source) and `engine_boundary` (hook firings).
+  NOTE: main branch (parallel iter95) additionally re-calibrates V2
   from `{}` like `run_backtest` (stale dashboard `engineParamsV2` caused the Luna 11-vs-8
   divergence) + fee escalation/slippage widening — not yet in GLM-FIX; rebase to inherit.
+  Steady-state resync (watchdog): trader-OPEN/engine-flat (or reverse) persisting 20 s
+  with no pending signals/swaps/buys/stops → re-notify + consume stale hook state,
+  journalled as `engine_resync` (backstop for silent holds of any trigger).
 - **`backtester.py`** — replay via ForwardTester + ProcessPool (`guard_parent`), persists to
   `backtest_data.db` + `v2_results/`.
 - **`signal_capture.py` / `autofeed.py` / `newpairs*.py` / `process_watchdog.py`** — live
@@ -178,8 +194,12 @@ post-iter72 ~full.
   stashed iter92/93 `buy_wallet_delta_sol` API (never merged) — see iter94/95 in
   RESEARCH_LOG before resurrecting. Bare `ForwardTester()` defaults `slippage_pct=10.0`
   vs 1.0 in `run_backtest`/live — always pass slippage explicitly in harnesses.
-- Deploy: restart `main.py` + hard-refresh browser (app.js cached). Live audits use
+- Deploy: restart `main.py` + hard-refresh browser (app.js cached). After EVERY deploy,
+  confirm the first `session_open`'s `code_commit` == HEAD (a stale process silently
+  diverges — INU Sep-29). Live audits use
   `backend/data/live_logs/<session>/` (`trades.jsonl`, `signals.jsonl`), not dashboard counters.
+  Silent-hold tripwire: any position held >~3 min past a +10% peak with no `exit_signal`,
+  or any `engine_heartbeat` with `has_trade=true, engine_in_position=false` — page with the session dir.
 - Fill forensics: `analysis/iter94_wedge_study.py` (on-chain fill vs tape),
   `analysis/iter94_validate_fix.py` (post-fix fill/PnL parity per session).
 - External: pump.fun/Cloudflare blocks curl (use browser API-proxy); DexScreener 30-mint
