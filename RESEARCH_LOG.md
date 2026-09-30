@@ -453,6 +453,186 @@ instant, 1 verified-empty). Gates: parity 10/10, VR 20/20, preflight 4/4, displa
 pristine tree; `test_live_chain_parity.py` + `test_real_entry_basis.py` target the
 stashed iter92/93 `buy_wallet_delta_sol` API, never merged).
 
+## Iter 96 — live-execution parity repairs + INU silent-hold audit (2026-09-28/29, GLM-FIX)
+
+**A. Post-10pm 5-trade audit (Sep-27 night, recs 6034/6042/6043).** Live model vs BT:
+PKMN50 exact (entry/exit prices identical, chain −1.2%); VBUCKS-23:11 within 0.2%;
+VBUCKS-22:46 buy TX blockhash-expired (execution failure, orphan watchdog sold +windfall —
+not a model bug); koinu ×2 diverged (trade-1 model 2.429e-07 vs BT 2.128e-07, +14%;
+on-chain 2.099e-07 ≈ BT). Root: deferred-exit anchor froze only on an EXACT-second
+candle match (`int(target) in fill_path`); thin tapes have no candle at sig_t+20s, so
+booking fell back to settle-time `_last_price`. Fix (`01cd620`): freeze at first state
+with t > target via `_path_price_at` interpolation (BT's `_resolve_latency_fill` mirror);
+cold live-replay then books BT-exact on all three recs. Verdict: booking divergence
+class CLOSED for sparse tapes (dense tapes were already exact).
+
+**B. Shared-wallet 6024 consolidation (`7ae5d39`).** Every 6024 is amount error (sell >
+wallet balance): (i) concurrent fleet sellers quote the full balance simultaneously
+(`_swap_in_flight` is per-trader, blind to siblings); (ii) provisional buy-quote
+`outAmount` (inflated 0.3–2%) quoted before settle reconciles; (iii) concurrent buyers
+overspend shared SOL into `insufficient_sol` deaths. Fixes: per-(wallet,mint) fleet sell
+mutex (bounded 30 s wait, never deadlocks, released in `finally`) + post-mutex CONFIRMED
+re-read clamped monotonically down; retry-loop re-reads moved to confirmed commitment
+and monotonic-decrease only (a lagging processed read must never resurrect sold tokens);
+3% proactive haircut when quoting unverified/provisional balances (dust swept by existing
+verify/watchdog); per-wallet SOL reservations (`buy+gas+rent`) checked at pre-flight,
+released on confirm/fail/close (idempotent). Verified balances still quote 100% (no new
+dust in the normal case); sole-trader hot path unchanged (extra confirmed read only
+under contention). Gates: parity 10/10, fleet/exec suites pass; unit-verified mutex
+ordering + reservation accounting. Verdict: first-attempt 6024s structurally eliminated
+(only a lying RPC can still cause one; clamp/retry absorbs it).
+
+**C. INU silent-hold audit (Sep-29 night, rec 6244, the −30% bag).** BT: 9 trades
+(incl. +146% and +23%); live: 4 trades, #4 held 33 min with NO engine exit ever emitted
+→ manual sell −18.59% (cash −18.44%). TX-failure audit: ZERO (no 6024/quote/broadcast/
+confirm failures in journal or console; buys 3–7 s, sells 1–5 s). Proven equalities:
+intake vs DB candles BITWISE identical (837/838 rows, all 7 fields); params identical
+(live signal coefficients == session kwargs == BT params); BT deterministic across
+processes (identical sha256); HF gates OFF (all consumers gated — inert); no warmup
+(no "Warmed up" line, newborn token); cold live-replay (incl. swap-blocking variant)
+reproduces BT tick-for-tick incl. exit #4. Two further booking bugs proven by exact-number
+reproduction and FIXED: (1) drain-launch freezes the exit anchor with an INCOMPLETE
+buffer (successor missing → span-1 saturation → intrabar close instead of BT's
+wick-interpolated fill; trade-3 booked 1.5450e-07 vs BT 1.4987e-07) — fix: two-tier
+freeze (provisional at launch, BT-exact upgrade once a buffered time exceeds the target;
+verified provisional `1.5449503044626009e-07` = journal, upgraded `1.4986959498521352e-07`
+= BT, to the ulp); (2) boundary hook consumed the buy anchor before launch used it —
+engine notified 1.55593e-07 (=BT) while the trader booked launch-state sc 1.55534e-07 —
+fix (corrected 09-30 after replay caught the mirror bug: launch-consume would starve
+hooks when launch runs first, the common instant case): detection freezes once,
+hook+launch both READ without consuming, values overwritten at next detection and
+cleared on fail/close paths — entry unified engine/trader/BT in both orders; on-chain
+swap unaffected — market order either way). 09-30 debug follow-up journals every
+previously-mute layer: `signal_suppressed` (throttled per guard + cumulative totals
+in heartbeat), `signal_launch` (sig_t/launch_t/via/fill-source),
+`engine_boundary` (hook firings), heartbeat gains pending ages + flat decision
+snapshot; replay emits 9 launches/17 boundaries/10 suppressions, all JSON-valid.
+THE missing exit
+signal itself was NOT reproduced by any journaled input — stated plainly as OPEN:
+every reproducible mechanism fires it. Forensics package shipped so the next silence is
+a 60-second diagnosis, not a 4-hour one: `code_commit`+`code_dirty` in every
+`session_open` (know exactly what ran), percoin-log drain into `recalibration` journal
+events, `engine_heartbeat` (in_position/entry/peak/bar_count/pending flags every 15
+candle-s), and the engine's per-state tick diagnostic wired to
+`<session>/engine_ticks.jsonl` (verified: 1,560 lines on the INU replay). PLUS a
+steady-state position/engine resync in the watchdog: trader-OPEN/engine-flat (or the
+reverse) persisting 20 s with no pending signals, in-flight swaps/buys, or stops →
+re-notify the engine with the trader's entry (or flat), consume stale hook state so a
+late hook can't double-notify, journal `engine_resync` + console warn (unit-verified
+heal-open, heal-close, and busy-guard; also covers the fail-abort path that re-opens
+the trader without notifying the engine). This is the backstop for the desync CLASS
+whatever its trigger — INU trade-4's shape (trader holding, engine flat, zero signals)
+would have healed ~21:49:35, captured the 21:49:42/45 peak, and exited at 21:49:50
+instead of bleeding to the manual sell. Gates after all changes: parity 10/10,
+fleet+exec 21/21; remaining failures (3 wall-timer, 2 entry-instant, 2 iter80-knob)
+verified byte-identical on the pristine tree.
+
+**E. Audit trap found 2026-09-30 (KAEDE rec-6295).** `run_backtest` routes params
+through `initialize_calibration_sync`, whose `_strip_default_sde` deletes any kwarg
+equal to `DEFAULT_CONFIG` — including a genuinely calibrated `tau_max=30.0` (the
+default). The session ran tau 30; the batch replay silently recomputed tau 20 and
+showed 2 BT trades vs 4 live (false divergence). Re-running with session-exact
+tau 30 reproduces all 4 live trades tick-for-tick (entries to the second, exits
+within 1 s, PnL within ~1pp). RULE for live-vs-BT audits: diff session kwargs vs
+`initialize_calibration_sync` output first; if fields were stripped, replay with
+session-exact params (construct `ForwardTester` directly). 6259/6261 had the same
+30→60 strip but zero live trades (unaffected).
+
+**F. Rent accounting + auto-close reverted (2026-09-30, user decision).** The audit
+traced ~82% of the night's live-vs-BT cash wedge to first-buy ATA rent (~0.03 SOL
+locked, verified + partially reclaimed on-chain via external Token-2022Close
+sweeps); an auto-close (`_close_empty_token_ata`, both sell-success paths,
+verified offline + unit-tested) was implemented and then REVERTED per user: manual
+reclaim after sessions, dashboard PnL already excludes rent (zero mismatch
+contribution), and the 0.95→0.79 wallet move is under separate investigation below.
+Code + triggers + flag fully removed (zero references); booking/observability/resync
+work untouched.
+
+**H. Spike-guard follow-through (2026-09-30).** Per the HANDOFF, the executable
+fix that respects BT-immutability is a live-only quote-deviation skip guard
+(spike entries are proven landing-drift, quotes accurate to 0–2%, exits fine).
+Implemented default-OFF (`SPIKE_GUARD_ENABLE=False`, threshold 5.0, fail-open on
+any unknown incl. unverified decimals) with clean unwind (no re-entry block, SOL
+reservation released, hook-opened engine rewound, `buy_skipped_spike_premium`
+journaled) + 6 unit tests green; parity/fleet/exec suites green (33 passed).
+Measured would-have-skipped on 37 quoted trades: 5% saves −0.0023 cash keeping
++0.0021 on 30. Requires a full-DB batch + explicit enable — not yet turned on.
+
+**G. Per-trade model-vs-cash closure + wallet archaeology (2026-09-30).** 39
+session-matched trades decomposed to the lamport: model−cash gap +0.010429 =
+entry-impact (fewer tokens than BT at quote) +0.011937 + exit-slip −0.001403 +
+residual −0.000105. I.e. entry fills explain 114% of the gap; exits slightly favor
+chain; BT's 0.0002/trade fee model is ~10× actual measured fees (pessimistic, favors
+chain). No unexplained leak in the trade path. Wallet "−200%"/0.95→0.79 claims do
+not fit the auditable window (true ≈ −0.007) nor the transient crater (7 concurrent
+positions, proven position-lockup illusion); on-chain history shows 7,449 TXs / 710
+fails back to 2026-01 (0.1 SOL funding, single wallet throughout). Measured fee burn
+(fails ≈ 0.000105 avg, ok ≈ 0.000017) puts 9-month cumulative fee load at roughly the
+claimed −0.16 order — the bleed is priority-fee attrition over thousands of TXs plus
+rent churn across pruned eras, not last-night decisions (which match BT).
+
+## Iter 97 — honest zero-delay entries PROPOSED then REVERTED (2026-09-30, user direction)
+
+User verdict, verified before acting: pre-Sep-03 the pipelines filled delay-0 entries
+at the signal-state close and live matched BT/chain; the exit-delay/latency era
+(Sep-03 `75810c1` lineage) silently rerouted them through the deferred queue at the
+signal candle's OPEN — unknowable pre-signal, +19–31% phantom edge on spike entries
+(TRENCHDOTS #4: model +28.52% vs chain −13%; KAEDE #1: +12.66% vs −15%; VBUCKS +11%
+vs cash loss; quotes land within 0–9% of signal-state on 10–13 SOL volume — drift,
+not impact). The spec + regression tests already existed
+(`test_entry_instant_under_exit_delay.py`, failing on HEAD — spec, not rot).
+A same-day implementation (BT fills + live anchor/notify at signal state, positive
+delays untouched; all 3 spec tests green, parity 10/10, replay==BT tick-for-tick)
+measured honest entries costing more on spikes (TRENCH #4 +28.52%→+5.60%, KAEDE #1
++12.66%→−11.48%) — then REVERTED same day per explicit user direction: the
+backtester is the immutable reference and must never be re-tuned toward live
+results (baseline integrity across eras). BT (`forward_tester.py`) is byte-identical
+to HEAD again; the live signal-state leg reverted with it; the 2 spec tests fail
+again exactly as before (kept as the documented aspiration, not adopted).
+RETAINED (all BT-neutral or live-improving): two-tier exit anchors, buy-anchor
+read-without-consume lifecycle, resync, observability package, 6024 consolidation.
+User direction going forward: improve LIVE execution toward BT fills (below), never
+the reverse. Follow-up proposal (NOT implemented — changes trade selection, needs a
+full-DB batch first): quote-deviation skip guard. Measured on 37 quoted trades
+(med deviation +0.22%, p90 +6.2%): a 5% guard would have skipped 7 trades losing
+−0.0023 cash while keeping +0.0021 (skipped BT-model +0.0019 — winners sacrificed);
+8% guard skips 3 cash-positive trades (too tight). Pipeline audit supporting this:
+signal→broadcast med 0.34 s, broadcast→confirm med 1.64 s, sell attempt→close med
+0.89 s, ALL sells landed group-1 — landing is already fast, so priority-fee
+escalation would have changed nothing last night (left flat deliberately).
+
+**I. The −200% wallet scare (2026-09-30 audit of the 09-29/30 night).** Wallet
+0.085→0.053 with a 0.0195 intraday crater looked catastrophic; full component
+accounting says otherwise. Craters: 7 concurrent open positions × 0.01 at 22:18
+(0.07 SOL locked in tokens + rent) — wallet reads free SOL only, so the dip is a
+position-lockup illusion, not losses (mark-to-market stayed ≈flat). True night:
+cash −0.0030 (11%), priority fees −0.0018 (7%), ATA rent −0.0299 (82%!) — first buys
+lock ~0.0015–0.003/mint which Jupiter never reclaims; at fresh-mint churn (18
+first-buys) that alone is −37% of the wallet. On-chain proof + recovery: at 04:45
+an external Token-2022Close sweeper reclaimed +0.0171 (8×0.001514 + strays);
+current wallet 0.0793 ≈ start −0.006 (−7%) — the "−200%" matches no wallet
+construction (closest: rent+fees were ~2.6× gross cash winnings pre-recovery, and
+summed-cash% = −29.8%). Rent auto-close was implemented for this wedge and then
+REVERTED same day per user decision (manual reclaim; dashboard excludes rent) —
+code, triggers, and flag fully removed; booking/observability/resync untouched.
+Deliberately NOT changed: BT rent modeling (would invalidate every baseline — the
+honest read is that BT is ~25–30% optimistic per fresh-mint first trade by
+construction), fee escalation, entry-spike impact (AMM physics; `exec_offset`
+calibration remains the sanctioned honesty lever).
+
+**G. Explicit non-changes.** `test_entry_instant_under_exit_delay` (2 tests) wants
+zero-delay entries booked at signal-state CLOSE; production/BT books signal-candle OPEN
+(adopted iter90j parity contract, AGENTS.md invariant — entry = signal-candle OPEN).
+Flipping it would invalidate every baseline; left as documented rot alongside the 8.
+Chain-vs-model gap is execution physics (landing drift + AMM impact + real fees/rent),
+not booking: BT stays 1%-slippage optimistic by design (VBUCKS-23:11 entry paid +19%
+over model on an intra-second spike). Fee escalation untouched (costs real SOL — needs
+paired measurement per the accept gate, not a unilateral change). Operations (binding
+after this audit): restart `main.py` after EVERY deploy and confirm the first
+`session_open`'s `code_commit` == HEAD; tripwire = any position held >~3 min past a
++10% peak with no `exit_signal`, or any heartbeat with `has_trade=true,
+engine_in_position=false`.
+
 ---
 
 ## Graveyard — do NOT re-test without a new data channel

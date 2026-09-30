@@ -238,6 +238,47 @@ JUPITER_SWAP_URL  = "https://lite-api.jup.ag/swap/v1/swap"
 JUPITER_API_TIMEOUT_S = 8.0
 WSOL_MINT         = "So11111111111111111111111111111111111111112"
 
+# ── Spike-premium skip guard (2026-09-30 handoff) ──────────────────────────
+# Vertical spikes move 5–50% in the ~2 s signal→fill window while the
+# backtester books the pre-spike print — buying them manufactures
+# model-positive/chain-negative flips (TRENCHDOTS #4, KAEDE #1, both proven
+# on-chain: accurate quotes, violent tape).  After a successful Jupiter
+# quote and BEFORE building the swap, compare the quote-implied price to
+# the BT-imprint anchor frozen at detection; skip (cleanly, no re-entry
+# block, no fail bookkeeping) when the premium exceeds the threshold.
+# OFF by default until a full-DB batch validates the selection effect
+# (it takes fewer trades than BT by design — report BT-all vs live-taken).
+SPIKE_GUARD_ENABLE = False
+SPIKE_GUARD_MAX_PREMIUM_PCT = 5.0
+
+
+def jupiter_quote_price_sol(amount_lamports: int, out_amount_raw,
+                            decimals: int) -> Optional[float]:
+    """Quoted price (SOL per token) from a Jupiter quote. None on bad input."""
+    try:
+        amount_lamports = int(amount_lamports)
+        out_amount_raw = int(out_amount_raw)
+        decimals = int(decimals)
+        if amount_lamports <= 0 or out_amount_raw <= 0 or decimals < 0:
+            return None
+        return (amount_lamports / 1e9) / (out_amount_raw / (10 ** decimals))
+    except (TypeError, ValueError):
+        return None
+
+
+def spike_premium_pct(quote_price_sol: float,
+                      anchor_price: Optional[float]) -> Optional[float]:
+    """Premium (%) of the executable quote over the BT-imprint anchor.
+    None when either side is unknown — callers must fail OPEN (trade)."""
+    try:
+        if not quote_price_sol or quote_price_sol <= 0:
+            return None
+        if not anchor_price or anchor_price <= 0:
+            return None
+        return (float(quote_price_sol) / float(anchor_price) - 1.0) * 100.0
+    except (TypeError, ValueError):
+        return None
+
 # ── Multi-RPC fanout ──────────────────────────────────────────────────────────
 # Broadcast every signed TX to ALL of these endpoints simultaneously.
 # If ANY one forwards it to a slot leader, the TX lands on-chain.
@@ -586,6 +627,19 @@ class LiveTrader:
         self.signal_capture = SignalCaptureJournal(
             self.journal.dir, engine_version)
         self._signal_capture_enabled: bool = True
+        # 2026-09-29 INU audit: point the engine's built-in per-state tick
+        # diagnostic at this session's dir (unless the caller pinned an
+        # explicit path via engine_kwargs).  One line per in-position
+        # engine.update: OHLC, entry/peak, Kramers K/P, direction, E*, tau,
+        # exit reason, streaks.  Write-only on the engine; the only record
+        # that shows the cascade's inputs on NON-signal states — exactly
+        # what was missing when a position sat silent for 33 minutes.
+        try:
+            if not getattr(self.engine, "_v2_debug_tick_log", ""):
+                self.engine._v2_debug_tick_log = str(
+                    self.journal.dir / "engine_ticks.jsonl")
+        except Exception:
+            pass
         self.buy_size_sol = buy_size_sol
         self.slippage_bps = slippage_bps
         # Buy-side budget is a fixed constant (BUY_SLIPPAGE_BPS): the sell-side
@@ -687,6 +741,13 @@ class LiveTrader:
         # exits.  Frozen at detection (instant) or when the boundary candle
         # arrives (deferred); consumed by confirm_sell.
         self._pending_exit_anchor: Optional[float] = None
+        # 2026-09-29 INU audit: anchor grade.  False = provisional freeze
+        # (target passed but the successor candle hasn't buffered yet, so the
+        # span saturates to 1 — e.g. a drain-launch ahead of the boundary
+        # candle); upgraded to a BT-exact re-freeze once a buffered time
+        # strictly greater than the target exists (same span the backtester
+        # resolves with).  confirm_sell consumes either grade.
+        self._pending_exit_anchor_exact: bool = False
         # iter91: the deferred exit's fill-target second — survives the launch
         # clearing _pending_exit / _pending_exit_delay_until_t so the anchor
         # still freezes if the launch ran early (drain) or the sell is still
@@ -734,6 +795,9 @@ class LiveTrader:
 
         self._last_price: float = 0.0
         self._token_decimals: int = 6  # pump.fun default
+        # 2026-09-30: True once decimals were confirmed by an on-chain read
+        # (the spike-premium guard refuses to price quotes otherwise).
+        self._token_decimals_verified: bool = False
         self._token_balance: int = 0   # raw token units held
         # True once the cached figure is on-chain-proven (balance probe or TX
         # ledger) rather than the provisional Jupiter outAmount — lets the
@@ -748,6 +812,28 @@ class LiveTrader:
         # by THIS trader's unresolved buy (buy_size + gas + rent).  Released
         # when the buy resolves (confirm or fail) — see wallet_*_reserve.
         self._sol_reserved: float = 0.0
+        # 2026-09-29 INU audit: count of engine percoin-log entries already
+        # journaled (see drain in _process_completed_candle).
+        self._percoin_drained: int = 0
+        # 2026-09-29 INU audit: last candle time an engine_heartbeat was
+        # journaled (see _process_completed_candle).
+        self._last_engine_heartbeat: int = 0
+        # 2026-09-30 debug audit: suppression telemetry.  Engine signals that
+        # arrive while a queue guard holds (position open, engine in position,
+        # already pending, …) are silently dropped by design — but silence is
+        # exactly what made the INU hold undebuggable.  `_suppress_last`
+        # throttles the journal (one `signal_suppressed` record per 60
+        # candle-s per key); `_suppressed_total` counts everything for the
+        # heartbeat.  Read-only/diagnostic: never gates trading.
+        self._suppress_last: dict = {}
+        self._suppressed_total: dict = {}
+        # 2026-09-30 debug audit: wall time the current exit was queued (for
+        # pending-age reporting in the heartbeat; buy side reuses
+        # `_pending_buy_ts`).
+        self._pending_exit_queued_ts: Optional[float] = None
+        # 2026-09-29 INU audit: wall time a trader/engine position mismatch
+        # was first seen (steady-state resync in _monitor_trade; None = none).
+        self._engine_desync_since: Optional[float] = None
 
         # iter94: True until this session's first buy confirms on-chain.  The
         # first buy of a fresh mint creates the token ATA (≈0.0015 SOL) and
@@ -1130,6 +1216,33 @@ class LiveTrader:
             except Exception:
                 pass
             self._sol_reserved = 0.0
+
+    def _note_suppressed(self, kind: str, detail: str,
+                         t: Optional[int] = None) -> None:
+        """Journal a dropped engine signal (throttled) + count it.
+
+        2026-09-30 debug audit: queue-guard drops were completely silent, so
+        "engine screaming but trader blocked" was indistinguishable from
+        "engine silent" (the INU post-mortem's central ambiguity).  One
+        `signal_suppressed` record per 60 candle-seconds per (kind, detail);
+        every occurrence counted into `_suppressed_total` for the heartbeat.
+        Diagnostic only — never gates, never blocks, never raises.
+        """
+        try:
+            key = (str(kind), str(detail))
+            self._suppressed_total[key] = int(
+                self._suppressed_total.get(key, 0)) + 1
+            now = int(t) if t is not None else 0
+            last, _ = self._suppress_last.get(key, (0, 0))
+            if last == 0 or (now > 0 and now - last >= 60):
+                self._suppress_last[key] = (now, 0)
+                self._journal_event(
+                    "signal_suppressed", signal=kind, detail=detail,
+                    candle_time=(now or None),
+                    suppressed_total=int(self._suppressed_total[key]),
+                )
+        except Exception:
+            pass
 
     def _get_fresh_blockhash(self) -> Optional[tuple]:
         """Return ``(blockhash, last_valid_block_height)`` if still fresh."""
@@ -1836,6 +1949,9 @@ class LiveTrader:
                 if decimals != self._token_decimals:
                     logger.info(f"[BAL] Token decimals detected: {decimals} (was {self._token_decimals})")
                     self._token_decimals = decimals
+                # 2026-09-30: decimals confirmed from an on-chain read (the
+                # spike-premium guard needs trustworthy decimals).
+                self._token_decimals_verified = True
                 return amount
             except Exception:
                 return None
@@ -1949,6 +2065,8 @@ class LiveTrader:
                             dec = int(value["decimals"])
                             if dec != self._token_decimals:
                                 self._token_decimals = dec
+                            # 2026-09-30: see above — on-chain confirmed.
+                            self._token_decimals_verified = True
                         return amt
                 except Exception:
                     return None
@@ -2077,6 +2195,51 @@ class LiveTrader:
                 self._journal_event("buy_rejected", reason=reason, error="jupiter_quote_failed")
                 await self._fail_buy_flat("Jupiter quote failed", reason)
                 return None
+
+            # ── Spike-premium skip guard (2026-09-30 handoff, OFF by default)
+            # A vertical spike moves the executable price far past the BT
+            # booking between signal and quote; buying it manufactures
+            # model-positive/chain-negative flips.  Skip CLEANLY here (before
+            # swap build/broadcast): no re-entry block, no fail bookkeeping,
+            # release the SOL reservation, unwind any engine-open the
+            # boundary hook may already have notified, journal the skip.
+            # Fail-open: any unknown (disabled flag, unverified decimals,
+            # missing anchor/quote) trades normally.
+            if SPIKE_GUARD_ENABLE and self._token_decimals_verified:
+                _anchor = self._pending_buy_anchor
+                _qpx = jupiter_quote_price_sol(
+                    amount_lam, quote.get("outAmount", 0),
+                    self._token_decimals)
+                _prem = spike_premium_pct(_qpx, _anchor)
+                if _prem is not None and _prem > SPIKE_GUARD_MAX_PREMIUM_PCT:
+                    logger.warning(
+                        f"[BUY SKIP] spike premium {_prem:.1f}% > "
+                        f"{SPIKE_GUARD_MAX_PREMIUM_PCT:.0f}% "
+                        f"(quote {_qpx:.4e} vs anchor {_anchor:.4e}) — skipping"
+                    )
+                    self._journal_event(
+                        "buy_skipped_spike_premium", reason=reason,
+                        quote_price_sol=_qpx, anchor_price=float(_anchor),
+                        premium_pct=round(_prem, 2),
+                        threshold_pct=SPIKE_GUARD_MAX_PREMIUM_PCT,
+                        quote_out_amount=quote.get("outAmount"),
+                    )
+                    self._release_sol_reserve()
+                    # Only unwind our own still-pending launch (never touch an
+                    # open/closing trade — e.g. an mcap emergency racing us).
+                    _ct = self.current_trade
+                    if _ct is not None and getattr(_ct, "status", "") == "pending" \
+                            and not getattr(_ct, "tx_hash_buy", ""):
+                        self.current_trade = None
+                    self._pending_buy = False
+                    self._pending_buy_reason = ""
+                    self._pending_buy_anchor = None
+                    self._buy_engine_open_pending = False
+                    self._buy_engine_open_boundary_t = None
+                    self._pending_buy_sig_t = None
+                    if getattr(self.engine, "in_position", False):
+                        self.engine.notify_trade_closed()
+                    return None
 
             swap_tx = await self._get_swap_tx(quote, priority_fee_override=fee)
             if not swap_tx:
@@ -3776,6 +3939,77 @@ class LiveTrader:
                         asyncio.ensure_future(self.execute_sell("watchdog_adopted_orphan"))
                         continue
 
+                # ── Position/engine steady-state resync (2026-09-29 INU) ──
+                # The trader and the engine must agree: trader holding an
+                # OPEN trade ⟺ engine in position.  Latency-mode boundary
+                # hooks keep them aligned candle-by-candle, but a missed hook
+                # leaves a SILENT hold: the trader sits on a bag the engine
+                # believes flat, so no exit cascade ever evaluates (INU
+                # rec-6244 trade-4: 33 min to −30% with zero signals while
+                # the backtester exited in 60 s).  Heal only unambiguous
+                # STEADY states — no pending signals, no in-flight swaps or
+                # buys, mismatch persisting 20 s (covers dead-tape gaps and
+                # normal settle windows; healthy hook→launch skew is <2 s) —
+                # and never during stops/teardown.  Healing also consumes
+                # the stale boundary-hook state so a late hook cannot
+                # double-notify afterwards and wipe the healed peak.
+                # Journaled as `engine_resync` (before/after) + console warn.
+                try:
+                    _ct = self.current_trade
+                    _open = bool(
+                        _ct is not None
+                        and getattr(_ct, "status", "") == "open")
+                    _eng = bool(getattr(self.engine, "in_position", False))
+                    _busy = bool(
+                        self._swap_in_flight or self._is_buy_pending()
+                        or self._pending_buy or self._pending_exit
+                        or self.mcap_stop_triggered
+                        or self.no_motion_stop_triggered
+                        or not self._alive)
+                    if _open == _eng or _busy:
+                        self._engine_desync_since = None
+                    else:
+                        _now = time.time()
+                        if self._engine_desync_since is None:
+                            self._engine_desync_since = _now
+                        elif _now - self._engine_desync_since >= 20.0:
+                            self._engine_desync_since = None
+                            if _open and not _eng:
+                                _anchor = float(
+                                    getattr(_ct, "entry_price", 0.0) or 0.0)
+                                if not _anchor > 0.0:
+                                    _anchor = float(self._last_price or 0.0)
+                                self.engine.notify_trade_opened(
+                                    _anchor, Direction.UP)
+                                self._buy_engine_open_pending = False
+                                self._buy_engine_open_boundary_t = None
+                                logger.warning(
+                                    f"[ENGINE RESYNC] trader OPEN but engine "
+                                    f"flat — re-notified open "
+                                    f"(entry={_anchor:.4e})"
+                                )
+                                self._journal_event(
+                                    "engine_resync", trade=_ct,
+                                    direction="heal_open",
+                                    engine_was_in_position=False,
+                                    healed_entry_price=_anchor,
+                                )
+                            elif _eng and not _open:
+                                self.engine.notify_trade_closed()
+                                self._exit_engine_close_pending = False
+                                self._exit_engine_close_boundary_t = None
+                                logger.warning(
+                                    "[ENGINE RESYNC] engine in position but "
+                                    "trader flat — notified closed"
+                                )
+                                self._journal_event(
+                                    "engine_resync",
+                                    direction="heal_close",
+                                    engine_was_in_position=True,
+                                )
+                except Exception:
+                    pass
+
                 if self.current_trade is None or self._swap_in_flight:
                     continue
 
@@ -4050,8 +4284,16 @@ class LiveTrader:
     engine_fill_slippage_pct: float = 1.0
 
     def _execute_pending_signals(self, t: int, so: float, sh: float,
-                                 sl: float, sc: float) -> None:
+                                 sl: float, sc: float,
+                                 via: str = "state") -> None:
         """Consume pending BUY/EXIT signals (engine notify + swap launch).
+
+        `via` records which path invoked the executor — "state" (intra-candle
+        4-state expansion), "retry" (candle-boundary retry pass in update()),
+        or "drain" (post-settle drain with synthetic tuple prices) — purely
+        for the `signal_launch` journal record (2026-09-30 debug audit: the
+        INU booking forensics hinged on drain-vs-state launch timing, which
+        was unobservable).
 
         Since the 2026-08-30 signal-instant change this is primarily the
         RETRY path: _queue_signal_from_state fires newly detected signals
@@ -4101,23 +4343,47 @@ class LiveTrader:
         # `_resolve_latency_fill` instead: resolve at the first state with
         # t > target via `_path_price_at` interpolation (containing candle +
         # successor span), which is defined on sparse tapes.
-        if (self._exit_anchor_target_t is not None
-                and self._pending_exit_anchor is None):
+        # 2026-09-29 INU audit: two-tier freeze.  The old exact-only rule
+        # missed sparse targets (koinu +14% model booking); the 09-28 sparse
+        # rule froze at launch with an INCOMPLETE buffer (successor missing
+        # → span saturates to 1 → wrong intrabar position on wicked
+        # candles: INU trade-3 booked 1.5450e-07 vs BT 1.4987e-07).
+        # Tier A (BT-exact): a buffered time strictly greater than the
+        # target exists — the span matches ForwardTester._resolve_latency_fill
+        # exactly (it resolves at the first update past the target, with the
+        # successor already buffered).  Overwrites a provisional freeze.
+        # Tier B (provisional): first call past the target freezes
+        # best-effort so a fast confirm still books a target-anchored fill
+        # instead of the `_last_price` fallback; upgraded by Tier A later.
+        # Launch timing is untouched (t-clock, as before).
+        if self._exit_anchor_target_t is not None and (
+                self._pending_exit_anchor is None
+                or not self._pending_exit_anchor_exact):
             _tgt = float(self._exit_anchor_target_t)
-            _exact = int(self._exit_anchor_target_t) in self._fill_path_candles
-            _sparse_ready = False
-            if not _exact and t is not None and float(t) > _tgt \
-                    and self._fill_path_times:
+            _buf = self._fill_path_times
+            _exact_grade = False
+            if _buf:
                 import bisect as _bisect
-                _idx = _bisect.bisect_right(
-                    self._fill_path_times, int(_tgt)) - 1
-                _sparse_ready = _idx >= 0
-            if _exact or _sparse_ready:
+                _idx = _bisect.bisect_right(_buf, int(_tgt)) - 1
+                _exact_grade = _idx >= 0 and (_idx + 1) < len(_buf)
+            if _exact_grade:
                 raw = self._path_price_at(self._exit_anchor_target_t)
                 self._exit_anchor_target_t = None
                 if raw > 0:
                     self._pending_exit_anchor = raw * (
                         1.0 - self.engine_fill_slippage_pct / 100.0)
+                    self._pending_exit_anchor_exact = True
+            elif self._pending_exit_anchor is None:
+                _t = float(t) if t is not None else None
+                if _t is not None and _t > _tgt:
+                    raw = self._path_price_at(self._exit_anchor_target_t)
+                    # NOTE: target intentionally NOT cleared — Tier A still
+                    # needs it for the BT-exact upgrade once the successor
+                    # buffers (confirm_sell clears it).
+                    if raw > 0:
+                        self._pending_exit_anchor = raw * (
+                            1.0 - self.engine_fill_slippage_pct / 100.0)
+                        self._pending_exit_anchor_exact = False
 
         # ── iter90j: engine position-state boundaries (BT latency mirror) ──
         # Latency mode only: runs BEFORE the engine consumes this state —
@@ -4128,19 +4394,48 @@ class LiveTrader:
         if t is not None and self._bt_latency_mode:
             if (self._buy_engine_open_pending
                     and float(t) > float(self._buy_engine_open_boundary_t)):
+                _open_boundary = self._buy_engine_open_boundary_t
                 self._buy_engine_open_pending = False
                 self._buy_engine_open_boundary_t = None
+                # 2026-09-29 INU audit: do NOT consume the frozen anchor /
+                # sig second here.  The pending launch below still needs them
+                # (BT books the detection-frozen fill, not the launch-state
+                # price); consuming first made the launch fall back to
+                # launch-state sc and stamp entry at the launch candle, so
+                # trader booking and engine baseline disagreed (INU trade-4:
+                # trader 1.55534e-07 vs engine/BT 1.55593e-07).  The launch
+                # clears both after use; _fail_buy_flat/close cover the rest.
                 anchor = self._pending_buy_anchor
-                self._pending_buy_anchor = None
-                self._pending_buy_sig_t = None
                 self.engine.notify_trade_opened(
                     anchor if anchor is not None else self._last_price,
                     Direction.UP)
+                # 2026-09-30 debug audit: journal hook firings — the notify
+                # layer was invisible, so a missed hook (trader holding while
+                # engine stays flat) could only be inferred, never seen.
+                try:
+                    self._journal_event(
+                        "engine_boundary", direction="open",
+                        candle_time=int(t),
+                        boundary_t=_open_boundary,
+                        price=float(anchor) if anchor is not None else None,
+                    )
+                except Exception:
+                    pass
             if (self._exit_engine_close_pending
                     and float(t) > float(self._exit_engine_close_boundary_t)):
+                _close_boundary = self._exit_engine_close_boundary_t
                 self._exit_engine_close_pending = False
                 self._exit_engine_close_boundary_t = None
                 self.engine.notify_trade_closed()
+                # 2026-09-30 debug audit: see above.
+                try:
+                    self._journal_event(
+                        "engine_boundary", direction="close",
+                        candle_time=int(t),
+                        boundary_t=_close_boundary,
+                    )
+                except Exception:
+                    pass
 
         if self._pending_buy:
             if self.current_trade is None and not self._swap_in_flight \
@@ -4185,6 +4480,35 @@ class LiveTrader:
                     fill = sc * (1.0 + self.engine_fill_slippage_pct / 100.0)
                 entry_t = (self._pending_buy_sig_t
                            if self._pending_buy_sig_t is not None else t)
+                # 2026-09-29 INU audit (corrected 09-30): the launch READS
+                # but does NOT consume the frozen anchor/sig second — like
+                # the boundary hook above, which also reads without
+                # consuming.  Whichever runs first (hook-first on blocked
+                # launches, launch-first on instant ones), the other still
+                # sees the detection-frozen values, so trader booking,
+                # engine baseline, and BT always agree.  (Consuming at either
+                # site starves the other: hook-consume broke drain-launches,
+                # launch-consume would break the hook.)  Values are
+                # overwritten wholesale at the next detection and cleared on
+                # fail/close paths.
+                # 2026-09-30 debug audit: journal the launch context — which
+                # path launched (state/retry/drain) and whether the fill came
+                # from the frozen anchor or the sc fallback.  The INU booking
+                # forensics hinged on exactly this and it was unobservable.
+                _fill_from_anchor = self._pending_buy_anchor is not None
+                try:
+                    self._journal_event(
+                        "signal_launch", side="buy", reason=buy_reason,
+                        sig_t=(int(entry_t) if _fill_from_anchor
+                               and entry_t is not None else None),
+                        launch_t=(int(t) if t is not None else None),
+                        via=via,
+                        fill_source=("anchor" if _fill_from_anchor
+                                     else "sc_fallback"),
+                        fill_price=float(fill) if fill else None,
+                    )
+                except Exception:
+                    pass
                 trade = LiveTrade(
                     token_mint=self.token_mint,
                     entry_time=int(entry_t) if entry_t is not None else t,
@@ -4257,6 +4581,26 @@ class LiveTrader:
                 self.engine.notify_trade_closed()
             self._pending_exit = False
             self._pending_exit_reason = ""
+            self._pending_exit_queued_ts = None
+            # 2026-09-30 debug audit: journal the launch context (see buy
+            # launch above).  Anchor state at launch tells whether confirm
+            # will book a frozen (exact/provisional), instant, or fallback
+            # fill — the other half of the INU booking forensics.
+            try:
+                self._journal_event(
+                    "signal_launch", side="exit", reason=exit_reason,
+                    launch_t=(int(t) if t is not None else None),
+                    via=via,
+                    anchor_state=(
+                        "frozen_exact"
+                        if self._pending_exit_anchor is not None
+                        and self._pending_exit_anchor_exact else
+                        "frozen_provisional"
+                        if self._pending_exit_anchor is not None else
+                        "instant_or_fallback"),
+                )
+            except Exception:
+                pass
 
             asyncio.ensure_future(self.execute_sell(exit_reason))
 
@@ -4373,6 +4717,8 @@ class LiveTrader:
                         f"[BUY BLOCK] BUY signal suppressed — re-entry block "
                         f"active for another {remaining:.0f}s (after failed buy)"
                     )
+                # 2026-09-30 debug audit: journal the drop too (throttled).
+                self._note_suppressed("buy", "buy_fail_block", t)
                 self._pending_buy = False
                 self._pending_buy_reason = ""
                 self._pending_buy_anchor = None
@@ -4485,6 +4831,7 @@ class LiveTrader:
                     reason = "trend_exit"
             self._pending_exit = True
             self._pending_exit_reason = reason
+            self._pending_exit_queued_ts = time.time()
             self._pending_buy = False
             self._pending_buy_anchor = None
             # Signal-time parameter capture: freeze the exit-cascade
@@ -4521,6 +4868,7 @@ class LiveTrader:
             # anchor freezes there (top of _execute_pending_signals), not here.
             if self._pending_exit_delay_until_t > 0.0:
                 self._pending_exit_anchor = None
+                self._pending_exit_anchor_exact = False
                 self._exit_anchor_target_t = self._pending_exit_delay_until_t
             elif so is not None:
                 # iter91: instant (loss-book) exits book at the backtester's
@@ -4535,6 +4883,33 @@ class LiveTrader:
             # Instant execution: fire the sell on THIS state's prices.
             self._execute_pending_signals(t, so, sh, sl, sc)
 
+        elif detected_signal == Signal.BUY.value:
+            # 2026-09-30 debug audit: a BUY the engine emitted but the queue
+            # dropped (guard below held).  Silent by design — but silence is
+            # what made the INU hold undebuggable, so record WHICH guard
+            # held (throttled 1/60 candle-s per key; every occurrence
+            # counted).  Read-only: the guards themselves are untouched.
+            if self._pending_buy:
+                self._note_suppressed("buy", "already_pending", t)
+            elif getattr(self.engine, "in_position", False):
+                self._note_suppressed("buy", "engine_in_position", t)
+            else:
+                _st = getattr(self.current_trade, "status", "") or ""
+                if self.current_trade is not None and _st != "closing":
+                    self._note_suppressed(
+                        "buy", f"position_open:{_st or 'open'}", t)
+        elif detected_signal == Signal.EXIT.value:
+            # 2026-09-30 debug audit: same for EXIT signals that never became
+            # pending (no position / already pending / already closing).
+            # An engine screaming EXIT into `no_position` while the trader
+            # holds a bag would be a desync fingerprint — this makes it one.
+            if self.current_trade is None:
+                self._note_suppressed("exit", "no_position", t)
+            elif self._pending_exit:
+                self._note_suppressed("exit", "already_pending", t)
+            else:
+                self._note_suppressed("exit", "already_closing", t)
+
     def _drain_pending_signals(self) -> None:
         """Retry pending signals after a swap settled (sell confirmed / buy
         failed) so a re-entry queued in the meantime fires immediately
@@ -4545,7 +4920,7 @@ class LiveTrader:
         else:
             t, c = int(time.time()), self._last_price
         try:
-            self._execute_pending_signals(t, c, c, c, c)
+            self._execute_pending_signals(t, c, c, c, c, via="drain")
         except Exception as e:
             logger.debug(f"[DRAIN] pending-signal retry error: {e}")
 
@@ -4696,6 +5071,92 @@ class LiveTrader:
                 self._last_motion_ts = time.time()
 
         self.completed_candle_count += 1
+        # 2026-09-29 INU audit: drain the engine's online-recalibration log
+        # into the journal.  A mid-session coefficient rewrite silently
+        # moves the live trajectory off the backtest (which calibrates once
+        # at the anchor) — without this record such drift is invisible.
+        # Cheap: one len() per candle, emits only on new entries.
+        try:
+            _pclog = getattr(self.engine, "_percoin_log", None) or []
+            _pcdone = int(getattr(self, "_percoin_drained", 0) or 0)
+            if len(_pclog) > _pcdone:
+                for _ev in _pclog[_pcdone:]:
+                    self._journal_event(
+                        "recalibration",
+                        percoin=dict(_ev) if isinstance(_ev, dict) else {"raw": str(_ev)},
+                    )
+                self._percoin_drained = len(_pclog)
+        except Exception:
+            pass
+        # 2026-09-29 INU audit: engine heartbeat.  A position held with no
+        # engine signal for many minutes is undebuggable post-hoc from
+        # signals alone (absence of evidence).  One small record per 15
+        # candle-seconds captures position/entry/peak/counters so the next
+        # silent-hold is diagnosable in one glance (flat vs positioned vs
+        # starved engine).  Period is 15 s, not 60 s, because the INU
+        # decision window (entry to expected exit) was only 39 s.
+        try:
+            if int(t) - int(getattr(self, "_last_engine_heartbeat", 0) or 0) >= 15:
+                self._last_engine_heartbeat = int(t)
+                _ct = self.current_trade
+                _now = time.time()
+                # 2026-09-30 debug audit: pending ages — a queued-but-never-
+                # launched signal (stuck swap guard, dead drain) is otherwise
+                # invisible between queue and launch journal records.
+                _buy_age = None
+                _pbts = getattr(self, "_pending_buy_ts", None)
+                if self._pending_buy and _pbts:
+                    _buy_age = round(_now - float(_pbts), 1)
+                _exit_age = None
+                _pets = getattr(self, "_pending_exit_queued_ts", None)
+                if self._pending_exit and _pets:
+                    _exit_age = round(_now - float(_pets), 1)
+                # 2026-09-30 debug audit: flat-state decision snapshot — the
+                # engine tick log only covers in-position states, so a flat
+                # engine's posture (direction/confidence/decisions) had no
+                # record.  All getattr-guarded (V1-safe); read-only.
+                _eng_in_pos = bool(getattr(self.engine, "in_position", False))
+                _dec = {}
+                if not _eng_in_pos:
+                    try:
+                        _v2d = getattr(self.engine, "_v2_last_decision", None) or {}
+                        _dec = {
+                            "direction": _v2d.get("direction"),
+                            "P_up": round(float(_v2d.get("P_up", 0.0) or 0.0), 4),
+                            "E_star": round(float(_v2d.get("E_star", 0.0) or 0.0), 4),
+                        }
+                    except Exception:
+                        _dec = {}
+                    try:
+                        _dec["confidence"] = round(
+                            float(getattr(self.engine, "trend_confidence", 0.0) or 0.0), 4)
+                        _dec["regime"] = str(
+                            getattr(getattr(self.engine, "regime", ""), "value", "") or "")
+                    except Exception:
+                        pass
+                self._journal_event(
+                    "engine_heartbeat",
+                    candle_time=int(t),
+                    engine_in_position=_eng_in_pos,
+                    engine_entry_price=float(getattr(self.engine, "entry_price", 0.0) or 0.0),
+                    engine_peak_price=float(getattr(self.engine, "_peak_price", 0.0) or 0.0),
+                    engine_bar_count=int(getattr(self.engine, "bar_count", 0) or 0),
+                    has_trade=bool(_ct is not None),
+                    trade_status=(getattr(_ct, "status", "") or ""),
+                    pending_exit=bool(self._pending_exit),
+                    pending_buy=bool(self._pending_buy),
+                    pending_buy_age_s=_buy_age,
+                    pending_exit_age_s=_exit_age,
+                    flat_decision=_dec,
+                    # tuple keys would break journal JSON — flatten them.
+                    suppressed_total={
+                        f"{k[0]}:{k[1]}": int(v)
+                        for k, v in (getattr(
+                            self, "_suppressed_total", None) or {}).items()
+                    },
+                )
+        except Exception:
+            pass
         return result
 
     def check_immediate_holder_flow_exit(self) -> Optional[str]:
@@ -4880,7 +5341,7 @@ class LiveTrader:
             # Retry pass: any signal that could not execute instantly (swap
             # in flight, re-entry block, stop) gets another chance here with
             # the new candle's open as the price basis.
-            self._execute_pending_signals(time_val, o, o, o, o)
+            self._execute_pending_signals(time_val, o, o, o, o, via="retry")
 
             # Surface whatever the pending executor did for the UI payload.
             trade_action = self._last_trade_action
@@ -5014,6 +5475,7 @@ class LiveTrader:
         slip_frac = self.engine_fill_slippage_pct / 100.0
         exit_anchor = self._pending_exit_anchor
         self._pending_exit_anchor = None
+        self._pending_exit_anchor_exact = False
         self._exit_anchor_target_t = None
         if exit_anchor is None:
             # Risk stops / manual sells (accepted parity exceptions) never
@@ -5097,6 +5559,7 @@ class LiveTrader:
         # backtester which never defers a queued signal.
         self._pending_exit = False
         self._pending_exit_reason = ""
+        self._pending_exit_queued_ts = None
         try:
             asyncio.ensure_future(self._drain_after_settle())
         except RuntimeError:

@@ -37,6 +37,49 @@ def _safe(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", name)
 
 
+_code_commit_cache: Optional[str] = None
+_code_dirty_cache: Optional[bool] = None
+
+
+def _code_commit() -> str:
+    """Short git commit of the running tree (best-effort, cached per process).
+
+    2026-09-29 INU audit: a session whose booked fills don't match the
+    backtester is undebuggable without knowing EXACTLY which code ran
+    (restart-after-deploy is manual).  Stamped into every session_open.
+    """
+    global _code_commit_cache
+    if _code_commit_cache is None:
+        try:
+            import subprocess
+            here = str(Path(__file__).parent)
+            out = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=here, capture_output=True, text=True, timeout=5,
+            )
+            _code_commit_cache = out.stdout.strip()[:12] or "unknown"
+        except Exception:
+            _code_commit_cache = "unknown"
+    return _code_commit_cache
+
+
+def _code_dirty() -> bool:
+    """Whether the running tree had uncommitted changes (best-effort)."""
+    global _code_dirty_cache
+    if _code_dirty_cache is None:
+        try:
+            import subprocess
+            here = str(Path(__file__).parent)
+            out = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=here, capture_output=True, text=True, timeout=5,
+            )
+            _code_dirty_cache = bool(out.stdout.strip())
+        except Exception:
+            _code_dirty_cache = False
+    return bool(_code_dirty_cache)
+
+
 class SessionJournal:
     """Owns one session's log files.  Not shared between sessions."""
 
@@ -68,6 +111,8 @@ class SessionJournal:
         self.event("session_open", {
             "token_mint": token_mint,
             "wallet": wallet,
+            "code_commit": _code_commit(),
+            "code_dirty": _code_dirty(),
             **(meta or {}),
         })
 
