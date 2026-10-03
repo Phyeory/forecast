@@ -513,6 +513,10 @@ class LiveTraderStats:
     # of the wallet attributable to this session's round trips.  Failed-tx
     # fee burns are journaled (swap_failed / sell journal) but are not in
     # the stats counters — the audit bridge reconciles them.
+    #   wallet_delta_ex_rent_sol — the DISPLAY number (user directive
+    # 2026-10-03): same ledger calculation with ATA rent ignored — rent
+    # parked in token ATAs is not a trading loss, the user reclaims it
+    # manually after every session.  Purely ledger-derived; no wallet reads.
     total_cash_pnl_sol: float = 0.0
     total_fees_sol: float = 0.0
     total_rent_sol: float = 0.0
@@ -522,6 +526,9 @@ class LiveTraderStats:
         d = asdict(self)
         d["wallet_delta_sol"] = (
             self.total_cash_pnl_sol - self.total_fees_sol - self.total_rent_sol
+        )
+        d["wallet_delta_ex_rent_sol"] = (
+            self.total_cash_pnl_sol - self.total_fees_sol
         )
         return d
 

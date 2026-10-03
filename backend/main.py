@@ -1447,6 +1447,7 @@ class _LiveSession:
                 "winning_trades": 0, "losing_trades": 0, "engines": [],
                 "total_cash_pnl_sol": 0.0, "total_fees_sol": 0.0,
                 "total_rent_sol": 0.0, "wallet_delta_sol": 0.0,
+                "wallet_delta_ex_rent_sol": 0.0,
             }
             for ev, _tr in zip(self.engine_versions, traders):
                 _s = _tr.stats.to_dict()
@@ -1458,6 +1459,8 @@ class _LiveSession:
                 _fleet_stats["total_fees_sol"] += float(_s.get("total_fees_sol", 0.0))
                 _fleet_stats["total_rent_sol"] += float(_s.get("total_rent_sol", 0.0))
                 _fleet_stats["wallet_delta_sol"] += float(_s.get("wallet_delta_sol", 0.0))
+                _fleet_stats["wallet_delta_ex_rent_sol"] += float(
+                    _s.get("wallet_delta_ex_rent_sol", 0.0))
                 _fleet_stats["engines"].append({"engine_version": ev, "stats": _s})
             _completed_live_sessions.append({
                 "mint": real_mint,
@@ -1960,11 +1963,14 @@ async def live_status():
             "tokens_traded": len(seen_mints),
             # iter95 display truth: wallet-basis aggregates.  total_pnl_sol
             # is the backtest-basis model PnL; wallet_delta_sol is the
-            # all-in wallet change (cash − fees − net rent).
+            # all-in wallet change (cash − fees − net rent); the ex-rent
+            # form (display surface, user directive 2026-10-03) drops the
+            # stranded ATA rent the user reclaims manually.
             "total_cash_pnl_sol": round(total_cash_pnl, 6),
             "total_fees_sol": round(total_fees, 6),
             "total_rent_sol": round(total_rent, 6),
             "wallet_delta_sol": round(total_cash_pnl - total_fees - total_rent, 6),
+            "wallet_delta_ex_rent_sol": round(total_cash_pnl - total_fees, 6),
         },
         "trades": _server_trade_events,
     })

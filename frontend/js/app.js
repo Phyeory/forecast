@@ -1841,11 +1841,12 @@ function updateSessionStats(summary = null, serverTraders = null) {
     wr = _ltServerSummary.win_rate || 0;
     trades = _ltServerSummary.total_trades || 0;
     tokens = _ltServerSummary.tokens_traded || 0;
-    // iter95 display truth: all-in wallet change (cash − fees − net rent).
-    walletDelta = _ltServerSummary.wallet_delta_sol ?? (
+    // Display truth: Wallet Δ ignores ATA rent — the user reclaims it
+    // manually after every session, so rent parked in token ATAs is not a
+    // trading loss.
+    walletDelta = _ltServerSummary.wallet_delta_ex_rent_sol ?? (
       (_ltServerSummary.total_cash_pnl_sol || 0)
       - (_ltServerSummary.total_fees_sol || 0)
-      - (_ltServerSummary.total_rent_sol || 0)
     );
   } else {
     // No server round-trip yet (very first page load) — approximate from the
@@ -1858,8 +1859,8 @@ function updateSessionStats(summary = null, serverTraders = null) {
       upnl += t.unrealizedPnl || 0;
       wins += st.winning_trades || 0;
       trades += st.total_trades || 0;
-      walletDelta += st.wallet_delta_sol ?? (
-        (st.total_cash_pnl_sol || 0) - (st.total_fees_sol || 0) - (st.total_rent_sol || 0)
+      walletDelta += st.wallet_delta_ex_rent_sol ?? (
+        (st.total_cash_pnl_sol || 0) - (st.total_fees_sol || 0)
       );
     }
     wr = trades > 0 ? (wins / trades) * 100 : 0;
@@ -1887,7 +1888,7 @@ function updateSessionStats(summary = null, serverTraders = null) {
   const wEl = $("lts-wallet");
   if (wEl) {
     wEl.textContent = fmt(walletDelta); wEl.className = "bt-stat-value " + cls(walletDelta);
-    wEl.title = "Wallet Δ — all-in wallet change: realized swap cash minus actual chain fees minus persistent account rent";
+    wEl.title = "Wallet Δ — realized swap cash minus actual chain fees (ATA rent excluded; user reclaims it manually after every session)";
   }
   $("lts-wr").textContent = `${wr.toFixed(1)}%`;
   $("lts-trades").textContent = trades;
@@ -1997,17 +1998,18 @@ function updateTraderCard(mint) {
     rb.style.display = "none";
   }
 
-  // iter95 display truth: Wallet Δ alongside the model PnL (falls back to
-  // cash − fees − rent when the server predates the derived field).
-  const wDelta = st.wallet_delta_sol ?? (
-    (st.total_cash_pnl_sol || 0) - (st.total_fees_sol || 0) - (st.total_rent_sol || 0)
+  // Display truth: Wallet Δ alongside the model PnL. Excludes ATA rent —
+  // the user reclaims it manually after every session (falls back to
+  // cash − fees when the server predates the field).
+  const wDelta = st.wallet_delta_ex_rent_sol ?? (
+    (st.total_cash_pnl_sol || 0) - (st.total_fees_sol || 0)
   );
   const wClass = wDelta >= 0 ? "pos" : "neg";
   document.getElementById(`lt-stats-${mint}`).innerHTML = `
     <div class="bt-stat"><span class="bt-stat-label">Trades</span><span class="bt-stat-value">${st.total_trades || 0}</span></div>
     <div class="bt-stat"><span class="bt-stat-label">Win Rate</span><span class="bt-stat-value">${(st.win_rate || 0).toFixed(1)}%</span></div>
     <div class="bt-stat"><span class="bt-stat-label" title="Model PnL — backtest-basis booking">Model</span><span class="bt-stat-value ${pnlClass}">${(st.total_pnl_sol || 0) >= 0 ? "+" : ""}${(st.total_pnl_sol || 0).toFixed(4)}</span></div>
-    <div class="bt-stat"><span class="bt-stat-label" title="Wallet Δ — swap cash minus chain fees minus persistent rent">Wallet Δ</span><span class="bt-stat-value ${wClass}">${wDelta >= 0 ? "+" : ""}${wDelta.toFixed(4)}</span></div>
+    <div class="bt-stat"><span class="bt-stat-label" title="Wallet Δ — swap cash minus chain fees (ATA rent excluded; user reclaims it manually)">Wallet Δ</span><span class="bt-stat-value ${wClass}">${wDelta >= 0 ? "+" : ""}${wDelta.toFixed(4)}</span></div>
   `;
 
   document.getElementById(`lt-upnl-${mint}`).innerHTML = hasPos ? `
