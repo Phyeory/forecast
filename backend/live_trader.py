@@ -458,6 +458,8 @@ class LiveTrade:
     exit_price: Optional[float] = None
     pnl_sol: float = 0.0
     pnl_pct: float = 0.0
+    modeled_pnl_sol: float = 0.0
+    modeled_pnl_pct: float = 0.0
     exit_reason: str = ""
     entry_reason: str = ""
     tx_hash_sell: str = ""
@@ -2976,6 +2978,14 @@ class LiveTrader:
             meta = result.get("meta") or {}
             if meta.get("err"):
                 return None
+            pre_by_account = {}
+            for tb in meta.get("preTokenBalances") or []:
+                if (tb.get("mint") == self.token_mint
+                        and tb.get("owner") == self.wallet_pubkey):
+                    amt = (tb.get("uiTokenAmount") or {}).get("amount")
+                    if amt is not None:
+                        pre_by_account[tb.get("accountIndex")] = int(amt)
+
             total = 0
             found = False
             for tb in meta.get("postTokenBalances") or []:
@@ -2984,7 +2994,8 @@ class LiveTrader:
                     amt = (tb.get("uiTokenAmount") or {}).get("amount")
                     if amt is not None:
                         found = True
-                        total += int(amt)
+                        total += int(amt) - pre_by_account.get(
+                            tb.get("accountIndex"), 0)
             return total if found else None
         except Exception as e:
             logger.warning(f"[BUY VERIFY] postTokenBalances parse failed for {sig[:8]}…: {e}")
@@ -3286,49 +3297,11 @@ class LiveTrader:
                 token_balance = self._token_balance
                 ct = self.current_trade
                 _exact_known = False
-                if ct and ct.tx_hash_buy and not self._token_balance_verified:
-                    try:
-                        exact = await self._get_tx_token_delivered(ct.tx_hash_buy)
-                    except Exception:
-                        exact = None
-                    if exact and (token_balance <= 0 or exact < token_balance):
-                        logger.info(
-                            f"[SELL] Clamping cached balance to buy-TX ledger "
-                            f"(exact delivery): {token_balance} → {exact} units"
-                        )
-                        token_balance = exact
-                        self._token_balance = exact
-                        self._cached_token_balance = exact
-                        _exact_known = True
-                if token_balance > 0 and not self._token_balance_verified \
-                        and not _exact_known:
-                    # 2026-09-28 consolidation: quoting a PROVISIONAL
-                    # (quote-inflated 0.3–2%) amount is a guaranteed first-
-                    # attempt 6024.  Haircut 3% PROACTIVELY instead of
-                    # burning a full TX cycle to discover it reactively —
-                    # the residual dust is swept by _verify_sell_settled /
-                    # watchdog exactly like the old probe-trim residue.
-                    _haircut = int(token_balance * 0.97)
-                    if _haircut > 0:
-                        logger.info(
-                            f"[SELL] Provisional balance haircut (unverified, "
-                            f"no ledger figure): {token_balance} → {_haircut} units"
-                        )
-                        self._journal_event(
-                            "sell_provisional_haircut", reason=reason,
-                            cached_balance=token_balance, quoted_balance=_haircut,
-                        )
-                        token_balance = _haircut
-                        self._token_balance = _haircut
-                        self._cached_token_balance = _haircut
 
-            # 2026-09-28 consolidation: post-mutex CONFIRMED truth.  A sibling
-            # engine may have sold while this seller waited for the fleet
-            # slot — clamp DOWN to the confirmed balance (monotonic: a
-            # lagging read must never ratchet the amount back UP over
-            # already-sold tokens, which restarts the 6024 chain).
-            # Skipped for verified sole-claimant sellers (no sibling exists
-            # to race; keeps the exit hot path free of the extra RPC read).
+            # 2026-09-28 consolidation + 2026-10-03 fix: confirmed balance truth.
+            # If the balance is unverified, fetch the confirmed on-chain balance
+            # FIRST before quoting.  Never apply a blind proactive haircut before
+            # querying the chain and discard the true confirmed figure.
             _needs_truth_read = (not self._token_balance_verified) or (
                 fleet_trader_count(self.wallet_pubkey, self.token_mint) > 1)
             if _needs_truth_read:
@@ -3337,15 +3310,53 @@ class LiveTrader:
                         commitment="confirmed")
                 except Exception:
                     _post_mutex_bal = 0
-                if _post_mutex_bal > 0 and _post_mutex_bal < token_balance:
+                if _post_mutex_bal > 0:
+                    _fleet_cnt = fleet_trader_count(self.wallet_pubkey, self.token_mint)
+                    if _fleet_cnt <= 1 or token_balance <= 0 or _post_mutex_bal < token_balance:
+                        logger.info(
+                            f"[SELL] Adopting confirmed on-chain balance: "
+                            f"{token_balance} → {_post_mutex_bal} units"
+                        )
+                        token_balance = _post_mutex_bal
+                        self._token_balance = _post_mutex_bal
+                        self._cached_token_balance = _post_mutex_bal
+                        self._token_balance_verified = True
+                        _exact_known = True
+
+            # If still unverified (RPC returned 0 or timed out), try the buy-TX ledger
+            if ct and ct.tx_hash_buy and not self._token_balance_verified and not _exact_known:
+                try:
+                    exact = await self._get_tx_token_delivered(ct.tx_hash_buy)
+                except Exception:
+                    exact = None
+                if exact and (token_balance <= 0 or exact < token_balance):
                     logger.info(
-                        f"[SELL] Post-mutex confirmed clamp: "
-                        f"{token_balance} → {_post_mutex_bal} units"
+                        f"[SELL] Clamping cached balance to buy-TX ledger "
+                        f"(exact delivery): {token_balance} → {exact} units"
                     )
-                    token_balance = _post_mutex_bal
-                    self._token_balance = _post_mutex_bal
-                    self._cached_token_balance = _post_mutex_bal
+                    token_balance = exact
+                    self._token_balance = exact
+                    self._cached_token_balance = exact
                     self._token_balance_verified = True
+                    _exact_known = True
+
+            # Degraded fallback: ONLY when on-chain confirmed read failed AND buy TX
+            # could not be indexed yet, apply a provisional haircut to the unverified
+            # estimate to prevent custom 6024.
+            if token_balance > 0 and not self._token_balance_verified and not _exact_known:
+                _haircut = int(token_balance * 0.97)
+                if _haircut > 0:
+                    logger.warning(
+                        f"[SELL] Provisional balance haircut (unverified, RPC/ledger "
+                        f"unavailable): {token_balance} → {_haircut} units"
+                    )
+                    self._journal_event(
+                        "sell_provisional_haircut", reason=reason,
+                        cached_balance=token_balance, quoted_balance=_haircut,
+                    )
+                    token_balance = _haircut
+                    self._token_balance = _haircut
+                    self._cached_token_balance = _haircut
 
             if token_balance <= 0:
                 # No on-chain balance AND no cached balance.  Do NOT give up —
@@ -5489,24 +5500,15 @@ class LiveTrader:
         basis = trade.size_sol if trade.size_sol > 0 else trade.cost_sol
         trade.cash_pnl_sol = (sol_received - basis) if basis > 0 else sol_received
 
-        # ── iter91 backtester-basis booking ──────────────────────────────────
-        # The recorded result is the backtester's _close_long formula on the
-        # SAME fill anchors (entry_price was booked as the signal candle's
-        # open × (1+slip) at detection; exit as the fill-instant tape price ×
-        # (1−slip)):  tokens = size/entry_exec, proceeds = tokens·exit_exec −
-        # fees, pnl = proceeds − size, pnl_pct = pnl/size·100, win iff pnl>0.
-        # Cash flows (cost_sol / cash_sol_received / cash_pnl_sol) keep the
-        # wallet truth — the tape basis is ~pool-depth-discounted vs real
-        # fills, so booked and cash PnL legitimately differ.
+        # ── backtester-basis booking ─────────────────────────────────────────
+        # Keep the tape/model booking as a diagnostic comparison.  The
+        # authoritative trade PnL is the confirmed on-chain cash result below.
         slip_frac = self.engine_fill_slippage_pct / 100.0
         exit_anchor = self._pending_exit_anchor
         self._pending_exit_anchor = None
         self._pending_exit_anchor_exact = False
         self._exit_anchor_target_t = None
         if exit_anchor is None:
-            # Risk stops / manual sells (accepted parity exceptions) never
-            # armed a deferred hold — book them on the current tape price so
-            # they stay on the same basis as engine exits.
             base = self._last_price or actual_price
             exit_anchor = (base * (1.0 - slip_frac)) if base else actual_price
         trade.exit_price = exit_anchor
@@ -5521,21 +5523,23 @@ class LiveTrader:
             # notional-invariant, so a 0.01 SOL live run compares directly to
             # a 0.1 SOL batch run (the absolute-fee form would overstate the
             # drag 10x at the smaller notional).
-            fees = basis * 0.002
+            fees = basis * 0.001
             trade.fee_sol = fees
             tokens = basis / entry_exec
             proceeds = tokens * exit_anchor
-            trade.pnl_sol = proceeds - fees - basis
-            trade.pnl_pct = (trade.pnl_sol / basis) * 100
+            trade.modeled_pnl_sol = proceeds - fees - basis
+            trade.modeled_pnl_pct = (trade.modeled_pnl_sol / basis) * 100
         else:
-            trade.pnl_sol = trade.cash_pnl_sol
+            trade.modeled_pnl_sol = trade.cash_pnl_sol
             # Zero-basis trades (adopted orphans) have no SOL cost to compare
             # against — report the percentage as the monitored price move over
             # the holding window instead of a misleading hardcoded "+0.00%".
             if trade.entry_price > 0 and exit_anchor > 0:
-                trade.pnl_pct = (exit_anchor - trade.entry_price) / trade.entry_price * 100
+                trade.modeled_pnl_pct = (exit_anchor - trade.entry_price) / trade.entry_price * 100
             else:
-                trade.pnl_pct = 0.0
+                trade.modeled_pnl_pct = 0.0
+        trade.pnl_sol = trade.cash_pnl_sol
+        trade.pnl_pct = (trade.pnl_sol / basis * 100.0) if basis > 0 else trade.modeled_pnl_pct
         trade.status = "closed"
 
         self.stats.total_trades += 1
