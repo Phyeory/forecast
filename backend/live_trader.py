@@ -3774,6 +3774,25 @@ class LiveTrader:
                         trade=self.current_trade,
                     )
                     self._last_exit_signal_ts = time.time()
+                    # Blind reads must NOT starve the slippage ladder: the
+                    # escalation below only ran on the readable-balance path,
+                    # so a sell doom-looped at the base bps while its on-chain
+                    # attempts kept failing with slippage errors (observed: 10
+                    # groups / 379s at 1000 bps, exit −32% below the booked
+                    # anchor).  Escalate here identically — the ladder exists
+                    # precisely for the panicked markets that also break RPC
+                    # reads.
+                    if attempt_group >= 2:
+                        new_slip = min(
+                            int(original_slippage * (1.5 ** (attempt_group - 1))),
+                            9000,
+                        )
+                        if new_slip != self.slippage_bps:
+                            logger.warning(
+                                f"[SELL SLIPPAGE ↑] {self.slippage_bps} → "
+                                f"{new_slip} bps (blind reads)"
+                            )
+                            self.slippage_bps = new_slip
                     await asyncio.sleep(stall_sleep)
                     continue
                 token_balance = bal
