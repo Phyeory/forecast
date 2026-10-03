@@ -293,8 +293,8 @@ def spike_premium_pct(quote_price_sol: float,
 # mainnet-beta is kept LAST for broadcast redundancy but NOT for reads.
 SOLANA_RPCS = [
     "https://solana-rpc.publicnode.com",
-    "https://rpc.ankr.com/solana",
     "https://api.mainnet-beta.solana.com",
+    "https://api.tatum.io/v3/blockchain/node/solana-mainnet",
 ]
 SOLANA_RPC_PRIMARY = SOLANA_RPCS[0]
 
@@ -1037,6 +1037,25 @@ class LiveTrader:
         if self._blockhash_task is None or self._blockhash_task.done():
             self._blockhash_task = asyncio.ensure_future(self._blockhash_loop())
             logger.info("[CACHE] Blockhash task started")
+        asyncio.ensure_future(self._prewarm_session())
+
+    async def _prewarm_session(self):
+        """Pre-warm TCP/TLS connection pools for Jupiter Lite and RPCs."""
+        try:
+            s = await self._get_session()
+            async with s.get(
+                JUPITER_QUOTE_URL,
+                params={
+                    "inputMint": WSOL_MINT,
+                    "outputMint": str(self.token_mint),
+                    "amount": str(int(self.buy_size_sol * 1e9)),
+                },
+                timeout=aiohttp.ClientTimeout(total=2.5),
+            ) as r:
+                await r.read()
+            logger.info("[PREWARM] Jupiter route and TLS connection warmed")
+        except Exception as e:
+            logger.debug(f"[PREWARM] Route warm-up: {e}")
 
     def _bind_log_context(self):
         """Re-anchor this session's journal in the CURRENT task context so
@@ -1380,7 +1399,7 @@ class LiveTrader:
 
     async def _get_quote(self, input_mint: str, output_mint: str, amount: int,
                          slippage_bps: Optional[int] = None) -> Optional[dict]:
-        """Fetch a Jupiter swap quote via the Swap API v1.
+        """Fetch a Jupiter swap quote via the Swap API v1 with fast hedged fallback.
 
         slippage_bps overrides the instance knob (the buy path pins its own
         BUY_SLIPPAGE_BPS budget; sells use self.slippage_bps so the sell
@@ -1392,42 +1411,61 @@ class LiveTrader:
             "amount": str(amount),
             "slippageBps": str(self.slippage_bps if slippage_bps is None
                                else slippage_bps),
-            # Exclude Meteora DLMM — sells routed through it consistently
-            # timeout while Pump.fun Amm routes confirm in ~1s.  Forcing
-            # Jupiter to skip Meteora keeps buys and sells on the same
-            # protocol (Pump.fun Amm) for pump.fun tokens.
             "excludeDexes": "Meteora DLMM",
-            # NOTE: onlyDirectRoutes removed — restricting to direct routes
-            # can force a Pump.fun AMM route that fails on Token-2022 via
-            # the V6 program. Letting Jupiter find the best route (possibly
-            # multi-hop) also avoids problematic single-hop Token-2022
-            # interactions.
-            #
-            # platformFeeBps intentionally omitted — including it (even as
-            # "0") triggers fee-collection code paths that can cause
-            # IncorrectTokenProgramID (error 6014) on Token-2022 mints.
         }
         logger.info(f"[QUOTE] Fetching quote: {input_mint[:8]}… → {output_mint[:8]}… amount={amount}")
+
+        async def _fetch_req(session: aiohttp.ClientSession) -> Optional[dict]:
+            try:
+                async with session.get(
+                    JUPITER_QUOTE_URL,
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=JUPITER_API_TIMEOUT_S),
+                ) as r:
+                    body = await r.text()
+                    if r.status != 200:
+                        logger.error(f"[QUOTE FAILED] HTTP {r.status}: {body}")
+                        return None
+                    return json.loads(body)
+            except Exception as e:
+                logger.error(f"[QUOTE ERROR] {type(e).__name__}: {e}")
+                return None
+
         try:
             s = await self._get_session()
-            async with s.get(
-                JUPITER_QUOTE_URL,
-                params=params,
-                timeout=aiohttp.ClientTimeout(total=JUPITER_API_TIMEOUT_S),
-            ) as r:
-                body = await r.text()
-                if r.status != 200:
-                    logger.error(f"[QUOTE FAILED] HTTP {r.status}: {body}")
-                    return None
-                quote = json.loads(body)
-                out_amt = quote.get('outAmount', '?')
-                route_plan = quote.get('routePlan', [])
-                swaps = [rp.get('swapInfo', {}).get('label', '?') for rp in route_plan]
-                logger.info(f"[QUOTE OK] outAmount={out_amt} route={'→'.join(swaps)} priceImpact={quote.get('priceImpactPct', '?')}%")
-                return quote
+            primary_task = asyncio.create_task(_fetch_req(s))
+            done, pending = await asyncio.wait([primary_task], timeout=0.35)
+            if done:
+                quote = primary_task.result()
+                if quote:
+                    out_amt = quote.get('outAmount', '?')
+                    route_plan = quote.get('routePlan', [])
+                    swaps = [rp.get('swapInfo', {}).get('label', '?') for rp in route_plan]
+                    logger.info(f"[QUOTE OK] outAmount={out_amt} route={'→'.join(swaps)} priceImpact={quote.get('priceImpactPct', '?')}%")
+                    return quote
+
+            # Primary quote request exceeded 350ms (pooled connection stall) — hedge on fresh session
+            logger.info("[QUOTE] Primary quote took >350ms — hedging on fresh connection")
+            async def _fetch_fresh():
+                async with aiohttp.ClientSession(headers={"Content-Type": "application/json"}) as fresh_s:
+                    return await _fetch_req(fresh_s)
+
+            hedge_task = asyncio.create_task(_fetch_fresh())
+            active = {primary_task, hedge_task}
+            while active:
+                d_tasks, active = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED, timeout=2.0)
+                for t in d_tasks:
+                    q = t.result() if not t.cancelled() else None
+                    if q:
+                        for rem in active:
+                            rem.cancel()
+                        out_amt = q.get('outAmount', '?')
+                        route_plan = q.get('routePlan', [])
+                        swaps = [rp.get('swapInfo', {}).get('label', '?') for rp in route_plan]
+                        logger.info(f"[QUOTE OK HEDGED] outAmount={out_amt} route={'→'.join(swaps)} priceImpact={q.get('priceImpactPct', '?')}%")
+                        return q
+            return None
         except Exception as e:
-            # asyncio.TimeoutError stringifies empty — always carry the type
-            # so blind "[QUOTE ERROR] " lines can't happen again.
             logger.error(f"[QUOTE ERROR] {type(e).__name__}: {e}")
             return None
 
@@ -1718,12 +1756,14 @@ class LiveTrader:
                     except Exception:
                         pass
                 if sig is not None:
-                    for t in pending:
-                        t.cancel()
+                    # Return immediately on fastest RPC acceptance, but DO NOT
+                    # cancel pending send tasks — let them complete concurrently
+                    # in background so ALL RPCs forward the transaction to leaders!
                     break
 
-            for t in pending:
-                t.cancel()
+            if sig is None:
+                for t in pending:
+                    t.cancel()
 
             if sig:
                 logger.info(
@@ -1873,7 +1913,7 @@ class LiveTrader:
                 # is deciding whether the buy is dead.
                 asyncio.ensure_future(self._background_confirm(sig, signed_b64))
 
-            return {"sig": sig, "last_valid_block_height": last_valid_height}
+            return {"sig": sig, "last_valid_block_height": last_valid_height, "signed_b64": signed_b64}
 
         except Exception as e:
             logger.error(f"[SIGN_AND_SEND ERROR] {e}", exc_info=True)
@@ -2272,6 +2312,7 @@ class LiveTrader:
                 return None
             sig = send_res["sig"]
             last_valid_height = send_res.get("last_valid_block_height")
+            signed_b64 = send_res.get("signed_b64")
 
             # ── PENDING until on-chain confirmation ───────────────────────────
             # DO NOT mark the trade open here — the TX may still fail or never
@@ -2294,6 +2335,7 @@ class LiveTrader:
             self._cached_token_balance = out_amount   # keep cache warm pre-refresh
             self._token_balance_verified = False      # provisional until proven
             self._last_exit_signal_ts = 0.0  # reset watchdog
+            self._last_signed_buy_b64 = signed_b64
             # Background task confirms the TX across the FULL blockhash-validity
             # window; only after the hash is cryptographically dead AND the
             # wallet provably holds no tokens is the buy declared failed.
@@ -2539,7 +2581,18 @@ class LiveTrader:
         # Single tight poll loop — one status probe per iteration (NOT a nested
         # 12 s _confirm_tx per outer loop, which made deadness/balance checks
         # run only once per 12 s and duplicated the _background_confirm waiter).
+        signed_b64 = getattr(self, "_last_signed_buy_b64", None)
+        last_rebroadcast = time.time()
         while time.time() < deadline:
+            # ── Active rebroadcast during confirm window (capped at 12s) ─────
+            if (
+                signed_b64
+                and (time.time() - last_rebroadcast) >= CONFIRM_REBROADCAST_S
+                and (time.time() - start) < CONFIRM_TIMEOUT_S
+            ):
+                last_rebroadcast = time.time()
+                asyncio.ensure_future(self._broadcast_multi(signed_b64))
+
             # ── 1. Single signature-status probe ─────────────────────────────
             status = await self._get_signature_status(sig)
             if status is not None:
