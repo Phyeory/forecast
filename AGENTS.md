@@ -100,10 +100,13 @@ graph TD
   emergency sell + entry block + terminate (idle breach = immediate terminate). Fill-anchor
   booking (iter91b): books BT-identical fills, journals wallet truth as `cash_*`;
   first-buy account rent journaled separately (`rent_sol`), `exit_price_actual` = ledger
-  price (iter94). Display truth (iter95, GLM-FIX uncommitted): `starting_balance` set-once
+  price (iter94). Display truth (iter95, GLM-FIX): `starting_balance` set-once
   (balance-cache seed) + `current_balance` seeded there; wallet-truth stats
   (`total_cash_pnl_sol`, `total_fees_sol` measured both sides, `total_rent_sol` NET via
-  `rent_sol_net`, `wallet_balance`, derived `wallet_delta_sol`); `_resolve_landed_sell_sig`
+  `rent_sol_net`, `wallet_balance`, derived `wallet_delta_sol`); displays read
+  `wallet_delta_ex_rent_sol` = cash − fees (ATA rent excluded — user directive 10-03;
+  10-03 evening revert: quote-based entry booking and wallet-measured PnL were UNDONE,
+  booking anchors + ledger-derived PnL are authoritative); `_resolve_landed_sell_sig`
   books retry-path fills under the true landed sig (`tx_delta_resolved`). Booking anchors
   verified BT-exact: entry = signal-candle OPEN, deferred exit = boundary-candle OPEN,
   loss-book exit = intrabar(frac≈0.505) — all ×(1±1%); live `_fill_fraction` reads the
