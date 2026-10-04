@@ -3310,6 +3310,12 @@ class LiveTrader:
             # quote, so a wrong first amount costs one 6024 round-trip at
             # most — not nine seconds.
             fresh_bal = 0
+            # e927330 moved the buy-TX-ledger clamp below the truth-read to run
+            # on every sell — these two must therefore be initialized on ALL
+            # paths, not only the fresh_bal==0 fallback (verified-balance sells
+            # would otherwise hit UnboundLocalError on `ct` and never sell).
+            ct = self.current_trade
+            _exact_known = False
             # iter91 latency: an ADOPTED cache is already the authoritative
             # on-chain figure (exact delivery read at buy settle / prior live
             # read) — re-reading it burns ~0.5-1 s of RPC fanout on the exit
@@ -3348,8 +3354,6 @@ class LiveTrader:
                 # back up would re-quote more than the wallet now holds and
                 # restart the very 6024 chain this correction exists to kill.
                 token_balance = self._token_balance
-                ct = self.current_trade
-                _exact_known = False
 
             # 2026-09-28 consolidation + 2026-10-03 fix: confirmed balance truth.
             # If the balance is unverified, fetch the confirmed on-chain balance
