@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DEGEN — AI trader</title>
+<style>
+  :root {
+    --bg: #0b0e11; --panel: #13171c; --panel2: #1a2027; --line: #232b34;
+    --text: #e6edf3; --dim: #8b98a5; --green: #2ea86b; --red: #e05252;
+    --amber: #d99a2b; --blue: #4c8dff; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 14px; padding: 12px 18px;
+           border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); z-index: 5; }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .5px; }
+  header h1 span { color: var(--amber); }
+  .pill { padding: 2px 9px; border-radius: 20px; font-size: 12px; border: 1px solid var(--line); color: var(--dim); }
+  .pill.on { color: var(--green); border-color: var(--green); }
+  .pill.off { color: var(--red); border-color: var(--red); }
+  .pill.warn { color: var(--amber); border-color: var(--amber); }
+  .spacer { flex: 1; }
+  select, button, input { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+           border-radius: 6px; padding: 5px 10px; font-size: 13px; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--blue); }
+  button.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+  button.danger { background: transparent; border-color: var(--red); color: var(--red); }
+  main { padding: 14px 18px; display: grid; gap: 14px; grid-template-columns: 1fr 360px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--dim);
+               margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; align-items: center; }
+  section h2 .n { background: var(--panel2); border-radius: 10px; padding: 0 8px; font-size: 11px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th { text-align: left; color: var(--dim); font-weight: 500; padding: 6px 10px; border-bottom: 1px solid var(--line);
+       position: sticky; top: 0; background: var(--panel); }
+  td { padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  tr:hover td { background: var(--panel2); }
+  .mono { font-family: var(--mono); font-size: 11.5px; }
+  .up { color: var(--green); } .down { color: var(--red); }
+  .scroller { max-height: 320px; overflow: auto; }
+  #journal { max-height: 480px; overflow: auto; padding: 6px 0; }
+  .jrow { padding: 5px 14px; border-bottom: 1px solid var(--line); font-family: var(--mono); font-size: 11.5px; }
+  .jrow .kind { display: inline-block; min-width: 110px; color: var(--blue); }
+  .jrow .t { color: var(--dim); margin-right: 6px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .cards { padding: 10px 14px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .card { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 12px; }
+  .card b { display: block; font-size: 13px; }
+  .cal { padding: 10px 14px; font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
+  footer { padding: 8px 18px; color: var(--dim); font-size: 11px; border-top: 1px solid var(--line); }
+  a { color: var(--blue); text-decoration: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>DEGEN <span>— AI degen trader</span></h1>
+  <span id="modePill" class="pill">—</span>
+  <span id="enginePill" class="pill">engine</span>
+  <span id="watchPill" class="pill">watching 0</span>
+  <div class="spacer"></div>
+  <label class="mono" style="color:var(--dim)">size
+    <input id="sizeInput" type="number" step="0.01" min="0.01" style="width:70px"> SOL</label>
+  <select id="modeSelect">
+    <option value="shadow">shadow</option>
+    <option value="confirm">confirm</option>
+    <option value="auto">auto</option>
+  </select>
+  <button id="startBtn" class="primary">Start</button>
+  <button id="stopBtn" class="danger">Stop</button>
+  <button id="loginBtn" title="One-time Terminal login (opens a window)">Terminal login</button>
+</header>
+
+<main>
+  <div style="display:flex; flex-direction:column; gap:14px;">
+    <section>
+      <h2>Watching <span class="n" id="watchCount">0</span></h2>
+      <div class="scroller">
+        <table>
+          <thead><tr>
+            <th>Coin</th><th>Age</th><th>MCap $</th><th>Curve</th><th>DD</th>
+            <th>10s buy/sell</th><th>Streak</th><th>Traps</th>
+          </tr></thead>
+          <tbody id="watchBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="grid">
+      <section>
+        <h2>Positions <span class="n" id="posCount">0</span></h2>
+        <div class="scroller">
+          <table>
+            <thead><tr><th>Coin</th><th>Entry</th><th>uPnL</th><th>Size</th><th>Age</th><th>Lane</th></tr></thead>
+            <tbody id="posBody"></tbody>
+          </table>
+        </div>
+      </section>
+      <section>
+        <h2>Armed traps <span class="n" id="trapCount">0</span></h2>
+        <div class="scroller">
+          <table>
+            <thead><tr><th>ID</th><th>Coin</th><th>Nuke</th><th>Triggers</th><th>State</th></tr></thead>
+            <tbody id="trapBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div style="display:flex; flex-direction:column; gap:14px;">
+    <section>
+      <h2>Journal <span class="n" id="jCount">0</span></h2>
+      <div id="journal"></div>
+    </section>
+    <section>
+      <h2>Calibration (p_up vs realized)</h2>
+      <div class="cal" id="calBody">no scored decisions yet</div>
+    </section>
+  </div>
+</main>
+
+<footer>
+  Homegrown decision AI · reflex tier is pure code · vendor scores are cross-checks only ·
+  <a href="/" target="_blank">main dashboard ↗</a>
+</footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmtS = (s) => s < 90 ? `${Math.round(s)}s` : s < 5400 ? `${Math.round(s/60)}m` : `${(s/3600).toFixed(1)}h`;
+const usd = (n) => n == null ? "—" : n >= 1000 ? `$${(n/1000).toFixed(1)}k` : `$${Math.round(n)}`;
+const esc = (s) => String(s ?? "").replace(/[<>&]/g, c => ({"<":"&lt;","&gt":"&gt;","&":"&amp;"}[c]));
+
+let lastConfig = null;
+
+function render(snap) {
+  const f = snap.feed || {};
+  $("watchPill").textContent = `watching ${f.watching ?? 0}`;
+  $("watchPill").className = "pill " + ((f.watching ?? 0) > 0 ? "on" : "");
+  $("modePill").textContent = snap.started ? `LIVE · ${snap.config?.mode}` : "stopped";
+  $("modePill").className = "pill " + (snap.started ? (snap.config?.mode === "auto" ? "warn" : "on") : "off");
+  const eng = snap.engine || {};
+  $("enginePill").textContent = `${eng.model || "engine"}${eng.has_key ? "" : " · NO KEY"}`;
+  $("enginePill").className = "pill " + (eng.has_key ? "on" : "off");
+
+  if (snap.config && JSON.stringify(snap.config) !== JSON.stringify(lastConfig)) {
+    lastConfig = snap.config;
+    $("modeSelect").value = snap.config.mode || "shadow";
+    $("sizeInput").value = snap.config.buy_size_sol ?? 0.05;
+  }
+
+  // watched
+  const watched = (f.watched || []).slice(0, 60);
+  $("watchCount").textContent = watched.length;
+  $("watchBody").innerHTML = watched.map(w => {
+    const dd = (w.drawdown ?? 0);
+    return `<tr>
+      <td><b>${esc(w.symbol || w.mint?.slice(0,6))}</b> <span class="mono">${esc((w.name||"").slice(0,26))}</span></td>
+      <td class="mono">${fmtS(w.age_s || 0)}</td>
+      <td>${usd(w.mcap_usd)}</td>
+      <td class="mono">${w.curve_frac != null ? (w.curve_frac*100).toFixed(1) + "%" : "—"}</td>
+      <td class="${dd > 0.3 ? "down" : ""}">${(dd*100).toFixed(0)}%</td>
+      <td class="mono"><span class="up">${(w.buy_sol_10s ?? 0).toFixed(2)}</span>/<span class="down">${(w.sell_sol_10s ?? 0).toFixed(2)}</span></td>
+      <td class="mono">${w.up_tick_streak ?? 0}</td>
+      <td>${w.armed_traps ? `<span class="pill warn">${w.armed_traps}</span>` : ""}</td>
+    </tr>`;
+  }).join("");
+
+  // positions
+  const pos = snap.positions || [];
+  $("posCount").textContent = pos.length;
+  $("posBody").innerHTML = pos.map(p => `<tr>
+      <td><b>${esc(p.symbol || p.mint.slice(0,6))}</b></td>
+      <td class="mono">${p.entry_price ?? "—"}</td>
+      <td class="mono">—</td>
+      <td class="mono">${p.size_sol} ◎</td>
+      <td class="mono">${fmtS((Date.now()/1000) - p.entry_ts)}</td>
+      <td>${p.lane}</td></tr>`).join("");
+
+  // traps
+  const traps = snap.traps || [];
+  $("trapCount").textContent = traps.length;
+  $("trapBody").innerHTML = traps.map(t => `<tr>
+      <td class="mono">${esc(t.trap_id)}</td>
+      <td><b>${esc((t.mint||"").slice(0,6))}</b></td>
+      <td class="mono">${((t.spec?.nuke_min_pct) ?? 0.5*100).toFixed(0)}%</td>
+      <td class="mono">≥${t.spec?.up_ticks ?? 3} ticks${t.spec?.vol_flip ? " + vol" : ""}</td>
+      <td>${t.state === "armed" ? `<span class="pill warn">${t.state}</span>` : `<span class="pill">${t.state}</span>`}</td>
+    </tr>`).join("");
+
+  // calibration
+  const cal = snap.calibration || {};
+  if (cal.n_scored) {
+    $("calBody").innerHTML =
+      `brier ${cal.brier} over ${cal.n_scored} scored decisions<br>` +
+      Object.entries(cal.bins || {}).map(([k, v]) =>
+        v.n ? `${k}: ${v.realized_up} (n=${v.n})` : null).filter(Boolean).join("<br>");
+  }
+}
+
+async function loadJournal() {
+  const r = await fetch("/api/degen/journal?n=60");
+  const data = await r.json();
+  const entries = (data.entries || []).slice().reverse();
+  $("jCount").textContent = entries.length;
+  $("journal").innerHTML = entries.map(e => {
+    const t = new Date(e.ts * 1000).toLocaleTimeString();
+    let detail = "";
+    if (e.kind === "decision") detail = `${e.decision?.action} p=${(e.decision?.p_up ?? 0).toFixed(2)} ${esc((e.decision?.reasons||[]).join(","))}`;
+    else if (e.kind === "trap_armed") detail = `${e.mint?.slice(0,8)} nuke≥${(e.spec?.nuke_min_pct*100).toFixed(0)}%`;
+    else if (e.kind === "trap_fired") detail = `${e.fire?.mint?.slice(0,8)} @ ${e.fire?.trigger?.price}`;
+    else if (e.kind === "buy_executed") detail = `ok=${e.result?.ok} ${e.result?.latency_s}s`;
+    else if (e.kind === "research_reject") detail = esc((e.our_verdict?.hard_rejects||[]).join("; "));
+    else detail = esc(JSON.stringify(e).slice(0, 120));
+    return `<div class="jrow"><span class="t">${t}</span><span class="kind">${esc(e.kind)}</span>${detail}</div>`;
+  }).join("");
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/api/degen/status");
+    render(await r.json());
+  } catch (e) { /* backend restarting */ }
+}
+
+$("startBtn").onclick = () => fetch("/api/degen/start", {method: "POST"}).then(poll);
+$("stopBtn").onclick = () => fetch("/api/degen/stop", {method: "POST"}).then(poll);
+$("loginBtn").onclick = () => fetch("/api/degen/terminal/login", {method: "POST"})
+  .then(r => r.json()).then(d => alert(d.ok ? "Terminal window opened — log in once inside it." : ("Login failed: " + (d.reason || ""))));
+$("modeSelect").onchange = (e) => fetch("/api/degen/config", {
+  method: "POST", headers: {"Content-Type": "application/json"},
+  body: JSON.stringify({mode: e.target.value})}).then(poll);
+$("sizeInput").onchange = (e) => fetch("/api/degen/config", {
+  method: "POST", headers: {"Content-Type": "application/json"},
+  body: JSON.stringify({buy_size_sol: parseFloat(e.target.value) || 0.05})}).then(poll);
+
+poll(); loadJournal();
+setInterval(poll, 2500);
+setInterval(loadJournal, 5000);
+</script>
+</body>
+</html>

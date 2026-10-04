@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -62,6 +63,18 @@ app.add_middleware(
 
 if FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+
+# DEGEN — AI degen trader (self-contained package at repo root; own page at /degen).
+# Mounted best-effort so a missing optional dep can never break the main app.
+try:
+    _REPO_ROOT = str(Path(__file__).parent.parent)
+    if _REPO_ROOT not in sys.path:
+        sys.path.insert(0, _REPO_ROOT)
+    from degen.router import router as _degen_router
+    app.include_router(_degen_router)
+    logger.info("[Degen] router mounted — page at /degen")
+except Exception as _degen_err:  # pragma: no cover
+    logger.warning("[Degen] router not mounted: %s", _degen_err)
 
 
 KEY_FILE_PATH = Path(__file__).parent / "data" / "live_key.json"

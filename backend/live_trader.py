@@ -224,13 +224,27 @@ def wallet_release_reserve(wallet_pubkey: str, amount_sol: float) -> None:
 
 
 # ── Jupiter & Solana constants ────────────────────────────────────────────────
-# NOTE: Using the newer Swap API v1 (lite-api.jup.ag) instead of the V6 API
-# (public.jupiterapi.com). The V6 on-chain program (JUP6L...) does NOT handle
-# Token-2022 mints correctly in its Route instruction, causing error 6014
-# (IncorrectTokenProgramID). The newer API generates transactions for an
-# updated program that supports Token-2022 natively.
-JUPITER_QUOTE_URL = "https://lite-api.jup.ag/swap/v1/quote"
-JUPITER_SWAP_URL  = "https://lite-api.jup.ag/swap/v1/swap"
+# NOTE: Using the newer Swap API v1 instead of the V6 API (public.jupiterapi.com).
+# The V6 on-chain program (JUP6L...) does NOT handle Token-2022 mints correctly
+# in its Route instruction, causing error 6014 (IncorrectTokenProgramID). The
+# newer API generates transactions for an updated program that supports
+# Token-2022 natively.
+#
+# 2026-10-04: lite-api.jup.ag is being retired (new portal since 2026-04-06,
+# grace ended 2026-06-30). The v1 paths now live on api.jup.ag — SAME response
+# shape, verified live (quote + swapTransaction build). Keyless tier = 0.5 RPS;
+# set JUP_API_KEY in the environment for paid-tier headroom (sent as x-api-key).
+# When Jupiter retires /swap/v1 entirely, the follow-up is /swap/v2
+# (order+execute, or build for self-signing) — response schemas differ.
+JUPITER_HOST = os.environ.get("JUP_HOST", "https://api.jup.ag")
+JUPITER_QUOTE_URL = f"{JUPITER_HOST}/swap/v1/quote"
+JUPITER_SWAP_URL  = f"{JUPITER_HOST}/swap/v1/swap"
+JUPITER_API_KEY   = os.environ.get("JUP_API_KEY", "")
+
+def jup_headers() -> dict:
+    """Optional Jupiter paid-tier auth (x-api-key) — never sent to RPC hosts."""
+    return {"x-api-key": JUPITER_API_KEY} if JUPITER_API_KEY else {}
+
 # lite-api routinely takes >3s per response under load; a 3s total timeout
 # turned one slow window into 7 consecutive quote failures and a 47s sell
 # delay (2026-08-26 Brezy49c).  A slow-but-successful quote beats three
@@ -1045,6 +1059,7 @@ class LiveTrader:
             s = await self._get_session()
             async with s.get(
                 JUPITER_QUOTE_URL,
+                headers=jup_headers(),
                 params={
                     "inputMint": WSOL_MINT,
                     "outputMint": str(self.token_mint),
@@ -1419,6 +1434,7 @@ class LiveTrader:
             try:
                 async with session.get(
                     JUPITER_QUOTE_URL,
+                    headers=jup_headers(),
                     params=params,
                     timeout=aiohttp.ClientTimeout(total=JUPITER_API_TIMEOUT_S),
                 ) as r:
@@ -1498,6 +1514,7 @@ class LiveTrader:
             s = await self._get_session()
             async with s.post(
                 JUPITER_SWAP_URL,
+                headers=jup_headers(),
                 json=body,
                 timeout=aiohttp.ClientTimeout(total=JUPITER_API_TIMEOUT_S),
             ) as r:
