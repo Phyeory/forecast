@@ -5,17 +5,19 @@ import os
 import time
 from pathlib import Path
 
-# Load .env from backend/ OR project root (whichever exists) early — used
-# by autofeed to find GMGN_API_KEY.  dotenv does NOT override env vars
-# already set in the process.  We try backend/.env first, then ../.env.
+# Load .env from backend/ AND project root (both merged) early — used
+# by autofeed/holder_flow to find GMGN_API_KEY.  dotenv does NOT override
+# env vars already set in the process.  backend/.env wins on conflicts.
 try:
     from dotenv import load_dotenv
     _backend_dir = Path(__file__).parent
     _root_dir = _backend_dir.parent
-    for _candidate in (_backend_dir / ".env", _root_dir / ".env"):
+    # Load root first, then backend overlay (no override=False semantics:
+    # first-loaded wins).  Old code `break`ed after backend/.env, so a root
+    # GMGN_API_KEY was silently never loaded.
+    for _candidate in (_root_dir / ".env", _backend_dir / ".env"):
         if _candidate.exists():
-            load_dotenv(_candidate)
-            break
+            load_dotenv(_candidate, override=False)
 except ImportError:
     pass
 from typing import Optional
