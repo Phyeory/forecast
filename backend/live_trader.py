@@ -484,6 +484,13 @@ class LiveTrade:
     # (Jupiter's ephemeral WSOL ATA is created AND closed inside one swap,
     # so only the token-ATA part is a real cost until the ATA is swept).
     rent_sol_net: float = 0.0
+    # Entry-premium attribution — journal-only, no behavior change.  The
+    # executable quote-implied price and its premium over the booked entry
+    # anchor, frozen at quote time; itemizes the cash-vs-booked entry
+    # divergence per trade (launch-candle spikes move the executable tape
+    # far past the pre-launch booking print).
+    entry_quote_price_sol: Optional[float] = None
+    entry_premium_pct: Optional[float] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -2244,6 +2251,33 @@ class LiveTrader:
                 self._journal_event("buy_rejected", reason=reason, error="jupiter_quote_failed")
                 await self._fail_buy_flat("Jupiter quote failed", reason)
                 return None
+
+            # ── Entry-premium attribution (journal-only, always on) ──────
+            # Measures the executable quote against the BOOKED entry anchor
+            # (signal-candle open × engine slippage).  On launch-candle
+            # spikes the book holds the pre-launch print while the
+            # executable tape has already moved — this number itemizes that
+            # divergence per trade.  No skip, no behavior change; the skip
+            # remains behind SPIKE_GUARD_ENABLE below.
+            try:
+                _ct = self.current_trade
+                if _ct is not None and _ct.entry_price > 0 \
+                        and self._token_decimals_verified:
+                    _qpx = jupiter_quote_price_sol(
+                        amount_lam, quote.get("outAmount", 0),
+                        self._token_decimals)
+                    if _qpx and _qpx > 0:
+                        _prem = (_qpx / float(_ct.entry_price) - 1.0) * 100.0
+                        _ct.entry_quote_price_sol = _qpx
+                        _ct.entry_premium_pct = round(_prem, 2)
+                        self._journal_event(
+                            "entry_quote_premium", reason=reason,
+                            quote_price_sol=_qpx,
+                            booked_entry_price=float(_ct.entry_price),
+                            premium_pct=round(_prem, 2),
+                            quote_out_amount=quote.get("outAmount"))
+            except Exception:
+                pass  # attribution must never break the buy path
 
             # ── Spike-premium skip guard (2026-09-30 handoff, OFF by default)
             # A vertical spike moves the executable price far past the BT
