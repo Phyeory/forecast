@@ -60,9 +60,9 @@ def _cfg_from_args(args) -> LiveConfig:
         k=args.k, buy_size=args.buy_size, starting_equity=args.equity,
         broker=args.broker, firm=args.firm, exec_mode=args.exec_mode,
         journal=not args.no_journal,
-        broker_kwargs=({"paper": {"starting_equity": args.equity,
-                                  "slippage_pct": args.slippage,
-                                  "fee_bps": args.fee_bps}} if args.broker == "paper"
+        broker_kwargs=({"starting_equity": args.equity,
+                        "slippage_pct": args.slippage,
+                        "fee_bps": args.fee_bps} if args.broker == "paper"
                        else {"base_url": args.bridge} if args.broker in ("mt5", "bridge")
                        else {}),
     )
@@ -105,6 +105,7 @@ def main() -> None:
     ap.add_argument("--start", default="")
     ap.add_argument("--max-bars", type=int, default=0)
     ap.add_argument("--exec-mode", default="next_open", choices=["close", "next_open"])
+    ap.add_argument("--feed", default="auto", choices=["auto", "tape", "yahoo", "alpaca"])
     ap.add_argument("--poll-seconds", type=float, default=60.0)
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--no-journal", action="store_true")
@@ -144,8 +145,15 @@ def main() -> None:
             Path(args.json_out).write_text(json.dumps(out, indent=1))
 
     else:  # paper | live
-        tickers = {s: resolve_ticker(s, cfg.market) for s in cfg.symbols}
-        feed = YahooFeed(cfg.market, cfg.interval, tickers, persist=True)
+        if args.feed == "tape":
+            from market_live.feeds import TapeFeed
+            feed = TapeFeed(cfg.market, cfg.interval)
+        elif args.feed == "alpaca":
+            from market_live.feeds import AlpacaFeed
+            feed = AlpacaFeed(cfg.interval)
+        else:
+            tickers = {s: resolve_ticker(s, cfg.market) for s in cfg.symbols}
+            feed = YahooFeed(cfg.market, cfg.interval, tickers, persist=True)
         cfg.broker_kwargs = cfg.broker_kwargs or {}
         trader = MarketLiveTrader(cfg, feed=feed)
         trader.prepare()

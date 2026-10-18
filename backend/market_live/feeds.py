@@ -133,6 +133,10 @@ class TapeFeed:
         self.interval = interval
         self._cache: dict[str, list[dict]] = {}
 
+    def closed_bars(self, symbol: str, since_ts: int = 0) -> list[dict]:
+        """All recorded bars after `since_ts` (historical => closed)."""
+        return [b for b in self.history(symbol) if int(b["time"]) > since_ts]
+
     def history(self, symbol: str) -> list[dict]:
         if symbol not in self._cache:
             rec = get_market_recording(self.market, symbol, self.interval)
