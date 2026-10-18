@@ -90,7 +90,7 @@ SYMBOLS = [
     ("SUIUSDT", "Sui", 2023, 6),
     ("APTUSDT", "Aptos", 2022, 11),
     ("TIAUSDT", "Celestia", 2023, 11),
-    ("PEPEUSDT", "Pepe", 2023, 6),
+    ("1000PEPEUSDT", "Pepe (1000x)", 2023, 6),
 ]
 
 _BASE = "https://data.binance.vision/data/futures/um/monthly/klines"
