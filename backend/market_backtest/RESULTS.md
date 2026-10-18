@@ -91,7 +91,14 @@ equity of one pooled account. Divergence (test window):
 All prop numbers below use the ledger series (the snapshot flattered perps
 40×; stocks were nearly unbiased because few trades turn over per symbol).
 
-## Prop-firm evaluation (FTMO-classic: +10% P1, +5% P2, 5% daily / 10% total)
+## Prop-firm evaluation — TIMED 60-day window (superseded, kept for the record)
+
+> **Superseded 2026-10-18.** This section assumed a 60-day phase window.
+> Real FTMO 2-Step challenges have **no time limit**; with the actual rules the
+> same strategy passes **74%** of attempts at k=0.75 (see "Prop-firm
+> evaluation — real firm rules" below and `PROP_FIRMS.md`). The numbers here
+> remain valid only for firms that impose deadlines.
+
 
 Phase-1 pass rates + funded survivorship (block-bootstrap over the **ledger**
 daily PnL, 2000 sims/phase, k = size multiplier):
@@ -137,6 +144,72 @@ equity path fails the total-loss rule. Arm14 fixes the *expectancy* (positive
 OOS, CI>0 on both segments); it does not repeal the challenge arithmetic —
 +10% in 60 days against ~0.9%/day test-window vol needs ≈ k≥2, where the 5%
 daily / 10% total walls bind.
+
+
+## Prop-firm evaluation — real firm rules (no time limit)
+
+Verified against FTMO's published objectives (2026-10-18): 2-Step = 10% / 5%
+targets, 5% daily, **static** 10% max loss, **no time limit**, min 4 days,
+consistency (best day <= 50% of total profit).  `mc_firms.py` block-bootstraps
+the arm14 out-of-sample ledger through those exact rules (3000 sims/row).
+
+| k | P1 pass | full pass | funded blown 1y | E payout (reset) | EV/attempt |
+|---|---|---|---|---|---|
+| 0.50 | 92.5% | 86.8% | 10.0% | $9,204 | +$7,921 |
+| **0.75** | **83.5%** | **74.2%** | **32.7%** | **$12,485** | **+$9,124** |
+| 1.00 | 63.3% | 48.0% | 63.0% | $12,783 | +$5,851 |
+| 1.50 | 62.7% | 44.8% | 78.6% | $15,475 | +$6,635 |
+| 2.00 | 58.9% | 37.8% | 89.0% | $15,898 | +$5,674 |
+
+The consistency rule costs ~1 pp (75.0% -> 74.2%) because the simulator keeps
+trading until the best-day share is satisfied, exactly as FTMO requires.
+
+**Rule sensitivity (k=0.75, same strategy):**
+
+| rules | full pass | funded blown | EV/attempt |
+|---|---|---|---|
+| no daily cap, static 10% | 84.6% | 32.7% | +$10,483 |
+| FTMO 2-Step (5% daily, static 10%, no TL) | 74.2% | 32.7% | +$9,124 |
+| FTMO 1-Step (3% daily, trailing 10%) | 60.5% | 73.5% | +$5,225 |
+| futures prop (2% daily, trailing 4%) | 42.1% | 100% | +$831 |
+| FTMO 2-Step + 30-day limit | **0.1%** | — | **-$527** |
+
+Time limits are fatal; trailing drawdown is severe; 3% daily is severe; 5%
+daily and 10/8% targets are mild.  **Buy a no-deadline, static-drawdown,
+swing-enabled, EA-allowed challenge.**
+
+**Attempt economics** ($540 per $100k attempt): 2 attempts -> 93% chance of at
+least one funded account, +$17.4k expected; 3 attempts -> 98%, +$26.2k.  Withdraw
+monthly: the EV comes from payouts taken before the account eventually blows.
+
+Full dossier with the firm ranking and the exact deployment settings:
+`backend/market_backtest/PROP_FIRMS.md`.
+
+## Live execution stack — decision-identical (`market_live/`)
+
+`MarketEngineHost` is not a reimplementation: it builds the same
+`MarketForwardTester` with the same costs/exec_model/engine kwargs and feeds
+every closed bar through the same four `update()` calls in the same order
+(open tick -> first extreme -> second extreme -> close tick + volume).  The live
+layer adds only position sizing (`k`), a broker adapter, and a prop rule guard.
+
+**Gate (`market_live/test_live_parity.py`): PASS** — trade books identical
+field-by-field (timestamps, fill prices, size, tokens, PnL, exit reason, fees)
+and final balance identical to 1e-12:
+
+| market | tapes | result |
+|---|---|---|
+| stocks 1d | 12 | PASS (e.g. BA 6/6, BLK 5/5, AXP 2/2) |
+| crypto_perp 1h | 2 | PASS (BTCUSDT 74/74, ETHUSDT 63/63) |
+
+Execution-mode wedge (8 names, 2024-01-01 onward, k=0.75): close-fill +8.71% vs
+next-open +8.25% -> **-0.47 pp over 2.8 years**.  The edge does not depend on
+fill timing.
+
+Stack: `feeds.py` (closed-bar feeds), `brokers.py` (Paper / Alpaca REST / MT5
+HTTP bridge), `prop_guard.py` (rules enforced live), `journal.py` (JSONL
+session journals with `code_commit`/`code_dirty`), `trader.py`, `run_live.py`.
+Runbook: `backend/market_live/README.md`.
 
 ## Calibration campaign (train→test, calibration-only)
 

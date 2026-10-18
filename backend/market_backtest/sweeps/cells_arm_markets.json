@@ -1,0 +1,7 @@
+{
+ "base": {},
+ "arm6": {"gain_retrace_arm_pct": 6.0},
+ "arm10": {"gain_retrace_arm_pct": 10.0},
+ "arm14": {"gain_retrace_arm_pct": 14.0},
+ "arm20": {"gain_retrace_arm_pct": 20.0}
+}

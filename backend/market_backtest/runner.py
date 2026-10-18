@@ -40,6 +40,8 @@ COSTS = {
     # exchange-grade (near-zero) taker costs; perps keep crypto-style
     # maker/taker around 5 bp.
     "stocks":         {"slippage_pct": 0.03, "priority_fee": 0.0},
+    "stocks_1h":      {"slippage_pct": 0.03, "priority_fee": 0.0},
+    "stocks_5m":      {"slippage_pct": 0.05, "priority_fee": 0.0},
     "crypto_perp_1h": {"slippage_pct": 0.05, "priority_fee": 0.0},
     "crypto_perp_1d": {"slippage_pct": 0.05, "priority_fee": 0.0},
 }
@@ -47,12 +49,13 @@ COSTS = {
 # Prop-tradable daily universes (fetch_markets.py) reuse the stocks
 # daily-bar engine class (BAR_SPEC / calibration / costs).
 MARKET_CLASS = {
-    "idx_fut": "stocks",
-    "intl_idx": "stocks",
-    "comm_fut": "stocks",
-    "fx": "stocks",
-    "crypto_spot": "stocks",
-    "etf": "stocks",
+    # ETF-proxy universes (fetch_markets.py, Nasdaq/FRED)
+    "idx_etf": "stocks", "intl_etf": "stocks", "comm_etf": "stocks",
+    "sector_etf": "stocks", "bond_etf": "stocks", "fx": "stocks",
+    "fx_etf": "stocks",
+    # legacy universe names (Yahoo-based fetcher)
+    "idx_fut": "stocks", "intl_idx": "stocks", "comm_fut": "stocks",
+    "crypto_spot": "stocks", "etf": "stocks",
 }
 
 
@@ -127,8 +130,12 @@ def run_market_backtest(
     time: entries before the boundary are train (in-sample for the
     calibration), entries at/after it are unseen out-of-sample.
     """
-    kind = f"{market}_{interval}" if market == "crypto_perp" else market
-    kind = MARKET_CLASS.get(kind, kind)
+    if market == "crypto_perp":
+        kind = f"{market}_{interval}"
+    elif market in ("stocks", "stocks_1h_raw") and interval != "1d":
+        kind = f"stocks_{interval}"
+    else:
+        kind = MARKET_CLASS.get(market, market) if interval == "1d" else f"{market}_{interval}"
     spec = BAR_SPEC[kind]
     bar_seconds = spec["bar_seconds"]
 
