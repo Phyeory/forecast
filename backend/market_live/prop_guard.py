@@ -22,8 +22,10 @@ cannot drift apart.
 
 from __future__ import annotations
 
+import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Optional
 
 TEMPLATES: dict[str, dict] = {
@@ -225,6 +227,24 @@ class PropGuard:
         if projected_equity - buf <= self.floor():
             return False, f"max_loss_floor {self.floor():,.2f}"
         return True, "ok"
+
+    # ── persistence (a restart must NOT reset the firm's floors) ──────────
+    def save(self, path: str | Path) -> None:
+        Path(path).write_text(json.dumps({
+            "name": self.name, "account": self.account,
+            "buffer_pct": self.buffer_pct, "state": asdict(self.s)}, indent=1))
+
+    def load(self, path: str | Path) -> bool:
+        p = Path(path)
+        if not p.exists():
+            return False
+        d = json.loads(p.read_text())
+        self.name = d.get("name", self.name)
+        self.account = float(d.get("account", self.account))
+        self.buffer_pct = float(d.get("buffer_pct", self.buffer_pct))
+        st = d.get("state") or {}
+        self.s = GuardState(**{**asdict(GuardState()), **st})
+        return True
 
     def status(self) -> dict:
         return {

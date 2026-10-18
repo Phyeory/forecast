@@ -143,7 +143,13 @@ class MarketLiveTrader:
             self.guard = PropGuard(self.cfg.firm,
                                    account_size=self.cfg.starting_equity,
                                    log=self._log)
-            self.guard.start_day(self._equity())
+            self._guard_path = (self.journal.dir / "guard_state.json"
+                                if self.journal else None)
+            if self._guard_path and self.guard.load(self._guard_path):
+                self._log(f"guard state restored (phase {self.guard.s.phase}, "
+                          f"equity {self.guard.s.equity:,.2f})")
+            else:
+                self.guard.start_day(self._equity())
             if self.journal:
                 self.journal.guard({"kind": "guard_init",
                                     "status": self.guard.status()})
@@ -282,6 +288,8 @@ class MarketLiveTrader:
                 if self.journal:
                     self.journal.guard({"kind": status, "status": self.guard.status()})
 
+        if self.guard and getattr(self, "_guard_path", None):
+            self.guard.save(self._guard_path)
         if self.journal:
             self.journal.equity({"event": "bar", "symbol": sym, "time": t,
                                  "equity": self._equity(),

@@ -151,3 +151,36 @@ Evidence so far says the edge is a *daily* phenomenon: the same engine on
 crypto 1h bars is unfundable (test Σ −0.27 at arm14 vs +0.33 on stocks 1d),
 and the daily strategy's hold time is 32 days. Day-trading the current
 calibration is an open experiment, not a validated path.
+
+## Daily operating loop (what actually runs)
+
+```bash
+# US equities close 16:00 ET.  Run the session shortly after, once per day.
+35 16 * * 1-5 cd /path/to/pump-chart-market/backend && \
+  ./.venv/bin/python -m market_live.run_live live \
+    --broker mt5 --bridge http://127.0.0.1:8765 \
+    --market stocks --symbols "$(cat symbols.txt)" \
+    --k 0.75 --firm ftmo_2step \
+    --results-dir market_backtest/results/arm14 \
+    --overrides '{"gain_retrace_arm_pct": 14.0}' \
+    --once >> logs/live_$(date +%F).log 2>&1
+```
+
+`--once` processes every newly closed bar, reconciles positions, checks the
+guard, persists `guard_state.json`, and exits — restart-safe by design.
+
+Weekly checks:
+* `decisions.jsonl` vs `orders.jsonl` divergence (broker missed a target)
+* `guard.jsonl` floors/phase (must match the broker's account page)
+* rolling 60/90-day realised mean vs +0.043%/day (edge decay)
+* re-run `test_live_parity.py` after any code change
+
+## Prop-account operating rules
+
+1. **Withdraw every payout.** At k=0.75 the funded account blows ~33%/yr;
+   withdrawn profit is the only profit that survives.
+2. **Never re-enter after a halt.** `guard_state.json` keeps the halt sticky
+   until a new account is funded.
+3. **Run 2–3 parallel attempts**, not one — 93–98% chance at least one funds.
+4. **Do not raise k to "pass faster".** Above k=1 the blow-up rate outruns the
+   pass rate; EV peaks at 0.5–0.75.
