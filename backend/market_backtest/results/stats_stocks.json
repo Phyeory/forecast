@@ -62,6 +62,48 @@
     "deterministic_p1_30d": "timeout"
    },
    "prop_mc": {
+    "0.25": {
+     "p1_60d": {
+      "timeout": 1.0
+     },
+     "p1_30d": {
+      "timeout": 1.0
+     },
+     "p2_30d": {
+      "timeout": 1.0
+     },
+     "funded": {
+      "years_simulated": 0.9920634920634921,
+      "p_blown": 0.003,
+      "mean_return_pct": -0.55,
+      "median_return_pct": -0.48,
+      "p05_return_pct": -5.67,
+      "p95_return_pct": 4.56,
+      "expected_trader_payout_pct_of_initial": 0.0
+     }
+    },
+    "0.5": {
+     "p1_60d": {
+      "timeout": 0.9965,
+      "fail_total": 0.0035
+     },
+     "p1_30d": {
+      "timeout": 1.0
+     },
+     "p2_30d": {
+      "timeout": 0.989,
+      "pass": 0.011
+     },
+     "funded": {
+      "years_simulated": 0.9920634920634921,
+      "p_blown": 0.212,
+      "mean_return_pct": -1.06,
+      "median_return_pct": -1.05,
+      "p05_return_pct": -10.0,
+      "p95_return_pct": 9.12,
+      "expected_trader_payout_pct_of_initial": 0.0
+     }
+    },
     "1.0": {
      "p1_60d": {
       "timeout": 0.7825,

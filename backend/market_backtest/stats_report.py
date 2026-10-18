@@ -56,7 +56,7 @@ PROP = {
 # ─────────────────────────────────────────────────────────────────────────
 
 def load_results(d: Path, market: str | None = None,
-                 label: str = "") -> list[dict]:
+                 label: str = "", interval: str | None = None) -> list[dict]:
     out = []
     for f in sorted(d.glob("*.json")):
         if f.name.startswith("batch_") or f.name.startswith("summary"):
@@ -72,6 +72,8 @@ def load_results(d: Path, market: str | None = None,
         if (data.get("label") or "") != label:
             continue
         if market and data.get("market") != market:
+            continue
+        if interval and data.get("interval") != interval:
             continue
         out.append(data)
     return out
@@ -386,8 +388,8 @@ def _sharpe(daily: list[tuple[int, float]]) -> float:
 
 
 def report(d: Path, market: str | None, label: str = "",
-           out_path: Path | None = None) -> dict:
-    results = load_results(d, market, label)
+           out_path: Path | None = None, interval: str | None = None) -> dict:
+    results = load_results(d, market, label, interval)
     if not results:
         print(f"[stats] no results (market={market}, label={label!r}) in {d}")
         return {}
@@ -491,7 +493,7 @@ def report(d: Path, market: str | None, label: str = "",
                   f"{'P2|P1 (30d)':>12}  {'P(daily breach)':>15}  "
                   f"{'funded: blown':>14}  {'funded μ ret':>12}")
             mc = {}
-            for k in (1.0, 2.0, 3.0, 5.0):
+            for k in (0.25, 0.5, 1.0, 2.0, 3.0, 5.0):
                 p1 = prop_monte_carlo(daily_test, k, PROP["phase1_target_pct"],
                                       n_sims=2000, max_days=60)
                 p1_30 = prop_monte_carlo(daily_test, k, PROP["phase1_target_pct"],
@@ -503,7 +505,7 @@ def report(d: Path, market: str | None, label: str = "",
                 p2p = p2.get("pass", 0.0)
                 mc[str(k)] = {"p1_60d": p1, "p1_30d": p1_30, "p2_30d": p2,
                               "funded": funded}
-                print(f"    {k:>3.1f}  {p1p:>12.1%}  {p1_30.get('pass', 0.0):>12.1%}  "
+                print(f"    {k:>4.2f}  {p1p:>12.1%}  {p1_30.get('pass', 0.0):>12.1%}  "
                       f"{p2p:>11.1%}  {p1.get('fail_daily', 0.0):>14.1%}  "
                       f"{funded['p_blown']:>13.1%}  {funded['mean_return_pct']:>+11.2f}%")
 
@@ -541,12 +543,14 @@ def main() -> None:
     ap.add_argument("--dir", type=str, default="market_backtest/results")
     ap.add_argument("--market", type=str, default=None,
                     choices=[None, "stocks", "crypto_perp"])
+    ap.add_argument("--interval", type=str, default=None,
+                    choices=[None, "1d", "1h"])
     ap.add_argument("--label", type=str, default="")
     ap.add_argument("--save", type=str, default="")
     args = ap.parse_args()
     d = Path(args.dir)
     out = (d / f"{args.save}.json") if args.save else None
-    report(d, args.market, args.label, out)
+    report(d, args.market, args.label, out, args.interval)
 
 
 if __name__ == "__main__":
