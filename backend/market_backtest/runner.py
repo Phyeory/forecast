@@ -44,6 +44,17 @@ COSTS = {
     "crypto_perp_1d": {"slippage_pct": 0.05, "priority_fee": 0.0},
 }
 
+# Prop-tradable daily universes (fetch_markets.py) reuse the stocks
+# daily-bar engine class (BAR_SPEC / calibration / costs).
+MARKET_CLASS = {
+    "idx_fut": "stocks",
+    "intl_idx": "stocks",
+    "comm_fut": "stocks",
+    "fx": "stocks",
+    "crypto_spot": "stocks",
+    "etf": "stocks",
+}
+
 
 class MarketForwardTester(ForwardTester):
     """ForwardTester hosting the V2M clone engine.
@@ -117,6 +128,7 @@ def run_market_backtest(
     calibration), entries at/after it are unseen out-of-sample.
     """
     kind = f"{market}_{interval}" if market == "crypto_perp" else market
+    kind = MARKET_CLASS.get(kind, kind)
     spec = BAR_SPEC[kind]
     bar_seconds = spec["bar_seconds"]
 

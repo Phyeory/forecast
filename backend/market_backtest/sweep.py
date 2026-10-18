@@ -256,7 +256,8 @@ def run_sweep(market: str, cells: dict[str, dict], symbols: list[str],
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--market", choices=["stocks", "perps"], required=True)
+    ap.add_argument("--market", required=True,
+                    help="stocks | perps | any market name in market_data.db")
     ap.add_argument("--round", choices=["a", "b", "c", "custom"], required=True)
     ap.add_argument("--cells-json", type=str, default="",
                     help="custom: path to {name: overrides} JSON")
@@ -285,6 +286,19 @@ def main() -> None:
         symbols = args.symbols.split(",") if args.symbols else LIQUID12
         cells = {"a": GEOM_A_PERPS, "b": ROUND_B_PERPS,
                  "c": ROUND_C_PERPS}[args.round] if args.round != "custom" else {}
+
+    if args.market not in ("stocks", "perps"):
+        # generic daily market (fetch_markets.py universes)
+        from .market_store import list_market_recordings
+        market = args.market
+        interval = args.interval or "1d"
+        symbols = ([s for s in args.symbols.split(",") if s]
+                   if args.symbols else
+                   [r["symbol"] for r in list_market_recordings(market)
+                    if r["interval"] == interval and r["status"] == "completed"])
+        if args.round != "custom":
+            raise SystemExit("generic markets need --round custom --cells-json")
+        cells = {}
 
     if args.interval:
         interval = args.interval
