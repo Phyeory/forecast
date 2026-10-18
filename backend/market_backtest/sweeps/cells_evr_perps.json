@@ -1,0 +1,12 @@
+{
+  "base":        {},
+  "evr_hi_c0":   {"v2_evr_confirm_pct": 20.0, "v2_evr_offside_min_pct": 6.0,
+                  "v2_evr_buy_ratio_max": 0.60, "v2_evr_eval_delay": 7200,
+                  "v2_evr_skip_sell_conc_min": 0.0},
+  "evr_max":     {"v2_evr_confirm_pct": 30.0, "v2_evr_offside_min_pct": 5.0,
+                  "v2_evr_buy_ratio_max": 0.70, "v2_evr_eval_delay": 3600,
+                  "v2_evr_skip_sell_conc_min": 0.0},
+  "evr_stop":    {"v2_evr_confirm_pct": 100.0, "v2_evr_offside_min_pct": 3.0,
+                  "v2_evr_buy_ratio_max": 0.99, "v2_evr_eval_delay": 3600,
+                  "v2_evr_skip_sell_conc_min": 0.0}
+}

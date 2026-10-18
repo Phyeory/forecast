@@ -1,0 +1,2625 @@
+{
+ "arm_g6": {
+  "overrides": {
+   "gain_retrace_arm_pct": 6.0
+  },
+  "symbols": 12,
+  "train": {
+   "n": 3,
+   "wr": 0.0,
+   "pnl": -0.012930077167596365,
+   "mean": -0.004310025722532122,
+   "symbols_pos": "0/12",
+   "exit_pnl": {
+    "gain_retrace": -0.0129
+   },
+   "exit_n": {
+    "gain_retrace": 3
+   }
+  },
+  "test": {
+   "n": 6,
+   "wr": 16.666666666666668,
+   "pnl": -0.02765785612337411,
+   "mean": -0.004609642687229018,
+   "symbols_pos": "0/12",
+   "exit_pnl": {
+    "recording_ended": -0.014,
+    "kelly_flat": -0.0133,
+    "gain_retrace": -0.0034,
+    "breakeven_scratch": 0.0031
+   },
+   "exit_n": {
+    "gain_retrace": 2,
+    "recording_ended": 2,
+    "breakeven_scratch": 1,
+    "kelly_flat": 1
+   }
+  },
+  "symbols_detail": [
+   {
+    "symbol": "DOGEUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "SOLUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "LINKUSDT",
+    "train": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.0005602433818864827,
+     "avg_pnl": -0.0005602433818864827,
+     "best": -0.0005602433818864827,
+     "worst": -0.0005602433818864827,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": -0.00056
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    },
+    "test": {
+     "trades": 3,
+     "wins": 1,
+     "losses": 2,
+     "win_rate": 33.333333333333336,
+     "total_pnl": -0.004392020573559155,
+     "avg_pnl": -0.0014640068578530517,
+     "best": 0.003065582716770529,
+     "worst": -0.007212295694411411,
+     "exit_reasons": {
+      "breakeven_scratch": 1,
+      "gain_retrace": 1,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "breakeven_scratch": 0.003066,
+      "gain_retrace": -0.000245,
+      "recording_ended": -0.007212
+     },
+     "hold_days_p50": 2.0,
+     "hold_days_p90": 2.0
+    }
+   },
+   {
+    "symbol": "XRPUSDT",
+    "train": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.012132214058620208,
+     "avg_pnl": -0.012132214058620208,
+     "best": -0.012132214058620208,
+     "worst": -0.012132214058620208,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": -0.012132
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    },
+    "test": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.013310653440928688,
+     "avg_pnl": -0.013310653440928688,
+     "best": -0.013310653440928688,
+     "worst": -0.013310653440928688,
+     "exit_reasons": {
+      "kelly_flat": 1
+     },
+     "exit_pnl": {
+      "kelly_flat": -0.013311
+     },
+     "hold_days_p50": 31.0,
+     "hold_days_p90": 31.0
+    }
+   },
+   {
+    "symbol": "BNBUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "ADAUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.003185053602505414,
+     "avg_pnl": -0.003185053602505414,
+     "best": -0.003185053602505414,
+     "worst": -0.003185053602505414,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": -0.003185
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    }
+   },
+   {
+    "symbol": "BTCUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "ETHUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "AVAXUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "NEARUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "DOTUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "LTCUSDT",
+    "train": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.0002376197270896746,
+     "avg_pnl": -0.0002376197270896746,
+     "best": -0.0002376197270896746,
+     "worst": -0.0002376197270896746,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": -0.000238
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    },
+    "test": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.006770128506380854,
+     "avg_pnl": -0.006770128506380854,
+     "best": -0.006770128506380854,
+     "worst": -0.006770128506380854,
+     "exit_reasons": {
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "recording_ended": -0.00677
+     },
+     "hold_days_p50": 5.0,
+     "hold_days_p90": 5.0
+    }
+   }
+  ]
+ },
+ "arm_g8": {
+  "overrides": {
+   "gain_retrace_arm_pct": 8.0
+  },
+  "symbols": 12,
+  "train": {
+   "n": 3,
+   "wr": 33.333333333333336,
+   "pnl": -0.009445629723143653,
+   "mean": -0.0031485432410478845,
+   "symbols_pos": "1/12",
+   "exit_pnl": {
+    "gain_retrace": -0.0094
+   },
+   "exit_n": {
+    "gain_retrace": 3
+   }
+  },
+  "test": {
+   "n": 6,
+   "wr": 33.333333333333336,
+   "pnl": -0.02276679805800648,
+   "mean": -0.00379446634300108,
+   "symbols_pos": "1/12",
+   "exit_pnl": {
+    "recording_ended": -0.014,
+    "kelly_flat": -0.0133,
+    "gain_retrace": 0.0015,
+    "breakeven_scratch": 0.0031
+   },
+   "exit_n": {
+    "gain_retrace": 2,
+    "recording_ended": 2,
+    "kelly_flat": 1,
+    "breakeven_scratch": 1
+   }
+  },
+  "symbols_detail": [
+   {
+    "symbol": "SOLUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "BNBUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "ETHUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "BTCUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "XRPUSDT",
+    "train": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.012132214058620208,
+     "avg_pnl": -0.012132214058620208,
+     "best": -0.012132214058620208,
+     "worst": -0.012132214058620208,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": -0.012132
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    },
+    "test": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.013310653440928688,
+     "avg_pnl": -0.013310653440928688,
+     "best": -0.013310653440928688,
+     "worst": -0.013310653440928688,
+     "exit_reasons": {
+      "kelly_flat": 1
+     },
+     "exit_pnl": {
+      "kelly_flat": -0.013311
+     },
+     "hold_days_p50": 31.0,
+     "hold_days_p90": 31.0
+    }
+   },
+   {
+    "symbol": "AVAXUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "DOGEUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "ADAUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.003185053602505414,
+     "avg_pnl": -0.003185053602505414,
+     "best": -0.003185053602505414,
+     "worst": -0.003185053602505414,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": -0.003185
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    }
+   },
+   {
+    "symbol": "LINKUSDT",
+    "train": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.0005602433818864827,
+     "avg_pnl": -0.0005602433818864827,
+     "best": -0.0005602433818864827,
+     "worst": -0.0005602433818864827,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": -0.00056
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    },
+    "test": {
+     "trades": 3,
+     "wins": 2,
+     "losses": 1,
+     "win_rate": 66.66666666666667,
+     "total_pnl": 0.0004990374918084767,
+     "avg_pnl": 0.00016634583060282557,
+     "best": 0.004645750469449358,
+     "worst": -0.007212295694411411,
+     "exit_reasons": {
+      "breakeven_scratch": 1,
+      "gain_retrace": 1,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "breakeven_scratch": 0.003066,
+      "gain_retrace": 0.004646,
+      "recording_ended": -0.007212
+     },
+     "hold_days_p50": 2.0,
+     "hold_days_p90": 2.0
+    }
+   },
+   {
+    "symbol": "NEARUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "DOTUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "LTCUSDT",
+    "train": {
+     "trades": 1,
+     "wins": 1,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.0032468277173630378,
+     "avg_pnl": 0.0032468277173630378,
+     "best": 0.0032468277173630378,
+     "worst": 0.0032468277173630378,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.003247
+     },
+     "hold_days_p50": 3.0,
+     "hold_days_p90": 3.0
+    },
+    "test": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.006770128506380854,
+     "avg_pnl": -0.006770128506380854,
+     "best": -0.006770128506380854,
+     "worst": -0.006770128506380854,
+     "exit_reasons": {
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "recording_ended": -0.00677
+     },
+     "hold_days_p50": 5.0,
+     "hold_days_p90": 5.0
+    }
+   }
+  ]
+ },
+ "arm_g10": {
+  "overrides": {
+   "gain_retrace_arm_pct": 10.0
+  },
+  "symbols": 12,
+  "train": {
+   "n": 3,
+   "wr": 66.66666666666667,
+   "pnl": -0.005546325812188321,
+   "mean": -0.0018487752707294404,
+   "symbols_pos": "2/12",
+   "exit_pnl": {
+    "gain_retrace": -0.0055
+   },
+   "exit_n": {
+    "gain_retrace": 3
+   }
+  },
+  "test": {
+   "n": 6,
+   "wr": 33.333333333333336,
+   "pnl": -0.06523166224952892,
+   "mean": -0.01087194370825482,
+   "symbols_pos": "0/12",
+   "exit_pnl": {
+    "kelly_flat": -0.0564,
+    "recording_ended": -0.014,
+    "gain_retrace": 0.0021,
+    "breakeven_scratch": 0.0031
+   },
+   "exit_n": {
+    "kelly_flat": 2,
+    "recording_ended": 2,
+    "breakeven_scratch": 1,
+    "gain_retrace": 1
+   }
+  },
+  "symbols_detail": [
+   {
+    "symbol": "SOLUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "BTCUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "ETHUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "BNBUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "DOGEUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "XRPUSDT",
+    "train": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.012132214058620208,
+     "avg_pnl": -0.012132214058620208,
+     "best": -0.012132214058620208,
+     "worst": -0.012132214058620208,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": -0.012132
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    },
+    "test": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.013310653440928688,
+     "avg_pnl": -0.013310653440928688,
+     "best": -0.013310653440928688,
+     "worst": -0.013310653440928688,
+     "exit_reasons": {
+      "kelly_flat": 1
+     },
+     "exit_pnl": {
+      "kelly_flat": -0.013311
+     },
+     "hold_days_p50": 31.0,
+     "hold_days_p90": 31.0
+    }
+   },
+   {
+    "symbol": "ADAUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.043117453417060074,
+     "avg_pnl": -0.043117453417060074,
+     "best": -0.043117453417060074,
+     "worst": -0.043117453417060074,
+     "exit_reasons": {
+      "kelly_flat": 1
+     },
+     "exit_pnl": {
+      "kelly_flat": -0.043117
+     },
+     "hold_days_p50": 36.0,
+     "hold_days_p90": 36.0
+    }
+   },
+   {
+    "symbol": "LINKUSDT",
+    "train": {
+     "trades": 1,
+     "wins": 1,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.003339060529068849,
+     "avg_pnl": 0.003339060529068849,
+     "best": 0.003339060529068849,
+     "worst": 0.003339060529068849,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.003339
+     },
+     "hold_days_p50": 4.0,
+     "hold_days_p90": 4.0
+    },
+    "test": {
+     "trades": 3,
+     "wins": 2,
+     "losses": 1,
+     "win_rate": 66.66666666666667,
+     "total_pnl": -0.002033426885159298,
+     "avg_pnl": -0.000677808961719766,
+     "best": 0.003065582716770529,
+     "worst": -0.007212295694411411,
+     "exit_reasons": {
+      "breakeven_scratch": 1,
+      "gain_retrace": 1,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "breakeven_scratch": 0.003066,
+      "gain_retrace": 0.002113,
+      "recording_ended": -0.007212
+     },
+     "hold_days_p50": 4.0,
+     "hold_days_p90": 4.0
+    }
+   },
+   {
+    "symbol": "AVAXUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "LTCUSDT",
+    "train": {
+     "trades": 1,
+     "wins": 1,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.0032468277173630378,
+     "avg_pnl": 0.0032468277173630378,
+     "best": 0.0032468277173630378,
+     "worst": 0.0032468277173630378,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.003247
+     },
+     "hold_days_p50": 3.0,
+     "hold_days_p90": 3.0
+    },
+    "test": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.006770128506380854,
+     "avg_pnl": -0.006770128506380854,
+     "best": -0.006770128506380854,
+     "worst": -0.006770128506380854,
+     "exit_reasons": {
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "recording_ended": -0.00677
+     },
+     "hold_days_p50": 5.0,
+     "hold_days_p90": 5.0
+    }
+   },
+   {
+    "symbol": "DOTUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "NEARUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   }
+  ]
+ },
+ "arm_g14": {
+  "overrides": {
+   "gain_retrace_arm_pct": 14.0
+  },
+  "symbols": 12,
+  "train": {
+   "n": 3,
+   "wr": 66.66666666666667,
+   "pnl": -0.0038323543665385873,
+   "mean": -0.0012774514555128624,
+   "symbols_pos": "2/12",
+   "exit_pnl": {
+    "gain_retrace": -0.0038
+   },
+   "exit_n": {
+    "gain_retrace": 3
+   }
+  },
+  "test": {
+   "n": 6,
+   "wr": 33.333333333333336,
+   "pnl": -0.06523166224952892,
+   "mean": -0.01087194370825482,
+   "symbols_pos": "0/12",
+   "exit_pnl": {
+    "kelly_flat": -0.0564,
+    "recording_ended": -0.014,
+    "gain_retrace": 0.0021,
+    "breakeven_scratch": 0.0031
+   },
+   "exit_n": {
+    "kelly_flat": 2,
+    "recording_ended": 2,
+    "breakeven_scratch": 1,
+    "gain_retrace": 1
+   }
+  },
+  "symbols_detail": [
+   {
+    "symbol": "SOLUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "BTCUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "ETHUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "BNBUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "XRPUSDT",
+    "train": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.012132214058620208,
+     "avg_pnl": -0.012132214058620208,
+     "best": -0.012132214058620208,
+     "worst": -0.012132214058620208,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": -0.012132
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    },
+    "test": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.013310653440928688,
+     "avg_pnl": -0.013310653440928688,
+     "best": -0.013310653440928688,
+     "worst": -0.013310653440928688,
+     "exit_reasons": {
+      "kelly_flat": 1
+     },
+     "exit_pnl": {
+      "kelly_flat": -0.013311
+     },
+     "hold_days_p50": 31.0,
+     "hold_days_p90": 31.0
+    }
+   },
+   {
+    "symbol": "DOGEUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "AVAXUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "ADAUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.043117453417060074,
+     "avg_pnl": -0.043117453417060074,
+     "best": -0.043117453417060074,
+     "worst": -0.043117453417060074,
+     "exit_reasons": {
+      "kelly_flat": 1
+     },
+     "exit_pnl": {
+      "kelly_flat": -0.043117
+     },
+     "hold_days_p50": 36.0,
+     "hold_days_p90": 36.0
+    }
+   },
+   {
+    "symbol": "LINKUSDT",
+    "train": {
+     "trades": 1,
+     "wins": 1,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.003339060529068849,
+     "avg_pnl": 0.003339060529068849,
+     "best": 0.003339060529068849,
+     "worst": 0.003339060529068849,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.003339
+     },
+     "hold_days_p50": 4.0,
+     "hold_days_p90": 4.0
+    },
+    "test": {
+     "trades": 3,
+     "wins": 2,
+     "losses": 1,
+     "win_rate": 66.66666666666667,
+     "total_pnl": -0.002033426885159298,
+     "avg_pnl": -0.000677808961719766,
+     "best": 0.003065582716770529,
+     "worst": -0.007212295694411411,
+     "exit_reasons": {
+      "breakeven_scratch": 1,
+      "gain_retrace": 1,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "breakeven_scratch": 0.003066,
+      "gain_retrace": 0.002113,
+      "recording_ended": -0.007212
+     },
+     "hold_days_p50": 4.0,
+     "hold_days_p90": 4.0
+    }
+   },
+   {
+    "symbol": "NEARUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "DOTUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "LTCUSDT",
+    "train": {
+     "trades": 1,
+     "wins": 1,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.004960799163012772,
+     "avg_pnl": 0.004960799163012772,
+     "best": 0.004960799163012772,
+     "worst": 0.004960799163012772,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.004961
+     },
+     "hold_days_p50": 7.0,
+     "hold_days_p90": 7.0
+    },
+    "test": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.006770128506380854,
+     "avg_pnl": -0.006770128506380854,
+     "best": -0.006770128506380854,
+     "worst": -0.006770128506380854,
+     "exit_reasons": {
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "recording_ended": -0.00677
+     },
+     "hold_days_p50": 5.0,
+     "hold_days_p90": 5.0
+    }
+   }
+  ]
+ },
+ "arm_g20": {
+  "overrides": {
+   "gain_retrace_arm_pct": 20.0
+  },
+  "symbols": 12,
+  "train": {
+   "n": 3,
+   "wr": 66.66666666666667,
+   "pnl": 0.004680248902581605,
+   "mean": 0.0015600829675272015,
+   "symbols_pos": "2/12",
+   "exit_pnl": {
+    "gain_retrace": 0.0047
+   },
+   "exit_n": {
+    "gain_retrace": 3
+   }
+  },
+  "test": {
+   "n": 5,
+   "wr": 40.0,
+   "pnl": -0.0516844258151205,
+   "mean": -0.0103368851630241,
+   "symbols_pos": "1/12",
+   "exit_pnl": {
+    "kelly_flat": -0.0564,
+    "recording_ended": 0.0017,
+    "breakeven_scratch": 0.0031
+   },
+   "exit_n": {
+    "kelly_flat": 2,
+    "recording_ended": 2,
+    "breakeven_scratch": 1
+   }
+  },
+  "symbols_detail": [
+   {
+    "symbol": "BTCUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "SOLUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "ETHUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "BNBUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "XRPUSDT",
+    "train": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.012132214058620208,
+     "avg_pnl": -0.012132214058620208,
+     "best": -0.012132214058620208,
+     "worst": -0.012132214058620208,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": -0.012132
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    },
+    "test": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.013310653440928688,
+     "avg_pnl": -0.013310653440928688,
+     "best": -0.013310653440928688,
+     "worst": -0.013310653440928688,
+     "exit_reasons": {
+      "kelly_flat": 1
+     },
+     "exit_pnl": {
+      "kelly_flat": -0.013311
+     },
+     "hold_days_p50": 31.0,
+     "hold_days_p90": 31.0
+    }
+   },
+   {
+    "symbol": "DOGEUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "ADAUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.043117453417060074,
+     "avg_pnl": -0.043117453417060074,
+     "best": -0.043117453417060074,
+     "worst": -0.043117453417060074,
+     "exit_reasons": {
+      "kelly_flat": 1
+     },
+     "exit_pnl": {
+      "kelly_flat": -0.043117
+     },
+     "hold_days_p50": 36.0,
+     "hold_days_p90": 36.0
+    }
+   },
+   {
+    "symbol": "LINKUSDT",
+    "train": {
+     "trades": 1,
+     "wins": 1,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.009440802863648762,
+     "avg_pnl": 0.009440802863648762,
+     "best": 0.009440802863648762,
+     "worst": 0.009440802863648762,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.009441
+     },
+     "hold_days_p50": 10.0,
+     "hold_days_p90": 10.0
+    },
+    "test": {
+     "trades": 2,
+     "wins": 2,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.011513809549249118,
+     "avg_pnl": 0.005756904774624559,
+     "best": 0.00844822683247859,
+     "worst": 0.003065582716770529,
+     "exit_reasons": {
+      "breakeven_scratch": 1,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "breakeven_scratch": 0.003066,
+      "recording_ended": 0.008448
+     },
+     "hold_days_p50": 71.0,
+     "hold_days_p90": 6.0
+    }
+   },
+   {
+    "symbol": "AVAXUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "LTCUSDT",
+    "train": {
+     "trades": 1,
+     "wins": 1,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.007371660097553051,
+     "avg_pnl": 0.007371660097553051,
+     "best": 0.007371660097553051,
+     "worst": 0.007371660097553051,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.007372
+     },
+     "hold_days_p50": 17.0,
+     "hold_days_p90": 17.0
+    },
+    "test": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.006770128506380854,
+     "avg_pnl": -0.006770128506380854,
+     "best": -0.006770128506380854,
+     "worst": -0.006770128506380854,
+     "exit_reasons": {
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "recording_ended": -0.00677
+     },
+     "hold_days_p50": 5.0,
+     "hold_days_p90": 5.0
+    }
+   },
+   {
+    "symbol": "NEARUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "DOTUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   }
+  ]
+ },
+ "arm_g10_c95": {
+  "overrides": {
+   "gain_retrace_arm_pct": 10.0,
+   "entry_confidence_high": 0.95
+  },
+  "symbols": 12,
+  "train": {
+   "n": 0,
+   "wr": 0.0,
+   "pnl": 0,
+   "mean": 0.0,
+   "symbols_pos": "0/12",
+   "exit_pnl": {},
+   "exit_n": {}
+  },
+  "test": {
+   "n": 1,
+   "wr": 100.0,
+   "pnl": 0.0050771476221217055,
+   "mean": 0.0050771476221217055,
+   "symbols_pos": "1/12",
+   "exit_pnl": {
+    "gain_retrace": 0.0051
+   },
+   "exit_n": {
+    "gain_retrace": 1
+   }
+  },
+  "symbols_detail": [
+   {
+    "symbol": "SOLUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "ETHUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "BTCUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "BNBUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "XRPUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "DOGEUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "AVAXUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "LINKUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 1,
+     "wins": 1,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.0050771476221217055,
+     "avg_pnl": 0.0050771476221217055,
+     "best": 0.0050771476221217055,
+     "worst": 0.0050771476221217055,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.005077
+     },
+     "hold_days_p50": 4.0,
+     "hold_days_p90": 4.0
+    }
+   },
+   {
+    "symbol": "ADAUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "DOTUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "NEARUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "LTCUSDT",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   }
+  ]
+ }
+}

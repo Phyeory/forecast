@@ -1,0 +1,71 @@
+{
+ "base": {
+  "overrides": {},
+  "symbols": 2,
+  "train": {
+   "n": 187,
+   "wr": 48.663101604278076,
+   "pnl": -0.36714848141257894,
+   "mean": -0.0019633608631688714,
+   "symbols_pos": "0/2",
+   "exit_pnl": {
+    "kelly_flat": -0.2189,
+    "kramers_down_exit": -0.1752,
+    "bayesian_flip": 0.0019,
+    "breakeven_scratch": 0.0048,
+    "rate_split_flip:armed": 0.0061,
+    "gain_retrace": 0.0141
+   }
+  },
+  "test": {
+   "n": 114,
+   "wr": 49.12280701754386,
+   "pnl": -0.15164652540363133,
+   "mean": -0.0013302326789792222,
+   "symbols_pos": "0/2",
+   "exit_pnl": {
+    "kramers_down_exit": -0.1706,
+    "kelly_flat": -0.0295,
+    "breakeven_scratch": 0.0017,
+    "rate_split_flip:armed": 0.0167,
+    "gain_retrace": 0.0301
+   }
+  }
+ },
+ "b_off6_bars30": {
+  "overrides": {
+   "no_long_offside_pct": 6.0,
+   "no_long_exit_bars": 30
+  },
+  "symbols": 2,
+  "train": {
+   "n": 191,
+   "wr": 46.596858638743456,
+   "pnl": -0.3715628358320318,
+   "mean": -0.0019453551614242502,
+   "symbols_pos": "0/2",
+   "exit_pnl": {
+    "kelly_flat": -0.2942,
+    "kramers_down_exit": -0.1109,
+    "bayesian_flip": 0.0019,
+    "breakeven_scratch": 0.0048,
+    "rate_split_flip:armed": 0.0061,
+    "gain_retrace": 0.0207
+   }
+  },
+  "test": {
+   "n": 122,
+   "wr": 47.540983606557376,
+   "pnl": -0.17117689282127696,
+   "mean": -0.001403089285420303,
+   "symbols_pos": "0/2",
+   "exit_pnl": {
+    "kelly_flat": -0.1162,
+    "kramers_down_exit": -0.1049,
+    "breakeven_scratch": 0.0017,
+    "rate_split_flip:armed": 0.0167,
+    "gain_retrace": 0.0315
+   }
+  }
+ }
+}

@@ -199,6 +199,85 @@ def _candles_for(market: str, symbol: str, interval: str) -> list[dict]:
     return _CANDLE_CACHE[key]
 
 
+def ledger_daily_equity(rows: list[dict], seg: str = "test") -> tuple[list[int], list[float]]:
+    """TRUE-accounting daily equity: realized ledger + live open marks.
+
+    Fixes the snapshot artifact in `mtm_daily_equity`: there, each symbol's
+    contribution is replaced by the next trade's mark at re-entry, which
+    *removes* the previously realized PnL from the sum (wins confiscated,
+    losses forgiven).  Here each symbol carries
+        Σ booked PnL of trades exited ≤ t  +  mark of the open trade (if any),
+    so the path is the actual mark-to-market equity of one pooled account.
+    """
+    per_symbol: dict[str, dict[int, float]] = {}
+    all_days: set[int] = set()
+
+    for data in rows:
+        sym = data["symbol"]
+        split_ts = int(data.get("split_ts") or 0)
+        candles = _candles_for(data["market"], sym, data["interval"])
+        if not candles:
+            continue
+        trades_all = sorted(data["trades"],
+                            key=lambda t: int(t.get("entry_time") or 0))
+        # segment by ENTRY time (same convention as _seg_trade_pnls)
+        if seg == "test":
+            trades = [t for t in trades_all
+                      if int(t.get("entry_time") or 0) >= split_ts]
+        else:
+            trades = [t for t in trades_all
+                      if int(t.get("entry_time") or 0) < split_ts]
+        series: dict[int, float] = {}
+        realized = 0.0                      # Σ booked PnL of CLOSED seg trades
+        ti = 0
+        open_t: dict | None = None
+        for cd in candles:
+            t = int(cd["time"])
+            if seg == "test" and t < split_ts:
+                continue
+            if seg == "train" and t >= split_ts:
+                break
+            day = int(t // SECONDS_DAY)
+            # settle loop — allows close + same-candle re-entry roll
+            while True:
+                progressed = False
+                if open_t is not None:
+                    xt = int(open_t.get("exit_time") or 0)
+                    if xt and t >= xt:
+                        realized += float(open_t.get("pnl_sol") or 0.0)
+                        open_t = None
+                        progressed = True
+                if (open_t is None and ti < len(trades)
+                        and int(trades[ti].get("entry_time") or 0) <= t):
+                    open_t = trades[ti]
+                    ti += 1
+                    progressed = True
+                if not progressed:
+                    break
+            mark = 0.0
+            if open_t is not None:
+                entry_px = float(open_t.get("entry_price") or 0.0)
+                size = float(open_t.get("size_sol") or 0.0)
+                if entry_px > 0:
+                    mark = size * (float(cd["close"]) / entry_px - 1.0)
+            series[day] = realized + mark
+            all_days.add(day)
+        if series:
+            per_symbol[sym] = series
+
+    days = sorted(all_days)
+    equity = []
+    lasts: dict[str, float] = {}
+    for d in days:
+        tot = 0.0
+        for sym, series in per_symbol.items():
+            if d in series:
+                lasts[sym] = series[d]
+            tot += lasts.get(sym, 0.0)
+        equity.append(1.0 + tot)
+    return days, equity
+
+
 def mtm_daily_equity(rows: list[dict], seg: str = "test") -> tuple[list[int], list[float]]:
     """Mark-to-market daily portfolio equity for one market's results.
 
@@ -388,7 +467,8 @@ def _sharpe(daily: list[tuple[int, float]]) -> float:
 
 
 def report(d: Path, market: str | None, label: str = "",
-           out_path: Path | None = None, interval: str | None = None) -> dict:
+           out_path: Path | None = None, interval: str | None = None,
+           series: str = "ledger") -> dict:
     results = load_results(d, market, label, interval)
     if not results:
         print(f"[stats] no results (market={market}, label={label!r}) in {d}")
@@ -449,9 +529,14 @@ def report(d: Path, market: str | None, label: str = "",
                   f"avg win {segs[seg]['avg_win'] * 100:.4f}%  "
                   f"avg loss -{segs[seg]['avg_loss'] * 100:.4f}%")
 
-        # portfolio: mark-to-market daily equity across ALL symbols on one
-        # account (proper for prop breach rules — no booked-at-exit artifacts)
-        days_idx, eq = mtm_daily_equity(rows, "test")
+        # portfolio: TRUE daily equity across ALL symbols on one account.
+        # `ledger` = realized-so-far + open marks (correct accounting);
+        # `snap`   = legacy snapshot series (confiscates wins / forgives
+        #            losses at re-entry — kept only for comparison).
+        if series == "ledger":
+            days_idx, eq = ledger_daily_equity(rows, "test")
+        else:
+            days_idx, eq = mtm_daily_equity(rows, "test")
         if len(eq) >= 5:
             daily_test: list[tuple[int, float]] = []
             prev = 1.0
@@ -472,7 +557,7 @@ def report(d: Path, market: str | None, label: str = "",
             span_days = max(1, days_idx[-1] - days_idx[0])
             span_years = span_days / 365.25
             ret_per_year = mtm_pnl / max(span_years, 1e-9)
-            print(f"\n  PORTFOLIO (unseen window, mark-to-market, all symbols one account):")
+            print(f"\n  PORTFOLIO (unseen window, {series} MTM equity, all symbols one account):")
             print(f"    MTM PnL {mtm_pnl:+.4f} over {span_years:.2f}y  "
                   f"(≈ {ret_per_year * 100:+.1f}%/yr on the 1.0 account)")
             print(f"    max drawdown {mdd:.2f}%  worst day {worst_day * 100:.2f}%  "
@@ -546,11 +631,15 @@ def main() -> None:
     ap.add_argument("--interval", type=str, default=None,
                     choices=[None, "1d", "1h"])
     ap.add_argument("--label", type=str, default="")
+    ap.add_argument("--series", type=str, default="ledger",
+                    choices=["ledger", "snap"],
+                    help="portfolio accounting: ledger = realized + open "
+                         "marks (correct); snap = legacy snapshot series")
     ap.add_argument("--save", type=str, default="")
     args = ap.parse_args()
     d = Path(args.dir)
     out = (d / f"{args.save}.json") if args.save else None
-    report(d, args.market, args.label, out, args.interval)
+    report(d, args.market, args.label, out, args.interval, args.series)
 
 
 if __name__ == "__main__":
