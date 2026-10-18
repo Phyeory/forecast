@@ -185,6 +185,52 @@ monthly: the EV comes from payouts taken before the account eventually blows.
 Full dossier with the firm ranking and the exact deployment settings:
 `backend/market_backtest/PROP_FIRMS.md`.
 
+
+**Deterministic historical path** — the actual arm14 test ledger, scaled and
+run day-by-day through the FTMO 2-Step guard:
+
+| k | outcome | day | date | best-day share at pass |
+|---|---|---|---|---|
+| 0.50 | pass P1+P2 | 538 | 2025-12-05 | 30% |
+| **0.75** | **pass P1+P2** | **442** | **2025-07-22** | **46%** |
+| 1.00 | pass P1+P2 | 337 | 2025-02-19 | 11% |
+
+No time limit means the 21-month runway at k=0.75 is legal.  The MC says 74% of
+*bootstrap* paths pass; the *real* path did.
+
+## Market league table — which market pays (`market_scan.py`, arm14)
+
+One config, every symbol, pooled into one account (10% notional per position).
+Test window, 2016–2026 tapes, 70/30 split.
+
+| market | symbols | test trades | Σ PnL | mean/trade | Sharpe | maxDD | worst day | positive | prop pass |
+|---|---|---|---|---|---|---|---|---|---|
+| **US stocks** | **67** | **113** | **+0.326** | **+0.043%** | **0.75** | **13.3%** | **−5.17%** | **31/67** | **72.2%** |
+| intl ETFs | 9 | 18 | +0.042 | +0.006% | 0.76 | 2.3% | −0.65% | 4/9 | 56.2% |
+| sector ETFs | 13 | 6 | +0.028 | +0.004% | 0.86 | 0.6% | −0.44% | 4/13 | 9.5% |
+| index ETFs | 5 | 2 | +0.015 | +0.002% | 1.00 | 0.3% | −0.23% | 2/5 | 0.0% |
+| commodity ETFs | 8 | 12 | +0.007 | +0.001% | 0.07 | 3.7% | −0.82% | 3/8 | 15.1% |
+| FX ETFs | 6 | 45 | +0.002 | +0.000% | 0.06 | 2.1% | −0.41% | 4/6 | 0.0% |
+| bond ETFs | 4 | 17 | −0.009 | −0.001% | −0.23 | 3.1% | −0.43% | 0/4 | 0.0% |
+
+**The edge is in single-name US equities, and breadth is the multiplier.**
+Per-name expectancy is similar in several markets, but only the 67-stock book
+trades often enough to compound an account (+0.326 over the test window vs
++0.042 for the next best).  Index/commodity/FX books are either too smooth
+(the engine rarely fires) or have no edge.
+
+**Adding the uncorrelated books** (`combine_books.py`; stocks+intl+sector+comm):
+
+| book set | Σ | CAGR | Sharpe | maxDD | worst day | FTMO pass k=0.75 | E payout |
+|---|---|---|---|---|---|---|---|
+| stocks only | +0.326 | +10.9% | 0.75 | 13.3% | −5.17% | 72.2% | $12.5k |
+| + intl + sector + comm | **+0.404** | **+12.0%** | **0.84** | 13.4% | −6.08% | 72.2% | **$13.9k** |
+
+Daily correlations: stocks↔intl 0.38, stocks↔sector 0.36, stocks↔comm −0.04.
+The diversified book is the better *personal* account (+1.1 pp CAGR, +0.09
+Sharpe, same drawdown); the stocks-only book is the cleaner *prop* vehicle
+(tighter daily tail, fewer moving parts).
+
 ## Live execution stack — decision-identical (`market_live/`)
 
 `MarketEngineHost` is not a reimplementation: it builds the same
