@@ -1,18 +1,23 @@
-"""runner.py — market-tape backtest executor.
+"""runner.py — market-tape backtest executor (V2M clone engine).
 
 Mirrors `backtester.run_backtest`'s replay EXACTLY — the same ForwardTester,
 the same 4-state intra-candle expansion with bull/bear midpoint ordering,
-state-4-only volume landing, and the `recording_ended` force-close — but
-reads candle tapes from `market_data.db` instead of memecoin recordings and
-consumes PRE-BAKED market calibration (`market_calibration.py`) instead of
-the pump.fun calibration stack (`calibration_startup.initialize_calibration_
-sync` is deliberately NOT called: it is memecoin-population specific and
-would overwrite the recalibrated coefficients).
+state-4-only volume landing, and the `recording_ended` force-close — but:
+
+  * runs the market-tailored engine CLONE (`strategy_engineV2M.py`,
+    fd. `MarketStrategyEngine` / ζ=0 default) instead of the memecoin V2 —
+    the memecoin engine file is untouched (sha-verified per batch run).
+  * reads candle tapes from `market_data.db` instead of memecoin recordings
+    and consumes PRE-BAKED market calibration (`market_calibration.py`).
+  * splits the tape into TRAIN / UNSEEN segments: engine params are frozen
+    from the train prefix ONLY (`candles[:split_idx]`), the replay then runs
+    over the full tape, and trade statistics are partitioned by entry time
+    into `stats_train` / `stats_test` for honest out-of-sample reads.
 
 Everything is additive/self-contained: nothing in backtester.py,
 forward_tester.py, strategy_engineV2.py, or the live booking system is
-modified (pipeline parity preserved by construction — same engine code,
-same executor code path).
+modified (pipeline parity preserved by construction — same executor code
+path, cloned engine math).
 """
 
 from __future__ import annotations
@@ -40,6 +45,47 @@ COSTS = {
 }
 
 
+class MarketForwardTester(ForwardTester):
+    """ForwardTester hosting the V2M clone engine.
+
+    ForwardTester constructs its engine inside `__init__` via
+    `create_engine(engine_version, **engine_kwargs)` — a single call site we
+    don't want to fork.  Instead we let the base build the cheap pure-Python
+    V1 placeholder, then swap in the clone.  Every downstream FT path only
+    touches `self.engine` afterwards, so the swap is behaviourally exact.
+    """
+
+    def __init__(self, *args, market_engine_kwargs: Optional[dict] = None,
+                 **kwargs):
+        kwargs.pop("engine_kwargs", None)
+        super().__init__(*args, engine_kwargs={}, engine_version=1, **kwargs)
+        from .strategy_engineV2M import StrategyEngineV2MAdapter
+        self.engine = StrategyEngineV2MAdapter(**(market_engine_kwargs or {}))
+
+
+def _partition_stats(trades: list[dict]) -> dict:
+    """WR / PnL / exit-mix over a trade slice (dicts from Trade.to_dict)."""
+    n = len(trades)
+    wins = sum(1 for t in trades if float(t.get("pnl_sol") or 0.0) > 0.0)
+    pnl = sum(float(t.get("pnl_sol") or 0.0) for t in trades)
+    reasons: dict[str, int] = {}
+    for t in trades:
+        r = str(t.get("exit_reason") or "?")
+        reasons[r] = reasons.get(r, 0) + 1
+    pnls = [float(t.get("pnl_sol") or 0.0) for t in trades]
+    return {
+        "trades": n,
+        "wins": wins,
+        "losses": n - wins,
+        "win_rate": (100.0 * wins / n) if n else 0.0,
+        "total_pnl": pnl,
+        "avg_pnl": (pnl / n) if n else 0.0,
+        "best": max(pnls) if pnls else 0.0,
+        "worst": min(pnls) if pnls else 0.0,
+        "exit_reasons": reasons,
+    }
+
+
 def run_market_backtest(
     market: str,
     symbol: str,
@@ -50,8 +96,14 @@ def run_market_backtest(
     engine_params_override: Optional[dict] = None,
     label: str = "",
     results_dir: Optional[Path] = None,
+    split_frac: float = 0.7,
 ) -> dict:
-    """One tape → calibrated engine params → full replay → artifacts."""
+    """One tape → calibrated (train-frozen) engine params → full replay.
+
+    Statistics are partitioned at the train/test boundary by trade ENTRY
+    time: entries before the boundary are train (in-sample for the
+    calibration), entries at/after it are unseen out-of-sample.
+    """
     kind = f"{market}_{interval}" if market == "crypto_perp" else market
     spec = BAR_SPEC[kind]
     bar_seconds = spec["bar_seconds"]
@@ -63,29 +115,33 @@ def run_market_backtest(
     if not candles:
         raise ValueError(f"No candles for {market}/{symbol}/{interval}")
 
-    calib = calibrate_market_params(candles, kind, calib_bars)
+    n = len(candles)
+    split_idx = max(1, min(n - 1, int(n * float(split_frac))))
+    split_ts = int(candles[split_idx]["time"])
+    train_tape = candles[:split_idx]
+
+    # Calibration: TRAIN PREFIX ONLY (causal).  Percentiles, σ gate and the
+    # KDE/τ knobs see nothing that happens after `split_ts`.
+    calib = calibrate_market_params(
+        train_tape, kind,
+        calib_bars if calib_bars is not None else len(train_tape))
     engine_params = dict(calib["engine_params"])
     if engine_params_override:
         engine_params.update(engine_params_override)
 
     costs = COSTS[kind]
-    priority_fee = costs["priority_fee"]
-    bribe_fee = 0.0
 
-    ft = ForwardTester(
+    ft = MarketForwardTester(
         starting_balance=starting_balance,
         buy_size_sol=buy_size,
-        priority_fee=priority_fee,
-        bribe_fee=bribe_fee,
+        priority_fee=costs["priority_fee"],
+        bribe_fee=0.0,
         slippage_pct=costs["slippage_pct"],
-        engine_kwargs=engine_params,
-        engine_version=2,
+        market_engine_kwargs=engine_params,
         exec_model="instant",
     )
 
-    # Engine-keyed latency injection mirrors backtester.run_backtest: the
-    # market calibration pins delays at 0.0, so both blocks are inert here
-    # (kept for structural parity if a future cell raises the engine knob).
+    # Engine-keyed latency injection mirrors backtester.run_backtest.
     _eng_delay = float(getattr(ft.engine, "v2_entry_delay_seconds", 0.0))
     if _eng_delay > 0.0:
         ft.enable_entry_latency(_eng_delay)
@@ -96,8 +152,8 @@ def run_market_backtest(
             armed_only=float(getattr(ft.engine, "v2_exit_delay_armed_only", 0.0)) > 0.0)
 
     ft_update = ft.update
-    engine = ft.engine
 
+    last_candle = None
     for candle in candles:
         t = int(candle["time"])
         o = float(candle["open"])
@@ -141,6 +197,12 @@ def run_market_backtest(
     trades = [t.to_dict() for t in ft.trade_history]
     stats = ft.stats.to_dict()
 
+    # ── Train / unseen partition (by ENTRY time) ─────────────────────
+    trades_train = [t for t in trades if int(t.get("entry_time") or 0) < split_ts]
+    trades_test = [t for t in trades if int(t.get("entry_time") or 0) >= split_ts]
+    stats_train = _partition_stats(trades_train)
+    stats_test = _partition_stats(trades_test)
+
     out_dir = Path(results_dir) if results_dir else RESULTS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     tag = f"{market}_{symbol}_{interval}"
@@ -149,14 +211,18 @@ def run_market_backtest(
     out = {
         "market": market, "symbol": symbol, "interval": interval,
         "kind": kind, "label": label,
+        "split_frac": split_frac, "split_ts": split_ts,
+        "split_iso": time.strftime("%Y-%m-%d", time.gmtime(split_ts)),
+        "n_candles": n, "n_candles_train": split_idx,
         "calibration": calib["audit"],
         "engine_params": engine_params,
         "stats": stats,
-        "n_candles": len(candles),
+        "stats_train": stats_train,
+        "stats_test": stats_test,
         "starting_balance": starting_balance,
         "buy_size": buy_size,
         "slippage_pct": costs["slippage_pct"],
-        "priority_fee": priority_fee,
+        "priority_fee": costs["priority_fee"],
         "ran_at": time.time(),
         "trades": trades,
     }
@@ -165,9 +231,10 @@ def run_market_backtest(
 
     summary = {
         "market": market, "symbol": symbol, "interval": interval,
-        "stats": stats,
+        "stats": stats, "stats_train": stats_train, "stats_test": stats_test,
         "n_trades": len(trades),
-        "n_candles": len(candles),
+        "n_candles": n,
+        "split_iso": out["split_iso"],
         "calibration": calib["audit"],
     }
     return summary

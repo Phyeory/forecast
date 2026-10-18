@@ -205,12 +205,21 @@ def calibrate_market_params(candles: list[dict], market_kind: str,
     # FAST prefix idempotently through a throwaway engine and reading the
     # post-warmup σ_t distribution.  Gate = 0.35 × p10 (blocks the truly
     # degenerate states, never the healthy floor).
-    lr = np.diff(np.log(np.maximum(closes, 1e-30)))
+    #
+    # The replay is bounded to the LAST `_REPLAY_BARS` bars of the prefix:
+    # with train/test splits the prefix can span tens of thousands of 1h
+    # bars (a full replay would double the per-symbol cost), and a
+    # cold-started 3000-bar window is statistically identical for a p10
+    # read.  The engine used is the V2M CLONE (same math as V2 — the only
+    # fork delta, ζ=0, is passed explicitly in `p` anyway — but keeps the
+    # calibration path on the exact engine class the runner uses).
+    _REPLAY_BARS = 3000
+    replay = prefix[-_REPLAY_BARS:]
     try:
-        from engine_factory import create_engine
-        eng = create_engine(engine_version=2, **p)
+        from .strategy_engineV2M import StrategyEngineV2MAdapter
+        eng = StrategyEngineV2MAdapter(**p)
         sig_post: list[float] = []
-        for i, cand in enumerate(prefix):
+        for i, cand in enumerate(replay):
             t0 = int(cand["time"]); o = float(cand["open"])
             hi = float(cand["high"]); lo = float(cand["low"])
             cl = float(cand["close"])

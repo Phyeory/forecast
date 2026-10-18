@@ -38,6 +38,7 @@ import urllib.request
 from .market_store import (
     init_market_db,
     insert_market_candles_batch,
+    get_market_recording,
     set_recording_bounds,
     upsert_market_recording,
 )
@@ -77,6 +78,46 @@ UNIVERSE = [
     ("MCD", "McDonald's Corp", "consumer_def"),
     ("NKE", "Nike Inc", "consumer_def"),
     ("MSTR", "MicroStrategy Inc", "growth_tech"),
+    # ── second cohort (2026-10-18): broad-factor expansion for
+    #    train/test statistical power — all listed continuously since
+    #    well before the 10-year window start.
+    ("ADBE", "Adobe Inc", "software"),
+    ("CRM", "Salesforce Inc", "software"),
+    ("ORCL", "Oracle Corp", "software"),
+    ("CSCO", "Cisco Systems", "tech_hw"),
+    ("IBM", "IBM Corp", "tech_hw"),
+    ("TXN", "Texas Instruments", "semis"),
+    ("AMAT", "Applied Materials", "semis"),
+    ("LRCX", "Lam Research", "semis"),
+    ("MS", "Morgan Stanley", "financials"),
+    ("WFC", "Wells Fargo", "financials"),
+    ("C", "Citigroup Inc", "financials"),
+    ("AXP", "American Express", "financials"),
+    ("BLK", "BlackRock Inc", "financials"),
+    ("V", "Visa Inc", "payments"),
+    ("MA", "Mastercard Inc", "payments"),
+    ("TMO", "Thermo Fisher Scientific", "healthcare"),
+    ("ABT", "Abbott Laboratories", "healthcare"),
+    ("LLY", "Eli Lilly & Co", "healthcare"),
+    ("MRK", "Merck & Co", "healthcare"),
+    ("AMGN", "Amgen Inc", "healthcare"),
+    ("PG", "Procter & Gamble", "consumer_def"),
+    ("CL", "Colgate-Palmolive", "consumer_def"),
+    ("PEP", "PepsiCo Inc", "consumer_def"),
+    ("COST", "Costco Wholesale", "consumer_def"),
+    ("HD", "Home Depot Inc", "consumer_disc"),
+    ("LOW", "Lowe's Companies", "consumer_disc"),
+    ("TGT", "Target Corp", "consumer_disc"),
+    ("DIS", "Walt Disney Co", "media"),
+    ("HON", "Honeywell International", "industrials"),
+    ("UNP", "Union Pacific", "industrials"),
+    ("LMT", "Lockheed Martin", "industrials"),
+    ("COP", "ConocoPhillips", "energy"),
+    ("SLB", "Schlumberger (SLB)", "energy"),
+    ("NEE", "NextEra Energy", "utility"),
+    ("T", "AT&T Inc", "telecom"),
+    ("VZ", "Verizon Communications", "telecom"),
+    ("FCX", "Freeport-McMoRan", "materials"),
 ]
 
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -168,7 +209,6 @@ def fetch_all(years: float = 10.0, force: bool = False, only: list[str] | None =
             continue
         existing = None
         try:
-            from market_store import get_market_recording
             existing = get_market_recording(MARKET, sym, INTERVAL)
         except Exception:
             pass

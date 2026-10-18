@@ -50,6 +50,7 @@ def _run_one(task: dict) -> dict:
             label=task.get("label", ""),
             engine_params_override=task.get("engine_params_override"),
             results_dir=task.get("results_dir"),
+            split_frac=task.get("split_frac", 0.7),
         )
     except Exception as exc:  # noqa: BLE001 — record per-job failure
         return {"error": f"{type(exc).__name__}: {exc}",
@@ -57,18 +58,12 @@ def _run_one(task: dict) -> dict:
                 "market": task.get("market")}
 
 
-STOCK_UNIVERSE = [
-    "NVDA", "AMD", "AVGO", "MU", "INTC", "QCOM", "AAPL", "MSFT",
-    "GOOGL", "META", "AMZN", "NFLX", "TSLA", "JPM", "GS", "BAC",
-    "CAT", "DE", "BA", "GE", "XOM", "CVX", "WMT", "KO", "JNJ",
-    "UNH", "PFE", "MCD", "NKE", "MSTR",
-]
+# Single source of truth = the fetcher universes (they define what's in the DB).
+from .fetch_stocks import UNIVERSE as _STOCK_UNIVERSE  # noqa: E402
+from .fetch_perps import SYMBOLS as _PERP_SYMBOLS      # noqa: E402
 
-PERP_UNIVERSE = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "BNBUSDT",
-    "ADAUSDT", "LINKUSDT", "AVAXUSDT", "LTCUSDT", "DOTUSDT", "ATOMUSDT",
-    "BCHUSDT", "AAVEUSDT", "XLMUSDT", "FILUSDT",
-]
+STOCK_UNIVERSE = [s for s, _n, _sec in _STOCK_UNIVERSE]
+PERP_UNIVERSE = [s for s, _n, _y, _m in _PERP_SYMBOLS]
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -91,6 +86,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 "market": "stocks", "symbol": sym, "interval": "1d",
                 "label": label, "engine_params_override": override,
                 "results_dir": RESULTS_DIR / label if label else RESULTS_DIR,
+                "split_frac": args.split_frac,
             })
     if args.market in ("perps", "both"):
         intervals = [i.strip() for i in args.intervals.split(",") if i.strip()]
@@ -100,6 +96,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                     "market": "crypto_perp", "symbol": sym, "interval": interval,
                     "label": label, "engine_params_override": override,
                     "results_dir": RESULTS_DIR / label if label else RESULTS_DIR,
+                    "split_frac": args.split_frac,
                 })
 
     print(f"[batch] {len(tasks)} tape-jobs {label or ''} …")
@@ -118,10 +115,13 @@ def cmd_run(args: argparse.Namespace) -> None:
                       f" → ERROR {res['error']}")
             else:
                 st = res["stats"]
+                stt = res.get("stats_test") or {}
+                tr = res.get("stats_train") or {}
                 print(f"[batch] {res['symbol']}{':' + res['interval'] if res['interval'] else ''}"
-                      f" → trades {st.get('total_trades', 0):>4} "
-                      f"WR {st.get('win_rate', 0.0) * 100 if st.get('win_rate', 0.0) <= 1.0 else st.get('win_rate', 0.0):>5.1f}% "
-                      f"PnL {st.get('total_pnl_sol', 0.0):>9.5f}")
+                      f" → all {st.get('total_trades', 0):>4} "
+                      f"(train {tr.get('trades', 0):>4} / test {stt.get('trades', 0):>4}) "
+                      f"| test WR {stt.get('win_rate', 0.0):>5.1f}% "
+                      f"PnL {stt.get('total_pnl', 0.0):>9.5f}")
 
     batch_file = out_dir / f"batch_{int(time.time())}.json"
     with open(batch_file, "w") as fh:
@@ -144,6 +144,8 @@ def cmd_summary(args: argparse.Namespace) -> None:
         except Exception:
             continue
         st = data.get("stats") or {}
+        stt = data.get("stats_test") or {}
+        tr = data.get("stats_train") or {}
         cb = data.get("calibration") or {}
         rows.append({
             "symbol": data.get("symbol"), "interval": data.get("interval"),
@@ -152,6 +154,11 @@ def cmd_summary(args: argparse.Namespace) -> None:
             "wins": st.get("winning_trades", 0),
             "win_rate": st.get("win_rate", 0.0),
             "pnl": st.get("total_pnl_sol", 0.0),
+            "trades_train": tr.get("trades", 0),
+            "pnl_train": tr.get("total_pnl", 0.0),
+            "trades_test": stt.get("trades", 0),
+            "wr_test": stt.get("win_rate", 0.0),
+            "pnl_test": stt.get("total_pnl", 0.0),
             "tau_max": cb.get("tau_max"),
             "arm_pct": cb.get("gain_retrace_arm_pct"),
             "n_candles": data.get("n_candles"),
@@ -160,18 +167,17 @@ def cmd_summary(args: argparse.Namespace) -> None:
         print(f"[summary] no per-symbol result JSONs in {d}")
         return
     trades_total = sum(r["trades"] for r in rows)
-    wins_total = sum(r["wins"] for r in rows)
     pnl_total = sum(r["pnl"] for r in rows)
-    print(f"\n{'market':<12}{'symbol':<10}{'interval':<5}{'trades':>7}{'WR%':>8}"
-          f"{'PnL':>10}{'tau':>6}{'arm%':>7}")
+    pnl_test_total = sum(r["pnl_test"] for r in rows)
+    print(f"\n{'market':<12}{'symbol':<10}{'int':<4}{'trades':>7}{'tr/tst':>8}"
+          f"{'WR%all':>8}{'PnL all':>10}{'WR test':>8}{'PnL test':>10}")
     for r in rows:
         wr = r["win_rate"] or 0.0
-        print(f"{r['market']:<12}{r['symbol']:<10}{r['interval']:<5}"
-              f"{r['trades']:>7}{wr:>8.1f}{r['pnl']:>10.5f}"
-              f"{str(r['tau_max'] or '-'):>6}{str(r['arm_pct'] or '-'):>7}")
-    print(f"\nTOTAL: {trades_total} trades, "
-          f"WR {wins_total / trades_total * 100 if trades_total else 0:.1f}%, "
-          f"PnL {pnl_total:+.5f}\n")
+        print(f"{r['market']:<12}{r['symbol']:<10}{r['interval']:<4}"
+              f"{r['trades']:>7}{str(r['trades_train']) + '/' + str(r['trades_test']):>8}"
+              f"{wr:>8.1f}{r['pnl']:>10.5f}{r['wr_test']:>8.1f}{r['pnl_test']:>10.5f}")
+    print(f"\nTOTAL: {trades_total} trades, PnL all {pnl_total:+.5f}, "
+          f"test-only PnL {pnl_test_total:+.5f}\n")
     out = d / "summary.json"
     with open(out, "w") as fh:
         json.dump(rows, fh, default=str)
@@ -194,6 +200,8 @@ def main() -> None:
     p.add_argument("--label", type=str, default="")
     p.add_argument("--forgot-calibration", action="store_true",
                    help="diagnostic: skip the market calibration layers")
+    p.add_argument("--split-frac", type=float, default=0.7,
+                   help="train fraction of the tape (calibration prefix)")
     p.add_argument("--max-workers", type=int, default=8)
     s = sub.add_parser("summary")
     s.add_argument("batch_dir")
