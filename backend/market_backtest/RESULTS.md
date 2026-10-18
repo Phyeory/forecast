@@ -482,6 +482,51 @@ loss-cutters, EVR, block, ladder, pup gate, conf gate, arming). No calibration
 in the 146-run-cell matrix makes the perps book viable, and none reaches the daily
 rate required for a prop challenge at tolerable ruin odds.
 
+## Monte Carlo deployment analysis (`mc_deploy.py`, arm14)
+
+Test-window empirical profile (754 days, ledger): mean +0.043%/day, σ 0.92%/day,
+worst day −5.17%, Sharpe 0.75 → full-Kelly k*≈5.1 (the tested k=1 is ≈0.2
+Kelly); cap-safe k (worst day ≤4.5%) = **0.87**.
+
+**P1-60d pass vs bootstrap method** (iid → 5 → 10 → 21-day blocks, 4k sims):
+k=0.75: 9.5→5.1%; k=1: 21.1→13.5%; k=1.5: 38.6→32.0%; k=2: **46.4→44.5%**;
+k=3: 46.7→45.4%. The ~45% pass-rate plateau at k≥2 is method-robust.
+Full challenge (P1+P2): k=1: 4.7%; k=1.5: 16.4%; **k=2: 26.2%**; k=3: 27.1%.
+
+**Funded phase + attempt EV** (1y, monthly payouts taken, $100k, 80% split;
+"paper" = payouts don't reduce the compounding base, "reset" = they do —
+conservative):
+
+| k | blown 1y (paper→reset) | E payout (paper→reset) | EV/attempt (paper→reset) |
+|---|---|---|---|
+| 0.75 | 10.6% → 34.4% | $13.3k → $12.3k | −$388 → −$399 |
+| 1.0 | 42.0% → 63.9% | $13.9k → $12.4k | +$132 → +$63 |
+| 1.5 | 54.6% → 79.1% | $18.3k → $15.0k | +$2,548 → +$2,013 |
+| 2.0 | 73.0% → 88.3% | $19.3k → $15.9k | **+$4,654 → +$3,761** |
+| 3.0 | 99.8% → 99.9% | $8.9k → $8.5k | +$2,016 → +$1,915 |
+
+**Personal account** (no prop rules, 3y bootstrap): k=1 → median CAGR 9.8%
+(P5 −1.3%), median maxDD 13.6%, P(losing 3y) 6.5%; k=2 → 18.1% → DD 23.5%;
+k=3 → 25.3% → DD 31.4% (P95 69.8%); k=5 → median 37.6% but P5 −100%
+(ruin). Trade-level bootstrap cross-check (k=1): 11.3% median CAGR, 6.4% DD —
+the two methods bracket the truth (trade-level misses overlap clustering).
+
+**Deployment mechanics** (from the labeled trades): holds p50 32d / p90 144d
+→ **swing accounts required** (weekend holding); max 23 concurrent positions
+(avg 5.5) → ~55% average notional; execution at the daily close (MOC-style,
+matches the instant-fill model ± the runner's 3–5bp slippage); EA allowed at
+the CFD prop firms (FTMO et al.); swap/commission drag ≈ 1–1.5%/yr at that
+exposure — not modeled in the backtest but small vs the edge.
+
+**Reading**: (a) there is **no live execution path** for this module yet — the
+repo's live stack is memecoin/Jupiter; deployment needs a broker adapter
+(IBKR/Alpaca for personal, MT5/cTrader for prop) + the daily close-time loop;
+(b) the rule-safe zone (k ≤ 0.87) is prop-EV-*negative* — you cannot be both
+daily-cap-safe and pass; (c) the positive-EV prop regime is k=1.5–2, and it
+rides variance + early payouts: ~1 in 4 attempts funds, ~55–88% of funded
+years end in a blowup, income is lumpy but EV-positive **if the edge holds**;
+(d) personal capital at k=1–2 is the cleaner compounding route.
+
 ## Failure mechanisms found (why)
 
 1. **ζ-collapse** (fixed): one-sided liquidity-jump decay kills the RBPF on
