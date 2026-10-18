@@ -1,0 +1,351 @@
+{
+ "label": "arm14",
+ "empirical": {
+  "n_days": 754,
+  "mean_pct": 0.04323644979933482,
+  "sd_pct": 0.9189166694481117,
+  "worst_pct": -5.167223429768986,
+  "best_pct": 9.55785331525294,
+  "sharpe": 0.7469201346259473,
+  "kelly_f": 5.120327817345834
+ },
+ "cap_safe_k": 0.8708738960415312,
+ "challenge": {
+  "0.5": {
+   "block1": {
+    "timeout": 0.985,
+    "pass": 0.0138,
+    "fail_total": 0.0013
+   },
+   "block5": {
+    "timeout": 0.9895,
+    "fail_total": 0.0027,
+    "pass": 0.0077
+   },
+   "block10": {
+    "timeout": 0.9912,
+    "fail_total": 0.003,
+    "pass": 0.0057
+   },
+   "block21": {
+    "timeout": 0.9945,
+    "fail_total": 0.0032,
+    "pass": 0.0022
+   }
+  },
+  "0.75": {
+   "block1": {
+    "timeout": 0.8732,
+    "fail_total": 0.032,
+    "pass": 0.0948
+   },
+   "block5": {
+    "timeout": 0.9038,
+    "pass": 0.0683,
+    "fail_total": 0.028
+   },
+   "block10": {
+    "timeout": 0.9032,
+    "fail_total": 0.033,
+    "pass": 0.0638
+   },
+   "block21": {
+    "pass": 0.0508,
+    "timeout": 0.909,
+    "fail_total": 0.0403
+   }
+  },
+  "1.0": {
+   "block1": {
+    "timeout": 0.6405,
+    "fail_total": 0.0793,
+    "pass": 0.2112,
+    "fail_daily": 0.069
+   },
+   "block5": {
+    "timeout": 0.6913,
+    "fail_total": 0.0902,
+    "pass": 0.1655,
+    "fail_daily": 0.053
+   },
+   "block10": {
+    "pass": 0.1665,
+    "timeout": 0.6987,
+    "fail_total": 0.1082,
+    "fail_daily": 0.0265
+   },
+   "block21": {
+    "timeout": 0.7312,
+    "fail_total": 0.119,
+    "pass": 0.1353,
+    "fail_daily": 0.0145
+   }
+  },
+  "1.5": {
+   "block1": {
+    "fail_total": 0.2195,
+    "pass": 0.3865,
+    "timeout": 0.2885,
+    "fail_daily": 0.1055
+   },
+   "block5": {
+    "timeout": 0.3738,
+    "pass": 0.3598,
+    "fail_total": 0.2265,
+    "fail_daily": 0.04
+   },
+   "block10": {
+    "timeout": 0.3845,
+    "pass": 0.3503,
+    "fail_total": 0.2357,
+    "fail_daily": 0.0295
+   },
+   "block21": {
+    "pass": 0.3197,
+    "timeout": 0.382,
+    "fail_total": 0.285,
+    "fail_daily": 0.0132
+   }
+  },
+  "2.0": {
+   "block1": {
+    "pass": 0.464,
+    "fail_total": 0.2825,
+    "timeout": 0.0945,
+    "fail_daily": 0.159
+   },
+   "block5": {
+    "pass": 0.4698,
+    "fail_total": 0.268,
+    "fail_daily": 0.1133,
+    "timeout": 0.149
+   },
+   "block10": {
+    "timeout": 0.1752,
+    "fail_daily": 0.1013,
+    "pass": 0.4635,
+    "fail_total": 0.26
+   },
+   "block21": {
+    "timeout": 0.208,
+    "fail_daily": 0.1027,
+    "pass": 0.4445,
+    "fail_total": 0.2447
+   }
+  },
+  "3.0": {
+   "block1": {
+    "pass": 0.4667,
+    "fail_total": 0.1693,
+    "fail_daily": 0.3595,
+    "timeout": 0.0045
+   },
+   "block5": {
+    "pass": 0.4753,
+    "fail_daily": 0.326,
+    "fail_total": 0.1898,
+    "timeout": 0.009
+   },
+   "block10": {
+    "pass": 0.4585,
+    "fail_daily": 0.3113,
+    "fail_total": 0.212,
+    "timeout": 0.0182
+   },
+   "block21": {
+    "pass": 0.4535,
+    "fail_total": 0.224,
+    "fail_daily": 0.2757,
+    "timeout": 0.0467
+   }
+  }
+ },
+ "full_challenge": {
+  "0.5": {
+   "p1": 0.0045,
+   "p2_given_p1": 0.05555555555555555,
+   "p_full": 0.00024999999999999995
+  },
+  "0.75": {
+   "p1": 0.06575,
+   "p2_given_p1": 0.16730038022813687,
+   "p_full": 0.011
+  },
+  "1.0": {
+   "p1": 0.163,
+   "p2_given_p1": 0.2852760736196319,
+   "p_full": 0.04650000000000001
+  },
+  "1.5": {
+   "p1": 0.3595,
+   "p2_given_p1": 0.4561891515994437,
+   "p_full": 0.164
+  },
+  "2.0": {
+   "p1": 0.46125,
+   "p2_given_p1": 0.5685636856368563,
+   "p_full": 0.26225
+  },
+  "3.0": {
+   "p1": 0.47675,
+   "p2_given_p1": 0.5684320922915574,
+   "p_full": 0.271
+  }
+ },
+ "funded": {
+  "0.5": {
+   "p_blown": 0.10975,
+   "mean_payout": 0.09103,
+   "median_payout": 0.08983,
+   "p90_payout": 0.13857,
+   "p_any_payout": 0.996,
+   "payout_ev_usd": 9102.886080920063,
+   "full_pass": 0.00024999999999999995,
+   "ev_per_attempt": -537.58927847977
+  },
+  "0.75": {
+   "p_blown": 0.34375,
+   "mean_payout": 0.12297,
+   "median_payout": 0.12479,
+   "p90_payout": 0.20511,
+   "p_any_payout": 0.9715,
+   "payout_ev_usd": 12297.311240217861,
+   "full_pass": 0.011,
+   "ev_per_attempt": -398.78957635760355
+  },
+  "1.0": {
+   "p_blown": 0.639,
+   "mean_payout": 0.12425,
+   "median_payout": 0.1161,
+   "p90_payout": 0.25353,
+   "p_any_payout": 0.896,
+   "payout_ev_usd": 12425.254441372796,
+   "full_pass": 0.04650000000000001,
+   "ev_per_attempt": 62.884331523835044
+  },
+  "1.5": {
+   "p_blown": 0.7915,
+   "mean_payout": 0.15025,
+   "median_payout": 0.11851,
+   "p90_payout": 0.35477,
+   "p_any_payout": 0.836,
+   "payout_ev_usd": 15024.542231626325,
+   "full_pass": 0.164,
+   "ev_per_attempt": 2012.5849259867173
+  },
+  "2.0": {
+   "p_blown": 0.88275,
+   "mean_payout": 0.15861,
+   "median_payout": 0.10366,
+   "p90_payout": 0.42758,
+   "p_any_payout": 0.761,
+   "payout_ev_usd": 15861.290970184418,
+   "full_pass": 0.26225,
+   "ev_per_attempt": 3761.2385569308635
+  },
+  "3.0": {
+   "p_blown": 0.99925,
+   "mean_payout": 0.08518,
+   "median_payout": 0.00026,
+   "p90_payout": 0.25999,
+   "p_any_payout": 0.5005,
+   "payout_ev_usd": 8518.037201662111,
+   "full_pass": 0.271,
+   "ev_per_attempt": 1914.7280816504322
+  }
+ },
+ "personal": {
+  "0.5": {
+   "median_cagr_pct": 5.113,
+   "mean_cagr_pct": 5.2,
+   "p05_cagr_pct": -0.628,
+   "p95_cagr_pct": 10.46,
+   "median_maxdd_pct": 7.363,
+   "p95_maxdd_pct": 14.054,
+   "p_loss_3y": 0.065,
+   "p_catastrophic": 0.0
+  },
+  "1.0": {
+   "median_cagr_pct": 9.772,
+   "mean_cagr_pct": 9.931,
+   "p05_cagr_pct": -1.264,
+   "p95_cagr_pct": 19.243,
+   "median_maxdd_pct": 13.552,
+   "p95_maxdd_pct": 26.617,
+   "p_loss_3y": 0.065,
+   "p_catastrophic": 0.0
+  },
+  "1.5": {
+   "median_cagr_pct": 14.066,
+   "mean_cagr_pct": 14.286,
+   "p05_cagr_pct": -1.908,
+   "p95_cagr_pct": 26.894,
+   "median_maxdd_pct": 18.849,
+   "p95_maxdd_pct": 38.125,
+   "p_loss_3y": 0.065,
+   "p_catastrophic": 0.003
+  },
+  "2.0": {
+   "median_cagr_pct": 18.059,
+   "mean_cagr_pct": 18.327,
+   "p05_cagr_pct": -2.561,
+   "p95_cagr_pct": 33.719,
+   "median_maxdd_pct": 23.51,
+   "p95_maxdd_pct": 49.575,
+   "p_loss_3y": 0.065,
+   "p_catastrophic": 0.005
+  },
+  "3.0": {
+   "median_cagr_pct": 25.322,
+   "mean_cagr_pct": 25.623,
+   "p05_cagr_pct": -4.143,
+   "p95_cagr_pct": 45.599,
+   "median_maxdd_pct": 31.362,
+   "p95_maxdd_pct": 69.754,
+   "p_loss_3y": 0.066,
+   "p_catastrophic": 0.016
+  },
+  "5.0": {
+   "median_cagr_pct": 37.602,
+   "mean_cagr_pct": 37.143,
+   "p05_cagr_pct": -100.0,
+   "p95_cagr_pct": 64.811,
+   "median_maxdd_pct": 44.085,
+   "p95_maxdd_pct": 100.752,
+   "p_loss_3y": 0.093,
+   "p_catastrophic": 0.071
+  }
+ },
+ "trade_level": {
+  "0.5": {
+   "median_cagr_pct": 5.562,
+   "p05_cagr_pct": 2.126,
+   "median_maxdd_pct": 3.238,
+   "p95_maxdd_pct": 6.173
+  },
+  "1.0": {
+   "median_cagr_pct": 11.287,
+   "p05_cagr_pct": 4.138,
+   "median_maxdd_pct": 6.444,
+   "p95_maxdd_pct": 12.074
+  },
+  "1.5": {
+   "median_cagr_pct": 17.171,
+   "p05_cagr_pct": 6.023,
+   "median_maxdd_pct": 9.604,
+   "p95_maxdd_pct": 17.848
+  },
+  "2.0": {
+   "median_cagr_pct": 23.211,
+   "p05_cagr_pct": 7.842,
+   "median_maxdd_pct": 12.721,
+   "p95_maxdd_pct": 23.374
+  },
+  "3.0": {
+   "median_cagr_pct": 35.663,
+   "p05_cagr_pct": 10.88,
+   "median_maxdd_pct": 18.865,
+   "p95_maxdd_pct": 33.688
+  }
+ }
+}
