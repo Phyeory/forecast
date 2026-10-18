@@ -84,6 +84,8 @@ _MARKET_CLAMP: dict[str, tuple[float, float]] = {
 
 BAR_SPEC = {
     "stocks":         {"bar_seconds": 86400.0, "calib_bars": 505},
+    "stocks_1h":      {"bar_seconds": 3600.0,  "calib_bars": 1500},
+    "stocks_5m":      {"bar_seconds": 300.0,   "calib_bars": 1500},
     "crypto_perp_1h": {"bar_seconds": 3600.0,  "calib_bars": 1500},
     "crypto_perp_1d": {"bar_seconds": 86400.0, "calib_bars": 505},
 }
@@ -190,7 +192,7 @@ def calibrate_market_params(candles: list[dict], market_kind: str,
     # production P⁰-balance behavior: SOL-1h churn halves (kramers 257→33,
     # WR 36→52%); AAPL-1d turns positive (WR 75%).  τ_min keeps the
     # engine's rate-window sane.
-    if market_kind == "crypto_perp_1h":
+    if market_kind in ("crypto_perp_1h", "stocks_1h", "stocks_5m"):
         tau_max, tau_min_floor = 20.0, 3.0
     else:  # stocks, crypto_perp_1d
         tau_max, tau_min_floor = 40.0, 5.0
@@ -287,7 +289,7 @@ def calibrate_market_params(candles: list[dict], market_kind: str,
     # engine-side cost model s_0/s_1/fee_fraction is the POSITIVE-EV gate
     # (what the engine believes a round trip costs) — matches the runner's
     # actual fill costs (slippage 3-5 bp + taker fee 0.2-4 bp).
-    if market_kind == "stocks":
+    if market_kind.startswith("stocks"):
         p["s_0"], p["s_1"], p["fee_fraction"] = 0.0003, 2e-6, 0.0002
     else:
         p["s_0"], p["s_1"], p["fee_fraction"] = 0.0005, 5e-6, 0.0004

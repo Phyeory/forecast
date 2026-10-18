@@ -1,0 +1,611 @@
+{
+ "tag": "arm14@market_backtest/results/arm14",
+ "seg": "test",
+ "empirical": {
+  "n_days": 754,
+  "mean_pct": 0.04323644979933482,
+  "sd_pct": 0.9189166694481117,
+  "worst_pct": -5.167223429768986,
+  "sharpe": 0.7469201346259473,
+  "kelly": 5.120327817345834
+ },
+ "templates": {
+  "ftmo_2step": {
+   "0.5": {
+    "p1": 0.925,
+    "p2_given_p1": 0.9387387387387387,
+    "p_full": 0.8683333333333333,
+    "challenge_raw": {
+     "pass": 0.932,
+     "fail_total": 0.068
+    },
+    "funded": {
+     "p_blown": 0.03,
+     "mean_payout": 0.09372,
+     "median_payout": 0.09194,
+     "p90_payout": 0.14234,
+     "p_any_payout": 0.99667,
+     "mean_months_paid": 7.166
+    },
+    "funded_reset": {
+     "p_blown": 0.1,
+     "mean_payout": 0.09204,
+     "median_payout": 0.09155,
+     "p90_payout": 0.14234,
+     "p_any_payout": 0.99667,
+     "mean_months_paid": 7.03467
+    },
+    "payout_ev_usd": 9372.065902215842,
+    "payout_ev_reset_usd": 9203.845617718054,
+    "ev_per_attempt": 8066.977225090755,
+    "ev_per_attempt_reset": 7920.90594471851
+   },
+   "0.75": {
+    "p1": 0.8346666666666667,
+    "p2_given_p1": 0.8889776357827476,
+    "p_full": 0.742,
+    "challenge_raw": {
+     "pass": 0.852,
+     "fail_total": 0.148
+    },
+    "funded": {
+     "p_blown": 0.10133,
+     "mean_payout": 0.13491,
+     "median_payout": 0.13649,
+     "p90_payout": 0.21291,
+     "p_any_payout": 0.97533,
+     "mean_months_paid": 6.87333
+    },
+    "funded_reset": {
+     "p_blown": 0.32667,
+     "mean_payout": 0.12485,
+     "median_payout": 0.12733,
+     "p90_payout": 0.21072,
+     "p_any_payout": 0.97533,
+     "mean_months_paid": 6.366
+    },
+    "payout_ev_usd": 13490.739232216994,
+    "payout_ev_reset_usd": 12484.542192675704,
+    "ev_per_attempt": 9870.808510305009,
+    "ev_per_attempt_reset": 9124.210306965373
+   },
+   "1.0": {
+    "p1": 0.6333333333333333,
+    "p2_given_p1": 0.7573684210526316,
+    "p_full": 0.4796666666666667,
+    "challenge_raw": {
+     "fail_daily": 0.144,
+     "pass": 0.665,
+     "fail_total": 0.191
+    },
+    "funded": {
+     "p_blown": 0.418,
+     "mean_payout": 0.1416,
+     "median_payout": 0.14531,
+     "p90_payout": 0.26102,
+     "p_any_payout": 0.90933,
+     "mean_months_paid": 5.50333
+    },
+    "funded_reset": {
+     "p_blown": 0.63,
+     "mean_payout": 0.12783,
+     "median_payout": 0.11907,
+     "p90_payout": 0.25542,
+     "p_any_payout": 0.90933,
+     "mean_months_paid": 4.94267
+    },
+    "payout_ev_usd": 14160.27669876259,
+    "payout_ev_reset_usd": 12782.983782196228,
+    "ev_per_attempt": 6511.232723173122,
+    "ev_per_attempt_reset": 5850.591220860125
+   },
+   "1.5": {
+    "p1": 0.6273333333333333,
+    "p2_given_p1": 0.71413390010627,
+    "p_full": 0.448,
+    "challenge_raw": {
+     "fail_daily": 0.104,
+     "pass": 0.639,
+     "fail_total": 0.257
+    },
+    "funded": {
+     "p_blown": 0.538,
+     "mean_payout": 0.18769,
+     "median_payout": 0.18401,
+     "p90_payout": 0.38378,
+     "p_any_payout": 0.85067,
+     "mean_months_paid": 4.854
+    },
+    "funded_reset": {
+     "p_blown": 0.786,
+     "mean_payout": 0.15475,
+     "median_payout": 0.1242,
+     "p90_payout": 0.35456,
+     "p_any_payout": 0.85067,
+     "mean_months_paid": 3.994
+    },
+    "payout_ev_usd": 18769.283391597015,
+    "payout_ev_reset_usd": 15474.649198897763,
+    "ev_per_attempt": 8110.558959435462,
+    "ev_per_attempt_reset": 6634.562841106198
+   },
+   "2.0": {
+    "p1": 0.5886666666666667,
+    "p2_given_p1": 0.6421291053227633,
+    "p_full": 0.378,
+    "challenge_raw": {
+     "fail_daily": 0.19,
+     "fail_total": 0.239,
+     "pass": 0.571
+    },
+    "funded": {
+     "p_blown": 0.72333,
+     "mean_payout": 0.19764,
+     "median_payout": 0.1477,
+     "p90_payout": 0.47297,
+     "p_any_payout": 0.778,
+     "mean_months_paid": 3.808
+    },
+    "funded_reset": {
+     "p_blown": 0.89,
+     "mean_payout": 0.15898,
+     "median_payout": 0.09739,
+     "p90_payout": 0.42641,
+     "p_any_payout": 0.778,
+     "mean_months_paid": 3.04133
+    },
+    "payout_ev_usd": 19763.671339794324,
+    "payout_ev_reset_usd": 15898.126637499552,
+    "ev_per_attempt": 7134.787766442255,
+    "ev_per_attempt_reset": 5673.611868974832
+   }
+  },
+  "ftmo_2step_nocons": {
+   "0.5": {
+    "p1": 0.925,
+    "p2_given_p1": 0.940900900900901,
+    "p_full": 0.8703333333333333,
+    "challenge_raw": {
+     "pass": 0.932,
+     "fail_total": 0.068
+    },
+    "funded": {
+     "p_blown": 0.03,
+     "mean_payout": 0.09372,
+     "median_payout": 0.09194,
+     "p90_payout": 0.14234,
+     "p_any_payout": 0.99667,
+     "mean_months_paid": 7.166
+    },
+    "funded_reset": {
+     "p_blown": 0.1,
+     "mean_payout": 0.09204,
+     "median_payout": 0.09155,
+     "p90_payout": 0.14234,
+     "p_any_payout": 0.99667,
+     "mean_months_paid": 7.03467
+    },
+    "payout_ev_usd": 9372.065902215842,
+    "payout_ev_reset_usd": 9203.845617718054,
+    "ev_per_attempt": 8086.8013568951865,
+    "ev_per_attempt_reset": 7940.393635953946
+   },
+   "0.75": {
+    "p1": 0.8366666666666667,
+    "p2_given_p1": 0.896414342629482,
+    "p_full": 0.75,
+    "challenge_raw": {
+     "pass": 0.854,
+     "fail_total": 0.146
+    },
+    "funded": {
+     "p_blown": 0.10133,
+     "mean_payout": 0.13491,
+     "median_payout": 0.13649,
+     "p90_payout": 0.21291,
+     "p_any_payout": 0.97533,
+     "mean_months_paid": 6.87333
+    },
+    "funded_reset": {
+     "p_blown": 0.32667,
+     "mean_payout": 0.12485,
+     "median_payout": 0.12733,
+     "p90_payout": 0.21072,
+     "p_any_payout": 0.97533,
+     "mean_months_paid": 6.366
+    },
+    "payout_ev_usd": 13490.739232216994,
+    "payout_ev_reset_usd": 12484.542192675704,
+    "ev_per_attempt": 9983.054424162747,
+    "ev_per_attempt_reset": 9228.406644506778
+   },
+   "1.0": {
+    "p1": 0.667,
+    "p2_given_p1": 0.8070964517741129,
+    "p_full": 0.5383333333333333,
+    "challenge_raw": {
+     "fail_daily": 0.11,
+     "pass": 0.699,
+     "fail_total": 0.191
+    },
+    "funded": {
+     "p_blown": 0.418,
+     "mean_payout": 0.1416,
+     "median_payout": 0.14531,
+     "p90_payout": 0.26102,
+     "p_any_payout": 0.90933,
+     "mean_months_paid": 5.50333
+    },
+    "funded_reset": {
+     "p_blown": 0.63,
+     "mean_payout": 0.12783,
+     "median_payout": 0.11907,
+     "p90_payout": 0.25542,
+     "p_any_payout": 0.90933,
+     "mean_months_paid": 4.94267
+    },
+    "payout_ev_usd": 14160.27669876259,
+    "payout_ev_reset_usd": 12782.983782196228,
+    "ev_per_attempt": 7373.648956167194,
+    "ev_per_attempt_reset": 6632.206269415637
+   },
+   "1.5": {
+    "p1": 0.6553333333333333,
+    "p2_given_p1": 0.775178026449644,
+    "p_full": 0.508,
+    "challenge_raw": {
+     "fail_daily": 0.083,
+     "pass": 0.66,
+     "fail_total": 0.257
+    },
+    "funded": {
+     "p_blown": 0.538,
+     "mean_payout": 0.18769,
+     "median_payout": 0.18401,
+     "p90_payout": 0.38378,
+     "p_any_payout": 0.85067,
+     "mean_months_paid": 4.854
+    },
+    "funded_reset": {
+     "p_blown": 0.786,
+     "mean_payout": 0.15475,
+     "median_payout": 0.1242,
+     "p90_payout": 0.35456,
+     "p_any_payout": 0.85067,
+     "mean_months_paid": 3.994
+    },
+    "payout_ev_usd": 18769.283391597015,
+    "payout_ev_reset_usd": 15474.649198897763,
+    "ev_per_attempt": 9269.115962931284,
+    "ev_per_attempt_reset": 7595.441793040064
+   },
+   "2.0": {
+    "p1": 0.6266666666666667,
+    "p2_given_p1": 0.7452127659574468,
+    "p_full": 0.467,
+    "challenge_raw": {
+     "fail_daily": 0.163,
+     "fail_total": 0.23,
+     "pass": 0.607
+    },
+    "funded": {
+     "p_blown": 0.72333,
+     "mean_payout": 0.19764,
+     "median_payout": 0.1477,
+     "p90_payout": 0.47297,
+     "p_any_payout": 0.778,
+     "mean_months_paid": 3.808
+    },
+    "funded_reset": {
+     "p_blown": 0.89,
+     "mean_payout": 0.15898,
+     "median_payout": 0.09739,
+     "p90_payout": 0.42641,
+     "p_any_payout": 0.778,
+     "mean_months_paid": 3.04133
+    },
+    "payout_ev_usd": 19763.671339794324,
+    "payout_ev_reset_usd": 15898.126637499552,
+    "ev_per_attempt": 8941.81451568395,
+    "ev_per_attempt_reset": 7136.605139712292
+   }
+  },
+  "nodaily_10": {
+   "0.5": {
+    "p1": 0.927,
+    "p2_given_p1": 1.0,
+    "p_full": 0.927,
+    "challenge_raw": {
+     "pass": 0.927,
+     "fail_total": 0.073
+    },
+    "funded": {
+     "p_blown": 0.03,
+     "mean_payout": 0.09372,
+     "median_payout": 0.09194,
+     "p90_payout": 0.14234,
+     "p_any_payout": 0.99667,
+     "mean_months_paid": 7.166
+    },
+    "funded_reset": {
+     "p_blown": 0.1,
+     "mean_payout": 0.09204,
+     "median_payout": 0.09155,
+     "p90_payout": 0.14234,
+     "p_any_payout": 0.99667,
+     "mean_months_paid": 7.03467
+    },
+    "payout_ev_usd": 9372.065902215842,
+    "payout_ev_reset_usd": 9203.845617718054,
+    "ev_per_attempt": 8648.485091354085,
+    "ev_per_attempt_reset": 8492.544887624637
+   },
+   "0.75": {
+    "p1": 0.8463333333333334,
+    "p2_given_p1": 1.0,
+    "p_full": 0.8463333333333334,
+    "challenge_raw": {
+     "pass": 0.8463,
+     "fail_total": 0.1537
+    },
+    "funded": {
+     "p_blown": 0.10133,
+     "mean_payout": 0.13491,
+     "median_payout": 0.13649,
+     "p90_payout": 0.21291,
+     "p_any_payout": 0.97533,
+     "mean_months_paid": 6.87333
+    },
+    "funded_reset": {
+     "p_blown": 0.32667,
+     "mean_payout": 0.12485,
+     "median_payout": 0.12733,
+     "p90_payout": 0.21072,
+     "p_any_payout": 0.97533,
+     "mean_months_paid": 6.366
+    },
+    "payout_ev_usd": 13490.739232216994,
+    "payout_ev_reset_usd": 12484.542192675704,
+    "ev_per_attempt": 11334.682303532983,
+    "ev_per_attempt_reset": 10483.104209067871
+   },
+   "1.0": {
+    "p1": 0.7836666666666666,
+    "p2_given_p1": 1.0,
+    "p_full": 0.7836666666666666,
+    "challenge_raw": {
+     "fail_total": 0.2163,
+     "pass": 0.7837
+    },
+    "funded": {
+     "p_blown": 0.19533,
+     "mean_payout": 0.16846,
+     "median_payout": 0.17648,
+     "p90_payout": 0.28178,
+     "p_any_payout": 0.94267,
+     "mean_months_paid": 6.44133
+    },
+    "funded_reset": {
+     "p_blown": 0.514,
+     "mean_payout": 0.14833,
+     "median_payout": 0.14806,
+     "p90_payout": 0.27395,
+     "p_any_payout": 0.94267,
+     "mean_months_paid": 5.64533
+    },
+    "payout_ev_usd": 16846.1106581008,
+    "payout_ev_reset_usd": 14833.078457183501,
+    "ev_per_attempt": 13084.915385731658,
+    "ev_per_attempt_reset": 11507.369150946137
+   },
+   "1.5": {
+    "p1": 0.7116666666666667,
+    "p2_given_p1": 1.0,
+    "p_full": 0.7116666666666667,
+    "challenge_raw": {
+     "fail_total": 0.2883,
+     "pass": 0.7117
+    },
+    "funded": {
+     "p_blown": 0.31867,
+     "mean_payout": 0.22661,
+     "median_payout": 0.24591,
+     "p90_payout": 0.4205,
+     "p_any_payout": 0.87733,
+     "mean_months_paid": 5.76133
+    },
+    "funded_reset": {
+     "p_blown": 0.716,
+     "mean_payout": 0.17808,
+     "median_payout": 0.1496,
+     "p90_payout": 0.3892,
+     "p_any_payout": 0.87733,
+     "mean_months_paid": 4.5
+    },
+    "payout_ev_usd": 22660.899223231747,
+    "payout_ev_reset_usd": 17807.553916762918,
+    "ev_per_attempt": 15971.306613866593,
+    "ev_per_attempt_reset": 12517.34253742961
+   },
+   "2.0": {
+    "p1": 0.6676666666666666,
+    "p2_given_p1": 1.0,
+    "p_full": 0.6676666666666666,
+    "challenge_raw": {
+     "fail_total": 0.3323,
+     "pass": 0.6677
+    },
+    "funded": {
+     "p_blown": 0.41067,
+     "mean_payout": 0.26965,
+     "median_payout": 0.2953,
+     "p90_payout": 0.5479,
+     "p_any_payout": 0.814,
+     "mean_months_paid": 5.13467
+    },
+    "funded_reset": {
+     "p_blown": 0.822,
+     "mean_payout": 0.19291,
+     "median_payout": 0.12989,
+     "p90_payout": 0.48951,
+     "p_any_payout": 0.814,
+     "mean_months_paid": 3.62133
+    },
+    "payout_ev_usd": 26964.56600952807,
+    "payout_ev_reset_usd": 19290.808482325436,
+    "ev_per_attempt": 17823.881905694907,
+    "ev_per_attempt_reset": 12700.369796699282
+   }
+  },
+  "firm_8_5": {
+   "0.5": {
+    "p1": 0.9286666666666666,
+    "p2_given_p1": 0.9411342426417804,
+    "p_full": 0.874,
+    "challenge_raw": {
+     "pass": 0.934,
+     "fail_total": 0.066
+    },
+    "funded": {
+     "p_blown": 0.03,
+     "mean_payout": 0.09372,
+     "median_payout": 0.09194,
+     "p90_payout": 0.14234,
+     "p_any_payout": 0.99667,
+     "mean_months_paid": 7.166
+    },
+    "funded_reset": {
+     "p_blown": 0.1,
+     "mean_payout": 0.09204,
+     "median_payout": 0.09155,
+     "p90_payout": 0.14234,
+     "p_any_payout": 0.99667,
+     "mean_months_paid": 7.03467
+    },
+    "payout_ev_usd": 9372.065902215842,
+    "payout_ev_reset_usd": 9203.845617718054,
+    "ev_per_attempt": 8123.145598536645,
+    "ev_per_attempt_reset": 7976.121069885579
+   },
+   "0.75": {
+    "p1": 0.843,
+    "p2_given_p1": 0.8983788058521155,
+    "p_full": 0.7573333333333333,
+    "challenge_raw": {
+     "pass": 0.863,
+     "fail_total": 0.137
+    },
+    "funded": {
+     "p_blown": 0.10133,
+     "mean_payout": 0.13491,
+     "median_payout": 0.13649,
+     "p90_payout": 0.21291,
+     "p_any_payout": 0.97533,
+     "mean_months_paid": 6.87333
+    },
+    "funded_reset": {
+     "p_blown": 0.32667,
+     "mean_payout": 0.12485,
+     "median_payout": 0.12733,
+     "p90_payout": 0.21072,
+     "p_any_payout": 0.97533,
+     "mean_months_paid": 6.366
+    },
+    "payout_ev_usd": 13490.739232216994,
+    "payout_ev_reset_usd": 12484.542192675704,
+    "ev_per_attempt": 10085.94651186567,
+    "ev_per_attempt_reset": 9323.919953919733
+   },
+   "1.0": {
+    "p1": 0.7153333333333334,
+    "p2_given_p1": 0.8052190121155638,
+    "p_full": 0.576,
+    "challenge_raw": {
+     "fail_daily": 0.08,
+     "pass": 0.737,
+     "fail_total": 0.183
+    },
+    "funded": {
+     "p_blown": 0.418,
+     "mean_payout": 0.1416,
+     "median_payout": 0.14531,
+     "p90_payout": 0.26102,
+     "p_any_payout": 0.90933,
+     "mean_months_paid": 5.50333
+    },
+    "funded_reset": {
+     "p_blown": 0.63,
+     "mean_payout": 0.12783,
+     "median_payout": 0.11907,
+     "p90_payout": 0.25542,
+     "p_any_payout": 0.90933,
+     "mean_months_paid": 4.94267
+    },
+    "payout_ev_usd": 14160.27669876259,
+    "payout_ev_reset_usd": 12782.983782196228,
+    "ev_per_attempt": 7927.35937848725,
+    "ev_per_attempt_reset": 7134.038658545027
+   },
+   "1.5": {
+    "p1": 0.688,
+    "p2_given_p1": 0.7800387596899225,
+    "p_full": 0.5366666666666666,
+    "challenge_raw": {
+     "fail_daily": 0.064,
+     "pass": 0.696,
+     "fail_total": 0.24
+    },
+    "funded": {
+     "p_blown": 0.538,
+     "mean_payout": 0.18769,
+     "median_payout": 0.18401,
+     "p90_payout": 0.38378,
+     "p_any_payout": 0.85067,
+     "mean_months_paid": 4.854
+    },
+    "funded_reset": {
+     "p_blown": 0.786,
+     "mean_payout": 0.15475,
+     "median_payout": 0.1242,
+     "p90_payout": 0.35456,
+     "p_any_payout": 0.85067,
+     "mean_months_paid": 3.994
+    },
+    "payout_ev_usd": 18769.283391597015,
+    "payout_ev_reset_usd": 15474.649198897763,
+    "ev_per_attempt": 9822.648753490397,
+    "ev_per_attempt_reset": 8054.528403408465
+   },
+   "2.0": {
+    "p1": 0.6623333333333333,
+    "p2_given_p1": 0.7488676396577756,
+    "p_full": 0.496,
+    "challenge_raw": {
+     "fail_daily": 0.133,
+     "fail_total": 0.217,
+     "pass": 0.65
+    },
+    "funded": {
+     "p_blown": 0.72333,
+     "mean_payout": 0.19764,
+     "median_payout": 0.1477,
+     "p90_payout": 0.47297,
+     "p_any_payout": 0.778,
+     "mean_months_paid": 3.808
+    },
+    "funded_reset": {
+     "p_blown": 0.89,
+     "mean_payout": 0.15898,
+     "median_payout": 0.09739,
+     "p90_payout": 0.42641,
+     "p_any_payout": 0.778,
+     "mean_months_paid": 3.04133
+    },
+    "payout_ev_usd": 19763.671339794324,
+    "payout_ev_reset_usd": 15898.126637499552,
+    "ev_per_attempt": 9530.620984537985,
+    "ev_per_attempt_reset": 7613.310812199778
+   }
+  }
+ }
+}

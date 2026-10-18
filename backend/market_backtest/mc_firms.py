@@ -47,7 +47,9 @@ from market_backtest.stats_report import (
 TEMPLATES: dict[str, dict] = {
     # FTMO 2-Step: 10%/5% targets, 5% daily, STATIC 10% max, no time limit
     "ftmo_2step":        dict(targets=[10.0, 5.0], daily=5.0, max_loss=10.0,
-                              trailing=False, time_limit=None),
+                              trailing=False, time_limit=None, consistency=50.0),
+    "ftmo_2step_nocons": dict(targets=[10.0, 5.0], daily=5.0, max_loss=10.0,
+                              trailing=False, time_limit=None, consistency=None),
     # generic 8%/5% 2-step, no time limit (FundingPips/E8 class)
     "firm_8_5":          dict(targets=[8.0, 5.0], daily=5.0, max_loss=10.0,
                               trailing=False, time_limit=None),
@@ -60,7 +62,7 @@ TEMPLATES: dict[str, dict] = {
                               trailing=False, time_limit=None),
     # FTMO 1-Step: 10% target, 3% daily, EOD-trailing 10% max, no time limit
     "ftmo_1step":        dict(targets=[10.0], daily=3.0, max_loss=10.0,
-                              trailing=True, time_limit=None),
+                              trailing=True, time_limit=None, consistency=50.0),
     # futures props: trailing drawdowns (EOD granularity here)
     "topstep_style":     dict(targets=[6.0], daily=2.0, max_loss=4.0,
                               trailing=True, time_limit=None),
@@ -110,12 +112,20 @@ def _series_stats(daily: list[tuple[int, float]]) -> dict:
             "kelly": (mean / var) if var > 0 else float("inf")}
 
 
-def sim_challenge(daily, k, rules, rng, horizon=2520) -> str:
-    """One no-deadline (or capped) single-phase run; first barrier wins."""
+def sim_challenge(daily, k, rules, rng, horizon=2520,
+                  consistency: float | None = None) -> str:
+    """One no-deadline (or capped) single-phase run; first barrier wins.
+
+    `consistency` (e.g. 50.0) models the FTMO-style rule: the best single day
+    may not exceed that share of TOTAL profit.  Hitting the target before the
+    rule is satisfied does NOT pass — the sim keeps trading (as the firm
+    requires), so the pass can be delayed or never happen.
+    """
     path = _block_bootstrap_days(daily, n_days=horizon, block=5,
                                  seed=rng.randrange(1 << 30))
     eq = 1.0
     peak = 1.0
+    profits: list[float] = []
     for i, (_, r) in enumerate(path):
         if rules["time_limit"] is not None and i >= rules["time_limit"]:
             return "timeout"
@@ -123,12 +133,18 @@ def sim_challenge(daily, k, rules, rng, horizon=2520) -> str:
         if rules["daily"] is not None and r <= -rules["daily"] / 100.0:
             return "fail_daily"
         eq += r
+        profits.append(r)
         if eq > peak:
             peak = eq
         base = peak if rules["trailing"] else 1.0
         if eq <= base - rules["max_loss"] / 100.0:
             return "fail_total"
         if eq >= 1.0 + rules["targets"][0] / 100.0:
+            if consistency and len(profits) > 1:
+                total = eq - 1.0
+                best = max(profits)
+                if total > 0 and best / total > consistency / 100.0:
+                    continue          # keep trading until the rule is met
             return "pass"
     return "long"
 
@@ -137,8 +153,9 @@ def challenge_mc(daily, k, rules, n_sims, seed=11) -> dict:
     rng = random.Random(seed)
     counts: dict[str, int] = {}
     pass_days: list[int] = []
+    cons = rules.get("consistency")
     for s in range(n_sims):
-        res = sim_challenge(daily, k, rules, rng)
+        res = sim_challenge(daily, k, rules, rng, consistency=cons)
         counts[res] = counts.get(res, 0) + 1
     return {kk: v / n_sims for kk, v in counts.items()}
 
@@ -147,13 +164,14 @@ def full_challenge_mc(daily, k, rules, n_sims, seed=17) -> dict:
     """P1 -> P2 (each with the same caps); returns p1, p2|p1, p_full."""
     rng = random.Random(seed)
     p1 = p2 = 0
+    cons = rules.get("consistency")
     for s in range(n_sims):
-        if sim_challenge(daily, k, rules, rng) == "pass":
+        if sim_challenge(daily, k, rules, rng, consistency=cons) == "pass":
             p1 += 1
             r2 = dict(rules)
             r2["targets"] = [rules["targets"][1]] + list(rules["targets"][2:]) \
                 if len(rules["targets"]) > 1 else rules["targets"]
-            if sim_challenge(daily, k, r2, rng) == "pass":
+            if sim_challenge(daily, k, r2, rng, consistency=cons) == "pass":
                 p2 += 1
     return {"p1": p1 / n_sims,
             "p2_given_p1": (p2 / p1 if p1 else 0.0),
