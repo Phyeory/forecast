@@ -59,6 +59,38 @@ SYMBOLS = [
     ("AAVEUSDT", "Aave", 2020, 12),
     ("AVAXUSDT", "Avalanche", 2021, 9),
     ("DOGEUSDT", "Dogecoin", 2021, 7),
+    # ── second cohort (2026-10-18): broad-factor expansion for train/
+    #    test statistical power.  Start months set conservatively late
+    #    (pre-listing months 404-skip cleanly); newer listings keep
+    #    2-4y of hourly tape each, still ≥4k test trades aggregated.
+    ("TRXUSDT", "TRON", 2020, 6),
+    ("ETCUSDT", "Ethereum Classic", 2020, 9),
+    ("EOSUSDT", "EOS", 2020, 9),
+    ("XTZUSDT", "Tezos", 2020, 9),
+    ("ALGOUSDT", "Algorand", 2020, 10),
+    ("VETUSDT", "VeChain", 2020, 10),
+    ("ZECUSDT", "Zcash", 2020, 4),
+    ("DASHUSDT", "Dash", 2020, 5),
+    ("THETAUSDT", "Theta Network", 2021, 1),
+    ("SANDUSDT", "The Sandbox", 2021, 4),
+    ("MANAUSDT", "Decentraland", 2021, 2),
+    ("CRVUSDT", "Curve DAO", 2020, 10),
+    ("COMPUSDT", "Compound", 2020, 9),
+    ("MKRUSDT", "Maker", 2020, 8),
+    ("SNXUSDT", "Synthetix", 2020, 10),
+    ("UNIUSDT", "Uniswap", 2020, 11),
+    ("YFIUSDT", "yearn.finance", 2020, 10),
+    ("SUSHIUSDT", "SushiSwap", 2020, 10),
+    ("NEARUSDT", "NEAR Protocol", 2021, 4),
+    ("EGLDUSDT", "MultiversX", 2021, 5),
+    ("GRTUSDT", "The Graph", 2021, 4),
+    ("1INCHUSDT", "1inch", 2021, 4),
+    ("ARBUSDT", "Arbitrum", 2023, 4),
+    ("OPUSDT", "Optimism", 2022, 7),
+    ("SUIUSDT", "Sui", 2023, 6),
+    ("APTUSDT", "Aptos", 2022, 11),
+    ("TIAUSDT", "Celestia", 2023, 11),
+    ("PEPEUSDT", "Pepe", 2023, 6),
 ]
 
 _BASE = "https://data.binance.vision/data/futures/um/monthly/klines"
@@ -177,14 +209,14 @@ def fetch_all(interval: str | None = None, force: bool = False,
             try:
                 res = fetch_symbol(sym, iv, sy, sm, force=force)
                 report[f"{sym}:{iv}"] = res
-                if "candles" in res:
+                if res.get("skipped"):
+                    print(f"[perp] {sym} {iv}: already fetched "
+                          f"({res.get('candles')} bars) — skip")
+                elif "first" in res:
                     f = datetime.datetime.fromtimestamp(res["first"])
                     l = datetime.datetime.fromtimestamp(res["last"])
                     print(f"[perp] {sym} {iv}: {res['candles']} bars "
                           f"({f:%Y-%m-%d} → {l:%Y-%m-%d})")
-                elif res.get("skipped"):
-                    print(f"[perp] {sym} {iv}: already fetched "
-                          f"({res['candles']} bars) — skip")
                 else:
                     print(f"[perp] {sym} {iv}: {res}")
             except Exception as exc:  # noqa: BLE001 — continue the universe
