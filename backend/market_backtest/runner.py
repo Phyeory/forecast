@@ -69,9 +69,15 @@ def _partition_stats(trades: list[dict]) -> dict:
     wins = sum(1 for t in trades if float(t.get("pnl_sol") or 0.0) > 0.0)
     pnl = sum(float(t.get("pnl_sol") or 0.0) for t in trades)
     reasons: dict[str, int] = {}
+    exit_pnl: dict[str, float] = {}
+    hold_days: list[float] = []
     for t in trades:
         r = str(t.get("exit_reason") or "?")
         reasons[r] = reasons.get(r, 0) + 1
+        exit_pnl[r] = exit_pnl.get(r, 0.0) + float(t.get("pnl_sol") or 0.0)
+        et, xt = int(t.get("entry_time") or 0), int(t.get("exit_time") or 0)
+        if et and xt:
+            hold_days.append((xt - et) / 86400.0)
     pnls = [float(t.get("pnl_sol") or 0.0) for t in trades]
     return {
         "trades": n,
@@ -83,6 +89,11 @@ def _partition_stats(trades: list[dict]) -> dict:
         "best": max(pnls) if pnls else 0.0,
         "worst": min(pnls) if pnls else 0.0,
         "exit_reasons": reasons,
+        "exit_pnl": {k: round(v, 6) for k, v in exit_pnl.items()},
+        "hold_days_p50": (sorted(hold_days)[len(hold_days) // 2]
+                          if hold_days else 0.0),
+        "hold_days_p90": (sorted(hold_days)[int(0.9 * (len(hold_days) - 1))]
+                          if hold_days else 0.0),
     }
 
 
@@ -97,6 +108,7 @@ def run_market_backtest(
     label: str = "",
     results_dir: Optional[Path] = None,
     split_frac: float = 0.7,
+    save: bool = True,
 ) -> dict:
     """One tape → calibrated (train-frozen) engine params → full replay.
 
@@ -226,8 +238,9 @@ def run_market_backtest(
         "ran_at": time.time(),
         "trades": trades,
     }
-    with open(out_dir / f"{tag}.json", "w") as fh:
-        json.dump(out, fh, default=str)
+    if save:
+        with open(out_dir / f"{tag}.json", "w") as fh:
+            json.dump(out, fh, default=str)
 
     summary = {
         "market": market, "symbol": symbol, "interval": interval,
@@ -236,5 +249,6 @@ def run_market_backtest(
         "n_candles": n,
         "split_iso": out["split_iso"],
         "calibration": calib["audit"],
+        "engine_params": engine_params,
     }
     return summary

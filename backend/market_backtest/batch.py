@@ -75,6 +75,15 @@ def cmd_run(args: argparse.Namespace) -> None:
         # Diagnostics cell: /calibration-forgot/ sends a tape across epochs.
         override = {"v2_mintcal_enable": 0.0, "v2_popcal_enable": 0.0}
 
+    if getattr(args, "params", ""):
+        # Explicit knob values applied on top of per-symbol calibration
+        # (same path as sweep.py cells).  Accepts inline JSON or a file path.
+        raw = args.params
+        pth = Path(raw)
+        if "\n" not in raw and "{" not in raw and pth.exists():
+            raw = pth.read_text()
+        override = {**(override or {}), **json.loads(raw)}
+
     if args.symbols:
         syms = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
     else:
@@ -202,6 +211,9 @@ def main() -> None:
                    help="diagnostic: skip the market calibration layers")
     p.add_argument("--split-frac", type=float, default=0.7,
                    help="train fraction of the tape (calibration prefix)")
+    p.add_argument("--params", type=str, default="",
+                   help="explicit knob overrides (inline JSON or file path) "
+                        "applied on top of per-symbol calibration")
     p.add_argument("--max-workers", type=int, default=8)
     s = sub.add_parser("summary")
     s.add_argument("batch_dir")

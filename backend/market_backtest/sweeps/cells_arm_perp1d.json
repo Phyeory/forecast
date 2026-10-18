@@ -1,0 +1,8 @@
+{
+  "arm_g6":   {"gain_retrace_arm_pct": 6.0},
+  "arm_g8":   {"gain_retrace_arm_pct": 8.0},
+  "arm_g10":  {"gain_retrace_arm_pct": 10.0},
+  "arm_g14":  {"gain_retrace_arm_pct": 14.0},
+  "arm_g20":  {"gain_retrace_arm_pct": 20.0},
+  "arm_g10_c95": {"gain_retrace_arm_pct": 10.0, "entry_confidence_high": 0.95}
+}

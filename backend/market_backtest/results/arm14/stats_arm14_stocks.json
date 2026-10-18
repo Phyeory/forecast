@@ -1,0 +1,226 @@
+{
+ "markets": {
+  "stocks": {
+   "n_symbols": 67,
+   "segments": {
+    "train": {
+     "n_symbols": 67,
+     "n_trades": 194,
+     "win_rate": 73.71134020618557,
+     "total_pnl": 0.366953241328875,
+     "mean_trade_pnl": 0.0018915115532416238,
+     "mean_trade_pnl_pct": 0.18915115532416238,
+     "bootstrap_ci95": [
+      0.0003113044478676974,
+      0.003424793369231323
+     ],
+     "bootstrap_ci95_pct": [
+      0.03113044478676974,
+      0.34247933692313226
+     ],
+     "wilcoxon_stat": 5759.0,
+     "wilcoxon_p": 2.3213827713088526e-06,
+     "symbol_breadth_pos": "35/67",
+     "symbol_breadth_binom_p": 0.807194691367025,
+     "profit_factor": 1.6314903721841636,
+     "avg_win": 0.006629678563783662,
+     "avg_loss": 0.011393937123376247
+    },
+    "test": {
+     "n_symbols": 67,
+     "n_trades": 113,
+     "win_rate": 77.87610619469027,
+     "total_pnl": 0.3260028314869844,
+     "mean_trade_pnl": 0.002884980809619331,
+     "mean_trade_pnl_pct": 0.2884980809619331,
+     "bootstrap_ci95": [
+      0.0006474927477700415,
+      0.004982917970400176
+     ],
+     "bootstrap_ci95_pct": [
+      0.06474927477700415,
+      0.4982917970400176
+     ],
+     "wilcoxon_stat": 1635.0,
+     "wilcoxon_p": 5.566731902394723e-06,
+     "symbol_breadth_pos": "31/67",
+     "symbol_breadth_binom_p": 0.6254068289416487,
+     "profit_factor": 2.116701416869552,
+     "avg_win": 0.007022006599970482,
+     "avg_loss": 0.01167734997241672
+    }
+   },
+   "portfolio": {
+    "mtm_pnl": 0.3260028314869845,
+    "span_years": 3.0006844626967832,
+    "annualized_pct_on_account": 10.864282317574917,
+    "max_drawdown_pct": 13.289082315029512,
+    "worst_day_pct": -5.167223429768986,
+    "best_day_pct": 9.55785331525294,
+    "sharpe_ann": 0.7469201346259473,
+    "deterministic_p1": "pass",
+    "deterministic_p1_30d": "timeout"
+   },
+   "prop_mc": {
+    "0.25": {
+     "p1_60d": {
+      "timeout": 1.0
+     },
+     "p1_30d": {
+      "timeout": 1.0
+     },
+     "p2_30d": {
+      "timeout": 1.0
+     },
+     "funded": {
+      "years_simulated": 0.9920634920634921,
+      "p_blown": 0.0,
+      "mean_return_pct": 2.56,
+      "median_return_pct": 2.55,
+      "p05_return_pct": -2.81,
+      "p95_return_pct": 7.66,
+      "expected_trader_payout_pct_of_initial": 2.05
+     }
+    },
+    "0.5": {
+     "p1_60d": {
+      "timeout": 0.994,
+      "fail_total": 0.001,
+      "pass": 0.005
+     },
+     "p1_30d": {
+      "timeout": 1.0
+     },
+     "p2_30d": {
+      "timeout": 0.9555,
+      "pass": 0.0445
+     },
+     "funded": {
+      "years_simulated": 0.9920634920634921,
+      "p_blown": 0.074,
+      "mean_return_pct": 4.97,
+      "median_return_pct": 5.07,
+      "p05_return_pct": -7.58,
+      "p95_return_pct": 15.33,
+      "expected_trader_payout_pct_of_initial": 3.98
+     }
+    },
+    "1.0": {
+     "p1_60d": {
+      "timeout": 0.684,
+      "fail_daily": 0.054,
+      "fail_total": 0.087,
+      "pass": 0.175
+     },
+     "p1_30d": {
+      "timeout": 0.894,
+      "fail_daily": 0.0385,
+      "pass": 0.0435,
+      "fail_total": 0.024
+     },
+     "p2_30d": {
+      "timeout": 0.67,
+      "pass": 0.283,
+      "fail_total": 0.022,
+      "fail_daily": 0.025
+     },
+     "funded": {
+      "years_simulated": 0.9920634920634921,
+      "p_blown": 0.48,
+      "mean_return_pct": 7.59,
+      "median_return_pct": 6.2,
+      "p05_return_pct": -10.07,
+      "p95_return_pct": 30.46,
+      "expected_trader_payout_pct_of_initial": 6.08
+     }
+    },
+    "2.0": {
+     "p1_60d": {
+      "fail_total": 0.2675,
+      "pass": 0.477,
+      "fail_daily": 0.1185,
+      "timeout": 0.137
+     },
+     "p1_30d": {
+      "fail_total": 0.137,
+      "pass": 0.272,
+      "timeout": 0.4965,
+      "fail_daily": 0.0945
+     },
+     "p2_30d": {
+      "fail_total": 0.112,
+      "pass": 0.5515,
+      "timeout": 0.264,
+      "fail_daily": 0.0725
+     },
+     "funded": {
+      "years_simulated": 0.9920634920634921,
+      "p_blown": 0.902,
+      "mean_return_pct": 7.22,
+      "median_return_pct": 0.64,
+      "p05_return_pct": -11.24,
+      "p95_return_pct": 50.8,
+      "expected_trader_payout_pct_of_initial": 5.77
+     }
+    },
+    "3.0": {
+     "p1_60d": {
+      "fail_total": 0.184,
+      "fail_daily": 0.34,
+      "pass": 0.4615,
+      "timeout": 0.0145
+     },
+     "p1_30d": {
+      "fail_total": 0.1525,
+      "fail_daily": 0.3025,
+      "pass": 0.387,
+      "timeout": 0.158
+     },
+     "p2_30d": {
+      "fail_total": 0.123,
+      "fail_daily": 0.2255,
+      "pass": 0.584,
+      "timeout": 0.0675
+     },
+     "funded": {
+      "years_simulated": 0.9920634920634921,
+      "p_blown": 0.978,
+      "mean_return_pct": 5.79,
+      "median_return_pct": -0.85,
+      "p05_return_pct": -13.11,
+      "p95_return_pct": 49.01,
+      "expected_trader_payout_pct_of_initial": 4.63
+     }
+    },
+    "5.0": {
+     "p1_60d": {
+      "fail_total": 0.075,
+      "fail_daily": 0.5595,
+      "pass": 0.3655
+     },
+     "p1_30d": {
+      "fail_total": 0.0735,
+      "fail_daily": 0.556,
+      "pass": 0.361,
+      "timeout": 0.0095
+     },
+     "p2_30d": {
+      "fail_total": 0.063,
+      "fail_daily": 0.46,
+      "pass": 0.475,
+      "timeout": 0.002
+     },
+     "funded": {
+      "years_simulated": 0.9920634920634921,
+      "p_blown": 0.999,
+      "mean_return_pct": 4.16,
+      "median_return_pct": -2.06,
+      "p05_return_pct": -15.27,
+      "p95_return_pct": 46.22,
+      "expected_trader_payout_pct_of_initial": 3.33
+     }
+    }
+   }
+  }
+ }
+}

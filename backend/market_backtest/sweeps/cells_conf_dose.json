@@ -1,0 +1,9 @@
+{
+  "base":    {},
+  "conf83":  {"entry_confidence_high": 0.83},
+  "conf86":  {"entry_confidence_high": 0.86},
+  "conf88":  {"entry_confidence_high": 0.88},
+  "conf90":  {"entry_confidence_high": 0.90},
+  "conf92":  {"entry_confidence_high": 0.92},
+  "conf95":  {"entry_confidence_high": 0.95}
+}

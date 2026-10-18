@@ -1,0 +1,7 @@
+{
+  "base":       {},
+  "c_conf90":   {"entry_confidence_high": 0.90},
+  "c_pup80":    {"v2_p_up_min": 0.80},
+  "c_ladder5":  {"tau_step": 5.0},
+  "c_block65":  {"iter05_decay_window_thresh": 0.65}
+}

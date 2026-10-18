@@ -1,0 +1,2609 @@
+{
+ "base": {
+  "overrides": {},
+  "symbols": 12,
+  "train": {
+   "n": 41,
+   "wr": 70.73170731707317,
+   "pnl": -0.0011959450289220769,
+   "mean": -2.9169390949318947e-05,
+   "symbols_pos": "7/12",
+   "exit_pnl": {
+    "bayesian_flip": -0.0313,
+    "kramers_down_exit": 0.0049,
+    "breakeven_scratch": 0.01,
+    "gain_retrace": 0.0152
+   },
+   "exit_n": {
+    "gain_retrace": 27,
+    "kramers_down_exit": 6,
+    "breakeven_scratch": 5,
+    "bayesian_flip": 3
+   }
+  },
+  "test": {
+   "n": 41,
+   "wr": 53.65853658536585,
+   "pnl": -0.18877936096457465,
+   "mean": -0.004604374657672552,
+   "symbols_pos": "2/12",
+   "exit_pnl": {
+    "recording_ended": -0.1302,
+    "kelly_flat": -0.0489,
+    "kramers_down_exit": -0.0196,
+    "evr_triage": -0.0094,
+    "breakeven_scratch": 0.0061,
+    "gain_retrace": 0.0131
+   },
+   "exit_n": {
+    "gain_retrace": 25,
+    "recording_ended": 9,
+    "kramers_down_exit": 3,
+    "kelly_flat": 2,
+    "evr_triage": 1,
+    "breakeven_scratch": 1
+   }
+  },
+  "symbols_detail": [
+   {
+    "symbol": "NKE",
+    "train": {
+     "trades": 1,
+     "wins": 1,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.00231876424400744,
+     "avg_pnl": 0.00231876424400744,
+     "best": 0.00231876424400744,
+     "worst": 0.00231876424400744,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.002319
+     },
+     "hold_days_p50": 7.0,
+     "hold_days_p90": 7.0
+    },
+    "test": {
+     "trades": 5,
+     "wins": 3,
+     "losses": 2,
+     "win_rate": 60.0,
+     "total_pnl": -0.06919631858830315,
+     "avg_pnl": -0.01383926371766063,
+     "best": 0.012511609954414124,
+     "worst": -0.048259082590953364,
+     "exit_reasons": {
+      "kramers_down_exit": 2,
+      "gain_retrace": 2,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "kramers_down_exit": -0.033722,
+      "gain_retrace": 0.012784,
+      "recording_ended": -0.048259
+     },
+     "hold_days_p50": 98.0,
+     "hold_days_p90": 374.0
+    }
+   },
+   {
+    "symbol": "NFLX",
+    "train": {
+     "trades": 3,
+     "wins": 3,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.005060288038974181,
+     "avg_pnl": 0.0016867626796580604,
+     "best": 0.0025440256001918043,
+     "worst": 0.0012004071554421042,
+     "exit_reasons": {
+      "gain_retrace": 1,
+      "breakeven_scratch": 2
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.002544,
+      "breakeven_scratch": 0.002516
+     },
+     "hold_days_p50": 33.0,
+     "hold_days_p90": 33.0
+    },
+    "test": {
+     "trades": 2,
+     "wins": 1,
+     "losses": 1,
+     "win_rate": 50.0,
+     "total_pnl": -0.003957377258625286,
+     "avg_pnl": -0.001978688629312643,
+     "best": 0.014161026238479826,
+     "worst": -0.018118403497105112,
+     "exit_reasons": {
+      "kramers_down_exit": 1,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "kramers_down_exit": 0.014161,
+      "recording_ended": -0.018118
+     },
+     "hold_days_p50": 136.0,
+     "hold_days_p90": 2.0
+    }
+   },
+   {
+    "symbol": "ADBE",
+    "train": {
+     "trades": 2,
+     "wins": 1,
+     "losses": 1,
+     "win_rate": 50.0,
+     "total_pnl": 0.0017986738963080007,
+     "avg_pnl": 0.0008993369481540003,
+     "best": 0.0022248641404545993,
+     "worst": -0.0004261902441465987,
+     "exit_reasons": {
+      "gain_retrace": 2
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.001799
+     },
+     "hold_days_p50": 2.0,
+     "hold_days_p90": 1.0
+    },
+    "test": {
+     "trades": 5,
+     "wins": 1,
+     "losses": 4,
+     "win_rate": 20.0,
+     "total_pnl": -0.052182138087390445,
+     "avg_pnl": -0.01043642761747809,
+     "best": 0.0018025956611828903,
+     "worst": -0.03030821254193347,
+     "exit_reasons": {
+      "kelly_flat": 1,
+      "gain_retrace": 3,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "kelly_flat": -0.019375,
+      "gain_retrace": -0.002499,
+      "recording_ended": -0.030308
+     },
+     "hold_days_p50": 16.0,
+     "hold_days_p90": 128.0
+    }
+   },
+   {
+    "symbol": "HD",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 3,
+     "wins": 2,
+     "losses": 1,
+     "win_rate": 66.66666666666667,
+     "total_pnl": -0.011288360818130574,
+     "avg_pnl": -0.003762786939376858,
+     "best": 0.0018720648996908146,
+     "worst": -0.013296926220459207,
+     "exit_reasons": {
+      "gain_retrace": 2,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.002009,
+      "recording_ended": -0.013297
+     },
+     "hold_days_p50": 21.0,
+     "hold_days_p90": 21.0
+    }
+   },
+   {
+    "symbol": "QCOM",
+    "train": {
+     "trades": 14,
+     "wins": 11,
+     "losses": 3,
+     "win_rate": 78.57142857142857,
+     "total_pnl": 0.007145568363098848,
+     "avg_pnl": 0.0005103977402213462,
+     "best": 0.00840833181557242,
+     "worst": -0.007421582651083614,
+     "exit_reasons": {
+      "gain_retrace": 9,
+      "kramers_down_exit": 2,
+      "breakeven_scratch": 2,
+      "bayesian_flip": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.008448,
+      "kramers_down_exit": 0.0006,
+      "breakeven_scratch": 0.00393,
+      "bayesian_flip": -0.005832
+     },
+     "hold_days_p50": 10.0,
+     "hold_days_p90": 42.0
+    },
+    "test": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.0036836519223605035,
+     "avg_pnl": -0.0036836519223605035,
+     "best": -0.0036836519223605035,
+     "worst": -0.0036836519223605035,
+     "exit_reasons": {
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "recording_ended": -0.003684
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    }
+   },
+   {
+    "symbol": "MSTR",
+    "train": {
+     "trades": 7,
+     "wins": 4,
+     "losses": 3,
+     "win_rate": 57.142857142857146,
+     "total_pnl": -0.02612777343597443,
+     "avg_pnl": -0.0037325390622820614,
+     "best": 0.003603372823568096,
+     "worst": -0.025310042822341783,
+     "exit_reasons": {
+      "gain_retrace": 5,
+      "bayesian_flip": 1,
+      "breakeven_scratch": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": -0.004421,
+      "bayesian_flip": -0.02531,
+      "breakeven_scratch": 0.003603
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 6.0
+    },
+    "test": {
+     "trades": 2,
+     "wins": 0,
+     "losses": 2,
+     "win_rate": 0.0,
+     "total_pnl": -0.03649081782735991,
+     "avg_pnl": -0.018245408913679956,
+     "best": -0.006966494161946876,
+     "worst": -0.029524323665413035,
+     "exit_reasons": {
+      "kelly_flat": 1,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "kelly_flat": -0.029524,
+      "recording_ended": -0.006966
+     },
+     "hold_days_p50": 41.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "IBM",
+    "train": {
+     "trades": 2,
+     "wins": 2,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.006853128490881488,
+     "avg_pnl": 0.003426564245440744,
+     "best": 0.0064140472640173835,
+     "worst": 0.0004390812268641048,
+     "exit_reasons": {
+      "kramers_down_exit": 2
+     },
+     "exit_pnl": {
+      "kramers_down_exit": 0.006853
+     },
+     "hold_days_p50": 24.0,
+     "hold_days_p90": 20.0
+    },
+    "test": {
+     "trades": 3,
+     "wins": 2,
+     "losses": 1,
+     "win_rate": 66.66666666666667,
+     "total_pnl": -0.0016776529171441956,
+     "avg_pnl": -0.0005592176390480652,
+     "best": 0.0015811168910725426,
+     "worst": -0.004759795712635614,
+     "exit_reasons": {
+      "gain_retrace": 2,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.003082,
+      "recording_ended": -0.00476
+     },
+     "hold_days_p50": 5.0,
+     "hold_days_p90": 5.0
+    }
+   },
+   {
+    "symbol": "LOW",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 5,
+     "wins": 3,
+     "losses": 2,
+     "win_rate": 60.0,
+     "total_pnl": -0.017186510156129514,
+     "avg_pnl": -0.0034373020312259027,
+     "best": 0.001955226440046587,
+     "worst": -0.0104356329464797,
+     "exit_reasons": {
+      "gain_retrace": 3,
+      "evr_triage": 1,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.002625,
+      "evr_triage": -0.009376,
+      "recording_ended": -0.010436
+     },
+     "hold_days_p50": 22.0,
+     "hold_days_p90": 36.0
+    }
+   },
+   {
+    "symbol": "PG",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 7,
+     "wins": 6,
+     "losses": 1,
+     "win_rate": 85.71428571428571,
+     "total_pnl": 0.007146576987680467,
+     "avg_pnl": 0.0010209395696686382,
+     "best": 0.00565364810040353,
+     "worst": -0.00041517735845565673,
+     "exit_reasons": {
+      "gain_retrace": 6,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.001493,
+      "recording_ended": 0.005654
+     },
+     "hold_days_p50": 8.0,
+     "hold_days_p90": 35.0
+    }
+   },
+   {
+    "symbol": "JPM",
+    "train": {
+     "trades": 11,
+     "wins": 6,
+     "losses": 5,
+     "win_rate": 54.54545454545455,
+     "total_pnl": 0.0003166927549696774,
+     "avg_pnl": 2.8790250451788856e-05,
+     "best": 0.005192925202446921,
+     "worst": -0.008794323182687691,
+     "exit_reasons": {
+      "gain_retrace": 8,
+      "kramers_down_exit": 2,
+      "bayesian_flip": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.003044,
+      "kramers_down_exit": -0.002567,
+      "bayesian_flip": -0.00016
+     },
+     "hold_days_p50": 4.0,
+     "hold_days_p90": 7.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "AAPL",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 4,
+     "wins": 2,
+     "losses": 2,
+     "win_rate": 50.0,
+     "total_pnl": -0.005676119325550524,
+     "avg_pnl": -0.001419029831387631,
+     "best": 0.003350444267371591,
+     "worst": -0.00808773597701086,
+     "exit_reasons": {
+      "gain_retrace": 4
+     },
+     "exit_pnl": {
+      "gain_retrace": -0.005676
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    }
+   },
+   {
+    "symbol": "MSFT",
+    "train": {
+     "trades": 1,
+     "wins": 1,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.001438712618812718,
+     "avg_pnl": 0.001438712618812718,
+     "best": 0.001438712618812718,
+     "worst": 0.001438712618812718,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.001439
+     },
+     "hold_days_p50": 8.0,
+     "hold_days_p90": 8.0
+    },
+    "test": {
+     "trades": 4,
+     "wins": 2,
+     "losses": 2,
+     "win_rate": 50.0,
+     "total_pnl": 0.005413008948738973,
+     "avg_pnl": 0.0013532522371847433,
+     "best": 0.006127811738035935,
+     "worst": -0.0012924467985383492,
+     "exit_reasons": {
+      "gain_retrace": 3,
+      "breakeven_scratch": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": -0.000715,
+      "breakeven_scratch": 0.006128
+     },
+     "hold_days_p50": 28.0,
+     "hold_days_p90": 28.0
+    }
+   }
+  ]
+ },
+ "evr_stop": {
+  "overrides": {
+   "v2_evr_confirm_pct": 100.0,
+   "v2_evr_offside_min_pct": 3.0,
+   "v2_evr_buy_ratio_max": 0.99,
+   "v2_evr_eval_delay": 86400,
+   "v2_evr_skip_sell_conc_min": 0.0
+  },
+  "symbols": 12,
+  "train": {
+   "n": 59,
+   "wr": 33.898305084745765,
+   "pnl": -0.16271025861624613,
+   "mean": -0.002757800993495697,
+   "symbols_pos": "2/12",
+   "exit_pnl": {
+    "evr_triage": -0.1889,
+    "kramers_down_exit": 0.0119,
+    "gain_retrace": 0.0143
+   },
+   "exit_n": {
+    "evr_triage": 32,
+    "gain_retrace": 23,
+    "kramers_down_exit": 4
+   }
+  },
+  "test": {
+   "n": 150,
+   "wr": 29.333333333333332,
+   "pnl": -0.34820211125298783,
+   "mean": -0.0023213474083532523,
+   "symbols_pos": "2/12",
+   "exit_pnl": {
+    "evr_triage": -0.4068,
+    "recording_ended": 0.0015,
+    "kramers_down_exit": 0.0201,
+    "gain_retrace": 0.037
+   },
+   "exit_n": {
+    "evr_triage": 95,
+    "gain_retrace": 49,
+    "recording_ended": 4,
+    "kramers_down_exit": 2
+   }
+  },
+  "symbols_detail": [
+   {
+    "symbol": "NKE",
+    "train": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.003542550577185763,
+     "avg_pnl": -0.003542550577185763,
+     "best": -0.003542550577185763,
+     "worst": -0.003542550577185763,
+     "exit_reasons": {
+      "evr_triage": 1
+     },
+     "exit_pnl": {
+      "evr_triage": -0.003543
+     },
+     "hold_days_p50": 5.0,
+     "hold_days_p90": 5.0
+    },
+    "test": {
+     "trades": 55,
+     "wins": 15,
+     "losses": 40,
+     "win_rate": 27.272727272727273,
+     "total_pnl": -0.14074161418717848,
+     "avg_pnl": -0.0025589384397668815,
+     "best": 0.002938407328220205,
+     "worst": -0.008566968478886203,
+     "exit_reasons": {
+      "evr_triage": 37,
+      "gain_retrace": 18
+     },
+     "exit_pnl": {
+      "evr_triage": -0.157967,
+      "gain_retrace": 0.017225
+     },
+     "hold_days_p50": 2.0,
+     "hold_days_p90": 11.0
+    }
+   },
+   {
+    "symbol": "NFLX",
+    "train": {
+     "trades": 4,
+     "wins": 0,
+     "losses": 4,
+     "win_rate": 0.0,
+     "total_pnl": -0.01935155564939929,
+     "avg_pnl": -0.004837888912349823,
+     "best": -0.0014791148639066165,
+     "worst": -0.008174052211098931,
+     "exit_reasons": {
+      "evr_triage": 3,
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "evr_triage": -0.017872,
+      "gain_retrace": -0.001479
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    },
+    "test": {
+     "trades": 7,
+     "wins": 2,
+     "losses": 5,
+     "win_rate": 28.571428571428573,
+     "total_pnl": -0.004206228008577034,
+     "avg_pnl": -0.0006008897155110049,
+     "best": 0.014161026238479826,
+     "worst": -0.007548998408585514,
+     "exit_reasons": {
+      "kramers_down_exit": 1,
+      "evr_triage": 4,
+      "gain_retrace": 2
+     },
+     "exit_pnl": {
+      "kramers_down_exit": 0.014161,
+      "evr_triage": -0.018627,
+      "gain_retrace": 0.00026
+     },
+     "hold_days_p50": 2.0,
+     "hold_days_p90": 2.0
+    }
+   },
+   {
+    "symbol": "HD",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 15,
+     "wins": 3,
+     "losses": 12,
+     "win_rate": 20.0,
+     "total_pnl": -0.036193297691731796,
+     "avg_pnl": -0.0024128865127821197,
+     "best": 0.0018525509321854067,
+     "worst": -0.005147311019182685,
+     "exit_reasons": {
+      "gain_retrace": 4,
+      "evr_triage": 10,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.000578,
+      "evr_triage": -0.036602,
+      "recording_ended": -0.00017
+     },
+     "hold_days_p50": 2.0,
+     "hold_days_p90": 7.0
+    }
+   },
+   {
+    "symbol": "ADBE",
+    "train": {
+     "trades": 2,
+     "wins": 1,
+     "losses": 1,
+     "win_rate": 50.0,
+     "total_pnl": 0.0017986738963080007,
+     "avg_pnl": 0.0008993369481540003,
+     "best": 0.0022248641404545993,
+     "worst": -0.0004261902441465987,
+     "exit_reasons": {
+      "gain_retrace": 2
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.001799
+     },
+     "hold_days_p50": 2.0,
+     "hold_days_p90": 1.0
+    },
+    "test": {
+     "trades": 26,
+     "wins": 8,
+     "losses": 18,
+     "win_rate": 30.76923076923077,
+     "total_pnl": -0.061789178825214744,
+     "avg_pnl": -0.0023765068778928747,
+     "best": 0.005017553736881689,
+     "worst": -0.006140102129762057,
+     "exit_reasons": {
+      "evr_triage": 16,
+      "gain_retrace": 10
+     },
+     "exit_pnl": {
+      "evr_triage": -0.07188,
+      "gain_retrace": 0.010091
+     },
+     "hold_days_p50": 2.0,
+     "hold_days_p90": 6.0
+    }
+   },
+   {
+    "symbol": "MSTR",
+    "train": {
+     "trades": 10,
+     "wins": 4,
+     "losses": 6,
+     "win_rate": 40.0,
+     "total_pnl": -0.053590555450622065,
+     "avg_pnl": -0.005359055545062207,
+     "best": 0.00261646529015902,
+     "worst": -0.02979410655495489,
+     "exit_reasons": {
+      "evr_triage": 5,
+      "gain_retrace": 5
+     },
+     "exit_pnl": {
+      "evr_triage": -0.057813,
+      "gain_retrace": 0.004222
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    },
+    "test": {
+     "trades": 4,
+     "wins": 0,
+     "losses": 4,
+     "win_rate": 0.0,
+     "total_pnl": -0.028500703100888522,
+     "avg_pnl": -0.0071251757752221305,
+     "best": -0.006359343876969015,
+     "worst": -0.008430456066537972,
+     "exit_reasons": {
+      "evr_triage": 3,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "evr_triage": -0.021534,
+      "recording_ended": -0.006966
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    }
+   },
+   {
+    "symbol": "IBM",
+    "train": {
+     "trades": 2,
+     "wins": 1,
+     "losses": 1,
+     "win_rate": 50.0,
+     "total_pnl": 0.0026596858650442257,
+     "avg_pnl": 0.0013298429325221128,
+     "best": 0.0064140472640173835,
+     "worst": -0.003754361398973158,
+     "exit_reasons": {
+      "evr_triage": 1,
+      "kramers_down_exit": 1
+     },
+     "exit_pnl": {
+      "evr_triage": -0.003754,
+      "kramers_down_exit": 0.006414
+     },
+     "hold_days_p50": 24.0,
+     "hold_days_p90": 5.0
+    },
+    "test": {
+     "trades": 5,
+     "wins": 3,
+     "losses": 2,
+     "win_rate": 60.0,
+     "total_pnl": -0.006920630379179005,
+     "avg_pnl": -0.001384126075835801,
+     "best": 0.0015010259044188762,
+     "worst": -0.0058933313542016,
+     "exit_reasons": {
+      "gain_retrace": 3,
+      "evr_triage": 2
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.002511,
+      "evr_triage": -0.009431
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 2.0
+    }
+   },
+   {
+    "symbol": "QCOM",
+    "train": {
+     "trades": 27,
+     "wins": 9,
+     "losses": 18,
+     "win_rate": 33.333333333333336,
+     "total_pnl": -0.0737117350635947,
+     "avg_pnl": -0.0027300642616146184,
+     "best": 0.00840833181557242,
+     "worst": -0.011101882623023376,
+     "exit_reasons": {
+      "evr_triage": 17,
+      "gain_retrace": 8,
+      "kramers_down_exit": 2
+     },
+     "exit_pnl": {
+      "evr_triage": -0.086747,
+      "gain_retrace": 0.005695,
+      "kramers_down_exit": 0.00734
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 4.0
+    },
+    "test": {
+     "trades": 2,
+     "wins": 1,
+     "losses": 1,
+     "win_rate": 50.0,
+     "total_pnl": 0.0021076020060724066,
+     "avg_pnl": 0.0010538010030362033,
+     "best": 0.005908896326296528,
+     "worst": -0.0038012943202241217,
+     "exit_reasons": {
+      "kramers_down_exit": 1,
+      "evr_triage": 1
+     },
+     "exit_pnl": {
+      "kramers_down_exit": 0.005909,
+      "evr_triage": -0.003801
+     },
+     "hold_days_p50": 6.0,
+     "hold_days_p90": 1.0
+    }
+   },
+   {
+    "symbol": "LOW",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 10,
+     "wins": 3,
+     "losses": 7,
+     "win_rate": 30.0,
+     "total_pnl": -0.0193074912523684,
+     "avg_pnl": -0.00193074912523684,
+     "best": 0.003010975650904135,
+     "worst": -0.0045695813036878835,
+     "exit_reasons": {
+      "evr_triage": 7,
+      "gain_retrace": 2,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "evr_triage": -0.026442,
+      "gain_retrace": 0.004124,
+      "recording_ended": 0.003011
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 7.0
+    }
+   },
+   {
+    "symbol": "JPM",
+    "train": {
+     "trades": 12,
+     "wins": 5,
+     "losses": 7,
+     "win_rate": 41.666666666666664,
+     "total_pnl": -0.01196862699966672,
+     "avg_pnl": -0.00099738558330556,
+     "best": 0.004334674888538739,
+     "worst": -0.00527242517013872,
+     "exit_reasons": {
+      "evr_triage": 4,
+      "gain_retrace": 7,
+      "kramers_down_exit": 1
+     },
+     "exit_pnl": {
+      "evr_triage": -0.014138,
+      "gain_retrace": 0.004032,
+      "kramers_down_exit": -0.001862
+     },
+     "hold_days_p50": 2.0,
+     "hold_days_p90": 3.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "PG",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 9,
+     "wins": 7,
+     "losses": 2,
+     "win_rate": 77.77777777777777,
+     "total_pnl": 0.00206300978147389,
+     "avg_pnl": 0.00022922330905265445,
+     "best": 0.00565364810040353,
+     "worst": -0.0034775215951432514,
+     "exit_reasons": {
+      "gain_retrace": 6,
+      "evr_triage": 2,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.003221,
+      "evr_triage": -0.006812,
+      "recording_ended": 0.005654
+     },
+     "hold_days_p50": 8.0,
+     "hold_days_p90": 16.0
+    }
+   },
+   {
+    "symbol": "AAPL",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 4,
+     "wins": 1,
+     "losses": 3,
+     "win_rate": 25.0,
+     "total_pnl": -0.014019122969394782,
+     "avg_pnl": -0.0035047807423486954,
+     "best": 0.0008096015059485401,
+     "worst": -0.008055618135127202,
+     "exit_reasons": {
+      "evr_triage": 2,
+      "gain_retrace": 2
+     },
+     "exit_pnl": {
+      "evr_triage": -0.01308,
+      "gain_retrace": -0.000939
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    }
+   },
+   {
+    "symbol": "MSFT",
+    "train": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.005003594637129821,
+     "avg_pnl": -0.005003594637129821,
+     "best": -0.005003594637129821,
+     "worst": -0.005003594637129821,
+     "exit_reasons": {
+      "evr_triage": 1
+     },
+     "exit_pnl": {
+      "evr_triage": -0.005004
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    },
+    "test": {
+     "trades": 13,
+     "wins": 1,
+     "losses": 12,
+     "win_rate": 7.6923076923076925,
+     "total_pnl": -0.040694456626001366,
+     "avg_pnl": -0.0031303428173847206,
+     "best": 0.0024799527553510947,
+     "worst": -0.004572604973218097,
+     "exit_reasons": {
+      "evr_triage": 11,
+      "gain_retrace": 2
+     },
+     "exit_pnl": {
+      "evr_triage": -0.0406,
+      "gain_retrace": -9.5e-05
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 2.0
+    }
+   }
+  ]
+ },
+ "evr_stop_blk50": {
+  "overrides": {
+   "v2_evr_confirm_pct": 100.0,
+   "v2_evr_offside_min_pct": 3.0,
+   "v2_evr_buy_ratio_max": 0.99,
+   "v2_evr_eval_delay": 86400,
+   "v2_evr_skip_sell_conc_min": 0.0,
+   "iter05_decay_window_thresh": 0.5
+  },
+  "symbols": 12,
+  "train": {
+   "n": 27,
+   "wr": 33.333333333333336,
+   "pnl": -0.05461254532860406,
+   "mean": -0.0020226868640223724,
+   "symbols_pos": "1/12",
+   "exit_pnl": {
+    "evr_triage": -0.0685,
+    "gain_retrace": 0.0065,
+    "kramers_down_exit": 0.0073
+   },
+   "exit_n": {
+    "evr_triage": 15,
+    "gain_retrace": 10,
+    "kramers_down_exit": 2
+   }
+  },
+  "test": {
+   "n": 64,
+   "wr": 34.375,
+   "pnl": -0.12953389265401444,
+   "mean": -0.0020239670727189756,
+   "symbols_pos": "2/12",
+   "exit_pnl": {
+    "evr_triage": -0.1589,
+    "recording_ended": 0.0045,
+    "kramers_down_exit": 0.0059,
+    "gain_retrace": 0.0189
+   },
+   "exit_n": {
+    "evr_triage": 38,
+    "gain_retrace": 22,
+    "recording_ended": 3,
+    "kramers_down_exit": 1
+   }
+  },
+  "symbols_detail": [
+   {
+    "symbol": "NKE",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 33,
+     "wins": 9,
+     "losses": 24,
+     "win_rate": 27.272727272727273,
+     "total_pnl": -0.08345150018759324,
+     "avg_pnl": -0.002528833339017977,
+     "best": 0.002602691103496993,
+     "worst": -0.008566968478886203,
+     "exit_reasons": {
+      "gain_retrace": 11,
+      "evr_triage": 22
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.011347,
+      "evr_triage": -0.094799
+     },
+     "hold_days_p50": 2.0,
+     "hold_days_p90": 11.0
+    }
+   },
+   {
+    "symbol": "ADBE",
+    "train": {
+     "trades": 2,
+     "wins": 1,
+     "losses": 1,
+     "win_rate": 50.0,
+     "total_pnl": 0.0018077258255102674,
+     "avg_pnl": 0.0009038629127551337,
+     "best": 0.0022248641404545993,
+     "worst": -0.00041713831494433196,
+     "exit_reasons": {
+      "gain_retrace": 2
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.001808
+     },
+     "hold_days_p50": 2.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 14,
+     "wins": 5,
+     "losses": 9,
+     "win_rate": 35.714285714285715,
+     "total_pnl": -0.026837247248714932,
+     "avg_pnl": -0.0019169462320510666,
+     "best": 0.002200019252480881,
+     "worst": -0.005271762060393398,
+     "exit_reasons": {
+      "evr_triage": 7,
+      "gain_retrace": 7
+     },
+     "exit_pnl": {
+      "evr_triage": -0.029997,
+      "gain_retrace": 0.00316
+     },
+     "hold_days_p50": 3.0,
+     "hold_days_p90": 6.0
+    }
+   },
+   {
+    "symbol": "HD",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 5,
+     "wins": 2,
+     "losses": 3,
+     "win_rate": 40.0,
+     "total_pnl": -0.01018165701077546,
+     "avg_pnl": -0.002036331402155092,
+     "best": 0.000136500502637818,
+     "worst": -0.003594705732472739,
+     "exit_reasons": {
+      "gain_retrace": 1,
+      "evr_triage": 3,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.000137,
+      "evr_triage": -0.01033,
+      "recording_ended": 1.1e-05
+     },
+     "hold_days_p50": 4.0,
+     "hold_days_p90": 5.0
+    }
+   },
+   {
+    "symbol": "NFLX",
+    "train": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.0014791148639066165,
+     "avg_pnl": -0.0014791148639066165,
+     "best": -0.0014791148639066165,
+     "worst": -0.0014791148639066165,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": -0.001479
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "MSTR",
+    "train": {
+     "trades": 6,
+     "wins": 3,
+     "losses": 3,
+     "win_rate": 50.0,
+     "total_pnl": -0.016529345052136782,
+     "avg_pnl": -0.002754890842022797,
+     "best": 0.00261646529015902,
+     "worst": -0.009658181757251805,
+     "exit_reasons": {
+      "evr_triage": 3,
+      "gain_retrace": 3
+     },
+     "exit_pnl": {
+      "evr_triage": -0.021918,
+      "gain_retrace": 0.005388
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "QCOM",
+    "train": {
+     "trades": 14,
+     "wins": 4,
+     "losses": 10,
+     "win_rate": 28.571428571428573,
+     "total_pnl": -0.02915413837552297,
+     "avg_pnl": -0.002082438455394498,
+     "best": 0.006088274336318686,
+     "worst": -0.0061609151451665345,
+     "exit_reasons": {
+      "evr_triage": 10,
+      "kramers_down_exit": 2,
+      "gain_retrace": 2
+     },
+     "exit_pnl": {
+      "evr_triage": -0.037541,
+      "kramers_down_exit": 0.00734,
+      "gain_retrace": 0.001047
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 4.0
+    },
+    "test": {
+     "trades": 1,
+     "wins": 1,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.005908896326296528,
+     "avg_pnl": 0.005908896326296528,
+     "best": 0.005908896326296528,
+     "worst": 0.005908896326296528,
+     "exit_reasons": {
+      "kramers_down_exit": 1
+     },
+     "exit_pnl": {
+      "kramers_down_exit": 0.005909
+     },
+     "hold_days_p50": 6.0,
+     "hold_days_p90": 6.0
+    }
+   },
+   {
+    "symbol": "IBM",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "LOW",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 4,
+     "wins": 2,
+     "losses": 2,
+     "win_rate": 50.0,
+     "total_pnl": -0.005494762080449481,
+     "avg_pnl": -0.0013736905201123702,
+     "best": 0.0013559458880113423,
+     "worst": -0.0037675213448817857,
+     "exit_reasons": {
+      "evr_triage": 2,
+      "gain_retrace": 1,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "evr_triage": -0.00741,
+      "gain_retrace": 0.001356,
+      "recording_ended": 0.000559
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    }
+   },
+   {
+    "symbol": "JPM",
+    "train": {
+     "trades": 3,
+     "wins": 1,
+     "losses": 2,
+     "win_rate": 33.333333333333336,
+     "total_pnl": -0.004254078225418137,
+     "avg_pnl": -0.001418026075139379,
+     "best": 0.0004469411808036561,
+     "worst": -0.004002714800476301,
+     "exit_reasons": {
+      "gain_retrace": 2,
+      "evr_triage": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": -0.000251,
+      "evr_triage": -0.004003
+     },
+     "hold_days_p50": 3.0,
+     "hold_days_p90": 3.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "PG",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 2,
+     "wins": 2,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.004409224424813701,
+     "avg_pnl": 0.0022046122124068507,
+     "best": 0.00396064994406542,
+     "worst": 0.00044857448074828166,
+     "exit_reasons": {
+      "gain_retrace": 1,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.000449,
+      "recording_ended": 0.003961
+     },
+     "hold_days_p50": 30.0,
+     "hold_days_p90": 3.0
+    }
+   },
+   {
+    "symbol": "AAPL",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.005024677218356324,
+     "avg_pnl": -0.005024677218356324,
+     "best": -0.005024677218356324,
+     "worst": -0.005024677218356324,
+     "exit_reasons": {
+      "evr_triage": 1
+     },
+     "exit_pnl": {
+      "evr_triage": -0.005025
+     },
+     "hold_days_p50": 29.0,
+     "hold_days_p90": 29.0
+    }
+   },
+   {
+    "symbol": "MSFT",
+    "train": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.005003594637129821,
+     "avg_pnl": -0.005003594637129821,
+     "best": -0.005003594637129821,
+     "worst": -0.005003594637129821,
+     "exit_reasons": {
+      "evr_triage": 1
+     },
+     "exit_pnl": {
+      "evr_triage": -0.005004
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    },
+    "test": {
+     "trades": 4,
+     "wins": 1,
+     "losses": 3,
+     "win_rate": 25.0,
+     "total_pnl": -0.008862169659235225,
+     "avg_pnl": -0.0022155424148088063,
+     "best": 0.0024799527553510947,
+     "worst": -0.003924560689593751,
+     "exit_reasons": {
+      "evr_triage": 3,
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "evr_triage": -0.011342,
+      "gain_retrace": 0.00248
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    }
+   }
+  ]
+ },
+ "blk50": {
+  "overrides": {
+   "iter05_decay_window_thresh": 0.5
+  },
+  "symbols": 12,
+  "train": {
+   "n": 19,
+   "wr": 68.42105263157895,
+   "pnl": -0.004189716063489571,
+   "mean": -0.00022051137176260898,
+   "symbols_pos": "4/12",
+   "exit_pnl": {
+    "bayesian_flip": -0.0253,
+    "breakeven_scratch": 0.0013,
+    "kramers_down_exit": 0.0068,
+    "gain_retrace": 0.0129
+   },
+   "exit_n": {
+    "gain_retrace": 14,
+    "kramers_down_exit": 3,
+    "breakeven_scratch": 1,
+    "bayesian_flip": 1
+   }
+  },
+  "test": {
+   "n": 25,
+   "wr": 72.0,
+   "pnl": -0.07062896628545001,
+   "mean": -0.0028251586514180006,
+   "symbols_pos": "5/12",
+   "exit_pnl": {
+    "recording_ended": -0.0415,
+    "kramers_down_exit": -0.024,
+    "kelly_flat": -0.0194,
+    "breakeven_scratch": 0.0028,
+    "gain_retrace": 0.0115
+   },
+   "exit_n": {
+    "gain_retrace": 17,
+    "recording_ended": 4,
+    "kramers_down_exit": 2,
+    "kelly_flat": 1,
+    "breakeven_scratch": 1
+   }
+  },
+  "symbols_detail": [
+   {
+    "symbol": "NKE",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 9,
+     "wins": 6,
+     "losses": 3,
+     "win_rate": 66.66666666666667,
+     "total_pnl": -0.06397371489128184,
+     "avg_pnl": -0.00710819054347576,
+     "best": 0.002602691103496993,
+     "worst": -0.04601498516047867,
+     "exit_reasons": {
+      "gain_retrace": 6,
+      "kramers_down_exit": 2,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.006046,
+      "kramers_down_exit": -0.024005,
+      "recording_ended": -0.046015
+     },
+     "hold_days_p50": 12.0,
+     "hold_days_p90": 210.0
+    }
+   },
+   {
+    "symbol": "ADBE",
+    "train": {
+     "trades": 2,
+     "wins": 1,
+     "losses": 1,
+     "win_rate": 50.0,
+     "total_pnl": 0.0018077258255102674,
+     "avg_pnl": 0.0009038629127551337,
+     "best": 0.0022248641404545993,
+     "worst": -0.00041713831494433196,
+     "exit_reasons": {
+      "gain_retrace": 2
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.001808
+     },
+     "hold_days_p50": 2.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 4,
+     "wins": 1,
+     "losses": 3,
+     "win_rate": 25.0,
+     "total_pnl": -0.020913159503160555,
+     "avg_pnl": -0.005228289875790139,
+     "best": 0.0027633617034793084,
+     "worst": -0.01937524784849004,
+     "exit_reasons": {
+      "kelly_flat": 1,
+      "gain_retrace": 2,
+      "breakeven_scratch": 1
+     },
+     "exit_pnl": {
+      "kelly_flat": -0.019375,
+      "gain_retrace": -0.004301,
+      "breakeven_scratch": 0.002763
+     },
+     "hold_days_p50": 128.0,
+     "hold_days_p90": 128.0
+    }
+   },
+   {
+    "symbol": "NFLX",
+    "train": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.0014791148639066165,
+     "avg_pnl": -0.0014791148639066165,
+     "best": -0.0014791148639066165,
+     "worst": -0.0014791148639066165,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": -0.001479
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "HD",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 4,
+     "wins": 4,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.0036823456605712263,
+     "avg_pnl": 0.0009205864151428066,
+     "best": 0.0018720648996908146,
+     "worst": 1.138069126009611e-05,
+     "exit_reasons": {
+      "gain_retrace": 3,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.003671,
+      "recording_ended": 1.1e-05
+     },
+     "hold_days_p50": 7.0,
+     "hold_days_p90": 7.0
+    }
+   },
+   {
+    "symbol": "IBM",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "QCOM",
+    "train": {
+     "trades": 7,
+     "wins": 6,
+     "losses": 1,
+     "win_rate": 85.71428571428571,
+     "total_pnl": 0.012332384010809258,
+     "avg_pnl": 0.0017617691444013225,
+     "best": 0.006241898266398552,
+     "worst": -0.000651490290617715,
+     "exit_reasons": {
+      "gain_retrace": 3,
+      "kramers_down_exit": 3,
+      "breakeven_scratch": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.004146,
+      "kramers_down_exit": 0.006842,
+      "breakeven_scratch": 0.001345
+     },
+     "hold_days_p50": 41.0,
+     "hold_days_p90": 96.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "MSTR",
+    "train": {
+     "trades": 5,
+     "wins": 3,
+     "losses": 2,
+     "win_rate": 60.0,
+     "total_pnl": -0.024482171771694802,
+     "avg_pnl": -0.004896434354338961,
+     "best": 0.00261646529015902,
+     "worst": -0.025310042822341783,
+     "exit_reasons": {
+      "gain_retrace": 4,
+      "bayesian_flip": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.000828,
+      "bayesian_flip": -0.02531
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "LOW",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 2,
+     "wins": 2,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.00057185770726291,
+     "avg_pnl": 0.000285928853631455,
+     "best": 0.0005590843076719448,
+     "worst": 1.2773399590965129e-05,
+     "exit_reasons": {
+      "gain_retrace": 1,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 1.3e-05,
+      "recording_ended": 0.000559
+     },
+     "hold_days_p50": 36.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "PG",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 2,
+     "wins": 2,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.004409224424813701,
+     "avg_pnl": 0.0022046122124068507,
+     "best": 0.00396064994406542,
+     "worst": 0.00044857448074828166,
+     "exit_reasons": {
+      "gain_retrace": 1,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.000449,
+      "recording_ended": 0.003961
+     },
+     "hold_days_p50": 30.0,
+     "hold_days_p90": 3.0
+    }
+   },
+   {
+    "symbol": "JPM",
+    "train": {
+     "trades": 3,
+     "wins": 2,
+     "losses": 1,
+     "win_rate": 66.66666666666667,
+     "total_pnl": 0.0061927481169796045,
+     "avg_pnl": 0.002064249372326535,
+     "best": 0.006444111541921441,
+     "worst": -0.0006983046057454922,
+     "exit_reasons": {
+      "gain_retrace": 3
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.006193
+     },
+     "hold_days_p50": 3.0,
+     "hold_days_p90": 3.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "AAPL",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 1,
+     "wins": 1,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.003350444267371591,
+     "avg_pnl": 0.003350444267371591,
+     "best": 0.003350444267371591,
+     "worst": 0.003350444267371591,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.00335
+     },
+     "hold_days_p50": 36.0,
+     "hold_days_p90": 36.0
+    }
+   },
+   {
+    "symbol": "MSFT",
+    "train": {
+     "trades": 1,
+     "wins": 1,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.001438712618812718,
+     "avg_pnl": 0.001438712618812718,
+     "best": 0.001438712618812718,
+     "worst": 0.001438712618812718,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.001439
+     },
+     "hold_days_p50": 8.0,
+     "hold_days_p90": 8.0
+    },
+    "test": {
+     "trades": 3,
+     "wins": 2,
+     "losses": 1,
+     "win_rate": 66.66666666666667,
+     "total_pnl": 0.0022440360489729555,
+     "avg_pnl": 0.0007480120163243185,
+     "best": 0.0024799527553510947,
+     "worst": -0.0012924467985383492,
+     "exit_reasons": {
+      "gain_retrace": 3
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.002244
+     },
+     "hold_days_p50": 4.0,
+     "hold_days_p90": 4.0
+    }
+   }
+  ]
+ },
+ "noblock": {
+  "overrides": {
+   "iter05_decay_entry_block": 0.0
+  },
+  "symbols": 12,
+  "train": {
+   "n": 41,
+   "wr": 70.73170731707317,
+   "pnl": -0.0011959450289220769,
+   "mean": -2.9169390949318947e-05,
+   "symbols_pos": "7/12",
+   "exit_pnl": {
+    "bayesian_flip": -0.0313,
+    "kramers_down_exit": 0.0049,
+    "breakeven_scratch": 0.01,
+    "gain_retrace": 0.0152
+   },
+   "exit_n": {
+    "gain_retrace": 27,
+    "kramers_down_exit": 6,
+    "breakeven_scratch": 5,
+    "bayesian_flip": 3
+   }
+  },
+  "test": {
+   "n": 41,
+   "wr": 53.65853658536585,
+   "pnl": -0.18877936096457465,
+   "mean": -0.004604374657672552,
+   "symbols_pos": "2/12",
+   "exit_pnl": {
+    "recording_ended": -0.1302,
+    "kelly_flat": -0.0489,
+    "kramers_down_exit": -0.0196,
+    "evr_triage": -0.0094,
+    "breakeven_scratch": 0.0061,
+    "gain_retrace": 0.0131
+   },
+   "exit_n": {
+    "gain_retrace": 25,
+    "recording_ended": 9,
+    "kramers_down_exit": 3,
+    "kelly_flat": 2,
+    "evr_triage": 1,
+    "breakeven_scratch": 1
+   }
+  },
+  "symbols_detail": [
+   {
+    "symbol": "NKE",
+    "train": {
+     "trades": 1,
+     "wins": 1,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.00231876424400744,
+     "avg_pnl": 0.00231876424400744,
+     "best": 0.00231876424400744,
+     "worst": 0.00231876424400744,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.002319
+     },
+     "hold_days_p50": 7.0,
+     "hold_days_p90": 7.0
+    },
+    "test": {
+     "trades": 5,
+     "wins": 3,
+     "losses": 2,
+     "win_rate": 60.0,
+     "total_pnl": -0.06919631858830315,
+     "avg_pnl": -0.01383926371766063,
+     "best": 0.012511609954414124,
+     "worst": -0.048259082590953364,
+     "exit_reasons": {
+      "kramers_down_exit": 2,
+      "gain_retrace": 2,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "kramers_down_exit": -0.033722,
+      "gain_retrace": 0.012784,
+      "recording_ended": -0.048259
+     },
+     "hold_days_p50": 98.0,
+     "hold_days_p90": 374.0
+    }
+   },
+   {
+    "symbol": "ADBE",
+    "train": {
+     "trades": 2,
+     "wins": 1,
+     "losses": 1,
+     "win_rate": 50.0,
+     "total_pnl": 0.0017986738963080007,
+     "avg_pnl": 0.0008993369481540003,
+     "best": 0.0022248641404545993,
+     "worst": -0.0004261902441465987,
+     "exit_reasons": {
+      "gain_retrace": 2
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.001799
+     },
+     "hold_days_p50": 2.0,
+     "hold_days_p90": 1.0
+    },
+    "test": {
+     "trades": 5,
+     "wins": 1,
+     "losses": 4,
+     "win_rate": 20.0,
+     "total_pnl": -0.052182138087390445,
+     "avg_pnl": -0.01043642761747809,
+     "best": 0.0018025956611828903,
+     "worst": -0.03030821254193347,
+     "exit_reasons": {
+      "kelly_flat": 1,
+      "gain_retrace": 3,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "kelly_flat": -0.019375,
+      "gain_retrace": -0.002499,
+      "recording_ended": -0.030308
+     },
+     "hold_days_p50": 16.0,
+     "hold_days_p90": 128.0
+    }
+   },
+   {
+    "symbol": "NFLX",
+    "train": {
+     "trades": 3,
+     "wins": 3,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.005060288038974181,
+     "avg_pnl": 0.0016867626796580604,
+     "best": 0.0025440256001918043,
+     "worst": 0.0012004071554421042,
+     "exit_reasons": {
+      "gain_retrace": 1,
+      "breakeven_scratch": 2
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.002544,
+      "breakeven_scratch": 0.002516
+     },
+     "hold_days_p50": 33.0,
+     "hold_days_p90": 33.0
+    },
+    "test": {
+     "trades": 2,
+     "wins": 1,
+     "losses": 1,
+     "win_rate": 50.0,
+     "total_pnl": -0.003957377258625286,
+     "avg_pnl": -0.001978688629312643,
+     "best": 0.014161026238479826,
+     "worst": -0.018118403497105112,
+     "exit_reasons": {
+      "kramers_down_exit": 1,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "kramers_down_exit": 0.014161,
+      "recording_ended": -0.018118
+     },
+     "hold_days_p50": 136.0,
+     "hold_days_p90": 2.0
+    }
+   },
+   {
+    "symbol": "HD",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 3,
+     "wins": 2,
+     "losses": 1,
+     "win_rate": 66.66666666666667,
+     "total_pnl": -0.011288360818130574,
+     "avg_pnl": -0.003762786939376858,
+     "best": 0.0018720648996908146,
+     "worst": -0.013296926220459207,
+     "exit_reasons": {
+      "gain_retrace": 2,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.002009,
+      "recording_ended": -0.013297
+     },
+     "hold_days_p50": 21.0,
+     "hold_days_p90": 21.0
+    }
+   },
+   {
+    "symbol": "QCOM",
+    "train": {
+     "trades": 14,
+     "wins": 11,
+     "losses": 3,
+     "win_rate": 78.57142857142857,
+     "total_pnl": 0.007145568363098848,
+     "avg_pnl": 0.0005103977402213462,
+     "best": 0.00840833181557242,
+     "worst": -0.007421582651083614,
+     "exit_reasons": {
+      "gain_retrace": 9,
+      "kramers_down_exit": 2,
+      "breakeven_scratch": 2,
+      "bayesian_flip": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.008448,
+      "kramers_down_exit": 0.0006,
+      "breakeven_scratch": 0.00393,
+      "bayesian_flip": -0.005832
+     },
+     "hold_days_p50": 10.0,
+     "hold_days_p90": 42.0
+    },
+    "test": {
+     "trades": 1,
+     "wins": 0,
+     "losses": 1,
+     "win_rate": 0.0,
+     "total_pnl": -0.0036836519223605035,
+     "avg_pnl": -0.0036836519223605035,
+     "best": -0.0036836519223605035,
+     "worst": -0.0036836519223605035,
+     "exit_reasons": {
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "recording_ended": -0.003684
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    }
+   },
+   {
+    "symbol": "MSTR",
+    "train": {
+     "trades": 7,
+     "wins": 4,
+     "losses": 3,
+     "win_rate": 57.142857142857146,
+     "total_pnl": -0.02612777343597443,
+     "avg_pnl": -0.0037325390622820614,
+     "best": 0.003603372823568096,
+     "worst": -0.025310042822341783,
+     "exit_reasons": {
+      "gain_retrace": 5,
+      "bayesian_flip": 1,
+      "breakeven_scratch": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": -0.004421,
+      "bayesian_flip": -0.02531,
+      "breakeven_scratch": 0.003603
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 6.0
+    },
+    "test": {
+     "trades": 2,
+     "wins": 0,
+     "losses": 2,
+     "win_rate": 0.0,
+     "total_pnl": -0.03649081782735991,
+     "avg_pnl": -0.018245408913679956,
+     "best": -0.006966494161946876,
+     "worst": -0.029524323665413035,
+     "exit_reasons": {
+      "kelly_flat": 1,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "kelly_flat": -0.029524,
+      "recording_ended": -0.006966
+     },
+     "hold_days_p50": 41.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "IBM",
+    "train": {
+     "trades": 2,
+     "wins": 2,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.006853128490881488,
+     "avg_pnl": 0.003426564245440744,
+     "best": 0.0064140472640173835,
+     "worst": 0.0004390812268641048,
+     "exit_reasons": {
+      "kramers_down_exit": 2
+     },
+     "exit_pnl": {
+      "kramers_down_exit": 0.006853
+     },
+     "hold_days_p50": 24.0,
+     "hold_days_p90": 20.0
+    },
+    "test": {
+     "trades": 3,
+     "wins": 2,
+     "losses": 1,
+     "win_rate": 66.66666666666667,
+     "total_pnl": -0.0016776529171441956,
+     "avg_pnl": -0.0005592176390480652,
+     "best": 0.0015811168910725426,
+     "worst": -0.004759795712635614,
+     "exit_reasons": {
+      "gain_retrace": 2,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.003082,
+      "recording_ended": -0.00476
+     },
+     "hold_days_p50": 5.0,
+     "hold_days_p90": 5.0
+    }
+   },
+   {
+    "symbol": "LOW",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 5,
+     "wins": 3,
+     "losses": 2,
+     "win_rate": 60.0,
+     "total_pnl": -0.017186510156129514,
+     "avg_pnl": -0.0034373020312259027,
+     "best": 0.001955226440046587,
+     "worst": -0.0104356329464797,
+     "exit_reasons": {
+      "gain_retrace": 3,
+      "evr_triage": 1,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.002625,
+      "evr_triage": -0.009376,
+      "recording_ended": -0.010436
+     },
+     "hold_days_p50": 22.0,
+     "hold_days_p90": 36.0
+    }
+   },
+   {
+    "symbol": "PG",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 7,
+     "wins": 6,
+     "losses": 1,
+     "win_rate": 85.71428571428571,
+     "total_pnl": 0.007146576987680467,
+     "avg_pnl": 0.0010209395696686382,
+     "best": 0.00565364810040353,
+     "worst": -0.00041517735845565673,
+     "exit_reasons": {
+      "gain_retrace": 6,
+      "recording_ended": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.001493,
+      "recording_ended": 0.005654
+     },
+     "hold_days_p50": 8.0,
+     "hold_days_p90": 35.0
+    }
+   },
+   {
+    "symbol": "JPM",
+    "train": {
+     "trades": 11,
+     "wins": 6,
+     "losses": 5,
+     "win_rate": 54.54545454545455,
+     "total_pnl": 0.0003166927549696774,
+     "avg_pnl": 2.8790250451788856e-05,
+     "best": 0.005192925202446921,
+     "worst": -0.008794323182687691,
+     "exit_reasons": {
+      "gain_retrace": 8,
+      "kramers_down_exit": 2,
+      "bayesian_flip": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.003044,
+      "kramers_down_exit": -0.002567,
+      "bayesian_flip": -0.00016
+     },
+     "hold_days_p50": 4.0,
+     "hold_days_p90": 7.0
+    },
+    "test": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    }
+   },
+   {
+    "symbol": "AAPL",
+    "train": {
+     "trades": 0,
+     "wins": 0,
+     "losses": 0,
+     "win_rate": 0.0,
+     "total_pnl": 0,
+     "avg_pnl": 0.0,
+     "best": 0.0,
+     "worst": 0.0,
+     "exit_reasons": {},
+     "exit_pnl": {},
+     "hold_days_p50": 0.0,
+     "hold_days_p90": 0.0
+    },
+    "test": {
+     "trades": 4,
+     "wins": 2,
+     "losses": 2,
+     "win_rate": 50.0,
+     "total_pnl": -0.005676119325550524,
+     "avg_pnl": -0.001419029831387631,
+     "best": 0.003350444267371591,
+     "worst": -0.00808773597701086,
+     "exit_reasons": {
+      "gain_retrace": 4
+     },
+     "exit_pnl": {
+      "gain_retrace": -0.005676
+     },
+     "hold_days_p50": 1.0,
+     "hold_days_p90": 1.0
+    }
+   },
+   {
+    "symbol": "MSFT",
+    "train": {
+     "trades": 1,
+     "wins": 1,
+     "losses": 0,
+     "win_rate": 100.0,
+     "total_pnl": 0.001438712618812718,
+     "avg_pnl": 0.001438712618812718,
+     "best": 0.001438712618812718,
+     "worst": 0.001438712618812718,
+     "exit_reasons": {
+      "gain_retrace": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": 0.001439
+     },
+     "hold_days_p50": 8.0,
+     "hold_days_p90": 8.0
+    },
+    "test": {
+     "trades": 4,
+     "wins": 2,
+     "losses": 2,
+     "win_rate": 50.0,
+     "total_pnl": 0.005413008948738973,
+     "avg_pnl": 0.0013532522371847433,
+     "best": 0.006127811738035935,
+     "worst": -0.0012924467985383492,
+     "exit_reasons": {
+      "gain_retrace": 3,
+      "breakeven_scratch": 1
+     },
+     "exit_pnl": {
+      "gain_retrace": -0.000715,
+      "breakeven_scratch": 0.006128
+     },
+     "hold_days_p50": 28.0,
+     "hold_days_p90": 28.0
+    }
+   }
+  ]
+ }
+}
