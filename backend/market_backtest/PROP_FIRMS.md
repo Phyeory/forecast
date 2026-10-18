@@ -78,6 +78,21 @@ time limit, weekend holding allowed, EAs allowed.
 * Firms with 3 % daily caps (our tail lives at −3.9 % at k=0.75).
 * Firms that ban weekend holding (median hold is 32 days).
 
+## Deterministic proof (the real path, not a bootstrap)
+
+The actual arm14 out-of-sample ledger, scaled and run day-by-day through the
+FTMO 2-Step guard:
+
+| k | outcome | day | date | best-day share |
+|---|---|---|---|---|
+| 0.50 | pass P1 + P2 | 538 | 2025-12-05 | 30% |
+| **0.75** | **pass P1 + P2** | **442** | **2025-07-22** | **46%** |
+| 1.00 | pass P1 + P2 | 337 | 2025-02-19 | 11% |
+
+At k=0.75 the account took 442 trading days (~21 months) to clear both phases
+— legal only because FTMO has no deadline.  The consistency rule was satisfied
+(46% < 50%) at the moment of passing.
+
 ## Attempt economics — "how do I make thousands a month with no capital?"
 
 A $100k FTMO 2-Step attempt costs **$540**. At k=0.75 each attempt is worth
@@ -123,7 +138,9 @@ eventually blows (33 %/yr at k=0.75). Money not withdrawn is money at risk.
 engine:  StrategyEngineV2M (clone of V2, ζ=0)
 config:  gain_retrace_arm_pct = 14.0     (arm-family winner)
 sizing:  k = 0.75  → 7.5 % of equity per position
-universe: 67 US large caps (daily bars)
+universe: 67 US single-name equities (daily bars) — the only market with
+          edge AND breadth; intl/sector/comm books add +1.1 pp CAGR but fatten
+          the daily tail, so stocks-only for the prop account
 firm:    FTMO 2-Step (10/5, 5 % daily, static 10 %, no time limit)
 exec:    signal at bar close, fill at next open (measured cost −0.47 pp/2.8 y)
 ```

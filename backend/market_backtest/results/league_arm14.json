@@ -1,0 +1,76 @@
+[
+ {
+  "market": "fx_etf",
+  "interval": "1d",
+  "label": "arm14",
+  "overrides": {
+   "gain_retrace_arm_pct": 14.0
+  },
+  "symbols": 6,
+  "train": {
+   "days": 1759,
+   "total_pnl": -0.005736420150233346,
+   "mean_pct": -0.0003261182575459548,
+   "sd_pct": 0.08893523500772088,
+   "sharpe": -0.05821052639413864,
+   "maxdd_pct": 4.943390495071187,
+   "worst_day_pct": -0.7289363811626925,
+   "best_day_pct": 1.2967945156049376,
+   "cagr_pct": -0.08880874859888976,
+   "span_years": 6.4750171115674195,
+   "trades": 30,
+   "trades_per_year": 4.633192389006343,
+   "symbols_positive": 3,
+   "pnl_per_symbol_year": -0.0001476552121122431
+  },
+  "test": {
+   "days": 754,
+   "total_pnl": 0.0022361071118679465,
+   "mean_pct": 0.0002965659299559611,
+   "sd_pct": 0.0762266322683419,
+   "sharpe": 0.06176106759400518,
+   "maxdd_pct": 2.0782527293756665,
+   "worst_day_pct": -0.4141442110903948,
+   "best_day_pct": 0.5467208862692141,
+   "cagr_pct": 0.0345017781754553,
+   "span_years": 6.4750171115674195,
+   "trades": 45,
+   "trades_per_year": 6.9497885835095135,
+   "symbols_positive": 4,
+   "pnl_per_symbol_year": 5.7557302509497356e-05
+  },
+  "prop_ftmo_2step": {
+   "0.5": {
+    "p_full": 0.0,
+    "p1": 0.0,
+    "blown": 0.0,
+    "E_payout": 0.006444191199890192
+   },
+   "0.75": {
+    "p_full": 0.0,
+    "p1": 0.0,
+    "blown": 0.0,
+    "E_payout": 0.009666286799835352
+   },
+   "1.0": {
+    "p_full": 0.00125,
+    "p1": 0.00625,
+    "blown": 0.0,
+    "E_payout": 0.012888382399780483
+   },
+   "1.5": {
+    "p_full": 0.03875,
+    "p1": 0.08875,
+    "blown": 0.0,
+    "E_payout": 0.019332573599670735
+   },
+   "2.0": {
+    "p_full": 0.125,
+    "p1": 0.215,
+    "blown": 0.0,
+    "E_payout": 0.025776764799560953
+   }
+  },
+  "out_dir": "/Users/jaime/pump-chart-market/backend/market_backtest/results/scan_fx_etf_arm14"
+ }
+]
