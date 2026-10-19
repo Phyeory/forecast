@@ -111,6 +111,113 @@ def _partition_stats(trades: list[dict]) -> dict:
     }
 
 
+def market_kind(market: str, interval: str) -> str:
+    """Map a (market, interval) pair to its BAR_SPEC / COSTS class."""
+    if market == "crypto_perp":
+        return f"{market}_{interval}"
+    if market in ("stocks", "stocks_1h_raw") and interval != "1d":
+        return f"stocks_{interval}"
+    return MARKET_CLASS.get(market, market) if interval == "1d" \
+        else f"{market}_{interval}"
+
+
+def replay_candles(
+    market: str,
+    symbol: str,
+    interval: str,
+    candles: list[dict],
+    engine_params: dict,
+    *,
+    starting_balance: float = 1.0,
+    buy_size: float = 0.1,
+    exec_model: str = "instant",
+    force_close: bool = True,
+    build_full_result: bool = False,
+) -> dict:
+    """Replay an ARBITRARY candle slice with fixed engine params.
+
+    This is the exact loop `run_market_backtest` uses (same 4-state
+    expansion, same bull/bear midpoint ordering, same state-4 volume
+    landing, same latency wiring) — extracted so the recalibrator can score
+    short windows without touching the DB or re-calibrating.
+
+    Returns {"trades": [...], "open_trade": dict|None, "stats": {...},
+             "balance": float, "last_candle": tuple|None}.
+    """
+    kind = market_kind(market, interval)
+    costs = COSTS[kind]
+
+    ft = MarketForwardTester(
+        starting_balance=starting_balance,
+        buy_size_sol=buy_size,
+        priority_fee=costs["priority_fee"],
+        bribe_fee=0.0,
+        slippage_pct=costs["slippage_pct"],
+        market_engine_kwargs=dict(engine_params),
+        exec_model=exec_model,
+    )
+
+    # Engine-keyed latency injection mirrors backtester.run_backtest.
+    _eng_delay = float(getattr(ft.engine, "v2_entry_delay_seconds", 0.0))
+    if _eng_delay > 0.0:
+        ft.enable_entry_latency(_eng_delay)
+    _eng_exit_delay = float(getattr(ft.engine, "v2_exit_delay_seconds", 0.0))
+    if _eng_exit_delay > 0.0:
+        ft.enable_exit_latency(
+            _eng_exit_delay,
+            armed_only=float(getattr(ft.engine,
+                                     "v2_exit_delay_armed_only", 0.0)) > 0.0)
+
+    ft_update = ft.update
+    last_candle = None
+    for candle in candles:
+        t = int(candle["time"])
+        o = float(candle["open"])
+        h = float(candle["high"])
+        l = float(candle["low"])
+        c = float(candle["close"])
+        vol = float(candle.get("volume", 0.0))
+        buy_vol = float(candle.get("buy_volume", 0.0))
+        sell_vol = float(candle.get("sell_volume", 0.0))
+
+        # Bull bar: high comes before low; bear bar: low before high
+        bullish = c >= o
+        mid_first, mid_second = (h, l) if bullish else (l, h)
+
+        # State 1: open tick
+        ft_update(time=t, o=o, h=o, l=o, c=o, volume=0.0,
+                  _build_full_result=build_full_result)
+        # State 2: first extreme
+        h2 = max(o, mid_first)
+        l2 = min(o, mid_first)
+        ft_update(time=t, o=o, h=h2, l=l2, c=mid_first, volume=0.0,
+                  _build_full_result=build_full_result)
+        # State 3: both extremes
+        ft_update(time=t, o=o, h=h, l=l, c=mid_second, volume=0.0,
+                  _build_full_result=build_full_result)
+        # State 4: close tick — buy/sell split lands here
+        ft_update(time=t, o=o, h=h, l=l, c=c, volume=vol,
+                  buy_volume=buy_vol, sell_volume=sell_vol,
+                  _build_full_result=build_full_result)
+
+        last_candle = (t, o, h, l, c)
+
+    if force_close and ft.current_trade is not None and last_candle is not None:
+        t_last, o_last, h_last, l_last, c_last = last_candle
+        ft._close_long(o_last, h_last, l_last, c_last, t_last,
+                       reason="recording_ended")
+
+    open_trade = (ft.current_trade.to_dict()
+                  if ft.current_trade is not None else None)
+    return {
+        "trades": [t.to_dict() for t in ft.trade_history],
+        "open_trade": open_trade,
+        "stats": ft.stats.to_dict(),
+        "balance": float(ft.balance),
+        "last_candle": last_candle,
+    }
+
+
 def run_market_backtest(
     market: str,
     symbol: str,
@@ -130,12 +237,7 @@ def run_market_backtest(
     time: entries before the boundary are train (in-sample for the
     calibration), entries at/after it are unseen out-of-sample.
     """
-    if market == "crypto_perp":
-        kind = f"{market}_{interval}"
-    elif market in ("stocks", "stocks_1h_raw") and interval != "1d":
-        kind = f"stocks_{interval}"
-    else:
-        kind = MARKET_CLASS.get(market, market) if interval == "1d" else f"{market}_{interval}"
+    kind = market_kind(market, interval)
     spec = BAR_SPEC[kind]
     bar_seconds = spec["bar_seconds"]
 
@@ -161,72 +263,13 @@ def run_market_backtest(
         engine_params.update(engine_params_override)
 
     costs = COSTS[kind]
-
-    ft = MarketForwardTester(
-        starting_balance=starting_balance,
-        buy_size_sol=buy_size,
-        priority_fee=costs["priority_fee"],
-        bribe_fee=0.0,
-        slippage_pct=costs["slippage_pct"],
-        market_engine_kwargs=engine_params,
-        exec_model="instant",
+    replay = replay_candles(
+        market, symbol, interval, candles, engine_params,
+        starting_balance=starting_balance, buy_size=buy_size,
+        exec_model="instant", force_close=True,
     )
-
-    # Engine-keyed latency injection mirrors backtester.run_backtest.
-    _eng_delay = float(getattr(ft.engine, "v2_entry_delay_seconds", 0.0))
-    if _eng_delay > 0.0:
-        ft.enable_entry_latency(_eng_delay)
-    _eng_exit_delay = float(getattr(ft.engine, "v2_exit_delay_seconds", 0.0))
-    if _eng_exit_delay > 0.0:
-        ft.enable_exit_latency(
-            _eng_exit_delay,
-            armed_only=float(getattr(ft.engine, "v2_exit_delay_armed_only", 0.0)) > 0.0)
-
-    ft_update = ft.update
-
-    last_candle = None
-    for candle in candles:
-        t = int(candle["time"])
-        o = float(candle["open"])
-        h = float(candle["high"])
-        l = float(candle["low"])
-        c = float(candle["close"])
-        vol = float(candle.get("volume", 0.0))
-        buy_vol = float(candle.get("buy_volume", 0.0))
-        sell_vol = float(candle.get("sell_volume", 0.0))
-
-        # Bull bar: high comes before low; bear bar: low before high
-        bullish = c >= o
-        if bullish:
-            mid_first, mid_second = h, l
-        else:
-            mid_first, mid_second = l, h
-
-        # State 1: open tick
-        ft_update(time=t, o=o, h=o, l=o, c=o, volume=0.0,
-                  _build_full_result=False)
-        # State 2: first extreme
-        h2 = max(o, mid_first)
-        l2 = min(o, mid_first)
-        ft_update(time=t, o=o, h=h2, l=l2, c=mid_first, volume=0.0,
-                  _build_full_result=False)
-        # State 3: both extremes
-        ft_update(time=t, o=o, h=h, l=l, c=mid_second, volume=0.0,
-                  _build_full_result=False)
-        # State 4: close tick — buy/sell split lands here
-        ft_update(time=t, o=o, h=h, l=l, c=c, volume=vol,
-                  buy_volume=buy_vol, sell_volume=sell_vol,
-                  _build_full_result=False)
-
-        last_candle = (t, o, h, l, c)
-
-    if ft.current_trade is not None:
-        t_last, o_last, h_last, l_last, c_last = last_candle
-        ft._close_long(o_last, h_last, l_last, c_last, t_last,
-                       reason="recording_ended")
-
-    trades = [t.to_dict() for t in ft.trade_history]
-    stats = ft.stats.to_dict()
+    trades = replay["trades"]
+    stats = replay["stats"]
 
     # ── Train / unseen partition (by ENTRY time) ─────────────────────
     trades_train = [t for t in trades if int(t.get("entry_time") or 0) < split_ts]

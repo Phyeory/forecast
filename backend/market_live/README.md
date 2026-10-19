@@ -175,6 +175,29 @@ Weekly checks:
 * rolling 60/90-day realised mean vs +0.043%/day (edge decay)
 * re-run `test_live_parity.py` after any code change
 
+## Recalibration (M11)
+
+Candidates are generated offline; the live stack only ever reads an
+**adopted** snapshot at session start:
+
+```bash
+./.venv/bin/python -m market_backtest.recalibrate_market snapshot \
+    --asof "$(date +%F)" --selection stats_only --tag weekly_$(date +%Y%m%d)
+./.venv/bin/python -m market_backtest.recalibrate_market report \
+    --run market_backtest/results/recal/full_so/replay.json
+./.venv/bin/python -m market_backtest.recalibrate_market adopt \
+    --snapshot market_backtest/results/recal/weekly_20261025
+
+./.venv/bin/python -m market_live.run_live live \
+    --config market_live/config/prop_ftmo_100k.json \
+    --calibration-snapshot market_backtest/results/recal/weekly_20261025 --once
+```
+
+Journal contract: `recalibration` (accepted, with version/asof/git commit),
+`recalibration_rejected` (missing `adopted.json` / unreadable / empty), and
+`heartbeat.jsonl` carries the live calibration version.  A missing snapshot
+falls back to `results_dir` frozen params; it never crashes the session.
+
 ## Prop-account operating rules
 
 1. **Withdraw every payout.** At k=0.75 the funded account blows ~33%/yr;

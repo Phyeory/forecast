@@ -1,0 +1,29 @@
+{
+ "versions": [
+  {
+   "file": "snapshot_2024-01-01_c9fcc7c695.json",
+   "asof": "2024-01-01",
+   "created_at": 1792414670.033185,
+   "chosen": "arm14_c79_t1"
+  },
+  {
+   "file": "snapshot_2024-04-01_b8c7180090.json",
+   "asof": "2024-04-01",
+   "created_at": 1792414860.7546859,
+   "chosen": "arm14_c79_t1"
+  },
+  {
+   "file": "snapshot_2024-07-01_711ddffe3d.json",
+   "asof": "2024-07-01",
+   "created_at": 1792415062.2954361,
+   "chosen": "arm14_c79_t1"
+  },
+  {
+   "file": "snapshot_2024-10-01_f7d5af78d0.json",
+   "asof": "2024-10-01",
+   "created_at": 1792415273.064843,
+   "chosen": "arm14_c79_t1"
+  }
+ ],
+ "latest": "snapshot_2024-10-01_f7d5af78d0.json"
+}

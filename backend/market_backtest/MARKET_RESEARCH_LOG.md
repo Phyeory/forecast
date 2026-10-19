@@ -618,9 +618,11 @@ HEAD` (the memecoin lesson INU Sep-29, applied here).
       with `trial_ftmo_2step.json` on the demo/MT5-bridge).
 - [ ] **Real MT5 bridge validation** on the FTMO demo account (preflight
       `--place-test-order` round-trip) before paying for the challenge.
-- [ ] **Adoption step**: bake arm14 into `market_calibration.py`
-      (`arm = clip(0.55·runup_med, 3.0, 14.0)`) and re-run to confirm
-      parity (currently the override lives in configs/results only).
+- [x] **Recalibration (M11)**: built, swept and rejected.  The frozen
+      override stays in `results/arm14` + configs; live snapshot adoption is
+      available (`recalibrate_market adopt`) for any future candidate that
+      passes the gate.  Do not bake a trailing-window refit into
+      `market_calibration.py` — the 505-bar base loses 0.092 OOS.
 - [ ] **Intraday (1h/5m)** plumbing exists; needs a data feed before any
       validation.
 - [ ] Push branch to remote (user hasn't asked).
@@ -639,3 +641,210 @@ cd /Users/jaime/pump-chart-market/backend
 /Users/jaime/pump-chart/backend/.venv/bin/python -m market_live.setup_prop \
     --config market_live/config/prop_ftmo_100k.json
 ```
+
+---
+
+# M11 — the calibrator as a first-class algorithm (2026-10-19)
+
+Standing task: `market_live/NEXT_AGENT_CALIBRATION_PROMPT.md`. Code:
+`market_backtest/recalibrate_market.py`; tests:
+`market_backtest/test_recalibrate.py`; snapshots:
+`market_backtest/results/recal/<tag>/`.
+
+## Phase A — the calibratable surface (what may move, what may not)
+
+The engine is not re-designed.  Every adoptable change is a **constant knob**
+on top of the per-symbol causal calibration.  The surface, by layer:
+
+| layer | keys | scope | decision |
+|---|---|---|---|
+| SDE / filter | `lambda_mu`, `alpha`, `eta`, `theta`, `sigma_mu/phi/h`, `kappa_mu`, `beta`, `zeta`, `lambda_0`, `tw_window_seconds`, `warmup_bars` | per symbol, causal prefix | refreshed every snapshot; `zeta=0` frozen forever (long-tape guard) |
+| decision horizon τ | `tau_max`, `tau_min`, `tau_step` | pooled by interval class | 1d→40/5/20 frozen; τ×1.5 searchable but prior-falsified |
+| arming ladder | `gain_retrace_arm_pct`, `give_frac`, `v2_rate_split_*` | per-symbol formula + **pooled floor** | the campaign's lever: floor ∈ {3, 14, 20}; give_frac/rate-split frozen (no-op on stocks) |
+| breakeven / no-long / EVR offside | `breakeven_arm_dd_pct`, `no_long_offside_pct`, `v2_evr_offside_min_pct` | per symbol | *statistic repaired*, floors retained (see Phase B) |
+| entry noise gate | `v2_sigma_t_min` | per symbol | *repaired*; behaviourally inert on this book |
+| confidence floors | `confidence_high`, `entry_confidence_high` | pooled | 0.79 frozen; 0.84/0.90/0.92 prior-falsified |
+| costs / latency / hard switches | `s_0/s_1/fee_fraction`, `latency_seconds`, per-coin/mint/popcal/harvestcal, holder-flow, delays | pooled | frozen forever on market tapes |
+
+Two layers that look per-symbol are effectively **pooled**: the arm floor and
+the confidence floor.  With 67 names and ~0.14 trades/name/quarter, per-symbol
+selection on a 252d window is a coin flip; the calibrator therefore selects
+behaviour knobs **pooled** and only the statistical (SDE/EVR/gate) layers
+per symbol.  `per_symbol` remains available as a diagnostic and loses (below).
+
+## Phase B — two silent calibration bugs (found, isolated, judged)
+
+The campaign's `v2_sigma_t_min` was `1e-06` on **all 67** arm14 result files,
+and `dd_med_pct` was `-0.0` on all 67.  Root causes:
+
+1. **Sigma gate never ran.**  `market_calibration.calibrate_market_params`
+   reads `p["warmup_bars"]` inside the gate replay *before* assigning it →
+   `KeyError` → blanket `except` → gate 0 → floored at 1e-6.  Second bug in
+   the same block: the posterior lives on the engine **core**
+   (`eng.core._last_sigma_t`), not the adapter (`eng._last_sigma_t`), so even
+   without the KeyError the sample list was empty.
+2. **Drawdown ladder pinned at floors.**  `_forward_runup_dd` returns
+   `-percentile(drawdowns, 40)` where the drawdown list is already
+   non-negative and >60 % zeros on a bull tape → `dd_med = -0.0`.  Every
+   `max(dd_med, 1.0)` then sets `breakeven_arm_dd_pct=15`,
+   `no_long_offside_pct=12`, `v2_evr_offside_min_pct=8` on every symbol.
+
+Isolation (full 67, campaign split 2023-10-16, arm14; `fixprobe`):
+
+| cell | test Σ | test trades | positive | train Σ |
+|---|---|---|---|---|
+| `none` (reconstruction) | **+0.3260** | 113 | 31 | +0.3670 |
+| `sigma` (repaired gate only) | +0.3260 | 113 | 31 | +0.3670 |
+| `dd` (repaired ladder only) | +0.2845 | 112 | 31 | +0.3173 |
+| `both` | +0.2845 | 112 | 31 | +0.3173 |
+
+`none` reproduces the stored arm14 book exactly, so the probe is clean.
+The repaired sigma gate changes **zero trades** (0.35×p10 blocks states that
+never host an entry on this book).  The repaired drawdown ladder **loses
+0.0415** test Σ — one high-vol name's winner is cut.  **Verdict: repair the
+code, adopt only the sigma gate; keep the campaign's drawdown floors.**  This
+is the accept gate doing its job: a bug fix is not automatically an edge.
+
+## Phase B2 — warm-up must be the full history
+
+The first forward harness warmed 260 bars before each scored window.  It
+produced **zero entries for quarters at a time** where the campaign path had
+several.  Measured on C, 2024-Q2 (window PnL, account units):
+
+| warm bars | C Q2 PnL | MCD Q2 PnL |
+|---|---|---|
+| 260 | 0.00000 | 0.00000 |
+| 500 | 0.00000 | 0.00000 |
+| 756 | 0.00000 | 0.00000 |
+| 1000 | 0.00000 | −0.01121 |
+| 1500 | +0.00506 | −0.00409 |
+| full (1873) | −0.00232 | −0.01147 |
+
+The engine's KDE (375 bars) + OU/RBPF state has long memory; a short warm
+changes *which trades exist*, not just their fills.  The live host warms on
+the full feed history, so the recalibrator does the same (`warmup_bars: 0`).
+Cost: ~5.5 s per symbol/window — the price of decision identity.
+
+## Phase B3 — calibrator architecture
+
+* **As-of** `T`: all data strictly before `T`; base calibration on the last
+  `base_lookback_bars=505`; selection on a `window_bars=252` trailing window,
+  first 80 % fit / last 20 % holdout (holdout never used for selection).
+* **Candidate grid**: arm floor ∈ {3, 14, 20} (the campaign's dose curve);
+  every other behaviour knob frozen at the incumbent.
+* **Selection**: pooled account Σ on the fit segment; **one-standard-error
+  rule** — cells within 1 SE of the leader are indistinguishable, and the
+  incumbent arm14 wins ties.  This is deliberate: a 202-bar fit window holds
+  ~1–3 account trades/month, so an argmax is usually one symbol's outlier.
+* **Holdout veto**: if the selected cell's holdout Σ is worse than arm14 by
+  more than 0.02 account units, fall back to arm14.
+* **Versioned output**: `snapshot_<asof>_<hash>.json` + `manifest.json`;
+  `created_at`, git commit, seed, config, per-symbol audit.
+  `adopt --snapshot <file|dir>` writes `adopted.json`; live only ever loads an
+  adopted snapshot at `session_open`, never mid-session.
+
+## Phase C — does adaptive recalibration beat the frozen campaign params?
+
+Retrospective: 18 monthly snapshots, 2024-01 → 2025-07, all 67 names, full
+trades; each snapshot is calibrated on data strictly before its as-of, then
+traded forward one month.  The frozen baseline is the stored arm14 params,
+replayed through the identical path.  Accounting is mark-inclusive at both
+window boundaries (booked exits ≤ t + open mark at t), so the stitched path
+is the account equity, not just realized PnL.
+
+**First pass was wrong and the bug is worth recording.**  The initial
+`window_pnl` recognized the replay's still-open position only at the END
+boundary, not at the START, so any long hold had its full end-mark counted
+without subtracting the start mark.  This produced a spurious −0.137 Δ.  A
+single-month reconciliation caught it: Feb-2024 frozen was −0.0272 vs the
+ledger's +0.0008, driven by PFE (−0.0283 vs a −0.0014 mark change).  Fixed
+and re-validated: Feb frozen +0.0015 vs ledger +0.0008 (boundary-day
+convention), and the full 18-month frozen path +0.1295 vs the campaign
+ledger's +0.1027.
+
+Corrected result (monthly refresh, `stats_only`, trailing 505-bar base):
+
+| metric | value |
+|---|---|
+| candidate Σ | **+0.0375** |
+| frozen Σ | **+0.1295** |
+| Δ | **−0.0920** |
+| positive months | 3 / 18 |
+| Wilcoxon p (monthly Δ) | **0.0090** |
+| Wilcoxon p (per-symbol Δ) | 0.0918 |
+| bootstrap 95% CI (per-symbol mean Δ) | [−0.0038, +0.0004] |
+| breadth (all 67) | 10 % |
+| verdict | **FAIL — reject** |
+
+The drag is not a few outliers: 15 of 18 months are negative, and the
+candidate systematically captures less upside (2024-08 +0.0108 vs +0.0256;
+2024-11 +0.0064 vs +0.0178; 2025-05 +0.0107 vs +0.0283).  Mechanism: the
+trailing 505-bar SDE / EVR / gate refresh moves the exit thresholds, not the
+arm (the arm is pinned at 14 by the policy).  It is a *statistics* problem,
+not an *arm-search* problem.
+
+## Phase C2 — the 2×2 (base stats × search)
+
+The clean experiment separates the two adaptive dimensions:
+
+| policy | base stats | behaviour search | verdict |
+|---|---|---|---|
+| frozen (control) | campaign 2016-2023 | none | **incumbent** |
+| `stats_only` / trailing | 505-bar trailing | none | **Δ −0.0920** (reject; p=0.009) |
+| `stats_only` / full | full history | none | **Δ +0.0001** (neutral; p=n/a, CI ±0.0004) |
+| `pooled` / frozen | campaign | arm ∈ {3,14,20} | **Δ +0.0013, 4/4 arm14** (no-op) |
+| `pooled` / trailing | 505-bar trailing | arm ∈ {3,14,20} | inherits the trailing-base loss |
+
+The full-history base cell is the decisive attribution: candidate **+0.0801**
+vs frozen **+0.0800**, Δ **+0.0001**, per-symbol CI [−0.0004, +0.0004],
+12 % breadth.  The −0.092 is not "recalibration is bad"; it is **a 505-bar
+window is too short to estimate the SDE/EVR layers**.  With a long base the
+refresh is exactly neutral, which is the honest reason to stop refreshing:
+it buys no edge, so the campaign's frozen snapshot is the better default.
+
+`stats_only/frozen` is the identity cell by construction: the test
+`test_frozen_base_stats_only_is_identity` asserts it equals the campaign
+params field-by-field, so its Δ is exactly 0.  The two open cells answer
+whether (a) a long base lookback repairs the refresh, and (b) the arm search
+adds anything once the base is held fixed.
+
+## Phase C3 — search-only (frozen base) collapses to the incumbent
+
+Four quarterly snapshots, 2024-01 → 2025-01, 67 names, base = the campaign's
+frozen params, candidates arm ∈ {3, 14, 20}:
+
+| as-of | chosen | quarter Δ |
+|---|---|---|
+| 2024-01-01 | arm14 | +0.0013 |
+| 2024-04-01 | arm14 | +0.0000 |
+| 2024-07-01 | arm14 | +0.0000 |
+| 2024-10-01 | arm14 | +0.0000 |
+| **total** | **4/4 arm14** | **+0.0013** (gate FAIL) |
+
+The one-standard-error rule is doing exactly what it was built to do: with a
+202-bar fit segment and ~1–3 account trades/month, no arm cell is
+distinguishable from the incumbent, so the calibrator refuses to switch.  The
+"search" is a no-op on this book — which is the correct answer, not a
+failure.  Any *trailing* search inherits the base-stats loss measured in
+Phase C (the base is shared), so it cannot rescue the policy.
+
+## Phase D — prop-firm re-proof (10k paths, current code)
+
+The recalibrated policies are rejected at Phase C, so the deployment stack is
+unchanged.  Re-running the incumbent through `mc_firms` at 10,000 paths (the
+campaign used 3,000) reproduces the published economics:
+
+| k | P1 | full pass | funded blown 1y | EV/attempt (reset) | $/mo |
+|---|---|---|---|---|---|
+| 0.50 | 93.0% | 87.2% | 10.5% | **+$7,851** | $757 |
+| **0.75** | **84.8%** | **74.8%** | **33.1%** | **+$9,098** | **$1,029** |
+| 1.00 | 65.5% | 49.1% | 64.4% | +$5,796 | $1,031 |
+
+FTMO free trial at k=0.75: **3.8%** pass / 96.1% timeout (unchanged — still a
+plumbing test, not an evaluation).  The deterministic day-442 pass proof
+stands because no engine parameter changed; the live guard path is
+byte-identical (`test_live_parity` PASS, `test_prop_guard` 6/6).
+
+**Verdict: no change.**  Recalibration is not adoptable on this stack.  The
+calibrator remains an offline monitor: it writes versioned candidates, the
+gate rejects them, and the live account keeps the campaign params.
