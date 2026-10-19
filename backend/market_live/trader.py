@@ -183,13 +183,23 @@ class MarketLiveTrader:
             if px <= 0:
                 continue
             target = self._buy_qty(px, eq) if host.desired_position else 0.0
-            f = self.broker.target_position(self._bsym(sym), target, px,
-                                            reason="state_sync")
-            if f:
-                f.synthetic = synthetic
-                fills.append(f)
-                if self.journal:
-                    self.journal.order({**f.to_dict(), "event": "sync_fill"})
+            already = []
+            if target and getattr(self.broker, "submits_immediately", False) \
+                    and hasattr(self.broker, "open_orders"):
+                try:
+                    already = self.broker.open_orders(self._bsym(sym))
+                except Exception:  # noqa: BLE001
+                    already = []
+            if already:
+                self._log(f"{sym}: sync skipped — open order queued")
+            else:
+                f = self.broker.target_position(self._bsym(sym), target, px,
+                                                reason="state_sync")
+                if f:
+                    f.synthetic = synthetic
+                    fills.append(f)
+                    if self.journal:
+                        self.journal.order({**f.to_dict(), "event": "sync_fill"})
             self.desired[sym] = host.desired_position
         return fills
 
@@ -225,13 +235,52 @@ class MarketLiveTrader:
         if pend is not None:
             px_open = float(candle["open"])
             self.prices[sym] = px_open
-            target = self._buy_qty(px_open) if pend["desired"] else 0.0
-            f = self.broker.target_position(self._bsym(sym), target, px_open,
-                                            reason=pend.get("reason", "next_open"))
-            if f:
-                deferred_fills.append(f)
-                if self.journal:
-                    self.journal.order({**f.to_dict(), "event": "next_open_fill"})
+            target = pend.get("target_qty")
+            if target is None:
+                target = self._buy_qty(px_open) if pend["desired"] else 0.0
+            done = False
+            if pend.get("submitted") and pend.get("order_id") is not None:
+                # the order went out at signal time (queueing broker); resolve
+                # the actual fill so the journal carries the broker's price
+                st = self.broker.order_status(pend["order_id"])
+                status = str((st or {}).get("status", "")).lower()
+                fq = float((st or {}).get("filled_qty") or 0.0)
+                if st is None:
+                    # no real order-status API (e.g. MT5 bridge) — the fill the
+                    # broker returned at submission time is the truth
+                    fq = float(pend.get("stroke_qty") or 0.0)
+                ap = (float((st or {}).get("avg_price") or 0.0)
+                      or float(pend.get("stroke_price") or 0.0) or px_open)
+                if status in ("rejected", "canceled", "expired", "gone"):
+                    self._log(f"{sym}: signal order {status or 'lost'} — "
+                              f"resubmitting at next_open")
+                    pend.pop("submitted", None)
+                    pend.pop("order_id", None)
+                elif fq > 0:
+                    f = BrokerFill(symbol=self._bsym(sym),
+                                   side="buy" if pend["desired"] else "sell",
+                                   qty=abs(fq), price=ap,
+                                   notional=abs(fq) * px_open, fee=0.0,
+                                   time=time.time(),
+                                   order_id=str(pend["order_id"]),
+                                   reason=pend.get("reason", "next_open"))
+                    deferred_fills.append(f)
+                    if self.journal:
+                        self.journal.order({**f.to_dict(),
+                                            "event": "next_open_fill"})
+                    done = True
+                else:
+                    # submitted but not yet filled (opg awaiting the open):
+                    # keep deferring — the intent is already at the broker
+                    self.pending[sym] = pend
+            if not done and not pend.get("submitted"):
+                f = self.broker.target_position(self._bsym(sym), target, px_open,
+                                                reason=pend.get("reason", "next_open"))
+                if f:
+                    deferred_fills.append(f)
+                    if self.journal:
+                        self.journal.order({**f.to_dict(),
+                                            "event": "next_open_fill"})
             self.desired[sym] = pend["desired"]
 
         # 2) engine sees the bar — the invariant call
@@ -268,9 +317,43 @@ class MarketLiveTrader:
                 self.desired[sym] = new
             else:
                 # defer to the next bar's open
-                self.pending[sym] = {"desired": new,
-                                     "reason": f"signal_{t}",
-                                     "signal_close": float(candle["close"])}
+                pend = {"desired": new, "reason": f"signal_{t}",
+                        "signal_close": float(candle["close"])}
+                tgt = self._buy_qty(float(candle["close"])) if new else 0.0
+                if getattr(self.broker, "submits_immediately", False):
+                    # queueing broker: submit NOW — an opg order sent after the
+                    # close fills at the next bar's open, the same instant the
+                    # backtester books. Reconciled on the next closed bar.
+                    try:
+                        already = (self.broker.open_orders(self._bsym(sym))
+                                   if hasattr(self.broker, "open_orders") else [])
+                        if already:
+                            pend["submitted"] = True
+                            pend["order_id"] = str(already[0].get("id", ""))
+                            pend["target_qty"] = tgt
+                            pend["stroke_price"] = float(candle["close"])
+                            pend["stroke_qty"] = tgt
+                            self._log(f"{sym}: open order already queued — "
+                                      f"skipping duplicate submit")
+                        else:
+                            f0 = self.broker.target_position(
+                                self._bsym(sym), tgt, float(candle["close"]),
+                                reason=f"signal_{t}")
+                            if f0:
+                                pend["submitted"] = True
+                                pend["order_id"] = f0.order_id
+                                pend["target_qty"] = tgt
+                                # brokers that fill on receipt (MT5 bridge) carry
+                                # the executable price in the response.
+                                pend["stroke_price"] = f0.price
+                                pend["stroke_qty"] = f0.qty
+                                if self.journal:
+                                    self.journal.order({**f0.to_dict(),
+                                                        "event": "signal_submit"})
+                    except Exception as exc:  # noqa: BLE001
+                        self._log(f"{sym}: signal submit failed ({type(exc).__name__}:"
+                                  f"{exc}) — deferring to next bar")
+                self.pending[sym] = pend
                 self.desired[sym] = prev       # not yet filled
 
         # 4) guard on post-bar equity
