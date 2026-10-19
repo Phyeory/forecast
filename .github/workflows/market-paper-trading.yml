@@ -1,0 +1,117 @@
+name: market-paper-trading
+
+# Daily forward-test of the US-equity V2 strategy on an Alpaca PAPER account.
+# The code is checked out from the market branch; this file lives on the
+# default branch because GitHub only fires scheduled workflows from there.
+#
+# Timing (cron is UTC):
+#   21:05 UTC = 17:05 ET (EDT) — after the US close, before the next open.
+#   02:00 UTC = 22:00 ET (EDT) / 21:00 ET (EST) — catches the bar when the
+#              first run fired too early (US DST edge) + weekend catch-up.
+# The job is stateless: the engine replays the full tape and the broker holds
+# the truth, so a missed day self-heals on the next run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "once = run the daily session, status = report only"
+        required: false
+        default: once
+        type: choice
+        options: [once, status]
+  schedule:
+    - cron: "5 21 * * 1-5"
+    - cron: "0 2 * * 1-6"
+
+concurrency:
+  group: market-paper
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  paper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+      APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+      APCA_PAPER_ACCOUNT_ID: ${{ secrets.APCA_PAPER_ACCOUNT_ID }}
+    steps:
+      - name: checkout market branch
+        uses: actions/checkout@v4
+        with:
+          ref: market-backtest-systems
+          path: repo
+
+      - name: python setup
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: install deps
+        run: |
+          python -m pip install --upgrade pip
+          # scipy is NOT optional here: the engine falls back to a numpy-only
+          # find_peaks without it, which would change decisions and break
+          # backtest/live parity.
+          pip install "numpy>=2.0" "scipy>=1.13"
+
+      - name: prop-eval status (before)
+        working-directory: repo/backend
+        run: python -m market_live.challenge_status --latest || true
+
+      - name: daily session
+        if: ${{ github.event_name == 'schedule' || inputs.mode == 'once' }}
+        working-directory: repo/backend
+        run: |
+          python -m market_live.run_live live \
+            --config market_live/config/alpaca_paper.json \
+            --feed alpaca --once
+
+      - name: prop-eval status (after)
+        working-directory: repo/backend
+        run: python -m market_live.challenge_status --latest || true
+
+      - name: upload session journals
+        if: always()
+        working-directory: repo/backend
+        run: |
+          mkdir -p out
+          cp -r data/live_market/* out/ 2>/dev/null || true
+          ls -la out | head -20
+        # artifacts are attached below
+
+      - name: publish journals to branch
+        if: always()
+        working-directory: repo
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin market-live-journals --depth=1 2>/dev/null || true
+          if git show-ref --verify --quiet refs/remotes/origin/market-live-journals; then
+            git checkout -B market-live-journals origin/market-live-journals
+          else
+            git checkout -B market-live-journals
+          fi
+          mkdir -p backend/data/live_market
+          cp -r backend/data/live_market/. backend/data/live_market/ 2>/dev/null || true
+          git add -f backend/data/live_market
+          if git diff --cached --quiet; then
+            echo "no journal changes"
+          else
+            git commit -m "market live journals $(date -u +%FT%TZ)"
+            git push origin market-live-journals
+          fi
+
+      - name: archive
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-live-journals-${{ github.run_number }}
+          path: repo/backend/out
+          retention-days: 90
