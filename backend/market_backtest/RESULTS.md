@@ -3,6 +3,7 @@
 **Branch**: `market-backtest-systems` · **Date**: 2026-10-18
 **Memecoin engine**: untouched (`strategy_engineV2.py` sha `7ae0aa73…` verified
 at every batch run; clone diff = docstring + `zeta` default only).
+Chronology + derivations companion: [`MARKET_RESEARCH_LOG.md`](MARKET_RESEARCH_LOG.md).
 
 ## What was built
 
@@ -203,7 +204,7 @@ No time limit means the 21-month runway at k=0.75 is legal.  The MC says 74% of
 One config, every symbol, pooled into one account (10% notional per position).
 Test window, 2016–2026 tapes, 70/30 split.
 
-| market | symbols | test trades | Σ PnL | mean/trade | Sharpe | maxDD | worst day | positive | prop pass |
+| market | symbols | test trades | Σ PnL | mean/day | Sharpe | maxDD | worst day | positive | prop pass |
 |---|---|---|---|---|---|---|---|---|---|
 | **US stocks** | **67** | **113** | **+0.326** | **+0.043%** | **0.75** | **13.3%** | **−5.17%** | **31/67** | **72.2%** |
 | intl ETFs | 9 | 18 | +0.042 | +0.006% | 0.76 | 2.3% | −0.65% | 4/9 | 56.2% |
@@ -212,6 +213,10 @@ Test window, 2016–2026 tapes, 70/30 split.
 | commodity ETFs | 8 | 12 | +0.007 | +0.001% | 0.07 | 3.7% | −0.82% | 3/8 | 15.1% |
 | FX ETFs | 6 | 45 | +0.002 | +0.000% | 0.06 | 2.1% | −0.41% | 4/6 | 0.0% |
 | bond ETFs | 4 | 17 | −0.009 | −0.001% | −0.23 | 3.1% | −0.43% | 0/4 | 0.0% |
+
+(mean/day is the ledger daily mean; per-trade means: stocks +0.289%, intl
++0.233%, sector +0.47%, idx +0.73%, comm +0.06%, fx +0.005%, bond −0.056% —
+per-name expectancy exists in several books, breadth is what the account multiplies.)
 
 **The edge is in single-name US equities, and breadth is the multiplier.**
 Per-name expectancy is similar in several markets, but only the 67-stock book
