@@ -1,5 +1,29 @@
 """recalibrate_market.py — adaptive, causal recalibrator for the V2M stock stack.
 
+STATUS: RESEARCH INSTRUMENT — NOT DEPLOYABLE.  (M11, 2026-10-19)
+-----------------------------------------------------------------
+The calibrator works; the *policy* it evaluates does not.  The full battery
+(18 OOS months, 67 names) returned:
+
+    trailing 505-bar stats, monthly   Δ −0.0920 vs frozen (p=0.009)  REJECT
+    full-history base, quarterly       Δ +0.0001 vs frozen           NEUTRAL
+    arm search on frozen base          Δ +0.0013, 4/4 kept arm14     NO-OP
+
+No cell passed the gate, so **no recalibrated parameter set is adoptable**
+and the live account keeps the campaign's frozen arm14 params.  The live
+integration that existed during the experiment (snapshot loading in
+`market_live/trader.py`, `--calibration-snapshot`, the weekly candidate in
+`daily_alpaca.sh`) has been REVERTED — the money path carries no code that
+could load a non-default parameter set.
+
+This module is kept because it is the *measuring apparatus* for the claim
+"recalibration does not help here": it is what produced the numbers above,
+it is how a future regime change would be re-tested, and it documents the
+two silent calibration bugs it found.  It is NOT wired into `market_live`,
+and nothing imports it from the live path.  To re-test a new policy, run
+the `replay`/`sweep` commands and read the gate — never point the live
+trader at a snapshot.
+
 Why this file exists
 --------------------
 The campaign's calibration was a ONE-SHOT fit on the 2016-2023 train prefix

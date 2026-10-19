@@ -65,15 +65,13 @@ def _cfg_from_args(args) -> LiveConfig:
         market=args.market, interval=args.interval, symbols=symbols,
         results_dir=args.results_dir, label=args.label, overrides=overrides,
         k=args.k, buy_size=args.buy_size, starting_equity=args.equity,
-        broker=args.broker, firm=args.firm,
-        exec_mode=args.exec_mode or "next_open",
+        broker=args.broker, firm=args.firm, exec_mode=args.exec_mode,
         journal=not args.no_journal,
         broker_kwargs=({"starting_equity": args.equity,
                         "slippage_pct": args.slippage,
                         "fee_bps": args.fee_bps} if args.broker == "paper"
                        else {"base_url": args.bridge} if args.broker in ("mt5", "bridge")
                        else {}),
-        calibration_snapshot=args.calibration_snapshot,
     )
 
 
@@ -115,14 +113,12 @@ def main() -> None:
     ap.add_argument("--fee-bps", type=float, default=0.0)
     ap.add_argument("--start", default="")
     ap.add_argument("--max-bars", type=int, default=0)
-    ap.add_argument("--exec-mode", default="", choices=["", "close", "next_open"])
+    ap.add_argument("--exec-mode", default="next_open", choices=["close", "next_open"])
     ap.add_argument("--feed", default="auto", choices=["auto", "tape", "yahoo", "alpaca"])
     ap.add_argument("--poll-seconds", type=float, default=60.0)
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--no-journal", action="store_true")
     ap.add_argument("--place-test-order", action="store_true")
-    ap.add_argument("--calibration-snapshot", default="",
-                    help="manually adopted recalibration snapshot file/dir")
     ap.add_argument("--json-out", default="")
     args = ap.parse_args()
 
@@ -133,10 +129,6 @@ def main() -> None:
             cfg.symbols = tuple(s for s in args.symbols.split(",") if s)
         if args.k is not None and args.k != 0.75:
             cfg.k = args.k
-        if args.calibration_snapshot:
-            cfg.calibration_snapshot = args.calibration_snapshot
-        if args.exec_mode:
-            cfg.exec_mode = args.exec_mode
     if not cfg.firm:
         cfg.firm = None
 

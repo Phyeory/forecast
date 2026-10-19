@@ -27,11 +27,9 @@ current market price (flagged `synthetic`).  From then on decisions match.
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 from market_backtest.market_calibration import calibrate_market_params
@@ -63,11 +61,6 @@ class LiveConfig:
     journal_root: Optional[str] = None
     exec_mode: str = "next_open"     # close | next_open
     broker_symbols: dict = field(default_factory=dict)  # data sym -> broker sym
-    # Manual adoption only: path to a recalibration snapshot JSON (or a
-    # snapshot directory containing `adopted.json`).  Empty = frozen params
-    # from results_dir, i.e. the campaign behaviour, byte-identical.
-    calibration_snapshot: str = ""
-    calibration_require_adopted: bool = True
 
     def as_dict(self) -> dict:
         return {k: (list(v) if isinstance(v, tuple) else v)
@@ -92,8 +85,6 @@ class MarketLiveTrader:
         self.current_day: Optional[str] = None
         self.guard: Optional[PropGuard] = None
         self._frozen: dict[str, dict] = {}
-        self._snap_symbols: set[str] = set()
-        self._calib_meta: dict = {}
         self.ready = False
         self.trades: list[dict] = []
 
@@ -106,10 +97,7 @@ class MarketLiveTrader:
     def _resolve_params(self, symbol: str, history: list[dict]) -> dict:
         if symbol in self._frozen:
             p = dict(self._frozen[symbol])
-            # A snapshot is authoritative: config overrides apply only to
-            # symbols that fell back to the frozen results_dir params.
-            if symbol not in self._snap_symbols:
-                p.update(self.cfg.overrides)
+            p.update(self.cfg.overrides)
             return p
         kind = MarketEngineHost._kind(self.cfg.market, self.cfg.interval)
         calib = calibrate_market_params(history, kind, len(history))
@@ -128,77 +116,12 @@ class MarketLiveTrader:
         self.desired[sym] = host.desired_position
         return host
 
-    def _load_calibration_snapshot(self) -> tuple[dict[str, dict], dict]:
-        """Explicit, session-start-only snapshot load (never mid-session).
-
-        Contract:
-          * empty config path       -> ({}, {}) and the caller uses frozen params
-          * directory                -> `adopted.json` (manual adoption record)
-          * file                     -> that file (the path IS the adoption)
-          * unreadable / not adopted -> rejected + journal event, frozen params
-        """
-        raw = str(self.cfg.calibration_snapshot or "").strip()
-        if not raw:
-            return {}, {}
-        p = Path(raw)
-        meta: dict = {"requested": raw}
-        try:
-            if p.is_dir():
-                adopted = p / "adopted.json"
-                if not adopted.exists() and self.cfg.calibration_require_adopted:
-                    raise FileNotFoundError(
-                        f"{p} has no adopted.json (candidate snapshot — run "
-                        f"`recalibrate_market adopt` first)")
-                if adopted.exists():
-                    rec = json.loads(adopted.read_text())
-                    p = p / rec["file"]
-                    meta.update({"adopted_at": rec.get("adopted_at"),
-                                 "adopted_by": rec.get("adopted_by", "manual")})
-                else:
-                    p = p / json.loads((p / "manifest.json").read_text())["latest"]
-            snap = json.loads(p.read_text())
-            params = dict(snap.get("params") or {})
-            if not params:
-                raise ValueError("snapshot has no params")
-            meta.update({
-                "version": snap.get("version"),
-                "asof": snap.get("asof"),
-                "git_commit": snap.get("git_commit"),
-                "n_symbols": len(params),
-                "source": str(p),
-            })
-            self._log(f"calibration snapshot {meta.get('version')} "
-                      f"(asof {meta.get('asof')}, {len(params)} symbols)")
-            return params, meta
-        except Exception as exc:  # noqa: BLE001
-            meta["error"] = f"{type(exc).__name__}: {exc}"
-            self._log(f"calibration snapshot REJECTED — {meta['error']} "
-                      f"(using frozen params)")
-            if self.journal:
-                self.journal.write("recalibration_rejected", meta)
-            return {}, meta
-
     def prepare(self) -> dict:
         if self.journal:
             self.journal.open_session(self.cfg.as_dict())
         self._frozen = params_map(self.cfg.results_dir, self.cfg.market,
                                   self.cfg.interval, self.cfg.label)
-        snap_params, self._calib_meta = self._load_calibration_snapshot()
-        if snap_params:
-            # Snapshot wins for symbols it covers; frozen params remain the
-            # fallback for anything missing (and are logged).
-            self._snap_symbols = set(snap_params)
-            missing = [s for s in self.cfg.symbols if s not in snap_params]
-            for s in self.cfg.symbols:
-                if s in snap_params:
-                    self._frozen[s] = dict(snap_params[s])
-            if self.journal:
-                self.journal.write("recalibration", {
-                    **self._calib_meta, "missing_symbols": missing,
-                    "mode": "snapshot"})
-            if missing:
-                self._log(f"snapshot missing {len(missing)} symbols — frozen fallback")
-        elif not self._frozen:
+        if not self._frozen:
             self._log(f"no frozen params in {self.cfg.results_dir} — rolling "
                       f"calibration per symbol")
 
@@ -237,8 +160,6 @@ class MarketLiveTrader:
         if self.journal:
             self.journal.heartbeat({"event": "ready",
                                     "broker_state": self.broker.state(),
-                                    "calibration": self._calib_meta or
-                                                   {"mode": "frozen"},
                                     "prepared": prepared})
         return prepared
 
@@ -530,13 +451,6 @@ def run_replay(cfg: LiveConfig, start_ts: Optional[int] = None,
         trader.journal.open_session({**cfg.as_dict(), "mode": "replay",
                                      "start_ts": start_ts})
     trader._frozen = params_map(cfg.results_dir, cfg.market, cfg.interval, cfg.label)
-    snap_params, trader._calib_meta = trader._load_calibration_snapshot()
-    if snap_params:
-        trader._frozen.update({k: dict(v) for k, v in snap_params.items()})
-        trader._snap_symbols = set(snap_params)
-        if trader.journal:
-            trader.journal.write("recalibration", {
-                **trader._calib_meta, "mode": "snapshot"})
 
     for sym in cfg.symbols:
         hist = feed.history(sym)
@@ -551,11 +465,6 @@ def run_replay(cfg: LiveConfig, start_ts: Optional[int] = None,
         trader.guard.start_day(trader._equity())
     trader._sync_positions(synthetic=True)
     trader.ready = True
-    if trader.journal:
-        trader.journal.heartbeat({"event": "ready",
-                                  "calibration": trader._calib_meta or
-                                                 {"mode": "frozen"},
-                                  "n_hosts": len(trader.hosts)})
 
     pending: list[tuple[int, str, dict]] = []
     for sym in cfg.symbols:
