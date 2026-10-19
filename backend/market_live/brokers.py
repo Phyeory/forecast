@@ -69,6 +69,12 @@ class Broker:
     def state(self) -> dict:
         raise NotImplementedError
 
+    def symbols(self, query: str = "") -> list[str]:
+        return []
+
+    def symbol_info(self, symbol: str) -> dict:
+        return {}
+
 
 class PaperBroker(Broker):
     """Local ledger.  Fills mirror the backtest cost model exactly."""
@@ -248,6 +254,9 @@ class AlpacaBroker(Broker):
                            notional=0.0, fee=0.0, time=time.time(),
                            reason=reason) for r in (resp or [])]
 
+    def symbols(self, query: str = "") -> list[str]:
+        return []
+
     def state(self) -> dict:
         acct = self._req("GET", "/v2/account")
         pos = self._req("GET", "/v2/positions")
@@ -300,7 +309,8 @@ class HttpBridgeBroker(Broker):
             return None
         r = self._req("POST", "/order", {
             "symbol": symbol, "qty": abs(delta),
-            "side": "buy" if delta > 0 else "sell", "reason": reason})
+            "side": "buy" if delta > 0 else "sell", "reason": reason,
+            "ref_price": float(ref_price)})
         return BrokerFill(symbol=symbol, side="buy" if delta > 0 else "sell",
                           qty=abs(delta), price=float(r.get("price", ref_price)),
                           notional=abs(delta) * float(ref_price),
@@ -318,6 +328,12 @@ class HttpBridgeBroker(Broker):
 
     def state(self) -> dict:
         return self._req("GET", "/state")
+
+    def symbols(self, query: str = "") -> list[str]:
+        return list(self._req("GET", f"/symbols?q={query}").get("matches", []))
+
+    def symbol_info(self, symbol: str) -> dict:
+        return self._req("GET", f"/symbolinfo?symbol={symbol}")
 
 
 class MT5Broker(HttpBridgeBroker):

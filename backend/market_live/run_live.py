@@ -47,6 +47,13 @@ def _ts(date_str: str) -> int:
     return int(d.timestamp())
 
 
+def _cfg_from_file(path: str) -> LiveConfig:
+    d = json.loads(Path(path).read_text())
+    d["symbols"] = tuple(d.get("symbols") or ())
+    return LiveConfig(**{k: v for k, v in d.items()
+                         if k in LiveConfig.__dataclass_fields__})
+
+
 def _cfg_from_args(args) -> LiveConfig:
     symbols = tuple(s for s in args.symbols.split(",") if s)
     if not symbols:
@@ -86,7 +93,9 @@ def _print_summary(s: dict) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["replay", "paper", "live", "compare"])
+    ap.add_argument("mode", choices=["replay", "paper", "live", "compare",
+                                     "preflight"])
+    ap.add_argument("--config", default="", help="JSON LiveConfig (overrides flags)")
     ap.add_argument("--market", default="stocks")
     ap.add_argument("--interval", default="1d")
     ap.add_argument("--symbols", default="")
@@ -109,12 +118,25 @@ def main() -> None:
     ap.add_argument("--poll-seconds", type=float, default=60.0)
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--no-journal", action="store_true")
+    ap.add_argument("--place-test-order", action="store_true")
     ap.add_argument("--json-out", default="")
     args = ap.parse_args()
 
-    cfg = _cfg_from_args(args)
+    cfg = _cfg_from_file(args.config) if args.config else _cfg_from_args(args)
+    if args.config:
+        # explicit CLI overrides still win
+        if args.symbols:
+            cfg.symbols = tuple(s for s in args.symbols.split(",") if s)
+        if args.k is not None and args.k != 0.75:
+            cfg.k = args.k
     if not cfg.firm:
         cfg.firm = None
+
+    if args.mode == "preflight":
+        from market_live.setup_prop import preflight
+        import sys as _sys
+        _sys.exit(0 if preflight(cfg, sample=args.limit,
+                                 place_test_order=args.place_test_order) else 1)
 
     if args.mode == "replay":
         start = _ts(args.start) if args.start else None

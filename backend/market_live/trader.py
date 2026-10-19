@@ -60,6 +60,7 @@ class LiveConfig:
     journal: bool = True
     journal_root: Optional[str] = None
     exec_mode: str = "next_open"     # close | next_open
+    broker_symbols: dict = field(default_factory=dict)  # data sym -> broker sym
 
     def as_dict(self) -> dict:
         return {k: (list(v) if isinstance(v, tuple) else v)
@@ -166,6 +167,9 @@ class MarketLiveTrader:
     def _equity(self) -> float:
         return self.broker.equity(self.prices)
 
+    def _bsym(self, sym: str) -> str:
+        return (self.cfg.broker_symbols or {}).get(sym, sym)
+
     def _buy_qty(self, price: float, equity: Optional[float] = None) -> float:
         eq = equity if equity is not None else self._equity()
         notional = max(0.0, self.cfg.k * self.cfg.buy_size * eq)
@@ -179,7 +183,7 @@ class MarketLiveTrader:
             if px <= 0:
                 continue
             target = self._buy_qty(px, eq) if host.desired_position else 0.0
-            f = self.broker.target_position(sym, target, px,
+            f = self.broker.target_position(self._bsym(sym), target, px,
                                             reason="state_sync")
             if f:
                 f.synthetic = synthetic
@@ -222,7 +226,7 @@ class MarketLiveTrader:
             px_open = float(candle["open"])
             self.prices[sym] = px_open
             target = self._buy_qty(px_open) if pend["desired"] else 0.0
-            f = self.broker.target_position(sym, target, px_open,
+            f = self.broker.target_position(self._bsym(sym), target, px_open,
                                             reason=pend.get("reason", "next_open"))
             if f:
                 deferred_fills.append(f)
@@ -254,7 +258,8 @@ class MarketLiveTrader:
                     new = 0
             if self.cfg.exec_mode == "close":
                 target = self._buy_qty(float(candle["close"]), eq) if new else 0.0
-                f = self.broker.target_position(sym, target, float(candle["close"]),
+                f = self.broker.target_position(self._bsym(sym), target,
+                                                float(candle["close"]),
                                                 reason=f"signal_{t}")
                 if f:
                     fills.append(f)
