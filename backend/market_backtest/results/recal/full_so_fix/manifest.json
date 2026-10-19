@@ -1,0 +1,113 @@
+{
+ "versions": [
+  {
+   "file": "snapshot_2024-01-01_d3a2ee5e4b.json",
+   "asof": "2024-01-01",
+   "created_at": 1792412975.81685,
+   "chosen": "arm14_c79_t1"
+  },
+  {
+   "file": "snapshot_2024-02-01_8dba41a730.json",
+   "asof": "2024-02-01",
+   "created_at": 1792413056.190017,
+   "chosen": "arm14_c79_t1"
+  },
+  {
+   "file": "snapshot_2024-03-01_1c684e1428.json",
+   "asof": "2024-03-01",
+   "created_at": 1792413135.806067,
+   "chosen": "arm14_c79_t1"
+  },
+  {
+   "file": "snapshot_2024-04-01_1d60af9ebc.json",
+   "asof": "2024-04-01",
+   "created_at": 1792413190.29877,
+   "chosen": "arm14_c79_t1"
+  },
+  {
+   "file": "snapshot_2024-05-01_d2984b6ad5.json",
+   "asof": "2024-05-01",
+   "created_at": 1792413252.478924,
+   "chosen": "arm14_c79_t1"
+  },
+  {
+   "file": "snapshot_2024-06-01_45803163a7.json",
+   "asof": "2024-06-01",
+   "created_at": 1792413317.773921,
+   "chosen": "arm14_c79_t1"
+  },
+  {
+   "file": "snapshot_2024-07-01_bce7c2d323.json",
+   "asof": "2024-07-01",
+   "created_at": 1792413385.321342,
+   "chosen": "arm14_c79_t1"
+  },
+  {
+   "file": "snapshot_2024-08-01_d443dad06f.json",
+   "asof": "2024-08-01",
+   "created_at": 1792413455.486491,
+   "chosen": "arm14_c79_t1"
+  },
+  {
+   "file": "snapshot_2024-09-01_db2ac67d15.json",
+   "asof": "2024-09-01",
+   "created_at": 1792413530.0269032,
+   "chosen": "arm14_c79_t1"
+  },
+  {
+   "file": "snapshot_2024-10-01_b3c6032da1.json",
+   "asof": "2024-10-01",
+   "created_at": 1792413595.8027809,
+   "chosen": "arm14_c79_t1"
+  },
+  {
+   "file": "snapshot_2024-11-01_4a81ae9003.json",
+   "asof": "2024-11-01",
+   "created_at": 1792413668.054283,
+   "chosen": "arm14_c79_t1"
+  },
+  {
+   "file": "snapshot_2024-12-01_6e97367a72.json",
+   "asof": "2024-12-01",
+   "created_at": 1792413742.787714,
+   "chosen": "arm14_c79_t1"
+  },
+  {
+   "file": "snapshot_2025-01-01_89a3174238.json",
+   "asof": "2025-01-01",
+   "created_at": 1792413847.507665,
+   "chosen": "arm14_c79_t1"
+  },
+  {
+   "file": "snapshot_2025-02-01_f7d965b807.json",
+   "asof": "2025-02-01",
+   "created_at": 1792413965.0579278,
+   "chosen": "arm14_c79_t1"
+  },
+  {
+   "file": "snapshot_2025-03-01_a1f1aa40c0.json",
+   "asof": "2025-03-01",
+   "created_at": 1792414087.6008298,
+   "chosen": "arm14_c79_t1"
+  },
+  {
+   "file": "snapshot_2025-04-01_daa9fd55fc.json",
+   "asof": "2025-04-01",
+   "created_at": 1792414167.7229729,
+   "chosen": "arm14_c79_t1"
+  },
+  {
+   "file": "snapshot_2025-05-01_2cc2e8ccd1.json",
+   "asof": "2025-05-01",
+   "created_at": 1792414233.507734,
+   "chosen": "arm14_c79_t1"
+  },
+  {
+   "file": "snapshot_2025-06-01_dfa5ef50d6.json",
+   "asof": "2025-06-01",
+   "created_at": 1792414303.611974,
+   "chosen": "arm14_c79_t1"
+  }
+ ],
+ "latest": "snapshot_2025-06-01_dfa5ef50d6.json"
+}

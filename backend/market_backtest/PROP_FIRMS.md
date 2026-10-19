@@ -168,3 +168,28 @@ universe: 67 US single-name equities (daily bars) — the only market with
 firm:    FTMO 2-Step (10/5, 5 % daily, static 10 %, no time limit)
 exec:    signal at bar close, fill at next open (measured cost −0.47 pp/2.8 y)
 ```
+
+## M11 recalibration re-proof (2026-10-19)
+
+The first-class recalibrator (`MARKET_RESEARCH_LOG.md` M11) was built, tuned
+and re-run against this dossier.  **Verdict: no
+change** — the live deployment stays on the frozen arm14 params.
+
+* 10,000-path `mc_firms` on the unchanged arm14 ledger (current code):
+  k=0.75 → **74.8 % full pass**, 33.1 % funded blown/yr, **EV +$9,098**,
+  **$1,029/mo**; k=0.50 → 87.2 %, +$7,851; k=1.00 → 49.1 %, +$5,796.
+  These reproduce the 3,000-path table (74.2 %, +$9,124) within MC noise.
+* FTMO free trial at k=0.75 remains **3.8 %** (96.1 % timeout) — still a
+  plumbing test, not an evaluation.
+* Recalibrated candidate (trailing 505-bar stats, monthly): **−0.092**
+  account Σ vs frozen over 18 OOS months, p=0.009 → rejected before any
+  prop spend.  Full-history base is neutral (+0.0001); arm search never
+  leaves arm14 (4/4 snapshots).  No variant passes the gate.
+* Deterministic day-442 two-phase pass stands: no engine parameter, cost,
+  or execution path changed.  `test_live_parity` PASS, `test_prop_guard`
+  6/6.  Live snapshot adoption is manual (`recalibrate_market adopt`) and
+  journalled; the default config still loads `results/arm14`.
+
+Operational consequence: the weekly candidate in `daily_alpaca.sh` is a
+monitor, not an auto-updater.  Expect `recalibration_rejected` / neutral
+gate reports unless the edge regime actually changes.
