@@ -206,22 +206,39 @@ class AlpacaFeed:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode())
 
-    def history(self, symbol: str, limit: int = 1000) -> list[dict]:
+    def history(self, symbol: str, limit: int = 1000,
+                start: str = "2023-01-01") -> list[dict]:
         tf = {"1d": "1Day", "1h": "1Hour", "30m": "30Min",
               "15m": "15Min", "5m": "5Min"}[self.interval]
-        payload = self._get(f"/{symbol}/bars",
-                            {"timeframe": tf, "limit": limit,
-                             "adjustment": "all", "feed": self.feed})
         out = []
-        for b in payload.get("bars", []):
-            o, h, l, c = float(b["o"]), float(b["h"]), float(b["l"]), float(b["c"])
-            v = float(b.get("v", 0.0))
-            bv, sv = _split_buy_sell(o, h, l, c, v)
-            out.append({"time": int(_dt.datetime.fromisoformat(
-                b["t"].replace("Z", "+00:00")).timestamp()),
-                "open": o, "high": h, "low": l, "close": c, "volume": v,
-                "buy_volume": bv, "sell_volume": sv})
+        token = None
+        while True:
+            params = {"timeframe": tf, "limit": limit,
+                      "adjustment": "all", "feed": self.feed,
+                      "start": start, "end": _dt.datetime.now(
+                          _dt.timezone.utc).strftime("%Y-%m-%d")}
+            if token:
+                params["page_token"] = token
+            payload = self._get(f"/{symbol}/bars", params)
+            for b in (payload.get("bars") or []):
+                o, h, l, c = float(b["o"]), float(b["h"]), float(b["l"]), float(b["c"])
+                v = float(b.get("v", 0.0))
+                bv, sv = _split_buy_sell(o, h, l, c, v)
+                out.append({"time": int(_dt.datetime.fromisoformat(
+                    b["t"].replace("Z", "+00:00")).timestamp()),
+                    "open": o, "high": h, "low": l, "close": c, "volume": v,
+                    "buy_volume": bv, "sell_volume": sv})
+            token = payload.get("next_page_token")
+            if not token:
+                break
         return out
+
+    def closed_bars(self, symbol: str, since_ts: int = 0) -> list[dict]:
+        bars = self.history(symbol)
+        now = time.time()
+        return [b for b in bars
+                if b["time"] > since_ts
+                and bar_is_closed(b["time"], self.interval, now)]
 
 
 def resolve_ticker(symbol: str, market: str) -> str:

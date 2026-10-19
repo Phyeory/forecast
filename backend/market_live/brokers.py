@@ -51,7 +51,23 @@ class BrokerFill:
 
 
 class Broker:
-    name = "base"
+    """Base broker contract.
+
+    `submits_immediately`: True for a real queueing broker (Alpaca `opg`,
+    an MT5 bridge that queues after-hours orders for the next session).
+    Orders are then submitted the instant the signal fires and fill at the
+    next bar's open — the same instant the backtester fills.  False for the
+    local ledger, which books the deferred fill itself.
+    """
+
+    name = "abstract"
+
+    @property
+    def submits_immediately(self) -> bool:
+        return False
+
+    def order_status(self, order_id: str) -> Optional[dict]:
+        return None
 
     def equity(self) -> float:
         raise NotImplementedError
@@ -175,6 +191,7 @@ class AlpacaBroker(Broker):
     """
 
     name = "alpaca"
+    submits_immediately = True     # opg orders submitted at signal queue for the next open
 
     def __init__(self, key: Optional[str] = None, secret: Optional[str] = None,
                  paper: bool = True, time_in_force: Optional[str] = None):
@@ -186,6 +203,7 @@ class AlpacaBroker(Broker):
                      else "https://api.alpaca.markets")
         self.paper = paper
         self.tif = time_in_force or "cls"
+        self._assets: Optional[list[dict]] = None
 
     # ── HTTP ──────────────────────────────────────────────────────────────
     def _req(self, method: str, path: str, body: Optional[dict] = None) -> dict:
@@ -254,8 +272,64 @@ class AlpacaBroker(Broker):
                            notional=0.0, fee=0.0, time=time.time(),
                            reason=reason) for r in (resp or [])]
 
+    def open_orders(self, symbol: str) -> list[dict]:
+        try:
+            os_ = self._req("GET",
+                            f"/v2/orders?status=open&symbols={symbol}")
+        except RuntimeError:
+            return []
+        return [o for o in (os_ or []) if isinstance(o, dict)]
+
     def symbols(self, query: str = "") -> list[str]:
-        return []
+        if self._assets is None:
+            self._assets = self._req(
+                "GET", "/v2/assets?status=ACTIVE&asset_class=us_equity") or []
+        q = query.upper()
+        exact = [a["symbol"] for a in self._assets
+                 if isinstance(a, dict) and str(a.get("symbol", "")).upper() == q]
+        if exact:
+            return exact
+        return [a["symbol"] for a in self._assets
+                if isinstance(a, dict) and q and q in str(a.get("symbol", "")).upper()][:5]
+
+    def symbol_info(self, symbol: str) -> dict:
+        try:
+            a = self._req("GET", f"/v2/assets/{symbol}")
+        except RuntimeError:
+            return {}
+        if not isinstance(a, dict) or a.get("status") != "active":
+            return {}
+        px = 0.0
+        try:                                   # last trade for the min-notional check
+            snap = self._req(
+                "GET", f"/v2/stocks/{symbol}/snapshots?feed=iex")
+            lt = ((snap or {}).get(symbol) or {}).get("latestTrade") or snap
+            if isinstance(lt, dict) and lt.get("p") is None and isinstance(lt.get("LatestTrade"), dict):
+                lt = lt["LatestTrade"]
+            if isinstance(lt, dict):
+                px = float(lt.get("p") or 0.0)
+        except Exception:  # noqa: BLE001
+            px = 0.0
+        return {"symbol": str(a.get("symbol", "")),
+                "tradable": bool(a.get("tradable", False)),
+                "fractionable": bool(a.get("fractionable", True)),
+                "contract_size": 1.0,     # shares
+                "volume_min": 0.0,        # fractionable — no lot minimum
+                "price": px}
+
+    def order_status(self, order_id: str) -> Optional[dict]:
+        try:
+            o = self._req("GET", f"/v2/orders/{order_id}")
+        except RuntimeError as exc:
+            if "404" in str(exc):
+                return {"status": "gone"}
+            return None
+        if not isinstance(o, dict):
+            return None
+        return {"status": str(o.get("status", "")),
+                "filled_qty": float(o.get("filled_qty") or 0.0),
+                "avg_price": float(o.get("filled_avg_price") or 0.0),
+                "side": str(o.get("side", "")), "symbol": str(o.get("symbol", ""))}
 
     def state(self) -> dict:
         acct = self._req("GET", "/v2/account")
@@ -279,6 +353,7 @@ class HttpBridgeBroker(Broker):
     """
 
     name = "bridge"
+    submits_immediately = True     # after-hours MT5 orders queue for the next session
 
     def __init__(self, base_url: str, token: str = ""):
         self.base = base_url.rstrip("/")

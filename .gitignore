@@ -68,3 +68,6 @@ notes
 
 audit_report/
 degen/
+# API keys / credentials (never commit)
+backend/market_live/config/keys.env
+backend/data/live_market/**/keys.env
