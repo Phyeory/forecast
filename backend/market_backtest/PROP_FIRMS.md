@@ -190,6 +190,9 @@ change** — the live deployment stays on the frozen arm14 params.
   6/6.  Live snapshot adoption is manual (`recalibrate_market adopt`) and
   journalled; the default config still loads `results/arm14`.
 
-Operational consequence: the weekly candidate in `daily_alpaca.sh` is a
-monitor, not an auto-updater.  Expect `recalibration_rejected` / neutral
-gate reports unless the edge regime actually changes.
+Operational consequence: **none** — the live stack was reverted to its
+pre-M11 state after the verdict, so there is no recalibration hook in the
+trading path at all.  `recalibrate_market` survives as an offline research
+instrument only; a future candidate must pass the gate in that module before
+anyone considers changing a parameter, and the change would be a deliberate,
+measured act rather than a weekly auto-update.

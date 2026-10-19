@@ -117,48 +117,6 @@ verdict    ON TRACK
 Verdicts: `ON TRACK` / `DEGRADING` (mean < half expected or t<0) / `FAILING`
 (mean ≤ 0 over 20+ days) / `TOO EARLY`.
 
-## Recalibration (M11) — candidate weekly, adoption manual
-
-The live stack defaults to the campaign's frozen arm14 params.  The
-recalibrator is an offline candidate generator; it never touches a running
-session.
-
-```bash
-# weekly candidate (stats-only policy is the safe default; no knob search)
-./.venv/bin/python -m market_backtest.recalibrate_market snapshot \
-    --asof "$(date +%F)" --selection stats_only --tag "weekly_$(date +%Y%m%d)"
-
-# inspect the retrospective gate before adopting
-./.venv/bin/python -m market_backtest.recalibrate_market report \
-    --run market_backtest/results/recal/full_so/replay.json
-
-# manual adoption (writes adopted.json in the snapshot dir)
-./.venv/bin/python -m market_backtest.recalibrate_market adopt \
-    --snapshot market_backtest/results/recal/weekly_20261025
-
-# next session picks it up at session_open only:
-./.venv/bin/python -m market_live.run_live live \
-    --config market_live/config/prop_ftmo_100k.json \
-    --calibration-snapshot market_backtest/results/recal/weekly_20261025 --once
-```
-
-Rules:
-
-1. **Never adopt mid-session.**  `session_open.json` freezes the config; a
-   snapshot is read once in `prepare()`/`run_replay()`.  The journal emits
-   `recalibration` (accepted) or `recalibration_rejected` (missing
-   `adopted.json`, unreadable, or empty), and `heartbeat.jsonl` records the
-   live `calibration.version`.
-2. **Candidate ≠ adopted.**  `adopt` is the explicit human step; without
-   `adopted.json` a directory is rejected and frozen params are used.
-3. **Full-history warm only.**  The engine needs the full feed history to
-   reproduce its decisions; a 260–1000 bar warm start suppresses entries for
-   quarters (see M11 §B2).  `recalibrate_market` sets `warmup_bars=0`.
-4. **Do not adopt the repaired drawdown ladder.**  It loses 0.0415 test Σ;
-   the campaign floors stay.  The repaired sigma gate is inert but correct.
-5. **Weekly candidate is gated on ≥28 recorded live days** in
-   `daily_alpaca.sh`; before that the script skips with a log line.
-
 ## Operating rules
 
 1. **Never raise k to pass faster.** EV peaks at k=0.5–0.75; above k=1 the

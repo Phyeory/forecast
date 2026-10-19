@@ -187,52 +187,34 @@ def test_frozen_params_are_not_mutated_by_candidates(tmp_path):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# live adoption semantics
+# live stack: the recalibrator must NOT be reachable from the money path
 # ─────────────────────────────────────────────────────────────────────────
 
-def test_live_snapshot_requires_manual_adoption(tmp_path):
-    from market_live.trader import LiveConfig, MarketLiveTrader
+def test_live_stack_cannot_load_a_non_default_parameter_set():
+    """M11 deployment decision, encoded as a gate.
 
-    snap = {"version": "v-test", "asof": "2025-01-01",
-            "params": {"AAPL": {"gain_retrace_arm_pct": 14.0}}}
-    f = tmp_path / "snapshot_2025-01-01_abc.json"
-    f.write_text(json.dumps(snap))
-    (tmp_path / "manifest.json").write_text(json.dumps({"latest": f.name,
-                                                        "versions": []}))
+    The recalibration policy was rejected (Δ −0.092 OOS, gate FAIL), so the
+    live stack was reverted.  If someone re-introduces a snapshot hook into
+    `market_live`, a rejected parameter set could reach the account — this
+    test fails loudly instead.
+    """
+    import inspect
+    from market_live import trader
+    from market_live import run_live
 
-    cfg = LiveConfig(symbols=("AAPL",), calibration_snapshot=str(tmp_path))
-    tr = MarketLiveTrader(cfg, journal=None, verbose=False)
-    params, meta = tr._load_calibration_snapshot()
-    assert params == {} and "adopted.json" in meta.get("error", "")
+    tr_src = inspect.getsource(trader)
+    assert "calibration_snapshot" not in tr_src
+    assert "_load_calibration_snapshot" not in tr_src
+    assert "recalibrat" not in tr_src
+    assert "recalibrat" not in inspect.getsource(run_live)
 
-    (tmp_path / "adopted.json").write_text(json.dumps(
-        {"file": f.name, "adopted_at": 1.0, "adopted_by": "test"}))
-    params, meta = tr._load_calibration_snapshot()
-    assert params["AAPL"]["gain_retrace_arm_pct"] == 14.0
-    assert meta["version"] == "v-test"
-
-
-def test_snapshot_params_are_authoritative_over_config_overrides(tmp_path):
-    from market_live.trader import LiveConfig, MarketLiveTrader
-    cfg = LiveConfig(symbols=("AAPL", "MSFT"),
-                     calibration_snapshot=str(tmp_path / "x.json"),
-                     overrides={"gain_retrace_arm_pct": 3.0})
-    tr = MarketLiveTrader(cfg, journal=None, verbose=False)
-    tr._frozen = {"AAPL": {"gain_retrace_arm_pct": 20.0},
-                  "MSFT": {"gain_retrace_arm_pct": 8.0}}
-    tr._snap_symbols = {"AAPL"}
-    assert tr._resolve_params("AAPL", [])["gain_retrace_arm_pct"] == 20.0
-    assert tr._resolve_params("MSFT", [])["gain_retrace_arm_pct"] == 3.0
+    cfg_fields = set(trader.LiveConfig.__dataclass_fields__)
+    assert "calibration_snapshot" not in cfg_fields
 
 
-def test_live_snapshot_file_path_is_explicit_adoption(tmp_path):
-    from market_live.trader import LiveConfig, MarketLiveTrader
-    snap = {"version": "v2", "asof": "2025-01-01",
-            "params": {"AAPL": {"confidence_high": 0.79}}}
-    f = tmp_path / "s.json"
-    f.write_text(json.dumps(snap))
-    cfg = LiveConfig(symbols=("AAPL",), calibration_snapshot=str(f))
-    tr = MarketLiveTrader(cfg, journal=None, verbose=False)
-    params, meta = tr._load_calibration_snapshot()
-    assert params["AAPL"]["confidence_high"] == 0.79
-    assert meta["source"] == str(f)
+def test_offline_module_is_not_imported_by_the_live_stack():
+    import pathlib
+    live = pathlib.Path(__file__).resolve().parents[1] / "market_live"
+    for p in live.glob("*.py"):
+        assert "recalibrate_market" not in p.read_text(), p.name
+

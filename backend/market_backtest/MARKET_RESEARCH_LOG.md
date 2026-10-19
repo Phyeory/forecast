@@ -848,3 +848,36 @@ byte-identical (`test_live_parity` PASS, `test_prop_guard` 6/6).
 **Verdict: no change.**  Recalibration is not adoptable on this stack.  The
 calibrator remains an offline monitor: it writes versioned candidates, the
 gate rejects them, and the live account keeps the campaign params.
+
+## Phase E — deployment decision: the live surface was REVERTED
+
+The experiment's live integration (snapshot loading in `market_live/trader.py`,
+the `--calibration-snapshot` flag, the weekly candidate block in
+`daily_alpaca.sh`) was **removed** after the verdict.  With no cell passing
+the gate, that code could only ever be a way for a rejected parameter set to
+reach the trading account — risk with no upside.  `backend/market_live/` is
+byte-identical to its pre-M11 state and carries no import of
+`recalibrate_market`.
+
+What is kept, and why:
+
+| kept | reason |
+|---|---|
+| `market_backtest/recalibrate_market.py` | the measuring apparatus: it produced the verdict, and it is how a future regime change gets re-tested.  Marked research-only in its docstring. |
+| `market_backtest/test_recalibrate.py` (17 tests) | gate math, determinism, causality and the two bug regressions |
+| `market_backtest/runner.py::replay_candles` | parity-verified extraction of the 4-state loop; arm14 reproduces trade-for-trade |
+| `results/recal/*`, `results/fix_*`, `mc_arm14_10k.json` | the evidence behind every number above |
+| this log + `PROP_FIRMS.md` append | the reasoning, so the next agent does not re-run the search |
+
+What was removed: every live-path hook (`calibration_snapshot`,
+`_snap_symbols`, `_load_calibration_snapshot`, the `recalibration` /
+`recalibration_rejected` journal events, the weekly auto-candidate, and the
+GO_LIVE/README sections describing them).  The journal contract and the
+snapshot-adoption workflow do not exist in the deployed stack.
+
+**The one thing to keep in mind**: the two calibration bugs found in Phase B
+are still present in `market_calibration.py` — deliberately, so the campaign
+baseline stays byte-comparable.  The sigma gate is inert (0 trades change),
+and the drawdown floors are the campaign's chosen values (the corrected
+statistic measured −0.0415 test Σ).  Neither is worth changing without a
+fresh acceptance run.
