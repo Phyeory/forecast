@@ -69,7 +69,7 @@ class Broker:
     def order_status(self, order_id: str) -> Optional[dict]:
         return None
 
-    def equity(self) -> float:
+    def equity(self, prices: Optional[dict] = None) -> float:
         raise NotImplementedError
 
     def position_qty(self, symbol: str) -> float:
@@ -227,7 +227,7 @@ class AlpacaBroker(Broker):
         return {}
 
     # ── broker API ────────────────────────────────────────────────────────
-    def equity(self) -> float:
+    def equity(self, prices: Optional[dict] = None) -> float:
         acct = self._req("GET", "/v2/account")
         return float(acct.get("equity", 0.0))
 
@@ -370,7 +370,7 @@ class HttpBridgeBroker(Broker):
             raw = resp.read().decode()
             return json.loads(raw) if raw else {}
 
-    def equity(self) -> float:
+    def equity(self, prices: Optional[dict] = None) -> float:
         return float(self._req("GET", "/equity").get("equity", 0.0))
 
     def position_qty(self, symbol: str) -> float:
