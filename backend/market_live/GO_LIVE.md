@@ -97,6 +97,21 @@ Run it at **16:30 ET, Mon–Fri** (cron on the Mac/VPS):
 30 16 * * 1-5 cd /path/to/pump-chart-market/backend && ./.venv/bin/python -m market_live.run_live live --config market_live/config/prop_ftmo_100k.json --once >> logs/live_$(date +\%F).log 2>&1
 ```
 
+> **SUPERSEDED (2026-10-19): the `--once` cron model is structurally broken.**
+> `warm()` replays ALL history — including the just-closed bar — through the
+> engine (synthetic fills, engine-state only), so an evening `--once` run
+> always reports `poll: 0 bars` and never submits: a daily cron can never
+> place the opg order from the fresh close signal.
+> The correct deployment is the **persistent poller**: warm ONCE at launch,
+> then `poll_once()` every 60 s — each closed bar is fetched minutes after its
+> close and processed exactly once (`since_ts` prevents doubles); the signal
+> submits an opg order that fills at the next open. Sleep/reboot catch-up:
+> `closed_bars(since_ts)` replays missed bars in sequence with identical
+> semantics; an opg whose targeted open already passed falls back to a day
+> order (logged `late_fill` wedge). The Alpaca implementation runs under
+> **launchd** (`com.jaime.market-eval`,
+> `market_live/market_eval_poller.sh`, logs `data/live_market/poller.out.log`).
+
 Each run: reads newly closed bars → engine decides (same four-state replay as
 the backtester) → reconciles positions through the bridge → updates the guard →
 writes the journal → persists `guard_state.json` → exits.
