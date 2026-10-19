@@ -132,19 +132,35 @@ Verdicts: `ON TRACK` / `DEGRADING` (mean < half expected or t<0) / `FAILING`
 
 ## Free trials — what they are and what they are not
 
-**FTMO Free Trial (2-Step, 14 days, $100k, no fee):** 5% target (halved),
-10% static, 5% daily, 2 min days, **no consistency**, MT5/cTrader.
-Measured pass probability for this strategy: **3.8% at k=0.75** (96% time out)
-— it is a 14-day sprint and our edge is a multi-month grind. The real 2-Step
-has no deadline, which is why it passes at 74%.
+**Card?** No — verified 2026-10-19 from ftmo.com/en/ftmo-free-trial/: the
+sign-up is "Register now" only (email), zero payment/card references on the
+page, a breach "costs you nothing", and identity checks (FTMO Identity) are
+only required before rewards, not for trials. Also true on that page: the
+trial **ends if you don't trade in the first 7 days**, and it is 14 days
+long.
 
-**Use the free trial for what it is good for:** proving that orders land, the
-symbol map is right, sizing is accepted, the guard tracks equity, and the
-journals fill up — on a live market with zero risk. Expect it to end at the
-14-day mark; that is not a failure signal.
+**Why the trial still isn't the answer to "can it pass prop evals live?":**
+FTMO Free Trial mirrors the *first phase* only, halved target, **14-day
+deadline** (2-Step trial: 5% target, 10% static, 5% daily, 2 min days, no
+consistency; MT5/cTrader; unlimited retries, $0). Measured pass probability
+for this strategy: **3.8% at k=0.75** (96% time out) — it is a 14-day sprint
+and our edge is a multi-month grind. The real 2-Step has no deadline, which
+is why it passes at 74%. **Use the free trial for what it is good for:**
+proving that orders land, the symbol map is right, sizing is accepted, and
+the guard tracks equity on FTMO's own platform — record this before the
+purchase, expect the 14-day end (not a failure signal).
 
-**Alpaca paper** is the proper free forward test: unlimited duration, live
-market data, simulated fills. Config: `market_live/config/alpaca_paper.json`.
+**Alpaca paper is the real free forward validator** — unlimited duration,
+live real-time market data, simulated fills, no card, no KYC. And on top of
+it the prop evaluation is answered continuously:
+
+- the **live PropGuard** enforces the FTMO 2-Step rules on the realized
+  equity (floors restart-safe in `guard_state.json`, 0.5% early trigger so
+  the real 5%/10% walls are never crossed by accident);
+- `challenge_status.py` replays the session's realized path through the
+  FTMO-exact rule cascade and answers **"if this were a real evaluation,
+  would it be passing today?"** — phase, target progress, trading days,
+  best-day share, distances to the daily/max floors, PASS/BREACH verdict.
 
 ```bash
 export APCA_API_KEY_ID=... APCA_API_SECRET_KEY=...
@@ -152,4 +168,11 @@ export APCA_API_KEY_ID=... APCA_API_SECRET_KEY=...
     --config market_live/config/alpaca_paper.json
 ./.venv/bin/python -m market_live.run_live live \
     --config market_live/config/alpaca_paper.json --once
+./.venv/bin/python -m market_live.challenge_status --latest   # would it pass?
+./.venv/bin/python -m market_live.forward_monitor --latest    # edge healthy?
 ```
+
+An `opg` (market-on-open) order submitted after the close fills at the next
+open — the same next-open semantics as the FTMO/MT5 deployment path
+(measured wedge −0.47 pp / 2.8 y), so the forward test measures the
+production fill convention.

@@ -85,6 +85,6 @@
  "broker": "alpaca",
  "broker_kwargs": {
   "paper": true,
-  "time_in_force": "cls"
+  "time_in_force": "opg"
  }
 }
