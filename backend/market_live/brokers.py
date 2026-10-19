@@ -244,7 +244,15 @@ class AlpacaBroker(Broker):
                         ref_price: float, reason: str = "") -> Optional[BrokerFill]:
         cur = self.position_qty(symbol)
         delta = float(target_qty) - cur
-        if abs(delta) * float(ref_price) < 1.0:      # < $1 notional → skip
+        # whole shares only: opg orders must be non-fractional (Alpaca 422
+        # "fractional orders must be DAY orders") and this also mirrors the
+        # MT5 lot granularity of the production path.  Sub-share residuals
+        # (< $1 share) are skipped — the sizing identity holds to ~1 share.
+        if delta > 0:
+            delta = float(int(delta))
+        else:
+            delta = -float(int(abs(delta)))
+        if abs(delta) < 1.0 or abs(delta) * float(ref_price) < 1.0:
             return None
         body = {
             "symbol": symbol,
