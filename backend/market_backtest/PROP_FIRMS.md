@@ -114,6 +114,30 @@ of fees, 93–98 % chance of at least one funded account, and roughly
 **Withdraw monthly.** The EV comes from payouts taken *before* the account
 eventually blows (33 %/yr at k=0.75). Money not withdrawn is money at risk.
 
+## Real payout mechanics (verified 2026-10-19, ftmo.com/faq)
+
+* Funded "FTMO Account" = simulated capital, **real money rewards**. Only
+  at-risk capital ever is the entry fee.
+* **Reward claim from day 14** after the first funded trade (Account
+  MetriX), then on demand; all positions must be closed to claim; review
+  1–2 business days, sent 1–2 business days after invoice approval ⇒
+  cash can land ~**every 14 days**, faster than the monthly cadence the
+  MC assumed (slightly better economics — money leaves the risk pool
+  sooner).
+* Split: **80%** on 2-Step (90% once Scaling/Premium conditions met;
+  1-Step/Instant are 90%). Entry fee **refunded with the first payout**.
+* Methods: bank wire / Visa Direct / Mastercard Send (≤$20k), Skrill
+  (≤$3k), crypto (min $50 closed profit; wire/Visa min $20).
+* **Reward Rollover**: a 2-Step funded account can roll its reward into
+  the *next* FTMO Account (paid out there at **100%** — no double ratio
+  cut). This is the cheap way to grow from 1 → N accounts without paying
+  full fees for each.
+* Withdrawal does not reset the Maximum Loss Limit (Instant-account
+  warning; static floor stays anchored to the initial balance either way).
+* **FTMO Identity** (KYC) is required before the first Reward is processed
+  — not to start trading.
+* Taxes are the trader's responsibility.
+
 ## Honest limits
 
 * The MC is a bootstrap of **one 3-year out-of-sample window** (plus 5.5 y
