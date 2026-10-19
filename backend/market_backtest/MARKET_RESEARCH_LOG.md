@@ -414,6 +414,32 @@ live data at zero cost), NOT a strategy evaluation; raising k to "pass" it
 converts a plumbing test into a ruin test (36–43% daily-breach rates at
 k≥3). The real 2-Step has **no deadline** and passes at 74%.
 
+Card/payment: **none** — verified 2026-10-19 from the live trial page
+(sign-up is "Register now"; the page contains zero payment/card references;
+"a breach … costs you nothing"). Two practical facts from the same page:
+the trial **ends if no trade is placed in the first 7 days**, and it is
+**14 days** ("Meet every Trading Objective and you pass … go again, as
+many times as you like").
+
+**The free live validator that CAN answer "could it pass prop evals
+live?"** is Alpaca paper + the own stack (added this session):
+
+- Alpaca paper: free, no card, no KYC, unlimited duration, live real-time
+  market data; production TIF corrected to `opg` (market-on-open) so fills
+  land at the next open — the same semantics as the FTMO/MT5 path.
+- `market_live/challenge_status.py` (M12): replays a session's realised
+  equity path through the FTMO-exact cascade (targets 10/5, daily 5%,
+  static 10%, min 4 trading days/phase, consistency ≤ 50%) and reports
+  phase/target/consistency/floor state + PASS/BREACH verdict, continuously.
+  On daily-closing equity (intraday breaches are invisible to it; the live
+  guard owns those) and equity-based targets (≈ balance at crossing).
+- Validation: reproduces the live guard on all three recorded sessions —
+  `20261018_233412`: PASSED (P1 2025-04-14, P2 2026-09-03, best-day
+  47.7%); `20261019_062729`: PASSED; `20261019_063215`: PASSED (P1 on
+  2023-01-23 — the 2023 start enters ~150% gross on day one from state
+  sync, so it hits +10% fast; the mid-2023 test-window path needed 442
+  days — same rules, different starting point).
+
 ### 8. Forward-monitor statistics (`forward_monitor.py`)
 
 From a session's `equity.jsonl` (bar events), collapsed per UTC day:
@@ -513,6 +539,7 @@ equal to 1e-12.
 | `setup_prop.py` | **preflight**: ① tapes+frozen params ② broker reachable+equity ③ symbol naming vs broker (via `/symbols`) ④ sizing vs min-lot notional ⑤ guard floors vs live equity; optional `--place-test-order` round-trip. Exit code = GO/NO-GO |
 | `mt5_bridge_server.py` | the FTMO/MT5-side server (runs on a Windows VPS): `/health /equity /position /symbolinfo /symbols /state`, `POST /order /flatten` (+simulate mode for loop tests); shares→lots via `trade_contract_size` with volume_step rounding & filling-mode retry; optional bearer token |
 | `forward_monitor.py` | realised-vs-backtest verdict per §8 |
+| `challenge_status.py` | FTMO-exact "would this session be a passing evaluation *today*" — replays realised equity through targets/flushes/consistency/min-days |
 | `test_live_parity.py` / `test_prop_guard.py` | the two gates (parity MUST pass after every deploy) |
 | `config/` | `prop_ftmo_100k.json` (production: mt5, ftmo_2step, k=0.75, next_open), `paper_100k.json`, `alpaca_paper.json` (free forward test), `trial_ftmo_2step.json` (free-trial rules) |
 | `README.md` / `GO_LIVE.md` | runbook + purchase→execution sequence |
@@ -582,8 +609,11 @@ HEAD` (the memecoin lesson INU Sep-29, applied here).
 
 ## Open work / next moves
 
-- [ ] **Alpaca keys** (`APCA_API_KEY_ID/SECRET`) → run `setup_prop` +
-      `run_live live` on `alpaca_paper.json` → the real free forward test.
+- [ ] **Alpaca keys** (`APCA_API_KEY_ID/SECRET`, free paper account: no
+      card, no KYC, 2 min) → `setup_prop` + `run_live live` on
+      `alpaca_paper.json` (now `opg` TIF) → the unlimited free forward
+      test; `challenge_status --latest` answers "would this pass the
+      evaluation today".
 - [ ] **FTMO free trial** signup (needs user email; 14-day plumbing test
       with `trial_ftmo_2step.json` on the demo/MT5-bridge).
 - [ ] **Real MT5 bridge validation** on the FTMO demo account (preflight
