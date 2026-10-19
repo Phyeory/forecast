@@ -794,6 +794,7 @@ function switchPage(pageId) {
   if (pageId === "viewer") loadRecordingsList("viewer-recordings-list", true);
   if (pageId === "backtest") { loadBacktestsList(); loadRecordingsDropdown(); }
   if (pageId === "new-pairs") { npRefreshPage(); }
+  if (pageId === "market") { mkRefresh(); }
 }
 
 navTabs.forEach(tab => tab.addEventListener("click", () => switchPage(tab.dataset.page)));
@@ -4097,3 +4098,180 @@ setInterval(() => {
 window.addEventListener("beforeunload", () => {
   try { npDisconnectWS(); } catch { /* ignore */ }
 });
+
+/* ── Market (stocks) FTMO 2-Step Eval ─────────────────────────────────── */
+
+let mkEqChart = null, mkEqSeries = null, mkCandleChart = null, mkCandleSeries = null;
+let mkPollTimer = null;
+let mkState = { equity: [], config: null };
+
+function mkNumber(v, dp = 2) {
+  if (v === null || v === undefined || isNaN(v)) return "—";
+  return Number(v).toLocaleString(undefined, { minimumFractionDigits: dp, maximumFractionDigits: dp });
+}
+function mkPct(v, dp = 2) {
+  if (v === null || v === undefined || isNaN(v)) return "—";
+  return (v >= 0 ? "+" : "") + Number(v).toFixed(dp) + "%";
+}
+function mkSide(v) {
+  if (v === null || v === undefined || isNaN(v)) return "mkt";
+  if (v > 0.05) return "long";
+  return "flat";
+}
+
+function mkEnsureEqChart() {
+  if (mkEqChart) return;
+  const el = document.getElementById("mk-eq-chart");
+  if (!el || el.clientWidth < 10) return;
+  mkEqChart = LightweightCharts.createChart(el, {
+    height: 280,
+    layout: { background: { type: "solid", color: "transparent" }, textColor: "#8892a6" },
+    grid: { vertLines: { color: "rgba(255,255,255,0.04)" }, horzLines: { color: "rgba(255,255,255,0.04)" } },
+    rightPriceScale: { borderColor: "rgba(255,255,255,0.1)" },
+    timeScale: { borderColor: "rgba(255,255,255,0.1)" },
+  });
+  mkEqSeries = mkEqChart.addAreaSeries({ lineColor: "#26a69a", topColor: "rgba(38,166,154,0.25)", bottomColor: "rgba(38,166,154,0.02)", lineWidth: 2 });
+}
+
+function mkEnsureCandleChart() {
+  if (mkCandleChart) return;
+  const el = document.getElementById("mk-candle-chart");
+  if (!el || el.clientWidth < 10) return;
+  mkCandleChart = LightweightCharts.createChart(el, {
+    height: 320,
+    layout: { background: { type: "solid", color: "transparent" }, textColor: "#8892a6" },
+    grid: { vertLines: { color: "rgba(255,255,255,0.04)" }, horzLines: { color: "rgba(255,255,255,0.04)" } },
+    timeScale: { borderColor: "rgba(255,255,255,0.1)" },
+  });
+  mkCandleSeries = mkCandleChart.addCandlestickSeries({
+    upColor: "#26a69a", downColor: "#ef5350", wickUpColor: "#26a69a", wickDownColor: "#ef5350", borderVisible: false,
+  });
+}
+
+async function mkLoadSymbol(symbol) {
+  mkEnsureCandleChart();
+  if (!mkCandleChart) return;
+  try {
+    const d = await apiFetch(`/api/market/candles/${symbol}?limit=500`);
+    const rows = (d.candles || []).map(r => ({ time: r.time, open: r.open, high: r.high, low: r.low, close: r.close }));
+    if (mkCandleSeries && rows.length) {
+      mkCandleSeries.setData(rows);
+      mkCandleChart.timeScale().fitContent();
+    }
+  } catch (e) { console.warn("[Market] candle load failed", e); }
+}
+
+async function mkRefresh() {
+  let st;
+  try { st = await apiFetch("/api/market/status"); }
+  catch (e) { console.warn("[Market] status failed", e); return; }
+
+  // session header
+  const sid = st.latest || "—";
+  document.getElementById("mk-session-id").textContent = sid;
+  document.getElementById("mk-commit").textContent = st.code_commit ? `commit ${String(st.code_commit).slice(0, 7)}` : "";
+
+  // config summary
+  const cfg = st.config || {};
+  mkState.config = cfg;
+
+  // account truth
+  const acct = st.account || null;
+  const equity = acct ? acct.equity : null;
+  const start = cfg.starting_equity || 100000;
+  const pnl = equity !== null && equity !== undefined ? equity - start : null;
+  const pnlPct = pnl !== null ? (pnl / start) * 100 : null;
+
+  // guard state (journal truth preferred)
+  const gs = st.guard_state || {};
+  const lastGuard = (st.guard_events || []).slice(-1)[0] || {};
+  const phase = gs.phase !== undefined ? gs.phase : (lastGuard.phase !== undefined ? lastGuard.phase : "—");
+  const days = gs.trading_days !== undefined ? gs.trading_days : (gs.days !== undefined ? gs.days : "—");
+  const halted = gs.halted !== undefined ? gs.halted : (lastGuard.halted !== undefined ? lastGuard.halted : false);
+  const floorStatic = gs.floor_static !== undefined ? gs.floor_static : start * 0.9;
+  const floorDaily = gs.daily_floor !== undefined ? gs.daily_floor : start * 0.95;
+  const target = ((gs.target_pct !== undefined ? gs.target_pct : 10) / 100) * start;
+
+  // stats grid
+  const cards = [
+    { label: "Equity", value: equity !== null && equity !== undefined ? "$" + mkNumber(equity) : "—" },
+    { label: "P/L since start", value: pnl !== null ? (pnl >= 0 ? "+$" : "-$") + mkNumber(Math.abs(pnl)) + " (" + mkPct(pnlPct) + ")" : "—", cls: pnl > 0 ? "up" : pnl < 0 ? "down" : "" },
+    { label: "Positions", value: (st.positions || []).length },
+    { label: "Open orders", value: (st.open_orders || []).length },
+    { label: "Bars processed", value: (st.decisions || []).length },
+    { label: "Session journal fills", value: (st.orders || []).filter(o => o.event && o.event.includes("fill")).length },
+  ];
+  const grid = document.getElementById("mk-stats-grid");
+  grid.innerHTML = cards.map(c => `<div class="bt-stat"><span class="bt-stat-label">${c.label}</span><span class="bt-stat-value ${c.cls || ""}">${c.value}</span></div>`).join("");
+
+  // guard panel
+  const prog = pnl !== null ? Math.max(0, Math.min(100, (pnl / target) * 100)) : 0;
+  document.getElementById("mk-target-bar").style.width = prog.toFixed(1) + "%";
+  document.getElementById("mk-target-label").textContent = `Phase-1 progress: ${pnlPct !== null ? mkPct(pnlPct) : "—"} of +10% target`;
+  document.getElementById("mk-static-floor").textContent = "$" + mkNumber(floorStatic);
+  document.getElementById("mk-daily-floor").textContent = "$" + mkNumber(floorDaily);
+  document.getElementById("mk-days").textContent = days;
+  document.getElementById("mk-phase").textContent = phase;
+  const badge = document.getElementById("mk-guard-badge");
+  if (halted) { badge.textContent = "HALTED"; badge.style.background = "#ef5350"; }
+  else { const done = phase === "passed"; badge.textContent = done ? "PASSED ✓" : "EVALUATING"; badge.style.background = done ? "#26a69a" : "#5c6bc0"; }
+
+  // equity chart (journal equity rows preferred; fallback: account equity spill)
+  mkEnsureEqChart();
+  if (mkEqChart) mkEqChart.applyOptions({ width: document.getElementById("mk-eq-chart").clientWidth });
+  const eqRows = (st.equity || []).map(r => ({ time: r.t || r.time || r.ts, value: r.equity !== undefined ? r.equity : r.value })).filter(r => r.time && r.value !== undefined);
+  if (eqRows.length) mkEqSeries.setData(eqRows);
+
+  // positions table
+  const pbody = document.getElementById("mk-positions-tbody");
+  const pos = (st.positions || []);
+  pbody.innerHTML = pos.length ? pos.map(p => `<tr>
+      <td><b>${p.symbol}</b></td><td>${mkNumber(p.qty, 0)}</td>
+      <td>$${mkNumber(p.avg_entry)}</td><td>$${mkNumber(p.market_value)}</td>
+      <td class="${p.unrealized_pl >= 0 ? 'up' : 'down'}">${p.unrealized_pl >= 0 ? "+" : "-"}$${mkNumber(Math.abs(p.unrealized_pl))} (${mkPct(p.unrealized_plpc * 100)})</td>
+    </tr>`).join("") : `<tr><td colspan="5" class="cell-empty">Flat.</td></tr>`;
+
+  // open orders table
+  const obody = document.getElementById("mk-orders-tbody");
+  const oo = (st.open_orders || []);
+  obody.innerHTML = oo.length ? oo.map(o => `<tr>
+      <td><b>${o.symbol}</b></td><td class="${o.side === 'buy' ? 'up' : 'down'}">${o.side}</td>
+      <td>${o.qty}</td><td>${o.tif}</td><td>${o.status}</td></tr>`).join("")
+    : `<tr><td colspan="5" class="cell-empty">None.</td></tr>`;
+
+  // journal table (orders + decisions merged, newest first)
+  const jrows = (st.orders || []).slice(-80).reverse();
+  const jbody = document.getElementById("mk-journal-tbody");
+  jbody.innerHTML = jrows.length ? jrows.map(o => `<tr>
+      <td>${o.time ? new Date(o.time * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : "—"}</td>
+      <td>${o.event || o.kind || "order"}</td><td><b>${o.symbol || "—"}</b></td>
+      <td class="${o.side === 'buy' ? 'up' : 'down'}">${o.side || "—"}</td>
+      <td>${o.qty !== undefined ? mkNumber(o.qty, 0) : "—"}</td>
+      <td>${o.price !== undefined ? "$" + mkNumber(o.price) : "—"}</td>
+      <td>${o.notional !== undefined ? "$" + mkNumber(o.notional) : "—"}</td>
+      <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${o.reason || ""}</td>
+    </tr>`).join("") : `<tr><td colspan="8" class="cell-empty">No journal rows yet.</td></tr>`;
+
+  // symbol dropdown (once)
+  const sel = document.getElementById("mk-symbol-select");
+  if (cfg.symbols && cfg.symbols.length && !sel.options.length) {
+    sel.innerHTML = cfg.symbols.map(s => `<option>${s}</option>`).join("");
+    mkLoadSymbol(cfg.symbols[0]);
+  }
+  sel.onchange = () => mkLoadSymbol(sel.value);
+}
+
+(async function mkInit() {
+  document.querySelectorAll(".nav-tab").forEach(t => {
+    t.addEventListener("click", () => {
+      if (t.dataset.page !== "market" && mkPollTimer) { clearInterval(mkPollTimer); mkPollTimer = null; }
+    });
+  });
+  const mt = document.getElementById("nav-market");
+  if (!mt) return;
+  mt.addEventListener("click", () => {
+    if (!mkPollTimer) mkPollTimer = setInterval(() => {
+      if (document.getElementById("page-market").classList.contains("active")) mkRefresh();
+    }, 15000);
+  });
+})();

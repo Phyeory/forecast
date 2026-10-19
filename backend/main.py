@@ -3273,6 +3273,180 @@ async def live_trading_ws(
         )
 
 
+# ── Market (stocks) prop-eval dashboard — additive, read-only ─────────────
+# Serves the market_live forward-test state: session journals under
+# data/live_market/, Alpaca paper account truth, and tape candles from
+# market_store.  Deliberately reads-ONLY: no memecoin state is touched.
+MARKET_JOURNAL_ROOT = Path(__file__).parent / "data" / "live_market"
+
+
+def _market_keys() -> Optional[dict]:
+    env = Path(__file__).parent / "market_live" / "config" / "keys.env"
+    try:
+        out = {}
+        for line in env.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("export "):
+                k, _, v = line[len("export "):].partition("=")
+                out[k.strip()] = v.strip().strip('"')
+        if out.get("APCA_API_KEY_ID") and out.get("APCA_API_SECRET_KEY"):
+            return out
+    except OSError:
+        pass
+    return None
+
+
+def _alpaca_get(path: str, keys: dict, base: str = "https://paper-api.alpaca.markets"):
+    import urllib.request
+    req = urllib.request.Request(base + path, headers={
+        "APCA-API-KEY-ID": keys["APCA_API_KEY_ID"],
+        "APCA-API-SECRET-KEY": keys["APCA_API_SECRET_KEY"]})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        raw = r.read().decode()
+        return json.loads(raw) if raw else None
+
+
+def _read_jsonl(path: Path, last: int = 300) -> list:
+    try:
+        rows = []
+        with path.open() as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    try:
+                        rows.append(json.loads(line))
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+        return rows[-last:]
+    except OSError:
+        return []
+
+
+def _market_sessions() -> list[dict]:
+    if not MARKET_JOURNAL_ROOT.exists():
+        return []
+    out = []
+    for d in sorted(MARKET_JOURNAL_ROOT.iterdir(), reverse=True):
+        if not d.is_dir():
+            continue
+        name = d.name
+        if not name[:8].isdigit():
+            continue
+        cfgj = {}
+        try:
+            cfgj = json.loads((d / "session_open.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            pass
+        out.append({
+            "session": name,
+            "opened_at": cfgj.get("opened_at"),
+            "code_commit": cfgj.get("code_commit"),
+            "config": cfgj.get("config", {}),
+            "n_bars": len(list(d.glob("bars.jsonl"))) and sum(
+                1 for _ in (d / "bars.jsonl").open()) if (d / "bars.jsonl").exists() else 0,
+            "n_decisions": sum(1 for _ in (d / "decisions.jsonl").open()) if (d / "decisions.jsonl").exists() else 0,
+            "n_orders": sum(1 for _ in (d / "orders.jsonl").open()) if (d / "orders.jsonl").exists() else 0,
+            "n_equity": sum(1 for _ in (d / "equity.jsonl").open()) if (d / "equity.jsonl").exists() else 0,
+        })
+        if len(out) >= 20:
+            break
+    return out
+
+
+@app.get("/api/market/status")
+async def market_status():
+    """Latest market_live session + Alpaca paper truth + prop-guard state."""
+    sessions = _market_sessions()
+    latest = sessions[0]["session"] if sessions else None
+    payload: dict = {"sessions": sessions, "latest": latest}
+
+    if latest:
+        d = MARKET_JOURNAL_ROOT / latest
+        cfgj = {}
+        try:
+            cfgj = json.loads((d / "session_open.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            pass
+        cfg = cfgj.get("config", {})
+        payload["config"] = cfg
+        payload["opened_at"] = cfgj.get("opened_at")
+        payload["code_commit"] = cfgj.get("code_commit")
+        payload["code_dirty"] = cfgj.get("code_dirty")
+        payload["decisions"] = _read_jsonl(d / "decisions.jsonl", 250)
+        payload["orders"] = _read_jsonl(d / "orders.jsonl", 150)
+        payload["equity"] = _read_jsonl(d / "equity.jsonl", 2000)
+        payload["heartbeat"] = _read_jsonl(d / "heartbeat.jsonl", 3)
+        payload["guard_events"] = _read_jsonl(d / "guard.jsonl", 30)
+        gs = d / "guard_state.json"
+        try:
+            payload["guard_state"] = json.loads(gs.read_text())
+        except (OSError, json.JSONDecodeError):
+            payload["guard_state"] = None
+
+    keys = _market_keys()
+    if keys:
+        try:
+            acct = _alpaca_get("/v2/account", keys) or {}
+            positions = _alpaca_get("/v2/positions", keys) or []
+            open_orders = _alpaca_get("/v2/orders?status=open&limit=100", keys) or []
+            payload["account"] = {
+                "account_number": acct.get("account_number"),
+                "equity": float(acct.get("equity", 0.0)),
+                "cash": float(acct.get("cash", 0.0)),
+                "buying_power": float(acct.get("buying_power", 0.0)),
+                "status": acct.get("status"),
+                "paper": (acct.get("paper") or True) and "paper" in str(acct.get("id", "")).lower() or True,
+            }
+            payload["positions"] = [{
+                "symbol": p.get("symbol"),
+                "qty": float(p.get("qty", 0.0)),
+                "avg_entry": float(p.get("avg_entry_price", 0.0)),
+                "market_value": float(p.get("market_value", 0.0)),
+                "unrealized_pl": float(p.get("unrealized_pl", 0.0)),
+                "unrealized_plpc": float(p.get("unrealized_plpc", 0.0)),
+            } for p in positions]
+            payload["open_orders"] = [{
+                "symbol": o.get("symbol"),
+                "side": o.get("side"),
+                "qty": o.get("qty"),
+                "tif": o.get("time_in_force"),
+                "status": o.get("status"),
+                "submitted_at": o.get("submitted_at"),
+            } for o in open_orders]
+        except Exception as exc:  # noqa: BLE001 — dashboard must never 500
+            payload["account_error"] = f"{type(exc).__name__}: {exc}"
+    return payload
+
+
+@app.get("/api/market/candles/{symbol}")
+async def market_candles(symbol: str, limit: int = 500):
+    """Tape candles for a stock symbol from market_store (read-only)."""
+    from market_backtest.market_store import (
+        get_market_recording, get_market_recording_candles)
+    rec = get_market_recording("stocks", symbol, "1d")
+    if not rec:
+        return {"symbol": symbol, "candles": []}
+    rows = get_market_recording_candles(rec["id"])[-limit:]
+    return {"symbol": symbol, "recording_id": rec["id"],
+            "candles": [{"time": int(r["time"]), "open": r["open"],
+                         "high": r["high"], "low": r["low"],
+                         "close": r["close"], "volume": r["volume"]}
+                        for r in rows]}
+
+
+@app.get("/api/market/positions_now")
+async def market_positions_now():
+    """Full broker truth snapshot (positions incl. current prices)."""
+    keys = _market_keys()
+    if not keys:
+        return {"error": "keys.env missing"}
+    try:
+        positions = _alpaca_get("/v2/positions", keys) or []
+        return {"positions": positions}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False, log_level="info", access_log=False)
 

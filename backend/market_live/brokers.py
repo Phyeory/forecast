@@ -204,6 +204,8 @@ class AlpacaBroker(Broker):
         self.paper = paper
         self.tif = time_in_force or "cls"
         self._assets: Optional[list[dict]] = None
+        self._clock_cache: Optional[dict] = None
+        self._clock_ts: float = 0.0
 
     # ── HTTP ──────────────────────────────────────────────────────────────
     def _req(self, method: str, path: str, body: Optional[dict] = None) -> dict:
@@ -254,12 +256,28 @@ class AlpacaBroker(Broker):
             delta = -float(int(abs(delta)))
         if abs(delta) < 1.0 or abs(delta) * float(ref_price) < 1.0:
             return None
+        # tif selection: opg = market-on-open (the backtest's next_open fill
+        # semantics) and valid whenever the market is closed.  If the opening
+        # auction we're targeting has ALREADY passed (Mac slept through it,
+        # poller restart mid-session), opg would be rejected by Alpaca — fall
+        # back to a plain day market order that fills at the current price
+        # (logged as a late-fill wedge, same convention as the MT5 path).
+        tif = self.tif
+        if self.tif == "opg":
+            try:
+                clock = self._clock()
+                # market open now → the targeted open is gone → day order.
+                if clock.get("is_open"):
+                    tif = "day"
+                    reason = (reason + " [late_fill]") if reason else "late_fill"
+            except Exception:  # noqa: BLE001 — clock hiccup → keep opg
+                pass
         body = {
             "symbol": symbol,
             "qty": f"{abs(delta):.6f}",
             "side": "buy" if delta > 0 else "sell",
             "type": "market",
-            "time_in_force": self.tif,
+            "time_in_force": tif,
             "client_order_id": f"mkt-{symbol}-{uuid.uuid4().hex[:12]}",
         }
         resp = self._req("POST", "/v2/orders", body)
@@ -287,6 +305,15 @@ class AlpacaBroker(Broker):
         except RuntimeError:
             return []
         return [o for o in (os_ or []) if isinstance(o, dict)]
+
+    def _clock(self) -> dict:
+        """Market clock (cached 60 s): {'is_open': bool, 'next_open': iso}."""
+        now = time.time()
+        if self._clock_cache and now - self._clock_ts < 60.0:
+            return self._clock_cache
+        self._clock_cache = self._req("GET", "/v2/clock")
+        self._clock_ts = now
+        return self._clock_cache
 
     def symbols(self, query: str = "") -> list[str]:
         if self._assets is None:
