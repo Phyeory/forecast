@@ -61,6 +61,13 @@ class LiveConfig:
     journal_root: Optional[str] = None
     exec_mode: str = "next_open"     # close | next_open
     broker_symbols: dict = field(default_factory=dict)  # data sym -> broker sym
+    # True  = materialise the engine's inherited book at the broker (the
+    #         campaign's book continues onto the live account).
+    # False = FLAT START: the engine's inherited positions are adopted as our
+    #         desired state but NOT traded — the account opens only on fresh
+    #         signals from now on.  Exits of inherited (never-bought) names
+    #         are no-ops: the broker delta is zero, so nothing is submitted.
+    warm_sync: bool = True
 
     def as_dict(self) -> dict:
         return {k: (list(v) if isinstance(v, tuple) else v)
@@ -155,7 +162,16 @@ class MarketLiveTrader:
                 self.journal.guard({"kind": "guard_init",
                                     "status": self.guard.status()})
 
-        self._sync_positions(synthetic=True)
+        if self.cfg.warm_sync:
+            self._sync_positions(synthetic=True)
+        else:
+            # flat start: adopt the engine's book as desired state, trade none
+            # of it.  Fresh signals from here on open real positions.
+            for sym, host in self.hosts.items():
+                self.desired[sym] = host.desired_position
+            self._log("flat start (warm_sync=False): inherited engine "
+                      "positions adopted as desired state, NOT traded — the "
+                      "account opens only on fresh signals")
         self.ready = True
         if self.journal:
             self.journal.heartbeat({"event": "ready",
