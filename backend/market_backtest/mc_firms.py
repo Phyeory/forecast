@@ -68,6 +68,12 @@ TEMPLATES: dict[str, dict] = {
                               trailing=True, time_limit=None),
     "apex_style":        dict(targets=[6.0], daily=None, max_loss=4.0,
                               trailing=True, time_limit=None),
+    # FTMO FREE TRIAL (14 days, target halved to 5%, 5% daily, 10% static,
+    # 2 min days, NO consistency) — a sprint, not the real challenge
+    "ftmo_trial_2step":  dict(targets=[5.0], daily=5.0, max_loss=10.0,
+                              trailing=False, time_limit=14, consistency=None),
+    "ftmo_trial_1step":  dict(targets=[5.0], daily=3.0, max_loss=10.0,
+                              trailing=True, time_limit=14, consistency=50.0),
     # legacy: the same FTMO 2-step but WITH a 30-day cap per phase (control)
     "ftmo_2step_30d":    dict(targets=[10.0, 5.0], daily=5.0, max_loss=10.0,
                               trailing=False, time_limit=30),

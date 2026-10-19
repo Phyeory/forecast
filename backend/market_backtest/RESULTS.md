@@ -231,6 +231,25 @@ The diversified book is the better *personal* account (+1.1 pp CAGR, +0.09
 Sharpe, same drawdown); the stocks-only book is the cleaner *prop* vehicle
 (tighter daily tail, fewer moving parts).
 
+
+## Free trials — measured, and what they are for
+
+FTMO's Free Trial mirrors the *first phase* only, halved target, **14-day
+deadline** (MT5/cTrader, unlimited retries, no fee):
+
+| k | free-trial pass | timeout | daily breach |
+|---|---|---|---|
+| 0.75 | **3.8%** | 96.1% | 0.0% |
+| 1.00 | 10.7% | 87.8% | 0.9% |
+| 2.00 | 35.3% | 57.9% | 3.9% |
+| 3.00 | 47.8% | 31.5% | 17.2% |
+| 5.00 | 52.5% | 7.6% | 36.3% |
+
+The trial is a 14-day sprint against a +5% target; the strategy is a
+multi-month grind. **The trial cannot validate the strategy** — it validates
+the plumbing (orders land, symbols resolve, sizing is accepted, guard tracks).
+The real 2-Step has no deadline and passes at 74% (same k, same ledger).
+
 ## Live execution stack — decision-identical (`market_live/`)
 
 `MarketEngineHost` is not a reimplementation: it builds the same

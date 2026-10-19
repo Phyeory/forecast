@@ -36,6 +36,17 @@ TEMPLATES: dict[str, dict] = {
         swing=True, ea_allowed=True,
         note="static 10% max loss, 5% daily, no time limit, 4 min days, "
              "consistency: best day <= 50% of total profit"),
+    "ftmo_trial_2step": dict(
+        label="FTMO Free Trial 2-Step (14 days)", targets=[5.0], daily=5.0,
+        max_loss=10.0, trailing=False, time_limit=14, min_days=2,
+        consistency=None, split=0.0, fee=0.0, account=100_000.0,
+        swing=True, ea_allowed=True,
+        note="free, 14-day sprint: 5% target — plumbing test, not the real rule set"),
+    "ftmo_trial_1step": dict(
+        label="FTMO Free Trial 1-Step (14 days, trailing)", targets=[5.0],
+        daily=3.0, max_loss=10.0, trailing=True, time_limit=14, min_days=0,
+        consistency=50.0, split=0.0, fee=0.0, account=100_000.0,
+        swing=True, ea_allowed=True, note="free trial, trailing 10%"),
     "ftmo_1step": dict(
         label="FTMO 1-Step", targets=[10.0], daily=3.0, max_loss=10.0,
         trailing=True, time_limit=None, min_days=0, consistency=50.0,
