@@ -195,6 +195,7 @@ def status() -> dict:
     state = read_json(f"{RUNTIME}/state.json") or {}
     out["state"] = {"cursor": sorted(set((state.get("last_ts") or {}).values())),
                     "book": state.get("book"),
+                    "pending": state.get("pending") or {},
                     "saved_at": state.get("saved_at")}
     eq = read_json(f"{RUNTIME}/equity.json") or []
     out["equity"] = eq if isinstance(eq, list) else []
