@@ -4143,22 +4143,26 @@ async function mkRefresh() {
   const pnlPct = pnl !== null ? (pnl / start) * 100 : null;
   const guard = acct.guard || {};
   const paused = !!st.paused;
+  const mode = st.mode || "paper";
   const running = (st.runs || []).some(r => r.status === "in_progress" || r.status === "queued");
   const closed = st.trades_closed || [];
   const openPos = st.trades_open || [];
 
   // header
   document.getElementById("mk-session-id").textContent = st.repo || "—";
-  document.getElementById("mk-commit").textContent = st.schedule || "";
+  document.getElementById("mk-commit").textContent = (st.schedule || "") + " · mode: " + mode.toUpperCase();
   const badge = document.getElementById("mk-remote-badge");
   if (st.error) { badge.textContent = "OFFLINE"; badge.style.background = "#ef5350"; }
-  else if (paused) { badge.textContent = "STOPPED"; badge.style.background = "#78909c"; }
+  else if (paused || mode === "off") { badge.textContent = "STOPPED"; badge.style.background = "#78909c"; }
+  else if (mode === "real") { badge.textContent = "REAL $"; badge.style.background = "#d32f2f"; }
   else if (running) { badge.textContent = "RUNNING"; badge.style.background = "#26a69a"; }
   else { badge.textContent = "ARMED"; badge.style.background = "#5c6bc0"; }
   const sBtn = document.getElementById("mk-start-btn");
   const xBtn = document.getElementById("mk-stop-btn");
-  if (sBtn) { sBtn.disabled = !!paused; sBtn.textContent = paused ? "Stopped" : "Start sim"; }
-  if (xBtn) { xBtn.disabled = !paused; }
+  const rBtn = document.getElementById("mk-real-btn");
+  if (sBtn) { sBtn.disabled = !!paused; sBtn.textContent = paused ? "Stopped" : "Prop paper"; }
+  if (xBtn) xBtn.disabled = !paused && mode !== "off";
+  if (rBtn) rBtn.disabled = mode === "real";
 
   // stats grid
   const cards = [
@@ -4270,12 +4274,18 @@ async function mkRefresh() {
   if (sel) sel.onchange = () => mkLoadSymbol(sel.value);
 }
 
-async function mkRemoteAction(path, label) {
+async function mkRemoteAction(path, label, body = null) {
   const btn = document.getElementById(path.endsWith("start") ? "mk-start-btn" : "mk-stop-btn");
   if (btn) btn.disabled = true;
   try {
-    const r = await apiFetch(path, { method: "POST" });
-    console.log(`[Market] ${label}`, r);
+    const opts = { method: "POST" };
+    if (body) {
+      opts.headers = { "Content-Type": "application/json" };
+      opts.body = JSON.stringify(body);
+    }
+    const r = await apiFetch(path, opts);
+    if (r && r.error) console.warn(`[Market] ${label} refused:`, r.error);
+    else console.log(`[Market] ${label}`, r);
   } catch (e) {
     console.warn(`[Market] ${label} failed`, e);
   }
@@ -4297,9 +4307,23 @@ async function mkRemoteAction(path, label) {
     }, 15000);
   });
 
-  // remote sim control: start / stop
+  // remote sim control: start / stop / REAL arm
   const sBtn = document.getElementById("mk-start-btn");
   const xBtn = document.getElementById("mk-stop-btn");
-  if (sBtn) sBtn.addEventListener("click", () => mkRemoteAction("/api/market/remote/start", "start"));
+  const rBtn = document.getElementById("mk-real-btn");
+  if (sBtn) sBtn.addEventListener("click", () => mkRemoteAction("/api/market/remote/start", "start", { mode: "paper" }));
   if (xBtn) xBtn.addEventListener("click", () => mkRemoteAction("/api/market/remote/stop", "stop"));
+  if (rBtn) rBtn.addEventListener("click", () => {
+    const ok = window.confirm(
+      "START REAL TRADING?\n\n" +
+      "This arms the prop runner for LIVE execution on the FTMO MT5 account with real money.\n\n" +
+      "Preconditions:\n" +
+      "  1) FTMO challenge bought and MT5 logged in on the Windows VPS\n" +
+      "  2) MT5 bridge service running on the VPS (port 8765, 127.0.0.1)\n" +
+      "  3) PROP_VPS_HOST / PROP_VPS_USER / PROP_VPS_SSH_KEY repo secrets set\n" +
+      "  4) trial rehearsal already passed with the same setup\n\n" +
+      "The next scheduled run submits REAL orders. Continue?");
+    if (!ok) return;
+    mkRemoteAction("/api/market/remote/start", "start real", { mode: "real", confirm: true });
+  });
 })();

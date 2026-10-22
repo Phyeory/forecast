@@ -20,6 +20,9 @@ jobs:
         env:
           APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+          PROP_VPS_HOST: ${{ secrets.PROP_VPS_HOST }}
+          PROP_VPS_USER: ${{ secrets.PROP_VPS_USER }}
+          PROP_VPS_SSH_KEY: ${{ secrets.PROP_VPS_SSH_KEY }}
         run: bash deploy/run_daily.sh
       - name: Commit account state
         run: |

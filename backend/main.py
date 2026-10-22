@@ -3431,11 +3431,18 @@ async def market_remote_status():
 
 
 @app.post("/api/market/remote/start")
-async def market_remote_start():
-    """Un-pause the remote sim and trigger a run now."""
+async def market_remote_start(body: dict = Body(default={})):
+    """Arm (paper|real|off), un-pause and dispatch the remote prop runner.
+
+    Body (all optional): {"mode": "paper"|"real"|"off", "config": <file>,
+    "confirm": bool}.  REAL requires confirm=true plus the PROP_VPS_* repo
+    secrets — the runner re-verifies the bridge before every real run.
+    """
     from market_live import remote
     try:
-        out = remote.start()
+        out = remote.start(mode=(body or {}).get("mode") or "paper",
+                           config=(body or {}).get("config"),
+                           confirm=bool((body or {}).get("confirm")))
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     return out

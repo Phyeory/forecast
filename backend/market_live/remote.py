@@ -5,12 +5,15 @@ The forward sim runs on a free GitHub Actions runner (private repo
 account state the runner commits back, and it starts/stops the runner.
 
 All state lives in the repo under `runtime/`:
-    state.json    the raw resume state (book, cursor, desired, pending)
-    account.json  the dashboard-ready account snapshot (equity, cash,
-                  positions, guard phase, floors, counters)
-    equity.json   the equity curve: [[epoch, equity], ...]
-    trades.json   {"open": [...], "closed": [...]} — round trips
-    paused        presence = the sim is stopped (no new decisions)
+    state.json       the raw resume state (book, cursor, desired, pending)
+    account.json     the dashboard-ready account snapshot (equity, cash,
+                     positions, guard phase, floors, counters)
+    equity.json      the equity curve: [[epoch, equity], ...]
+    trades.json      {"open": [...], "closed": [...]} — round trips
+    paused           presence = the sim is stopped (no new decisions)
+    armed.json       {"mode": paper|real|off, "config": …} — the arm switch;
+                     REAL means live orders on the FTMO account via the
+                     Windows VPS MT5 bridge (SSH tunnel from the runner)
 
 Credentials: the GitHub token comes from the local git credential helper
 (macOS Keychain) — never from a file in the repo.
@@ -34,6 +37,10 @@ WORKFLOW = "prop-sim.yml"
 BRANCH = "main"
 API = "https://api.github.com"
 RUNTIME = "runtime"
+ARMED = f"{RUNTIME}/armed.json"
+PAPER_CONFIG = "paper_ftmo_sim_gh.json"   # resume-based paper sim (paper broker)
+REAL_CONFIG = "gh_prop.json"              # FTMO MT5 via SSH tunnel to the VPS bridge
+LOCAL_POLLER_LABEL = "com.jaime.market-prop-sim"  # Mac poller kept OFF while remote armed
 
 
 # ── credentials ────────────────────────────────────────────────────────────
@@ -128,10 +135,66 @@ def _rm(path: str) -> tuple[bool, str]:
     return True, "removed"
 
 
+# ── arm switch ─────────────────────────────────────────────────────────────
+def read_armed() -> dict:
+    """The arm switch.  Absent/legacy/unknown → paper (the default mode)."""
+    data = read_json(ARMED)
+    if not isinstance(data, dict) or data.get("mode") not in ("off", "paper", "real"):
+        return {"mode": "paper", "config": PAPER_CONFIG, "ts": 0}
+    data.setdefault("config", REAL_CONFIG if data["mode"] == "real" else PAPER_CONFIG)
+    return data
+
+
+def _owned_secrets() -> list:
+    """Names of repo Actions secrets ([] if unverifiable)."""
+    data, _err = api("GET", f"/repos/{REPO}/actions/secrets")
+    if not isinstance(data, dict):
+        return []
+    return [s.get("name", "") for s in data.get("secrets", [])]
+
+
 # ── control actions ────────────────────────────────────────────────────────
-def start() -> dict:
-    """Un-pause and trigger a run now."""
+def start(mode: str = "paper", config: Optional[str] = None,
+          confirm: bool = False) -> dict:
+    """Arm the runner in `mode` (paper|real|off), un-pause, dispatch a run now.
+
+    REAL mode moves actual money: it changes runtime/armed.json to
+    {"mode": "real", "config": "gh_prop.json"} so every scheduled and
+    dispatched run trades the FTMO MT5 account through the VPS bridge.
+    Requires confirm=True and the three PROP_VPS_* repo secrets.
+    """
     out: dict = {"ok": False, "actions": []}
+    mode = (mode or "paper").strip().lower()
+    if mode not in ("paper", "real", "off"):
+        out["error"] = f"unknown mode {mode!r} (paper|real|off)"
+        return out
+    if mode == "real" and not confirm:
+        out["error"] = ("REAL-money arming requires confirm=true "
+                        "(FTMO account bought + Windows VPS bridge running + "
+                        "PROP_VPS_* repo secrets set)")
+        return out
+    if mode == "real":
+        owned = _owned_secrets()
+        if owned:
+            missing = [s for s in ("PROP_VPS_HOST", "PROP_VPS_USER", "PROP_VPS_SSH_KEY")
+                       if s not in owned]
+            if missing:
+                out["error"] = ("REAL arm blocked — repo secrets missing: "
+                                + ", ".join(missing))
+                return out
+        # secrets unverifiable → still arm; every real run fails LOUDLY at the
+        # tunnel step if the bridge is down, which is a safe no-op.
+    cfg = config or (REAL_CONFIG if mode == "real" else PAPER_CONFIG)
+    ok, msg = write_text(ARMED, json.dumps(
+        {"mode": mode, "config": cfg, "armed_at": time.time()}) + "\n",
+        f"prop-sim: arm {mode}")
+    out["actions"].append({"arm": ok, "detail": msg})
+    if not ok:
+        out["error"] = f"committing armed.json failed: {msg}"
+        return out
+    if mode == "off":
+        out["ok"] = True           # disarm only; stop() is the stronger hammer
+        return out
     ok, msg = _rm(f"{RUNTIME}/paused")
     out["actions"].append({"unpause": ok, "detail": msg})
     data, err = api("POST", f"/repos/{REPO}/actions/workflows/{WORKFLOW}/dispatches",
@@ -141,13 +204,23 @@ def start() -> dict:
         return out
     out["actions"].append({"dispatch": True})
     out["ok"] = True
+    out["mode"] = mode
+    out["config"] = cfg
     out["started_at"] = time.time()
     return out
 
 
 def stop() -> dict:
-    """Pause the sim and cancel any in-flight run."""
+    """Disarm (mode=off), pause the sim, cancel any in-flight run.
+
+    Also unloads the local Mac prop poller so two schedulers never
+    double-submit against the same account.
+    """
     out: dict = {"ok": False, "actions": []}
+    ok, msg = write_text(ARMED, json.dumps(
+        {"mode": "off", "config": None, "disarmed_at": time.time()}) + "\n",
+        "prop-sim: disarm (mode=off)")
+    out["actions"].append({"disarm": ok, "detail": msg})
     ok, msg = write_text(f"{RUNTIME}/paused",
                          json.dumps({"paused_at": time.time()}) + "\n",
                          "prop-sim: pause")
@@ -160,6 +233,14 @@ def stop() -> dict:
             if not e:
                 cancelled += 1
         out["actions"].append({"cancelled_runs": cancelled})
+    try:
+        uid = subprocess.run(["id", "-u"], capture_output=True, text=True,
+                             timeout=5).stdout.strip() or "501"
+        subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LOCAL_POLLER_LABEL}"],
+                       capture_output=True, timeout=10)
+        out["actions"].append({"local_poller": "launchd bootout attempted"})
+    except Exception:  # noqa: BLE001 — local hygiene must never break the call
+        pass
     out["ok"] = True
     return out
 
@@ -194,6 +275,9 @@ def status() -> dict:
 
     paused = read_text(f"{RUNTIME}/paused") is not None
     out["paused"] = paused
+    armed = read_armed()
+    out["armed"] = armed
+    out["mode"] = armed.get("mode", "paper")
     account = read_json(f"{RUNTIME}/account.json") or {}
     out["account"] = account
     state = read_json(f"{RUNTIME}/state.json") or {}

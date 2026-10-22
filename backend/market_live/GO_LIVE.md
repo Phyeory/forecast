@@ -25,6 +25,36 @@ expected ~$1,160/month per funded account.  (The original 10-18 figures —
 model, which for stocks was CONSERVATIVE; the honest next-open fill improves
 every number.  See MARKET_RESEARCH_LOG.md "M12" and `results/arm14h/`.)
 
+## Remote runner (GitHub Actions) — the default way prop runs
+
+The paper sim already runs unattended on the private repo **Phyeory/prop-sim**
+(crons 05:00 · 05:30 · 08:00 UTC; resume-based; idempotent; state committed
+back under `runtime/`). The dashboard's **Market** tab is its control panel.
+
+Arming modes — written as `runtime/armed.json` by the control plane
+(`backend/market_live/remote.py`, buttons in the Market tab):
+
+| mode | config | what it does |
+|---|---|---|
+| `paper` | `paper_ftmo_sim_gh.json` | FTMO-2-step rules simulated on a paper broker (current default) |
+| `real`  | `gh_prop.json` | **LIVE**: SSH tunnel from the runner to the Windows VPS MT5 bridge (`deploy/vps_win/`), orders on the FTMO account |
+| `off`   | — | no new decisions (report-only refresh) |
+
+Buttons: **Prop paper** (arm paper + dispatch now), **Start REAL** (red,
+double-confirmed preconditions), **Stop** (disarm + pause + cancel in-flight
++ unload the local Mac poller so nothing double-submits).
+
+`run_daily.sh` re-verifies the bridge on every real run and aborts BEFORE any
+order if the tunnel/bridge is down (loud red run in Actions, cursor untouched
+— a safe no-op). Real trading requires: FTMO challenge, Windows VPS bridge
+(`deploy/vps_win/README.md` — includes a `--simulate` tunnel rehearsal and the
+`--place-test-order` demo proof), and the three `PROP_VPS_*` repo secrets;
+the arming endpoint blocks on missing secrets.
+
+The local Mac daily loop/cron below still works and is the fallback, but
+GitHub Actions is the primary scheduler — it survives the Mac being off, and
+the committed `runtime/` state makes every run restart-exact.
+
 ## What you need to buy / create (30 minutes)
 
 1. **FTMO account** — register, buy *FTMO Challenge: 2-Step, $100k* (~$540).
