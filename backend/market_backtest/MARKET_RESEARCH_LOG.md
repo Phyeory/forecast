@@ -881,3 +881,88 @@ baseline stays byte-comparable.  The sigma gate is inert (0 trades change),
 and the drawdown floors are the campaign's chosen values (the corrected
 statistic measured −0.0415 test Σ).  Neither is worth changing without a
 fresh acceptance run.
+
+# M12 — achievable-fill rerun: the instant book was CONSERVATIVE (2026-10-22)
+
+Prompt: the memecoin repo's iter100 ruling condemned `exec_model="instant"`
+(signal-state close fill) as ~72% phantom for the memecoin live. The stock
+campaign's accepted books (arm14 backtests and every `mc_firms` run behind
+`PROP_FIRMS.md`) also ran `exec_model="instant"` (research log line ~281);
+production fills at the NEXT BAR'S OPEN (opg). Question: are the accepted
+backtests + prop-pass simulations realistic?
+
+**Answer: strictly realistic, and pessimistic.** Unlike the memecoin case,
+the stocks instant book UNDERSTATES the strategy: the achievable next-open
+fill is better, not worse. Opposite direction, same root cause class —
+fill pricing at a tick the execution path cannot transact.
+
+## The rerun apparatus — `market_backtest/run_honest.py`
+
+Same frozen arm14 engine params → 4-state replay through `MarketEngineHost`
+(engine notified at each candle's close states, the live's exact timing).
+Ledger = the live's PaperBroker: every fill (entry AND exit) executes at the
+NEXT bar's open × (1±3 bp) (`COSTS['stocks']` slippage), zero fees, fixed
+0.1-unit book (the FT sizing semantics — not equity-dynamic, for
+comparability), `recording_ended` force-close at the last close. Deferred
+pending keyed off desired-position transitions exactly like
+`MarketLiveTrader.step_bar` (transition-or-bust; exit pend flattens via the
+same target_position call). Results in `results/arm14h/` (arm14 schema,
+`exec_basis: achievable_next_open`; `mc_firms` / `ledger_daily_equity` read
+them unchanged).
+
+**Decision parity: 67/67 parity-exact** vs the accepted files (engine trade
+bars identical; accepted tail-force-close rows accounted). Ledger rows land
+exactly one bar after each engine decision bar. Fill audit: 282/282 honest
+entry prices == that bar's raw open × (1+3 bp); round trips
+reconcile to the broker.
+
+## Results — paired per-symbol (test window)
+
+| metric | accepted (instant) | honest (next-open) |
+|---|---|---|
+| Σ test-window book (67 syms) | +0.326 | **+0.426 (+31%)** |
+| per-symbol mean | +0.00487 | +0.00635 |
+| paired Δ | — | **+0.00149** (Wilcoxon p=0.0043) |
+| better / worse / flat | — | 29 / 15 / 23 |
+| bootstrap 95% CI (Δ) | — | [+0.00051, +0.00257] |
+
+## Mechanism (why better, not worse)
+
+- **Entry wedge**: next open vs the signal-day close ≈ **−1.07%** (mean and
+  median, n=243). The engine fires on strong closes (`buy_exhaustion`,
+  `buy_idle`); the instant book paid the signal candle's run-up high. The
+  achievable fill buys the next morning's often-lower open.
+- **Exit wedge**: ≈ neutral (mean +0.04%, median −0.30%, n=230).
+- The wedge's sign is a property of THIS signal set on THIS tape (2026).
+  It is not a law. Any future acceptance run must state its exec basis and
+  re-measure the wedge — mixed-basis comparisons are invalid (see iter100).
+
+## Prop-firm MC reproof (same code, `--sims 3000`, seg=test, 754 days)
+
+Pooled ledger: daily mean **+0.043% → +0.0565%**, Sharpe **0.75 → 1.00**,
+worst day **−5.17% → −4.82%** (k=1), kelly* 5.1 → 7.0.
+
+| rule set (k=0.75) | P1 pass | full pass | EV/attempt | EV (reset cost) |
+|---|---|---|---|---|
+| FTMO 2-Step (production) | 83.5 → **91.1%** | 74.2 → **84.9%** | $9,871 → **$12,363** | $9,124 → **$11,734** |
+| 2-Step, no consistency | 83.7 → 91.2% | 75.0 → 85.3% | $9,983 → $12,429 | $9,228 → $11,797 |
+| generic 8/5 2-step | 84.3 → 91.6% | 75.7 → 85.7% | $10,086 → $12,485 | $9,324 → $11,850 |
+| FTMO 1-Step (trailing) | 57.5 → 64.7% | 57.5 → 64.7% | $5,849 → $7,256 | $4,936 → $6,217 |
+| 2-Step + 30-day cap | 0.7 → 0.9% | 0.1% | −$527 | — |
+| free trial (14d cap) | 3.8 → 4.3% | — | −$7 → +$119 | — |
+
+Structural conclusions unchanged: time limit still fatal (0.1%), trailing
+still severe (65% vs 91% P1), daily 5% cap still mild, consistency still
+≈free. The risk fingerprint IMPROVED (Sharpe 1.00, worst day −4.82%), so
+every rule ranking holds or loosens.
+
+Caveats: MC still excludes commission/CFD overnight drag (unchanged, listed
+in PROP_FIRMS honest-limits); the FTMO-funded-stage blow rate (32.7% 1y at
+k=0.75) proportionally improves but the withdraw-cadence advice stands
+(withdraw every payout; the strategies' funded-stage return far outruns the
+blow rate — that arithmetic was already the campaign's rationale).
+
+Artifacts: `results/arm14h/` (67 honest per-symbol books),
+`results/mc_arm14h.json`, `results/mc_arm14_accepted_rerun.json`
+(same-code accepted rerun for apples-to-apples), `run_honest.py`.
+`PROP_FIRMS.md` headline numbers superseded by this table.

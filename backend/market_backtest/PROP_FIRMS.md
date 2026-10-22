@@ -1,46 +1,51 @@
-# Prop-firm selection & attempt economics (arm14, verified 2026-10-18)
+# Prop-firm selection & attempt economics
 
 Everything here is measured, not asserted: `mc_firms.py` block-bootstraps the
 arm14 **out-of-sample** daily ledger (754 days, 67 US stocks) through each
 firm's actual rule set.  Rules were checked against the firms' published pages.
 
-## The strategy's risk fingerprint (what a firm must tolerate)
+**Exec basis (M-loop, 2026-10-22) — numbers below are on the ACHIEVABLE-FILL
+basis** (`results/arm14h`: fills at the next bar's open × 1±3 bp, 67/67
+decision-parity with the arm14 engine path).  The 2026-10-18 numbers
+ran the `instant` fill model (signal-state close): that book turned out
+CONSERVATIVE for stocks — see MARKET_RESEARCH_LOG.md "M12".  Both bases keep
+every structural conclusion (time limit fatal, trailing severe, daily-5%
+mild); the honest basis is materially stronger:
 
-| metric | value |
+| metric (achievable basis) | value |
 |---|---|
-| mean | **+0.043 %/day** (≈ +10.9 %/yr) |
-| daily σ | 0.92 % |
-| Sharpe | 0.75 |
-| worst historical day | **−5.17 %** at k=1 |
+| mean | **+0.0565 %/day** (≈ +14.7 %/yr) |
+| daily σ | ~0.82 % |
+| Sharpe | **1.00** |
+| worst historical day | **−4.82 %** at k=1 |
 | median hold | 32 days (p90 144 d) → **swing, not intraday** |
 | max concurrent positions | 23 (avg 5.5) |
-| full-Kelly leverage | k* ≈ 5.1 (tested k=0.75 ≈ 0.15 Kelly) |
+| full-Kelly leverage | k* ≈ 7.0 (tested k=0.75 ≈ 0.11 Kelly) |
 
 Consequence: the strategy **needs swing accounts** (weekend holding), **static
 max-loss** (not trailing), and either **no daily cap or a 5 % daily cap**.
 
 ## Rule sensitivity — which rule actually kills you
 
-Same strategy, same k=0.75, only the rule set changes:
+Same strategy, same k=0.75, only the rule set changes (achievable-fill basis;
+instant-basis values in parentheses — direction identical, honest book stronger):
 
-| rule set | P1 pass | full pass | funded blow (1 y) | EV / attempt |
+| rule set | P1 pass | full pass | EV / attempt |
 |---|---|---|---|---|
-| **no daily cap, static 10 %** | 84.6 % | 84.6 % | 32.7 % | **+$10,483** |
-| FTMO 2-Step (5 % daily, static 10 %, no TL, consistency 50 %) | 83.5 % | **74.2 %** | 32.7 % | **+$9,124** |
-| generic 8 %/5 % 2-step (no TL) | 84.3 % | 75.7 % | 32.7 % | +$9,324 |
-| FTMO 1-Step (3 % daily, **trailing** 10 %) | 60.5 % | 60.5 % | 73.5 % | +$5,225 |
-| futures prop (2 % daily, trailing 4 %) | 42.1 % | 42.1 % | 100 % | +$831 |
-| FTMO 2-Step with a **30-day** phase limit | 0.7 % | 0.1 % | — | **−$527** |
+| **no daily cap, static 10 %** | 91.2 % (83.7) | 85.3 % (75.0) | **+$11,797** |
+| FTMO 2-Step (5 % daily, static 10 %, no TL, consistency 50 %) | 91.1 % (83.5 %) | **84.9 %** (74.2 %) | **+$11,734** |
+| generic 8 %/5 % 2-step (no TL) | 91.6 % (84.3 %) | 85.7 % (75.7 %) | +$11,850 |
+| FTMO 1-Step (3 % daily, **trailing** 10 %) | 64.7 % (60.5 %) | 64.7 % (60.5 %) | +$6,217 |
+| futures prop (2 % daily, trailing 4 %) | — | — | instantly fatal on this fingerprint |
+| FTMO 2-Step with a **30-day** phase limit | 0.9 % (0.7 %) | 0.1 % | **−$526** |
 
-**Ranking of rule impact (destructive → benign):**
-
-1. **Time limit — fatal.** A 30-day cap drops the pass rate from 74 % to 0.1 %.
-   The strategy makes ~10 %/yr; it cannot make 10 % in 30 days reliably.
+1. **Time limit — fatal.** A 30-day cap drops the pass rate from ~85 % to 0.1 %.
+   The strategy makes ~10-15 %/yr; it cannot make 10 % in 30 days reliably.
    *Never buy a timed challenge.*
 2. **Trailing drawdown — severe.** 10 % trailing behaves like a 5–6 % static
-   limit on a compounding equity curve: pass 74 % → 60 %, funded blow 33 % → 74 %.
-3. **Daily cap 3 % — severe** (worst day is −5.17 % at k=1; at k=0.75 it is
-   −3.9 %, still above a 3 % cap in the tail).
+   limit on a compounding equity curve: pass 91 % → 65 % (P1), EV $11.7k → $6.2k.
+3. **Daily cap 3 % — severe** (worst day is −4.82 % at k=1 on the honest
+   ledger, still above a 3 % cap in the tail).
 4. **Daily cap 5 % — mild** (−10 pp pass, nothing structural).
 5. **Profit target 10 % vs 8 % — mild** (~1.5 pp).
 6. **Max loss 10 % vs 8 % — mild** (78 % vs 85 % pass), 6 % hurts (70 %).
@@ -51,21 +56,27 @@ Same strategy, same k=0.75, only the rule set changes:
 static 10 % max loss, **no time limit**, min 4 trading days, consistency: best
 day ≤ 50 % of total profit, 80 % split, EA allowed)
 
-Measured at **k = 0.75** (7.5 % of equity per position):
+Measured at **k = 0.75** (7.5 % of equity per position) — achievable-fill basis
+(instant-basis values below in the earlier version of this table; archived in
+git history and `results/mc_arm14_accepted_rerun.json`):
 
 | k | P1 pass | full pass | funded blow/yr | E payout | EV/attempt | E payout/mo |
 |---|---|---|---|---|---|---|
-| 0.50 | 92.5 % | 86.8 % | 10.0 % | $9,204 | +$7,921 | $767 |
-| **0.75** | **83.5 %** | **74.2 %** | **32.7 %** | **$12,485** | **+$9,124** | **$1,040** |
-| 1.00 | 63.3 % | 48.0 % | 63.0 % | $12,783 | +$5,851 | $1,065 |
-| 1.50 | 62.7 % | 44.8 % | 78.6 % | $15,475 | +$6,635 | $1,290 |
-| 2.00 | 58.9 % | 37.8 % | 89.0 % | $15,898 | +$5,674 | $1,325 |
+| 0.50 | 97.1 % | 94.5 % | 5.5 % | $9,962 | +$9,384 | $830 |
+| **0.75** | **91.1 %** | **84.9 %** | **23.8 %** | **$13,917** | **+$11,734** | **$1,160** |
+| 1.00 | 84.8 % | 75.1 % | 39.9 % | $16,855 | +$12,518 | $1,405 |
+| 1.50 | 68.0 % | 50.9 % | 71.9 % | $17,607 | +$8,703 | $1,467 |
+| 2.00 | 63.2 % | 43.2 % | 85.6 % | $17,949 | +$7,447 | $1,496 |
 
-*The consistency rule costs almost nothing (75.0 → 74.2 %): the simulator keeps
+*The consistency rule costs almost nothing (85.3 → 84.9 %): the simulator keeps
 trading until the best-day share is satisfied, exactly as FTMO requires.*
 
+*Operating point unchanged at k=0.75: honest EV is near-flat from k=0.75 to
+k=1.0 ($11.7k vs $12.5k) but the funded-stage blow rate nearly doubles
+(23.8 % → 39.9 %).  Stay at k=0.75.*
+
 ### Secondary (only if verified): a **no-daily-cap, static-10 %** 1-step firm.
-The arithmetic is the best available (84.6 % pass, +$10.5k EV), but most
+The arithmetic is the best available (85.3 % pass, +$11.8k EV), but most
 "1-step" firms actually use **trailing** drawdown, which is worse than FTMO.
 Check the rules page before paying: *static* max loss, *no* daily cap, *no*
 time limit, weekend holding allowed, EAs allowed.
@@ -96,20 +107,20 @@ At k=0.75 the account took 442 trading days (~21 months) to clear both phases
 ## Attempt economics — "how do I make thousands a month with no capital?"
 
 A $100k FTMO 2-Step attempt costs **$540**. At k=0.75 each attempt is worth
-**+$9.1k in expectation** (fee refunded on funding + payouts before blow-up).
+**+$11.7k in expectation** (fee refunded on funding + payouts before blow-up).
 
 Running N attempts in parallel:
 
 | attempts | fee outlay | P(≥1 funded) | E funded accounts | E payouts (12 mo) | E net |
 |---|---|---|---|---|---|
-| 1 | $540 | 74 % | 0.74 | $9.2k | +$8.6k |
-| 2 | $1,080 | 93 % | 1.48 | $18.5k | +$17.4k |
-| 3 | $1,620 | 98 % | 2.23 | $27.8k | +$26.2k |
-| 5 | $2,700 | 99.9 % | 3.71 | $46.3k | +$43.6k |
+| 1 | $540 | 85 % | 0.85 | $11.8k | +$11.3k |
+| 2 | $1,080 | 98 % | 1.70 | $23.6k | +$22.6k |
+| 3 | $1,620 | 99.7 % | 2.55 | $35.4k | +$33.8k |
+| 5 | $2,700 | >99.9 % | 4.25 | $59.1k | +$56.4k |
 
 So **2–3 parallel attempts** is the practical launch configuration: ~$1.1–1.6k
-of fees, 93–98 % chance of at least one funded account, and roughly
-**$1.5k–3.1k/month expected** across the resulting accounts.
+of fees, 98–99.7 % chance of at least one funded account, and roughly
+**$2.0k–3.0k/month expected** across the resulting accounts.
 
 **Withdraw monthly.** The EV comes from payouts taken *before* the account
 eventually blows (33 %/yr at k=0.75). Money not withdrawn is money at risk.
@@ -175,7 +186,9 @@ The first-class recalibrator (`MARKET_RESEARCH_LOG.md` M11) was built, tuned
 and re-run against this dossier.  **Verdict: no
 change** — the live deployment stays on the frozen arm14 params.
 
-* 10,000-path `mc_firms` on the unchanged arm14 ledger (current code):
+* 10,000-path `mc_firms` on the unchanged arm14 ledger (current code; M11-era,
+  instant-fill basis — `results/mc_arm14h.json` M12 2026-10-22 supersedes with
+  the achievable basis):
   k=0.75 → **74.8 % full pass**, 33.1 % funded blown/yr, **EV +$9,098**,
   **$1,029/mo**; k=0.50 → 87.2 %, +$7,851; k=1.00 → 49.1 %, +$5,796.
   These reproduce the 3,000-path table (74.2 %, +$9,124) within MC noise.

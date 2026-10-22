@@ -1,0 +1,14 @@
+{
+ "n_symbols": 67,
+ "accepted_test_mean": 0.004866,
+ "honest_test_mean": 0.006353,
+ "mean_paired_delta_honest_minus_accepted": 0.001487,
+ "honest_better": 29,
+ "honest_worse": 15,
+ "breadth_pct": 43.3,
+ "wilcoxon_p": 0.004260721211380769,
+ "bootstrap_ci95": [
+  0.000509,
+  0.002565
+ ]
+}

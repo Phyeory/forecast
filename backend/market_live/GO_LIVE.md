@@ -11,15 +11,19 @@ Why this firm and not another:
 
 | requirement | why it matters | FTMO 2-Step |
 |---|---|---|
-| no time limit | a 30-day cap drops the pass rate 74% → 0.1% | ✅ none |
+| no time limit | a 30-day cap drops the pass rate ~85% → 0.1% | ✅ none |
 | static max loss | trailing 10% ≈ a 5–6% static floor | ✅ static |
-| 5% daily cap | worst day is −5.17% at k=1, −3.9% at k=0.75 | ✅ 5% |
+| 5% daily cap | worst day is −4.82% at k=1 (honest ledger) | ✅ 5% |
 | swing holding | median hold 32 days | ✅ |
 | EA allowed | the whole point | ✅ |
 | 80–90% split | payout economics | ✅ 80% |
 
-Measured: **74.2% full-challenge pass** at k=0.75, **+$9.1k EV per attempt**,
-funded blow-up 32.7%/yr, expected ~$1,040/month per funded account.
+Measured (achievable-fill basis, M-loop 2026-10-22): **84.9% full-challenge
+pass** at k=0.75, **+$11.7k EV per attempt**, funded blow-up 23.8%/yr,
+expected ~$1,160/month per funded account.  (The original 10-18 figures —
+74.2% / +$9.1k / 32.7% blow / $1,040 per month — ran the `instant` fill
+model, which for stocks was CONSERVATIVE; the honest next-open fill improves
+every number.  See MARKET_RESEARCH_LOG.md "M12" and `results/arm14h/`.)
 
 ## What you need to buy / create (30 minutes)
 
@@ -134,11 +138,12 @@ Verdicts: `ON TRACK` / `DEGRADING` (mean < half expected or t<0) / `FAILING`
 
 ## Operating rules
 
-1. **Never raise k to pass faster.** EV peaks at k=0.5–0.75; above k=1 the
-   blow-up rate outruns the pass rate.
-2. **Withdraw every payout.** The funded account blows ~33%/yr; withdrawn
-   profit is the only profit that survives.
-3. **Run 2–3 attempts in parallel** if you can fund the fees — 93–98% chance
+1. **Never raise k to pass faster.** On the honest ledger EV is near-flat
+   k=0.75→1.0 ($11.7k vs $12.5k) but the funded blow-up rate nearly doubles
+   (23.8% → 39.9%). Stay at k=0.75.
+2. **Withdraw every payout.** The funded account blows ~24%/yr (honest basis);
+   withdrawn profit is the only profit that survives.
+3. **Run 2–3 attempts in parallel** if you can fund the fees — 98–99.7% chance
    at least one passes.
 4. **Do not restart the trader mid-day** — if you must, `guard_state.json`
    restores the firm's floors; verify `session_open.json`'s `code_commit`
@@ -158,9 +163,9 @@ long.
 FTMO Free Trial mirrors the *first phase* only, halved target, **14-day
 deadline** (2-Step trial: 5% target, 10% static, 5% daily, 2 min days, no
 consistency; MT5/cTrader; unlimited retries, $0). Measured pass probability
-for this strategy: **3.8% at k=0.75** (96% time out) — it is a 14-day sprint
+for this strategy: **4.3% at k=0.75** (96% time out) — it is a 14-day sprint
 and our edge is a multi-month grind. The real 2-Step has no deadline, which
-is why it passes at 74%. **Use the free trial for what it is good for:**
+is why it passes at 85%. **Use the free trial for what it is good for:**
 proving that orders land, the symbol map is right, sizing is accepted, and
 the guard tracks equity on FTMO's own platform — record this before the
 purchase, expect the 14-day end (not a failure signal).
