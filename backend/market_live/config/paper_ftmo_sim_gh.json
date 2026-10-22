@@ -70,7 +70,7 @@
   "WMT",
   "XOM"
  ],
- "results_dir": "market_backtest/results/arm14",
+ "results_dir": "backend/market_backtest/results/arm14",
  "label": "arm14",
  "overrides": {
   "gain_retrace_arm_pct": 14.0

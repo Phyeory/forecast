@@ -966,3 +966,63 @@ Artifacts: `results/arm14h/` (67 honest per-symbol books),
 `results/mc_arm14h.json`, `results/mc_arm14_accepted_rerun.json`
 (same-code accepted rerun for apples-to-apples), `run_honest.py`.
 `PROP_FIRMS.md` headline numbers superseded by this table.
+
+# M13 — the prop-firm forward sim, running 24/7 (2026-10-22)
+
+Goal: a live forward simulation of the FTMO 2-step challenge — the full live
+stack (engine → guard → fills) on unseen bars — running continuously, so the
+edge can be checked against reality rather than the backtest.
+
+## What was built
+
+**Restart-safe account state** (`market_live/trader.py`, `market_live/snapshot.py`).
+The old live stack reset on every restart: the book lived in RAM, the guard
+state in the per-session journal dir, and the engine warm *consumed* the
+newest bar (so the crash-time decision was silently swallowed).  Now:
+
+- `state.json` — book, per-symbol decision cursor, desired state, in-flight
+  orders (atomic write after every poll);
+- `guard_state.json` — the PropGuard phase/equity/floors at a stable path
+  (a restart no longer resets a passed phase to 0);
+- `snap.pkl.gz` — the pickled+gzipped **engine state** per symbol.  Restoring
+  it skips the ~6-min warm and is **decision-identical** to a fresh warm
+  (verified: same desired position AND same fills on the next bar).  Guarded
+  by an engine-file hash + a frozen-params hash, so a stale snapshot is
+  never used.
+- On resume the engine warms only through the last processed bar and the new
+  bar is decided live; only in-flight orders and exits of positions we own
+  are re-armed (flat-start semantics preserved across restarts).
+
+Verified end-to-end: fresh start → flat, no phantom orders; simulated crash
+with an in-flight order → re-armed, bar decided live, fill booked (equity
+100,097.52); rewind-the-cursor test → exactly one bar processed live.
+
+**Two hosts, one strategy** (a replication pair, both flat-start, both on the
+frozen arm14 params):
+
+| host | cadence | state |
+|---|---|---|
+| Mac — launchd `com.jaime.prop-sim` under `caffeinate` (no sleep-missed closes) | resident, 60 s poll | `backend/data/live_market/prop_sim/` |
+| GitHub Actions — private repo `Phyeory/prop-sim` | cron 22:15 + 22:45 UTC (after the close in EDT and EST) | `runtime/` committed to the repo |
+
+Both accounts started at the same cursor (1792555200) and $100,000.  Their
+equity curves must agree — a standing check on the whole stack.
+
+**The free-host question, answered with terms not marketing.**  The brief was
+"completely free, no card, 24/7".  Verified against current terms:
+Oracle Always Free / GCP / AWS / Scaleway / Hetzner / DigitalOcean all need a
+card; PythonAnywhere's free tier has **no scheduled tasks, no always-on
+tasks and 100 CPU-seconds/day** (unusable; its $10/mo tier has tasks);
+Serv00 is genuinely free with cron and 15 processes but FreeBSD has no numpy
+wheel, so the engine cannot run there; Hugging Face Spaces is viable but
+needs sleep management and git auth.  **GitHub Actions on a private repo** is
+the only no-card option with scheduled cron, real CPU (2000 min/mo free for
+private repos) and no sleep — and the engine snapshot is what makes a daily
+job viable on any host at all (the job costs ~2 min instead of a 6-min warm).
+
+Secret hygiene: the push credential and the Alpaca keys were moved through a
+local receiver so neither entered a transcript or a log; the keys are stored
+as GitHub **encrypted** repo secrets (sealed box) and the daily state commits
+use the workflow's built-in `GITHUB_TOKEN` (no PAT needed at runtime).
+
+Operational manual: `market_live/PROP_SIM.md`.
