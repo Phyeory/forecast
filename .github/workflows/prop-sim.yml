@@ -1,21 +1,16 @@
 name: prop-sim
 on:
   schedule:
-    # Alpaca timestamps a daily bar at 00:00 ET of its session (04:00 UTC in
-    # EDT, 05:00 UTC in EST) and the stack treats it as closed one day later
-    # (timestamp + 24 h).  The next session opens at 13:30 UTC, so a run
-    # between 05:00 and 13:30 UTC decides AFTER the bar is closed and still
-    # BEFORE the open it must fill at -> the "fill at the next open" price is
-    # one the order could actually have caught.  05:00 UTC + a 05:30 backup.
-    - cron: "0 5 * * 1-6"
-    - cron: "30 5 * * 1-6"
+    - cron: '0 5 * * 1-6'
+    - cron: '30 5 * * 1-6'
+    - cron: '0 8 * * 1-6'
   workflow_dispatch:
 jobs:
   daily:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
-      contents: write          # commit the account state back
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -30,7 +25,9 @@ jobs:
         run: |
           git config user.name "prop-sim-bot"
           git config user.email "prop-sim-bot@users.noreply.github.com"
-          git add -A runtime || true
+          echo "runtime/snap.pkl.gz" >> .gitignore || true
+          git add -A runtime .gitignore || true
+          git reset -q runtime/snap.pkl.gz 2>/dev/null || true
           if git diff --staged --quiet; then
             echo "no state change"; exit 0
           fi
