@@ -3418,6 +3418,38 @@ async def market_status():
     return payload
 
 
+@app.get("/api/market/remote")
+async def market_remote_status():
+    """The REMOTE prop-firm sim: account, equity curve, trades, run history."""
+    from market_live import remote
+    try:
+        return remote.status()
+    except Exception as exc:  # noqa: BLE001 — dashboard must never 500
+        return {"error": f"{type(exc).__name__}: {exc}", "repo": remote.REPO}
+
+
+@app.post("/api/market/remote/start")
+async def market_remote_start():
+    """Un-pause the remote sim and trigger a run now."""
+    from market_live import remote
+    try:
+        out = remote.start()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    return out
+
+
+@app.post("/api/market/remote/stop")
+async def market_remote_stop():
+    """Pause the remote sim (no new decisions) and cancel any in-flight run."""
+    from market_live import remote
+    try:
+        out = remote.stop()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    return out
+
+
 @app.get("/api/market/candles/{symbol}")
 async def market_candles(symbol: str, limit: int = 500):
     """Tape candles for a stock symbol from market_store (read-only)."""

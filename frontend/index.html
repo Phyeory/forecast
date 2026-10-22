@@ -138,11 +138,16 @@
       <div class="page-inner">
         <div class="page-head">
           <div>
-            <h1 class="page-title">Market — FTMO 2-Step Eval</h1>
-            <p class="page-subtitle">US-equity V2 forward test · Alpaca paper PA35LD0D2 · decision-identical to backtester</p>
+            <h1 class="page-title">Market — FTMO 2-Step Remote Sim</h1>
+            <p class="page-subtitle">US-equity V2 forward test &middot; 67 stocks &middot; 1d &middot; next-open fills &middot; runs on a free remote runner</p>
           </div>
-          <div class="page-head-side" id="mk-session-box">
-            <span id="mk-session-id" class="pf-wallet-addr">—</span>
+          <div class="page-head-side" style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
+            <div style="display:flex;gap:8px;align-items:center">
+              <span id="mk-remote-badge" class="rec-card-badge">&mdash;</span>
+              <button id="mk-start-btn" class="btn btn-primary">Start sim</button>
+              <button id="mk-stop-btn" class="btn btn-danger">Stop sim</button>
+            </div>
+            <span id="mk-session-id" class="pf-wallet-addr">&mdash;</span>
             <span id="mk-commit" class="pf-wallet-bal"></span>
           </div>
         </div>
@@ -151,8 +156,8 @@
 
         <div class="panel" style="margin-top:14px">
           <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center">
-            <h3 class="panel-title">Prop Guard — FTMO 2-Step</h3>
-            <span id="mk-guard-badge" class="rec-card-badge">—</span>
+            <h3 class="panel-title">Prop Guard &mdash; FTMO 2-Step</h3>
+            <span id="mk-guard-badge" class="rec-card-badge">&mdash;</span>
           </div>
           <div style="padding:14px 16px">
             <div style="height:22px;background:rgba(255,255,255,.06);border-radius:11px;overflow:hidden;position:relative">
@@ -160,10 +165,10 @@
               <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:12px" id="mk-target-label"></div>
             </div>
             <div style="display:flex;gap:24px;margin-top:10px;font-size:12px;color:var(--text-dim,#8892a6);flex-wrap:wrap">
-              <span>Static floor <b id="mk-static-floor">—</b></span>
-              <span>Daily floor <b id="mk-daily-floor">—</b></span>
-              <span>Trading days <b id="mk-days">—</b></span>
-              <span>Phase <b id="mk-phase">—</b></span>
+              <span>Static floor <b id="mk-static-floor">&mdash;</b></span>
+              <span>Daily floor <b id="mk-daily-floor">&mdash;</b></span>
+              <span>Trading days <b id="mk-days">&mdash;</b></span>
+              <span>Phase <b id="mk-phase">&mdash;</b></span>
             </div>
           </div>
           <div class="panel-header"><h3 class="panel-title">Account Equity</h3></div>
@@ -175,7 +180,7 @@
             <div class="panel-header"><h2 class="section-title">Open Positions</h2></div>
             <div class="panel-body" style="max-height:320px;overflow:auto">
               <table class="data-table" style="width:100%">
-                <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Entry</th><th>Mkt Value</th><th>P/L</th></tr></thead>
+                <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Entry</th><th>Notional</th><th>Opened</th></tr></thead>
                 <tbody id="mk-positions-tbody">
                   <tr><td colspan="5" class="cell-empty">Flat.</td></tr>
                 </tbody>
@@ -183,15 +188,45 @@
             </div>
           </div>
           <div class="panel">
-            <div class="panel-header"><h2 class="section-title">Open Orders</h2></div>
+            <div class="panel-header"><h2 class="section-title">Pending Orders</h2></div>
             <div class="panel-body" style="max-height:320px;overflow:auto">
               <table class="data-table" style="width:100%">
-                <thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>TIF</th><th>Status</th></tr></thead>
+                <thead><tr><th>Symbol</th><th>Side</th><th>Reason</th><th>Since</th></tr></thead>
                 <tbody id="mk-orders-tbody">
-                  <tr><td colspan="5" class="cell-empty">None.</td></tr>
+                  <tr><td colspan="4" class="cell-empty">None.</td></tr>
                 </tbody>
               </table>
             </div>
+          </div>
+        </div>
+
+        <div class="panel" style="margin-top:14px">
+          <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center">
+            <h3 class="panel-title">Closed Trades</h3>
+            <span id="mk-closed-count" class="pf-wallet-bal"></span>
+          </div>
+          <div class="panel-body" style="max-height:340px;overflow:auto">
+            <table class="data-table" style="width:100%">
+              <thead><tr><th>Symbol</th><th>Entry</th><th>Exit</th><th>Qty</th><th>Entry px</th><th>Exit px</th><th>P/L</th><th>Days</th><th>Exit reason</th></tr></thead>
+              <tbody id="mk-closed-tbody">
+                <tr><td colspan="9" class="cell-empty">No closed trades yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel" style="margin-top:14px">
+          <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center">
+            <h3 class="panel-title">Remote Runs</h3>
+            <span id="mk-schedule-note" class="pf-wallet-bal"></span>
+          </div>
+          <div class="panel-body" style="max-height:240px;overflow:auto">
+            <table class="data-table" style="width:100%">
+              <thead><tr><th>#</th><th>Started (UTC)</th><th>Event</th><th>Status</th><th>Result</th></tr></thead>
+              <tbody id="mk-runs-tbody">
+                <tr><td colspan="5" class="cell-empty">No runs yet.</td></tr>
+              </tbody>
+            </table>
           </div>
         </div>
 
@@ -201,18 +236,6 @@
             <select id="mk-symbol-select" class="form-select" style="width:auto"></select>
           </div>
           <div id="mk-candle-chart" style="height:320px"></div>
-        </div>
-
-        <div class="panel" style="margin-top:14px;margin-bottom:20px">
-          <div class="panel-header"><h3 class="panel-title">Recent Orders &amp; Fills (journal)</h3></div>
-          <div class="panel-body" style="max-height:300px;overflow:auto">
-            <table class="data-table" style="width:100%">
-              <thead><tr><th>Time</th><th>Event</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Notional</th><th>Reason</th></tr></thead>
-              <tbody id="mk-journal-tbody">
-                <tr><td colspan="8" class="cell-empty">No journal rows yet.</td></tr>
-              </tbody>
-            </table>
-          </div>
         </div>
       </div>
     </div>

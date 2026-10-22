@@ -4163,102 +4163,155 @@ async function mkLoadSymbol(symbol) {
 
 async function mkRefresh() {
   let st;
-  try { st = await apiFetch("/api/market/status"); }
-  catch (e) { console.warn("[Market] status failed", e); return; }
+  try { st = await apiFetch("/api/market/remote"); }
+  catch (e) { console.warn("[Market] remote status failed", e); return; }
 
-  // session header
-  const sid = st.latest || "—";
-  document.getElementById("mk-session-id").textContent = sid;
-  document.getElementById("mk-commit").textContent = st.code_commit ? `commit ${String(st.code_commit).slice(0, 7)}` : "";
-
-  // config summary
-  const cfg = st.config || {};
-  mkState.config = cfg;
-
-  // account truth
-  const acct = st.account || null;
-  const equity = acct ? acct.equity : null;
-  const start = cfg.starting_equity || 100000;
-  const pnl = equity !== null && equity !== undefined ? equity - start : null;
+  const acct = st.account || {};
+  const equity = acct.equity !== undefined && acct.equity !== null ? Number(acct.equity) : null;
+  const cash = acct.cash !== undefined && acct.cash !== null ? Number(acct.cash) : null;
+  const start = 100000;
+  const pnl = equity !== null ? equity - start : null;
   const pnlPct = pnl !== null ? (pnl / start) * 100 : null;
+  const guard = acct.guard || {};
+  const paused = !!st.paused;
+  const running = (st.runs || []).some(r => r.status === "in_progress" || r.status === "queued");
+  const closed = st.trades_closed || [];
+  const openPos = st.trades_open || [];
 
-  // guard state (journal truth preferred)
-  const gs = st.guard_state || {};
-  const lastGuard = (st.guard_events || []).slice(-1)[0] || {};
-  const phase = gs.phase !== undefined ? gs.phase : (lastGuard.phase !== undefined ? lastGuard.phase : "—");
-  const days = gs.trading_days !== undefined ? gs.trading_days : (gs.days !== undefined ? gs.days : "—");
-  const halted = gs.halted !== undefined ? gs.halted : (lastGuard.halted !== undefined ? lastGuard.halted : false);
-  const floorStatic = gs.floor_static !== undefined ? gs.floor_static : start * 0.9;
-  const floorDaily = gs.daily_floor !== undefined ? gs.daily_floor : start * 0.95;
-  const target = ((gs.target_pct !== undefined ? gs.target_pct : 10) / 100) * start;
+  // header
+  document.getElementById("mk-session-id").textContent = st.repo || "—";
+  document.getElementById("mk-commit").textContent = st.schedule || "";
+  const badge = document.getElementById("mk-remote-badge");
+  if (st.error) { badge.textContent = "OFFLINE"; badge.style.background = "#ef5350"; }
+  else if (paused) { badge.textContent = "STOPPED"; badge.style.background = "#78909c"; }
+  else if (running) { badge.textContent = "RUNNING"; badge.style.background = "#26a69a"; }
+  else { badge.textContent = "ARMED"; badge.style.background = "#5c6bc0"; }
+  const sBtn = document.getElementById("mk-start-btn");
+  const xBtn = document.getElementById("mk-stop-btn");
+  if (sBtn) { sBtn.disabled = !!paused; sBtn.textContent = paused ? "Stopped" : "Start sim"; }
+  if (xBtn) { xBtn.disabled = !paused; }
 
   // stats grid
   const cards = [
-    { label: "Equity", value: equity !== null && equity !== undefined ? "$" + mkNumber(equity) : "—" },
+    { label: "Balance (cash)", value: cash !== null ? "$" + mkNumber(cash) : "—" },
+    { label: "Equity", value: equity !== null ? "$" + mkNumber(equity) : "—" },
     { label: "P/L since start", value: pnl !== null ? (pnl >= 0 ? "+$" : "-$") + mkNumber(Math.abs(pnl)) + " (" + mkPct(pnlPct) + ")" : "—", cls: pnl > 0 ? "up" : pnl < 0 ? "down" : "" },
-    { label: "Positions", value: (st.positions || []).length },
-    { label: "Open orders", value: (st.open_orders || []).length },
-    { label: "Bars processed", value: (st.decisions || []).length },
-    { label: "Session journal fills", value: (st.orders || []).filter(o => o.event && o.event.includes("fill")).length },
+    { label: "Open positions", value: openPos.length },
+    { label: "Closed trades", value: closed.length },
+    { label: "Realized P/L", value: acct.realized !== undefined ? (Number(acct.realized) >= 0 ? "+$" : "-$") + mkNumber(Math.abs(Number(acct.realized))) : "—", cls: Number(acct.realized) > 0 ? "up" : Number(acct.realized) < 0 ? "down" : "" },
   ];
   const grid = document.getElementById("mk-stats-grid");
-  grid.innerHTML = cards.map(c => `<div class="bt-stat"><span class="bt-stat-label">${c.label}</span><span class="bt-stat-value ${c.cls || ""}">${c.value}</span></div>`).join("");
+  if (grid) grid.innerHTML = cards.map(c => `<div class="bt-stat"><span class="bt-stat-label">${c.label}</span><span class="bt-stat-value ${c.cls || ""}">${c.value}</span></div>`).join("");
 
   // guard panel
+  const phase = guard.phase !== undefined ? guard.phase : "—";
+  const days = guard.trading_days !== undefined ? guard.trading_days : (guard.days !== undefined ? guard.days : "—");
+  const halted = !!guard.halted;
+  const floorStatic = guard.floor !== undefined ? Number(guard.floor) : start * 0.9;
+  const floorDaily = guard.daily_floor !== undefined ? Number(guard.daily_floor) : start * 0.95;
+  const target = ((guard.target_pct !== undefined ? Number(guard.target_pct) : 10) / 100) * start;
   const prog = pnl !== null ? Math.max(0, Math.min(100, (pnl / target) * 100)) : 0;
-  document.getElementById("mk-target-bar").style.width = prog.toFixed(1) + "%";
-  document.getElementById("mk-target-label").textContent = `Phase-1 progress: ${pnlPct !== null ? mkPct(pnlPct) : "—"} of +10% target`;
-  document.getElementById("mk-static-floor").textContent = "$" + mkNumber(floorStatic);
-  document.getElementById("mk-daily-floor").textContent = "$" + mkNumber(floorDaily);
-  document.getElementById("mk-days").textContent = days;
-  document.getElementById("mk-phase").textContent = phase;
-  const badge = document.getElementById("mk-guard-badge");
-  if (halted) { badge.textContent = "HALTED"; badge.style.background = "#ef5350"; }
-  else { const done = phase === "passed"; badge.textContent = done ? "PASSED ✓" : "EVALUATING"; badge.style.background = done ? "#26a69a" : "#5c6bc0"; }
+  const bar = document.getElementById("mk-target-bar");
+  if (bar) bar.style.width = prog.toFixed(1) + "%";
+  const tl = document.getElementById("mk-target-label");
+  if (tl) tl.textContent = `Phase-1 progress: ${pnlPct !== null ? mkPct(pnlPct) : "—"} of +10% target`;
+  const f1 = document.getElementById("mk-static-floor"); if (f1) f1.textContent = "$" + mkNumber(floorStatic);
+  const f2 = document.getElementById("mk-daily-floor"); if (f2) f2.textContent = "$" + mkNumber(floorDaily);
+  const fd = document.getElementById("mk-days"); if (fd) fd.textContent = days;
+  const fp = document.getElementById("mk-phase"); if (fp) fp.textContent = phase;
+  const gb = document.getElementById("mk-guard-badge");
+  if (gb) {
+    if (halted) { gb.textContent = "HALTED"; gb.style.background = "#ef5350"; }
+    else if (phase === "passed") { gb.textContent = "PASSED ✓"; gb.style.background = "#26a69a"; }
+    else { gb.textContent = "EVALUATING"; gb.style.background = "#5c6bc0"; }
+  }
 
-  // equity chart (journal equity rows preferred; fallback: account equity spill)
+  // equity chart
   mkEnsureEqChart();
   if (mkEqChart) mkEqChart.applyOptions({ width: document.getElementById("mk-eq-chart").clientWidth });
-  const eqRows = (st.equity || []).map(r => ({ time: r.t || r.time || r.ts, value: r.equity !== undefined ? r.equity : r.value })).filter(r => r.time && r.value !== undefined);
-  if (eqRows.length) mkEqSeries.setData(eqRows);
+  const eqRows = (st.equity || []).map(r => ({ time: Math.floor(Number(r[0])), value: Number(r[1]) }))
+    .filter(r => isFinite(r.time) && isFinite(r.value));
+  if (mkEqSeries) {
+    if (eqRows.length) mkEqSeries.setData(eqRows);
+    else mkEqSeries.setData([{ time: Math.floor(Date.now() / 1000), value: equity !== null ? equity : start }]);
+  }
 
-  // positions table
+  // open positions
   const pbody = document.getElementById("mk-positions-tbody");
-  const pos = (st.positions || []);
-  pbody.innerHTML = pos.length ? pos.map(p => `<tr>
-      <td><b>${p.symbol}</b></td><td>${mkNumber(p.qty, 0)}</td>
-      <td>$${mkNumber(p.avg_entry)}</td><td>$${mkNumber(p.market_value)}</td>
-      <td class="${p.unrealized_pl >= 0 ? 'up' : 'down'}">${p.unrealized_pl >= 0 ? "+" : "-"}$${mkNumber(Math.abs(p.unrealized_pl))} (${mkPct(p.unrealized_plpc * 100)})</td>
-    </tr>`).join("") : `<tr><td colspan="5" class="cell-empty">Flat.</td></tr>`;
+  if (pbody) {
+    const pos = acct.positions || [];
+    pbody.innerHTML = pos.length ? pos.map(p => {
+      const op = openPos.find(o => o.symbol === p.symbol);
+      return `<tr>
+        <td><b>${p.symbol}</b></td><td>${mkNumber(p.qty, 0)}</td>
+        <td>$${mkNumber(p.avg_price)}</td><td>$${mkNumber(p.notional)}</td>
+        <td>${op && op.entry_time ? new Date(op.entry_time * 1000).toLocaleDateString() : "—"}</td>
+      </tr>`;
+    }).join("") : `<tr><td colspan="5" class="cell-empty">Flat.</td></tr>`;
+  }
 
-  // open orders table
+  // pending orders (in-flight intents from the resume state)
+  const pend = (st.state && st.state.pending) || {};
   const obody = document.getElementById("mk-orders-tbody");
-  const oo = (st.open_orders || []);
-  obody.innerHTML = oo.length ? oo.map(o => `<tr>
-      <td><b>${o.symbol}</b></td><td class="${o.side === 'buy' ? 'up' : 'down'}">${o.side}</td>
-      <td>${o.qty}</td><td>${o.tif}</td><td>${o.status}</td></tr>`).join("")
-    : `<tr><td colspan="5" class="cell-empty">None.</td></tr>`;
+  if (obody) {
+    const rows = Object.entries(pend);
+    obody.innerHTML = rows.length ? rows.map(([sym, p]) => `<tr>
+        <td><b>${sym}</b></td><td class="${Number(p.desired) ? "up" : "down"}">${Number(p.desired) ? "buy" : "sell"}</td>
+        <td>${p.reason || "—"}</td><td>—</td></tr>`).join("")
+      : `<tr><td colspan="4" class="cell-empty">None.</td></tr>`;
+  }
 
-  // journal table (orders + decisions merged, newest first)
-  const jrows = (st.orders || []).slice(-80).reverse();
-  const jbody = document.getElementById("mk-journal-tbody");
-  jbody.innerHTML = jrows.length ? jrows.map(o => `<tr>
-      <td>${o.time ? new Date(o.time * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : "—"}</td>
-      <td>${o.event || o.kind || "order"}</td><td><b>${o.symbol || "—"}</b></td>
-      <td class="${o.side === 'buy' ? 'up' : 'down'}">${o.side || "—"}</td>
-      <td>${o.qty !== undefined ? mkNumber(o.qty, 0) : "—"}</td>
-      <td>${o.price !== undefined ? "$" + mkNumber(o.price) : "—"}</td>
-      <td>${o.notional !== undefined ? "$" + mkNumber(o.notional) : "—"}</td>
-      <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${o.reason || ""}</td>
-    </tr>`).join("") : `<tr><td colspan="8" class="cell-empty">No journal rows yet.</td></tr>`;
+  // closed trades
+  const cbody = document.getElementById("mk-closed-tbody");
+  const cc = document.getElementById("mk-closed-count");
+  if (cc) cc.textContent = closed.length ? `${closed.length} closed` : "";
+  if (cbody) {
+    cbody.innerHTML = closed.length ? closed.slice().reverse().map(t => `<tr>
+        <td><b>${t.symbol || "—"}</b></td>
+        <td>${t.entry_time ? new Date(t.entry_time * 1000).toLocaleDateString() : "—"}</td>
+        <td>${t.exit_time ? new Date(t.exit_time * 1000).toLocaleDateString() : "—"}</td>
+        <td>${mkNumber(t.qty, 0)}</td>
+        <td>$${mkNumber(t.entry_price)}</td><td>$${mkNumber(t.exit_price)}</td>
+        <td class="${Number(t.pnl) >= 0 ? "up" : "down"}">${Number(t.pnl) >= 0 ? "+" : "-"}$${mkNumber(Math.abs(Number(t.pnl)))} (${mkPct(t.pnl_pct)})</td>
+        <td>${t.days !== null && t.days !== undefined ? mkNumber(t.days, 1) : "—"}</td>
+        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.exit_reason || ""}</td>
+      </tr>`).join("") : `<tr><td colspan="9" class="cell-empty">No closed trades yet.</td></tr>`;
+  }
+
+  // run history
+  const rbody = document.getElementById("mk-runs-tbody");
+  if (rbody) {
+    const runs = st.runs || [];
+    rbody.innerHTML = runs.length ? runs.map(r => `<tr>
+        <td>#${r.run_number !== undefined ? r.run_number : r.id}</td>
+        <td>${r.created_at ? new Date(r.created_at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—"}</td>
+        <td>${r.event || "—"}</td>
+        <td>${r.status || "—"}</td>
+        <td class="${r.conclusion === "success" ? "up" : r.conclusion === "failure" ? "down" : ""}">${r.conclusion || "—"}</td>
+      </tr>`).join("") : `<tr><td colspan="5" class="cell-empty">No runs yet.</td></tr>`;
+  }
 
   // symbol dropdown (once)
   const sel = document.getElementById("mk-symbol-select");
-  if (cfg.symbols && cfg.symbols.length && !sel.options.length) {
-    sel.innerHTML = cfg.symbols.map(s => `<option>${s}</option>`).join("");
-    mkLoadSymbol(cfg.symbols[0]);
+  const symbols = ["AAPL", "MSFT", "NVDA", "TSLA", "AMD", "COST", "META", "SPY"];
+  if (sel && !sel.options.length) {
+    sel.innerHTML = symbols.map(s => `<option>${s}</option>`).join("");
+    mkLoadSymbol(symbols[0]);
   }
-  sel.onchange = () => mkLoadSymbol(sel.value);
+  if (sel) sel.onchange = () => mkLoadSymbol(sel.value);
+}
+
+async function mkRemoteAction(path, label) {
+  const btn = document.getElementById(path.endsWith("start") ? "mk-start-btn" : "mk-stop-btn");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await apiFetch(path, { method: "POST" });
+    console.log(`[Market] ${label}`, r);
+  } catch (e) {
+    console.warn(`[Market] ${label} failed`, e);
+  }
+  await mkRefresh();
+  if (btn) btn.disabled = false;
 }
 
 (async function mkInit() {
@@ -4274,4 +4327,10 @@ async function mkRefresh() {
       if (document.getElementById("page-market").classList.contains("active")) mkRefresh();
     }, 15000);
   });
+
+  // remote sim control: start / stop
+  const sBtn = document.getElementById("mk-start-btn");
+  const xBtn = document.getElementById("mk-stop-btn");
+  if (sBtn) sBtn.addEventListener("click", () => mkRemoteAction("/api/market/remote/start", "start"));
+  if (xBtn) xBtn.addEventListener("click", () => mkRemoteAction("/api/market/remote/stop", "stop"));
 })();

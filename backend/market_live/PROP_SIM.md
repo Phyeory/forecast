@@ -5,19 +5,35 @@ params, k=0.75) driven through the **live stack** (`market_live/`) with a paper
 broker and the `ftmo_2step` PropGuard, so the firm's rules are enforced on
 every bar: 5 % daily loss, static 10 % max loss, no time limit, 50 %
 consistency.  Orders fill at the **next bar's open** (the achievable basis the
-M12 rerun proved is the honest one).  Two hosts run it, independently, as a
-replication pair:
+M12 rerun proved is the honest one).  It runs on one host with one boss:
 
 | host | cadence | state | role |
 |---|---|---|---|
-| **Mac** (`com.jaime.prop-sim` launchd, under `caffeinate`) | resident, polls every 60 s → processes each close within ~1 min | `backend/data/live_market/prop_sim/` | fast feedback + the dashboard |
-| **GitHub Actions** (`Phyeory/prop-sim`, private) | cron 22:15 + 22:45 UTC (= 23:15 / 23:45 BST), after the US close in EDT *and* EST | `runtime/` committed to the private repo | 24/7 coverage when the Mac is off |
+| **GitHub Actions** (`Phyeory/prop-sim`, private) | cron 05:00 / 05:30 / 08:00 UTC (+ dashboard Start) | `runtime/` committed to the private repo | the only host — 24/7, free, no card |
+| **Dashboard** (`localhost:8000` → Market tab) | on demand | reads/writes the repo via the API | performance · trades · balance · **Start/Stop** |
 
-Both accounts start **flat** (`warm_sync=false`: the engine's inherited
-positions are adopted as desired state but never traded — only fresh signals
-open positions) and both use the **frozen arm14 params** (the same engine the
-backtest and the prop MC ran on).  Their equity curves must match — that
-equality is the replication check on the whole stack.
+The Mac resident host was **retired 2026-10-22** (launchd jobs removed) — the
+dashboard no longer mirrors a local account, it *controls the remote one*.
+One account, one truth: `runtime/account.json` in the repo.
+
+## Dashboard control (the daily interface)
+
+`./start.sh` → open `http://localhost:8000` → **Market** tab.  It talks to the
+repo through `market_live/remote.py` (GitHub token from the Keychain via
+`git credential fill` — stored nowhere in files):
+
+- **Perf** — equity curve (`runtime/equity.json`), P/L vs the $100k start,
+  realized P/L, prop-guard phase progress bar.
+- **Trades** — open positions + pending fills from `state.json`,
+  closed round trips (entry/exit/px/pnl/days/exit reason) from
+  `runtime/trades.json`.
+- **Balance** — cash + equity from `runtime/account.json`.
+- **Start sim** — removes `runtime/paused` and dispatches a run now.
+- **Stop sim** — commits `runtime/paused` (the runner then makes no new
+  decisions, reports only) and cancels any in-flight run.
+
+The runner (`deploy/run_daily.sh`) publishes the snapshot after every run via
+`market_live/remote_report.py`.
 
 ## Restart safety (the part that made a remote host possible)
 
@@ -40,32 +56,24 @@ the crash-time decision was silently swallowed.  Now:
   crash and (b) exits of positions we own are re-armed — the flat-start
   semantics survive a restart.
 
-## Daily checks
+## Checks (remote-only now)
 
 ```bash
-cd /Users/jaime/pump-chart-market/backend
-tail -3 data/live_market/prop_sim_poller.out.log      # the Mac's last polls
-tail -2 data/live_market/prop_sim_monitor.log          # 30-min anomaly monitor
-cat data/live_market/prop_sim/state.json | head -20   # book + cursor
-```
-
-The monitor appends one line per 30 min and raises a macOS notification on:
-poller gone · guard halted · equity at/below the firm floors · stale
-heartbeat.
-
-```bash
-# the remote runner
 open https://github.com/Phyeory/prop-sim/actions        # run history
+tail -40 /tmp/mk_dash.log                               # dashboard log
+curl -s localhost:8000/api/market/remote | python3 -m json.tool | head -30
 ```
+
+An Equity/Balance/Lockstep anomaly now means one thing: the remote runner —
+check the Actions page for a failed run.  The old Mac poller/monitor logs and
+`restart_prop_sim.sh` are retired (the launchd jobs no longer exist).
 
 ## Restarting
 
-```bash
-./market_live/restart_prop_sim.sh     # reinstall + load poller and monitor
-```
-
-A restart resumes exactly where it stopped (no lost decisions, no account
-reset) — the snapshot makes it fast.
+Nothing to restart on a host — the runner is stateless per run and the state
+lives in the repo.  To restart the *sim* use the dashboard **Stop → Start**.
+A stop pauses decisions without closing positions; the account resumes from
+`state.json` exactly where it stopped (no lost decisions, no account reset).
 
 ## The free-host question (verified 2026-10-22)
 
