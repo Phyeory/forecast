@@ -68,3 +68,5 @@ notes
 
 audit_report/
 degen/
+# Alpaca credentials — real secrets; never commit (leaked once on public forecast, rotate)
+keys.env
