@@ -27,9 +27,11 @@ current market price (flagged `synthetic`).  From then on decisions match.
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from market_backtest.market_calibration import calibrate_market_params
@@ -68,6 +70,16 @@ class LiveConfig:
     #         signals from now on.  Exits of inherited (never-bought) names
     #         are no-ops: the broker delta is zero, so nothing is submitted.
     warm_sync: bool = True
+    # Stable paths for restart-safe continuity.  Without them the account
+    # lives in memory + per-session journal dirs, so ANY restart resets the
+    # guard phase and the book (a prop sim would silently restart at $100k).
+    # state_path : JSON with {book, last_ts, desired} — the resume state.
+    # guard_path : JSON with the PropGuard phase/equity/floors.
+    state_path: Optional[str] = None
+    guard_path: Optional[str] = None
+    # Engine-state snapshot (pickled + gzipped).  Restoring it skips the
+    # multi-minute warm and is decision-identical to a fresh warm.
+    snapshot_path: Optional[str] = None
 
     def as_dict(self) -> dict:
         return {k: (list(v) if isinstance(v, tuple) else v)
@@ -123,6 +135,60 @@ class MarketLiveTrader:
         self.desired[sym] = host.desired_position
         return host
 
+    # ── restart-safe state (resume) ─────────────────────────────────────
+    def _state_file(self) -> Optional[Path]:
+        return Path(self.cfg.state_path) if self.cfg.state_path else None
+
+    def _load_state(self) -> Optional[dict]:
+        p = self._state_file()
+        if not p or not p.exists():
+            return None
+        try:
+            data = json.loads(p.read_text())
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"state file unreadable ({exc}) — starting fresh")
+            return None
+        if not isinstance(data, dict):
+            return None
+        return data
+
+    def _save_state(self) -> None:
+        """Persist the book + decision cursor atomically (restart safety)."""
+        p = self._state_file()
+        if not p:
+            return
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "saved_at": time.time(),
+                "book": self.broker.state(),
+                "last_ts": {k: int(v) for k, v in self.last_ts.items()},
+                "desired": {k: int(v) for k, v in self.desired.items()},
+                "pending": {k: {kk: vv for kk, vv in v.items()
+                                if kk in ("desired", "reason")}
+                            for k, v in self.pending.items()},
+            }
+            tmp = p.with_suffix(p.suffix + ".tmp")
+            tmp.write_text(json.dumps(payload, indent=1, default=str))
+            tmp.replace(p)                      # atomic swap
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"state save failed: {type(exc).__name__}: {exc}")
+
+    def _restore_book(self, book: Optional[dict]) -> None:
+        """Rehydrate the paper broker from a saved state file."""
+        if not book:
+            return
+        b = self.broker
+        if hasattr(b, "cash"):
+            b.cash = float(book.get("cash", b.cash))
+        if hasattr(b, "realized"):
+            b.realized = float(book.get("realized", b.realized))
+        if hasattr(b, "fees"):
+            b.fees = float(book.get("fees", b.fees))
+        pos = book.get("positions") or {}
+        if hasattr(b, "positions") and isinstance(pos, dict):
+            b.positions = {k: dict(v) for k, v in pos.items()}
+
     def prepare(self) -> dict:
         if self.journal:
             self.journal.open_session(self.cfg.as_dict())
@@ -132,27 +198,83 @@ class MarketLiveTrader:
             self._log(f"no frozen params in {self.cfg.results_dir} — rolling "
                       f"calibration per symbol")
 
+        # ── resume: restore the book + decision cursor, warm the engine only
+        #    through the last processed bar so the NEW bar is decided live
+        state = self._load_state()
+        resume_ts = (state or {}).get("last_ts") or {}
+        if state:
+            self._restore_book((state or {}).get("book"))
+            for sym, d in ((state or {}).get("desired") or {}).items():
+                self.desired[sym] = int(d)
+            self._log(f"resumed from {self.cfg.state_path}: "
+                      f"{len(resume_ts)} symbols, equity "
+                      f"{self.broker.equity(self.prices):,.2f}")
+
         prepared = {}
+        # ── snapshot restore: skips the warm entirely when the engine code
+        #    and the frozen params are unchanged (decision-identical)
+        snap_restored: set[str] = set()
+        if self.cfg.snapshot_path:
+            from market_live.snapshot import load_snapshot
+            snap_restored = load_snapshot(self, self.cfg.snapshot_path)
+            if snap_restored:
+                self._log(f"snapshot restored {len(snap_restored)} symbols "
+                          f"(warm skipped)")
         for sym in self.cfg.symbols:
+            if sym in snap_restored:
+                prepared[sym] = {"bars": 0,
+                                 "desired": self.desired.get(sym, 0),
+                                 "last_ts": self.last_ts.get(sym, 0),
+                                 "restored": True}
+                continue
             history = self.feed.history(sym)
             if not history:
                 self._log(f"{sym}: no history — skipped")
                 continue
-            if self.cfg.warmup_bars:
+            if sym in resume_ts:
+                t_last = int(resume_ts[sym])
+                history = [b for b in history if int(b["time"]) <= t_last]
+                if not history:
+                    history = []
+            if self.cfg.warmup_bars and history:
                 history = history[-self.cfg.warmup_bars:]
-            host = self._build_host(sym, history)
-            prepared[sym] = {"bars": len(history),
-                             "desired": host.desired_position,
-                             "last_ts": int(history[-1]["time"])}
-            self._log(f"{sym}: {len(history)} bars, warm position "
-                      f"{host.desired_position}, frozen params={bool(self._frozen)}")
+            if history:
+                host = self._build_host(sym, history)
+                prepared[sym] = {"bars": len(history),
+                                 "desired": host.desired_position,
+                                 "last_ts": int(history[-1]["time"])}
+                self._log(f"{sym}: {len(history)} bars, warm position "
+                          f"{host.desired_position}, frozen params="
+                          f"{bool(self._frozen)}")
+            else:
+                self._log(f"{sym}: no warm history (fresh start)")
 
+        # ── reconcile in-flight intent.  Flat start (warm_sync=False) means
+        #    an inherited engine position is deliberately NOT traded: only
+        #    (a) orders that were in flight at the crash and (b) exits of
+        #    positions WE own may be re-armed.
+        if state:
+            saved_pending = (state or {}).get("pending") or {}
+            for sym, p in saved_pending.items():
+                if sym in self.hosts:
+                    self.pending[sym] = {"desired": int(p.get("desired", 0)),
+                                         "reason": p.get("reason", "resume")}
+                    self._log(f"{sym}: resume — re-arming the in-flight "
+                              f"{'entry' if p.get('desired') else 'exit'}")
+            for sym in list(self.hosts):
+                held = self.broker.position_qty(self._bsym(sym)) > 0
+                d = int(self.desired.get(sym, 0))
+                if held and not d and sym not in self.pending:
+                    self.pending[sym] = {"desired": 0,
+                                         "reason": "resume_exit"}
+                    self._log(f"{sym}: resume — re-arming the exit order")
         if self.cfg.firm:
             self.guard = PropGuard(self.cfg.firm,
                                    account_size=self.cfg.starting_equity,
                                    log=self._log)
-            self._guard_path = (self.journal.dir / "guard_state.json"
-                                if self.journal else None)
+            self._guard_path = (Path(self.cfg.guard_path) if self.cfg.guard_path
+                                else (self.journal.dir / "guard_state.json"
+                                      if self.journal else None))
             if self._guard_path and self.guard.load(self._guard_path):
                 self._log(f"guard state restored (phase {self.guard.s.phase}, "
                           f"equity {self.guard.s.equity:,.2f})")
@@ -423,6 +545,11 @@ class MarketLiveTrader:
                                     "equity": self._equity(),
                                     "broker": self.broker.state(),
                                     "guard": self.guard.status() if self.guard else None})
+        # persist the cursor + book so a restart resumes instead of resetting
+        self._save_state()
+        if self.cfg.snapshot_path:
+            from market_live.snapshot import save_snapshot
+            save_snapshot(self, self.cfg.snapshot_path)
         return out
 
     def flatten_and_stop(self, reason: str = "operator") -> None:

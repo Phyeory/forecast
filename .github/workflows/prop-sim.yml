@@ -1,0 +1,33 @@
+name: prop-sim
+on:
+  schedule:
+    # 22:15 UTC — after the US close in both EDT (20:00 UTC) and EST (21:00 UTC)
+    - cron: "15 22 * * 1-6"
+    - cron: "45 22 * * 1-6"     # backup run (idempotent)
+  workflow_dispatch:
+jobs:
+  daily:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write          # commit the account state back
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Daily prop-sim step
+        env:
+          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+        run: bash deploy/run_daily.sh
+      - name: Commit account state
+        run: |
+          git config user.name "prop-sim-bot"
+          git config user.email "prop-sim-bot@users.noreply.github.com"
+          git add -A runtime || true
+          if git diff --staged --quiet; then
+            echo "no state change"; exit 0
+          fi
+          git commit -m "state: $(date -u +%FT%TZ)" || exit 0
+          git push
