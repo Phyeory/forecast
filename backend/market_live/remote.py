@@ -43,7 +43,11 @@ def _token() -> Optional[str]:
         out = subprocess.run(["git", "credential", "fill"], input="protocol=https\nhost=github.com\n\n",
                              capture_output=True, text=True, timeout=10).stdout
         for line in out.splitlines():
-            if line.startswith("password="):
+            if line.startswith("password=") and line.split("=", 1)[1].strip():
+                return line.split("=", 1)[1].strip()
+        # Some credential helpers (osxkeychain) put the token in username
+        for line in out.splitlines():
+            if line.startswith("username=") and line.split("=", 1)[1].strip().startswith("ghp_"):
                 return line.split("=", 1)[1].strip()
     except Exception:  # noqa: BLE001
         pass
