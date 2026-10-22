@@ -112,13 +112,55 @@ def yahoo_bars(ticker: str, interval: str = "1d",
     return [dedup[t] for t in sorted(dedup)]
 
 
+_CLOCK_CACHE: dict = {"ts": 0.0, "data": None}
+
+
+def market_clock() -> dict:
+    """Alpaca market clock (cached 60 s): {'is_open': bool, ...}.
+
+    Used by the paper path to mirror the live broker's rule: an order
+    created while the market is OPEN has missed the next open (it would be
+    a day order at the current price, not an opg fill), so the sim must not
+    book the open it could not have caught.
+    """
+    now = time.time()
+    if _CLOCK_CACHE["data"] is not None and now - _CLOCK_CACHE["ts"] < 60.0:
+        return _CLOCK_CACHE["data"]
+    key = os.environ.get("APCA_API_KEY_ID", "")
+    secret = os.environ.get("APCA_API_SECRET_KEY", "")
+    if not key or not secret:
+        return {"is_open": False, "next_open": None, "source": "no-keys"}
+    try:
+        req = urllib.request.Request(
+            "https://paper-api.alpaca.markets/v2/clock",
+            headers={"APCA-API-KEY-ID": key,
+                     "APCA-API-SECRET-KEY": secret})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception:  # noqa: BLE001 — clock is advisory, never fatal
+        return {"is_open": False, "next_open": None, "source": "error"}
+    data["source"] = "alpaca"
+    _CLOCK_CACHE["ts"] = now
+    _CLOCK_CACHE["data"] = data
+    return data
+
+
+def market_is_open() -> bool:
+    try:
+        return bool((market_clock() or {}).get("is_open"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def bar_is_closed(bar_time: int, interval: str, now: Optional[float] = None) -> bool:
     """True when a bar's interval has fully elapsed (with a grace period)."""
     now = now or time.time()
     if interval == "1d":
-        # daily bars are timestamped at 00:00 UTC of the session date; a US
-        # session closes 16:00 ET = 20:00/21:00 UTC.  Closed once the UTC day
-        # is over.
+        # Alpaca timestamps a daily bar at 00:00 ET of its session date
+        # (04:00 UTC in EDT, 05:00 UTC in EST); the session itself ends at
+        # 16:00 ET = 20:00/21:00 UTC.  The stack treats the bar as closed
+        # once a full day has elapsed from the timestamp — conservative by a
+        # few hours, which never moves the decision past the next open.
         end = bar_time + 86400
         return now >= end
     secs = {"1h": 3600, "30m": 1800, "15m": 900, "5m": 300}.get(interval, 3600)

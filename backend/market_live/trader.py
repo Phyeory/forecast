@@ -38,7 +38,7 @@ from market_backtest.market_calibration import calibrate_market_params
 from market_backtest.runner import COSTS
 
 from market_live.brokers import Broker, BrokerFill, build_broker
-from market_live.feeds import TapeFeed, bar_is_closed
+from market_live.feeds import TapeFeed, bar_is_closed, market_is_open
 from market_live.host import MarketEngineHost, params_map
 from market_live.journal import SessionJournal
 from market_live.prop_guard import PropGuard
@@ -373,6 +373,15 @@ class MarketLiveTrader:
         if pend is not None:
             px_open = float(candle["open"])
             self.prices[sym] = px_open
+            # ── late-fill rule (mirrors the live Alpaca broker): if the order
+            #    was created while the market was OPEN, the targeted open had
+            #    already passed → the achievable fill is the current price,
+            #    not an open we could not catch.
+            if pend.get("late"):
+                px_fill = float(candle["close"])
+                pend["reason"] = f"{pend.get('reason', '')} [late_fill]".strip()
+            else:
+                px_fill = px_open
             target = pend.get("target_qty")
             if target is None:
                 target = self._buy_qty(px_open) if pend["desired"] else 0.0
@@ -412,7 +421,7 @@ class MarketLiveTrader:
                     # keep deferring — the intent is already at the broker
                     self.pending[sym] = pend
             if not done and not pend.get("submitted"):
-                f = self.broker.target_position(self._bsym(sym), target, px_open,
+                f = self.broker.target_position(self._bsym(sym), target, px_fill,
                                                 reason=pend.get("reason", "next_open"))
                 if f:
                     deferred_fills.append(f)
@@ -454,9 +463,12 @@ class MarketLiveTrader:
                         self.journal.order({**f.to_dict(), "event": "close_fill"})
                 self.desired[sym] = new
             else:
-                # defer to the next bar's open
+                # defer to the next bar's open — unless the market is open
+                # right now, in which case that open has already passed and
+                # the achievable fill is the current price (late_fill).
                 pend = {"desired": new, "reason": f"signal_{t}",
-                        "signal_close": float(candle["close"])}
+                        "signal_close": float(candle["close"]),
+                        "late": market_is_open()}
                 tgt = self._buy_qty(float(candle["close"])) if new else 0.0
                 if getattr(self.broker, "submits_immediately", False):
                     # queueing broker: submit NOW — an opg order sent after the
