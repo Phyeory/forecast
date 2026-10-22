@@ -312,6 +312,8 @@ DEFAULT_CONFIG = {
     # train vs +1.64 holdout imbalance).  1.0 = per-coin fires only when the
     # mint-history layer actually supplied the session's coefficients.
     "v2_percoin_requires_mintcal": 1.0,
+    "v2_calib_launch_abs":        0.0,  # 1 = launch calibration stays absolute even when ratio mode is on (see above)
+    "v2_percoin_popcal_refine":   0.0,  # iter100: 1 = population-sourced coefficients are refineable by the online per-coin layer (sentinel; default OFF = shipped byte-exact behaviour)
     "v2_percoin_cal_min_candles": 120,  # tape length before first recalibration
     "v2_percoin_cal_every":       100,  # legacy count diagnostic; scheduling uses seconds
     "v2_percoin_cal_interval_seconds": 100.0,  # elapsed candle-clock time between attempts
@@ -368,6 +370,28 @@ DEFAULT_CONFIG = {
     # concentrates the edge and is what makes it significant.
     "v2_tau_vr_enable":           1.0,  # ADOPTED 2026-09-19 (iter90e): full-DB Δ+3.935 SOL p=0.00014 CI+ breadth 60% (565 changed, 61% improved), holdout Δ+0.462 p=0.017 CI+ 82% improved, both eras positive, day-blocked permutation p=0.0005
     "v2_tau_vr_scale":            1.0, # tau_max = scale × H* (ADOPTED cell; screened 0.25/0.5/1.0/2.0 + static reference)
+    # ── iter100: the tuner's CALIBRATION MODE + SENSITIVITY (default OFF) ──
+    # The absolute estimator path maps each session's raw statistic through a
+    # fixed formula into a coefficient, and the population medians land on the
+    # clip bounds for 6 of 13 SDE keys ⇒ every session gets the SAME pinned
+    # vector (8 of 13 keys carry no information; see the iter100 tuner audit).
+    # The centred ("ratio") mode expresses every coefficient as
+    #     DEFAULT_k × clip(own_stat_k / frozen_ref_stat_k, lo, hi)
+    # so a session AT the reference population gets exactly the DEFAULT and a
+    # session 1.3× more volatile gets 1.3× the default diffusion — the
+    # direction and the magnitude of the deviation survive instead of the
+    # bound.  The same pivot serves the population (regime), mint-history
+    # (per-coin) and online per-coin (the session's own tape) layers.
+    "v2_calib_ratio_enable":      0.0,  # 0 = absolute (legacy) mapping; 1 = centred ratio mapping
+    "v2_calib_ratio_lo":          0.5,  # sensitivity band: lower ratio clip
+    "v2_calib_ratio_hi":          2.0,  # sensitivity band: upper ratio clip
+    "v2_calib_ratio_scale":       1.0,  # global dial: 1.0 anchors the reference population on DEFAULT; <1 tightens toward the shipped bound-pinned end (more trades), >1 explores deeper-sigma selectivity
+    "v2_geom_legacy_basis":       0.0,  # 1 = harvest run-up measured from the n+1 fill (next candle's open)
+    # LAUNCH/ONLINE DECOUPLING (iter100): 1 = the LAUNCH calibration keeps the
+    # shipped absolute (bound-pinned) mapping — the vector holding the PnL
+    # ridge — while the ONLINE per-coin layer still estimates with the centred
+    # ratio mapping + dial.  The launch is the prior; the per-coin layer adapts
+    # it per-coin.  0 = both layers share the ratio mode (default).
 
     # ── ADOPTED 2026-09-12 (user directive): population SDE calibration ──
     # At session start, all 13 free SDE coefficients are estimated from the
@@ -3068,6 +3092,25 @@ class StrategyEngineV2Adapter:
         self._v2_tau_vr_scale = float(
             engine_kwargs.get("v2_tau_vr_scale",
                               DEFAULT_CONFIG["v2_tau_vr_scale"]))
+        # ── iter100: the tuner's calibration mode + sensitivity ────────────
+        # (read here so the ONLINE per-coin layer can use the same mapping
+        #  as the launch calibration — the two must agree, or the session
+        #  would be re-tuned off its own launch basis mid-flight.)
+        self._v2_calib_ratio_enable = float(
+            engine_kwargs.get("v2_calib_ratio_enable",
+                              DEFAULT_CONFIG["v2_calib_ratio_enable"])) > 0.0
+        self._v2_calib_ratio_lo = float(
+            engine_kwargs.get("v2_calib_ratio_lo",
+                              DEFAULT_CONFIG["v2_calib_ratio_lo"]))
+        self._v2_calib_ratio_hi = float(
+            engine_kwargs.get("v2_calib_ratio_hi",
+                              DEFAULT_CONFIG["v2_calib_ratio_hi"]))
+        self._v2_calib_ratio_scale = float(
+            engine_kwargs.get("v2_calib_ratio_scale",
+                              DEFAULT_CONFIG["v2_calib_ratio_scale"]))
+        self._v2_geom_legacy_basis = float(
+            engine_kwargs.get("v2_geom_legacy_basis",
+                              DEFAULT_CONFIG["v2_geom_legacy_basis"])) > 0.0
 
         # ── V1 config knobs the capture enumerates (cfg_*) ──
         # We echo them onto `eng` so the ForwardTester's _capture_entry_params
@@ -3408,9 +3451,17 @@ class StrategyEngineV2Adapter:
         if self._v2_percoin_enable and n >= max(20, self._v2_percoin_min_candles):
             arrays = [np.array([row[key] for row in rows], dtype=float)
                       for key in ("c", "v", "bv", "sv", "pool")]
-            raw = estimate_from_session_arrays(*arrays, duration_s,
-                                               tau_vr=self._v2_tau_vr_enable,
-                                               tau_scale=self._v2_tau_vr_scale)
+            raw = estimate_from_session_arrays(
+                *arrays, duration_s,
+                tau_vr=self._v2_tau_vr_enable,
+                tau_scale=self._v2_tau_vr_scale,
+                # iter100: the online layer must use the SAME mapping as the
+                # launch calibration (absolute or centred) — otherwise the
+                # session would be re-tuned onto a different basis mid-flight.
+                ratio_enable=self._v2_calib_ratio_enable,
+                ratio_lo=self._v2_calib_ratio_lo,
+                ratio_hi=self._v2_calib_ratio_hi,
+                ratio_scale=self._v2_calib_ratio_scale)
 
         blend = self._v2_percoin_blend
         overrides = {}
@@ -3435,6 +3486,12 @@ class StrategyEngineV2Adapter:
             geom_raw = estimate_geometry_from_candles(
                 np.array([row["c"] for row in rows], dtype=float),
                 np.array([row["h"] for row in rows], dtype=float),
+                # iter100: on the n+1 execution model the entry fills at the
+                # next candle's open, so the harvestable run-up is measured
+                # from THAT price (the basis the strategy trades on).
+                opens=(np.array([row["o"] for row in rows], dtype=float)
+                       if self._v2_geom_legacy_basis else None),
+                legacy_basis=self._v2_geom_legacy_basis,
                 arm_scale=self._v2_harvest_arm_scale,
                 arm_bounds=(self._v2_harvest_arm_min, self._v2_harvest_arm_max),
             )

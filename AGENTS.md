@@ -36,9 +36,15 @@ per-trade logs from `backend/v2_results/`.
    identically. Gate: `backend/analysis/test_live_parity.py`.
 2. **4-state intra-candle expansion** — every candle = `open → extreme1 → extreme2 → close`
    (4× `engine.update()`). Never one update per candle.
-3. **Signal-instant execution (iter73)** — live swaps on the signal state; BT default
-   `exec_model="instant"` fills at that state's close ± slippage (`legacy` = retired n+1 model).
-   `entry/exit_latency_seconds > 0` defers to `t_signal + latency` on the recorded path.
+3. **Execution model — legacy n+1 is the backtester default (iter100; was signal-instant
+   iter73)** — the BT fills a candle-N signal at State 1 of candle N+1 (next candle's
+   open, intra-bar path at `fill_fraction`): the nearest simple model of a *transactable*
+   fill. `exec_model="instant"` (signal state's close) is the live-parity reference
+   (retired from the BT default; the live still notifies the engine at the signal state
+   and books the frozen signal-candle anchor). `exec_model="latency"` +
+   `entry/exit_latency_seconds > 0` defers the fill to `t_signal + latency` on the
+   recorded path and notifies the engine at the fill boundary (the design
+   `live_trader.py` mirrors) — the faithful honest model. See invariant 12.
 4. **Delay knobs live on the ENGINE** (`v2_entry_delay_seconds` 0.0; `v2_exit_delay_seconds`
    20.0 + `v2_exit_delay_armed_only` 1.0, iter83 ADOPTED 2026-09-12: full-DB Δ+5.06 p=5.6e-17,
    holdout-confirmed). 0.0 = byte-exact signal-instant. Batch cells pass only `--params`, so
@@ -60,6 +66,37 @@ per-trade logs from `backend/v2_results/`.
     corrects pre-FIX_EPOCH recordings via `(pool_sol+V)/pool_sol`, pairCreatedAt-gated
     (curve-era prefix untouched). Escape hatches: `effective_basis=False` (loader param),
     `PUMPCHART_DISABLE_VR_FIX=1` (global). Never reintroduce raw-vault pricing.
+12. **Achievable-fill basis (iter100)** — the backtester fills on the **legacy n+1**
+    model by default (`backtester.run_backtest` / `run_backtest_batch` /
+    `main.py` API: `exec_model="legacy"`): a signal from candle N fills at State 1 of
+    candle N+1 (the next candle's open, priced on the intra-bar path at
+    `fill_fraction`). Rationale: the "instant" model booked the signal candle's OPEN
+    tick — a price the chain cannot transact at (the live's fill lands ~2.15 s after
+    the signal tick and pays the signal candle's own run-up, ρ=0.87 with `ret_candle`;
+    the live measures it per trade as `entry_quote_premium`). Measured on the 200-rec
+    cohort: the instant headline (+1.904 SOL, WR 71.4%, PF 2.27) is **~72% phantom** —
+    the honest price costs −1.375 SOL paired (12 W→L vs 1 L→W, McNemar p=0.0034).
+    Caveats: (a) the n+1 model also shifts the ENGINE's position state one candle
+    later, so it is a different decision path, not just a different price — the
+    `latency` model (`--entry-latency-seconds N`, path-priced fill, engine notified at
+    the fill boundary — the design `live_trader.py` already mirrors) keeps the live's
+    timing and prices the achievable tick, and is the faithful honest model;
+    (b) `ForwardTester.__init__`'s own default stays `"instant"` (the live-parity
+    reference used by `analysis/test_live_parity.py` + the live chart WS path) — the BT
+    entry points pass the model explicitly; (c) legacy and instant batches are NOT
+    comparable, and every batch file now records `exec_model`.
+    `run_iteration.py --exec-model {legacy,instant,latency}` switches per cell.
+13. **The auto tuner is mostly inert (iter100 audit)** — `session_calibrator` feeds the
+    engine 13 SDE coefficients + τ, but 8 of 13 are pinned (σ_mu/κ_mu/σ_ell/θ/ζ/σ_h at
+    the clip floor, σ_phi at the ceiling, β at the default) ⇒ no per-coin information.
+    The per-coin channel fires for only ~6.7% of sessions (a fresh mint has no prior
+    same-mint tape) and its online refinement is gated behind
+    `v2_percoin_requires_mintcal=1.0` ⇒ dead for ~92.5%; ungating it is a **byte-exact
+    no-op** (0 changed trades). The harvest-geometry channel is *computed* but stripped
+    by `calibration_startup` whenever `v2_harvestcal_enable=0` (default) ⇒ dead in
+    production. The only live calibration is 4 population-level SDE keys + the τ=VR
+    horizon. Do not assume a calibration change moves decisions; measure the changed-
+    trade count before believing a PnL delta.
 
 ## Architecture
 

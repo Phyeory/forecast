@@ -523,11 +523,12 @@ async def run_backtest_endpoint(body: dict = Body(...)):
             slippage_pct=body.get("slippage_pct", 1.0),
             starting_balance=body.get("starting_balance", 1.0),
             engine_version=engine_version,
-            # 2026-08-30 execution model: "instant" (default) fills at the
-            # signal-instant price, mirroring the live trader; "legacy"
-            # reproduces the old n+1 mid-bar model.  Latency overlays defer
-            # fills to t_signal + latency on the recorded price path.
-            exec_model=body.get("exec_model", "instant"),
+            # Execution model: "legacy" (default) fills at the next candle's
+            # open tick (n+1 model — the nearest simple model of an
+            # achievable fill); "instant" books the signal state's close (the
+            # live-parity reference).  Latency overlays defer fills to
+            # t_signal + latency on the recorded price path.
+            exec_model=body.get("exec_model", "legacy"),
             entry_latency_seconds=float(body.get("entry_latency_seconds", 0.0)),
             exit_latency_seconds=float(body.get("exit_latency_seconds", 0.0)),
         )
@@ -576,7 +577,7 @@ async def run_backtest_batch_endpoint(body: dict = Body(default={})):
             last_night=last_night,
             last_12h=last_12h,
             last_days=last_days,
-            exec_model=body.get("exec_model", "instant"),
+            exec_model=body.get("exec_model", "legacy"),
             entry_latency_seconds=float(body.get("entry_latency_seconds", 0.0)),
             exit_latency_seconds=float(body.get("exit_latency_seconds", 0.0)),
         )

@@ -27,14 +27,20 @@ Signal model — identical to ForwardTester / LiveTrader:
   same intra-candle moment as live trading.
 
   Execution models (ForwardTester exec_model):
-    "instant" (default): a signal from state k fills at THAT state's close
-      price ± slippage — the exact mirror of the live trader's signal-instant
-      execution (2026-08-30).  entry/exit_latency_seconds>0 defer the fill to
-      t_signal + latency, priced on the recorded intra-candle path.
-    "legacy": the historical n+1 model — a pending BUY/EXIT queued during
-      candle N executed at State 1 of candle N+1 with a fill_fraction
-      mid-bar price.  Kept byte-identical so every pre-change baseline
-      batch remains reproducible.
+    "legacy" (DEFAULT since 2026-10-21, iter100): the n+1 model — a pending
+      BUY/EXIT queued during candle N executes at State 1 of candle N+1,
+      i.e. the NEXT candle's open tick, priced on the intra-bar path at
+      fill_fraction.  Rationale: the live trader CANNOT transact at the
+      signal candle's open tick (the tick only reaches the trader when the
+      next trade lands, +1.25 s median of pure software, and the swap needs
+      ~0.9 s more ⇒ ~2.15 s total).  The "instant" model books that
+      unfillable price and therefore overstates PnL.  "legacy" is the
+      nearest simple model of an ACHIEVABLE fill (one 1 s candle later).
+    "instant": a signal from state k fills at THAT state's close price ±
+      slippage (the 2026-08-30 signal-instant model, and the live-parity
+      reference used by analysis/test_live_parity.py).  entry/exit_latency
+      _seconds>0 defer the fill to t_signal + latency, priced on the recorded
+      intra-candle path (ignored in "legacy" mode — legacy takes precedence).
 
 Performance optimisation:
   Intra-candle states are generated inline (no list allocation) and the
@@ -136,14 +142,14 @@ def run_backtest_batch(
     # their exact on-chain timestamp (0.0 = legacy, byte-identical baselines).
     holder_flow_latency_seconds: float = 0.0,
     persist_results: bool = True,
-    # 2026-08-30 execution model (see ForwardTester docstring):
-    #   exec_model="instant" (default) fills at the signal-instant price —
-    #   the exact mirror of the live trader.  "legacy" reproduces the
-    #   pre-change n+1 mid-bar model byte-identically (historical baselines).
+    # Execution model (see the module docstring):
+    #   exec_model="legacy" (default) fills at the NEXT candle's open tick
+    #   (n+1 model) — the nearest simple model of an achievable fill.
+    #   "instant" books the signal state's close (the live-parity reference).
     #   entry/exit_latency_seconds>0 add a measured-latency overlay that
     #   prices the fill on the recorded path at t_signal + latency
     #   (live journals: buy signal→confirm median 10.0 s, sell 2.3 s).
-    exec_model: str = "instant",
+    exec_model: str = "legacy",
     entry_latency_seconds: float = 0.0,
     exit_latency_seconds: float = 0.0,
 ) -> list[dict]:
@@ -298,11 +304,11 @@ def run_backtest(
     holder_flow_latency_seconds: float = 0.0,
     persist_results: bool = True,
     persist_candles: bool = True,
-    # 2026-08-30 execution model (see ForwardTester docstring): "instant"
-    # fills at the signal-instant price (live mirror); "legacy" reproduces
-    # the pre-change n+1 mid-bar model byte-identically.  Latency overlays
-    # defer the fill to t_signal + latency on the recorded price path.
-    exec_model: str = "instant",
+    # Execution model (see the module docstring): "legacy" (default) fills at
+    # the next candle's open tick (n+1 model); "instant" books the signal
+    # state's close (live-parity reference).  Latency overlays defer the fill
+    # to t_signal + latency on the recorded price path.
+    exec_model: str = "legacy",
     entry_latency_seconds: float = 0.0,
     exit_latency_seconds: float = 0.0,
 ) -> dict:
@@ -524,6 +530,9 @@ def run_backtest(
             token_name=recording.get("token_name", ""),
             token_symbol=recording.get("token_symbol", ""),
             engine_params=engine_params,
+            exec_model=exec_model,
+            entry_latency_seconds=entry_latency_seconds,
+            exit_latency_seconds=exit_latency_seconds,
             stats=stats,
             trades=trades,
             batch_id=batch_id,
@@ -559,6 +568,9 @@ def _write_trade_log(
     stats: dict,
     trades: list[dict],
     batch_id: Optional[str] = None,
+    exec_model: str = "",
+    entry_latency_seconds: float = 0.0,
+    exit_latency_seconds: float = 0.0,
 ) -> str:
     """
     Write a JSON file for a single backtest run.
@@ -604,6 +616,12 @@ def _write_trade_log(
         "batch_id":      batch_id,
         "generated_at":  timestamp,
         "engine_params": engine_params,
+        # iter100: the execution model is part of the batch's identity — a
+        # "legacy" (n+1) batch and an "instant" batch are NOT comparable, and
+        # the batch files are the only durable record of which was run.
+        "exec_model": exec_model,
+        "entry_latency_seconds": round(float(entry_latency_seconds), 6),
+        "exit_latency_seconds": round(float(exit_latency_seconds), 6),
         "summary": {
             "total_trades":    stats.get("total_trades", 0),
             "winning_trades":  stats.get("winning_trades", 0),

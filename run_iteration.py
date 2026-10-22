@@ -52,6 +52,14 @@ def main():
                     help="defer entry fills to t_signal + N s on the recorded path (iter73 overlay)")
     ap.add_argument("--exit-latency-seconds", type=float, default=0.0,
                     help="defer exit fills to t_signal + N s on the recorded path (iter73 overlay)")
+    # iter100: execution model.  "legacy" (default) = n+1 (next candle's open
+    # tick) — the canonical backtester model.  "instant" = signal-state close
+    # (the live-parity reference).  "latency" = path-priced overlay (needs a
+    # non-zero latency).  Cells must be like-for-like: the paired diff is
+    # only valid when both arms used the same model.
+    ap.add_argument("--exec-model", default="legacy",
+                    choices=["legacy", "instant", "latency"],
+                    help="execution model (default: legacy = n+1 next-candle-open)")
     args = ap.parse_args()
 
     params = _engine_params_from_file(args.params)
@@ -74,6 +82,7 @@ def main():
         recording_ids=recording_ids,
         entry_latency_seconds=args.entry_latency_seconds,
         exit_latency_seconds=args.exit_latency_seconds,
+        exec_model=args.exec_model,
     )
     elapsed = time.time() - t0
     errors_total = sum(1 for r in results if "error" in r)

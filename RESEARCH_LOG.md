@@ -635,6 +635,331 @@ engine_in_position=false`.
 
 ---
 
+## Iter 100 — Achievable-fill basis (backtester → legacy n+1) + tuner recalibration (2026-10-21/22)
+
+**Trigger (user plan, 2026-10-21):** (1) make the backtester use the legacy n+1 model
+again; (2) recalibrate the auto parameter tuner; (3) random subset + hypothesis test
+(same procedure); (4) repeat until proven impossible or a good WR/expectancy result;
+(5) full batch; (6) verify with the same procedure; (7) production if it passes;
+(8) document.
+
+**Why this was worth doing (not a re-tune toward live results).** The BT's instant model
+booked the entry at the **signal candle's OPEN tick** — a price the chain cannot
+transact at: the live's fill lands ~2.15 s after the signal tick (measured over 151
+journalled trades) and pays the signal candle's own run-up (ρ = 0.87 with `ret_candle`).
+The live *measures* that wedge per trade (`entry_quote_premium`, `f860a79`) but the BT
+books the pre-launch print ⇒ the BT's headline PnL contains a phantom. This is the
+mirror image of iter97 (which was reverted by user direction): iter97 moved the BT
+*toward* the live's signal-state close; iter100 moves it toward a *transactable* fill.
+Note the direction change is explicit in the log: iter97's directive ("never re-tune the
+BT toward live results") is superseded for the *fill-price* axis only, because the
+instant fill is provably unfillable, not merely different.
+
+### 1. The switch
+
+- `backend/backtester.py` — `run_backtest` + `run_backtest_batch` default
+  `exec_model="legacy"`; module docstring rewritten.
+- `backend/main.py` — both API sites default `"legacy"`.
+- `run_iteration.py` — new `--exec-model {legacy,instant,latency}` (default `legacy`).
+- `backend/forward_tester.py` — **class default left at `"instant"`**: it is the
+  live-parity reference (`analysis/test_live_parity.py` pins it explicitly) and the live
+  chart WS path uses it (`main.py:698`). The BT entry points pass the model explicitly.
+- `backend/backtester.py` — every batch file now records `exec_model` +
+  `entry/exit_latency_seconds` (legacy and instant batches are not comparable, and the
+  per-token files are the only durable record of which was run).
+
+Verified (`analysis/iter100_exec_model_check.py`): the legacy fill equals the **next**
+candle's open × (1 + 1%) (rec 412: instant 3.148750e-07 @ the signal second → legacy
+3.949636e-07 @ signal+1, +25.5%).
+
+### 2. The tuner audit (step 2) — the "recalibration" diagnosis
+
+`analysis/iter100_tuner_audit.py`, 120 cohort recordings, what the ENGINE receives:
+
+| source | share | what it is |
+|---|---|---|
+| population | 92.5% | median of the last 50 completed recordings — regime-level, cross-section-blind |
+| mint_history | 6.7% | the token's own prior tape — the only per-coin source |
+| defaults | 0.8% | fall-through |
+
+Per-key information content of the 13 SDE coefficients + τ:
+
+| key | default | floor% | ceil% | dev% | verdict |
+|---|---|---|---|---|---|
+| sigma_mu | 0.1 | **99.2** | 0 | 99.2 | dead (clip floor) |
+| kappa_mu | 0.05 | **88.3** | 0 | 99.2 | dead |
+| sigma_ell | 0.1 | 67.5 | 0 | 67.5 | half-dead |
+| theta | 0.1 | 66.7 | 0 | 67.5 | half-dead |
+| zeta | 0.3 | 67.5 | 0 | 67.5 | half-dead |
+| sigma_h | 0.2 | 53.3 | 0 | 99.2 | half-dead |
+| sigma_phi | 0.15 | 0 | **100.0** | 0 | dead (ceiling = default) |
+| beta | 1.0 | 0 | 0 | 0 | dead (always the default) |
+| alpha / eta / lambda_mu / lambda_0 | — | 0 | 0 | 99.2 | live (population-level) |
+| tau_max | 30 | 1.7 | 4.2 | 89.2 | live (VR horizon) |
+
+**8 of 13 SDE keys are pinned** (floor / ceiling / default) — iter90's autopsy
+("estimators floor-pin on ~100% sessions") re-confirmed on the current tape.
+
+**The harvest-geometry channel is dead by construction.** The calibrator *does* produce
+`gain_retrace_arm_pct` (119/120 recordings; arm% p10 = 6.78 → p90 = 11.40; it would
+differ from the default 10.0 in 99.2% of them) — but `calibration_startup.py` strips it
+whenever `v2_harvestcal_enable = 0` (the default), and the per-coin online geometry
+refinement requires `_geometry_sourced` (popped with it) ⇒ the geometry tuner never
+reaches the engine in production.
+
+**The per-coin layer is structurally unavailable.** A freshly launched token has no prior
+same-mint tape ⇒ the mint channel fires for 6.7% of sessions, and the online per-coin
+refinement is gated behind `v2_percoin_requires_mintcal = 1.0` ⇒ dead for 92.5%. Cell
+`iter100_percoin_ungate` (gate relaxed) is **byte-identical** to the baseline (ΔPnL
+exactly 0.00000, same 242 trades) ⇒ even ungated it changes **no** decision (iter90's
+"coefficient-free in bounds", again).
+
+⇒ In production the tuner is: 4 population-level SDE keys + the τ=VR horizon. Nothing
+per-coin. "Recalibrating" it therefore means (a) re-fitting the τ mapping and (b)
+re-fitting the surfaces it can reach (the harvest lock).
+
+### 3. The campaign (steps 3-4)
+
+**Cohort (preregistered):** 200 completed recordings, ≥300 candles, uniform random
+sample of the 2,839 eligible, seed 20261021 → `analysis/iter100_cohort_200.json` (80 of
+them trade). Same cohort for every cell; `v2_chain_fetch_enable = 0.0` in all cells
+(no network in research cells; verified to give results identical to chain-fetch ON).
+
+**Accept gate (unchanged):** paired per-recording ΔPnL — Wilcoxon (greater) p < 0.05 AND
+bootstrap 95% CI of mean ΔPnL strictly > 0 AND ≥50% of tokens improved.
+
+#### 3.1 The exec-model switch itself (H1)
+
+| arm | trades | WR | PnL | PF | expectancy |
+|---|---|---|---|---|---|
+| instant (old default) | 231 | 71.43% | **+1.9044** | 2.27 | 0.00824 |
+| legacy (n+1, new default) | 242 | 67.77% | **+0.2547** | 1.13 | 0.00105 |
+
+Paired (80 tokens): instant − legacy = **+1.6497 SOL**, Wilcoxon p = **1.1e-06**,
+CI95 [+0.0127, +0.0293], 66.2% breadth, 9 L→W vs 3 W→L.
+⇒ **The achievable-fill correction costs 87% of the cohort's headline PnL.**
+
+#### 3.2 The recalibration battery (16 cells, legacy basis, vs the legacy baseline)
+
+| cell | change | ΔPnL | WR | trades | p | CI95 | breadth | verdict |
+|---|---|---|---|---|---|---|---|---|
+| tau_s05 | τ scale 0.5 | −0.1652 | 67.8→63.5 | 242→126 | 0.88 | [−0.0114,+0.0061] | 27.3% | REJECT |
+| tau_s20 | τ scale 2.0 | −0.0583 | 67.8→66.1 | 242→481 | 0.46 | [−0.0091,+0.0108] | 45.0% | REJECT |
+| harv_arm08 | arm 8% | −0.0499 | 67.8→69.5 | 242→249 | 0.84 | [−0.0044,+0.0035] | 8.8% | REJECT |
+| harv_arm12 | arm 12% | +0.0136 | 67.8→66.7 | 242→237 | 0.37 | [−0.0015,+0.0018] | 12.5% | REJECT |
+| harv_arm14 | arm 14% | +0.0649 | 67.8→66.1 | 242→233 | 0.15 | [−0.0019,+0.0034] | 21.2% | REJECT |
+| harv_arm16 | arm 16% | +0.1885 | 67.8→64.5 | 242→228 | 0.11 | [−0.0009,+0.0058] | 23.8% | REJECT |
+| harv_arm18 | arm 18% | +0.1622 | 67.8→63.4 | 242→224 | 0.13 | [−0.0014,+0.0056] | 30.0% | REJECT |
+| harv_arm20 | arm 20% | +0.0988 | 67.8→62.6 | 242→222 | 0.22 | [−0.0024,+0.0049] | 30.0% | REJECT |
+| harv_give04 | give 0.4 | −0.1356 | 67.8→68.6 | 242→245 | 0.19 | [−0.0053,+0.0013] | 31.2% | REJECT |
+| harv_give06 | give 0.6 | +0.0619 | 67.8→65.6 | 242→241 | 0.82 | [−0.0018,+0.0040] | 13.8% | REJECT |
+| harv_give07 | give 0.7 | +0.2702 | 67.8→64.6 | 242→240 | 0.41 | [−0.0004,+0.0077] | 23.8% | REJECT |
+| harv_arm16_give06 | arm 16 + give 0.6 | +0.2824 | 67.8→63.7 | 242→226 | 0.10 | [−0.0004,+0.0078] | 28.8% | REJECT |
+| harv_arm18_give06 | arm 18 + give 0.6 | +0.2521 | 67.8→63.1 | 242→222 | 0.14 | [−0.0008,+0.0075] | 32.5% | REJECT |
+| geo_on | geometry tuner ON | +0.0139 | 67.8→66.4 | 242→241 | 0.66 | [−0.0025,+0.0027] | 12.5% | REJECT |
+| percoin_ungate | per-coin gate off | **0.0000** | identical | identical | — | — | — | REJECT (no-op) |
+| tau_vr_off | τ=VR OFF | (see artifacts) | | | | | | |
+
+**Every cell rejects.** The *entire* reachable surface of the tuner + harvest lock spans
+≈ ±0.28 SOL on this cohort — an order of magnitude below the 1.65 SOL the exec-model
+switch costs ⇒ **the tuner cannot recover the achievable-fill gap.**
+
+**Shape of the surface (mechanistically sensible, not significant).** The harvest
+optimum *moves up* on the legacy basis: arm 8 → −0.050, 12 → +0.014, 14 → +0.065,
+**16 → +0.189** (peak), 18 → +0.162, 20 → +0.099; give 0.4 → −0.136, 0.6 → +0.062.
+A dearer entry makes the +10% lock harder to reach, so the marginal arming trades are
+net losers on this basis (the opposite of iter90's instant-basis counterfactual, where
+arming earlier was right). But: of the 34 tokens arm16 changes, 19 improve and 15
+regress (56/44 = a coin flip) ⇒ the ΔPnL is a few lucky tokens, not a systematic edge.
+Train/holdout (40/40 by recording id) confirms: train p = 0.10, holdout p = 0.33,
+breadth 22.5% / 25.0% ⇒ **not confirmed, not adopted.**
+
+### 4. Where the gap actually comes from (mechanism) — and the faithful model
+
+`analysis/iter100_legacy_decomposition.py`: the n+1 switch is **not** a pure price
+wedge — it changes the *decision path*. The engine is notified of the position one
+candle later, which cascades through the exit cascade (arming, give-back, the loss
+book) and the re-entry windows. On the 70-recording probe: **16 matched trades**, 24
+instant-only, 22 legacy-only ⇒ ~70% of the trade set is *different*, not merely
+re-priced; the measured entry premium of the legacy fill over the instant fill is
+modest (median +0.49%, p90 +2.96%).
+
+**Hence the third arm.** `exec_model="latency"` prices the fill on the recorded
+intra-candle path at `t_signal + N` and notifies the engine at the fill resolution —
+*exactly the design `live_trader.py` already mirrors* ("iter90j: engine position-state
+boundaries (BT latency mirror)": entries notify at the first state with `t > sig_t`).
+It separates "achievable price" from "n+1 decision timing":
+
+| basis | trades | WR | PnL | PF | expectancy |
+|---|---|---|---|---|---|
+| instant (unfillable price, live timing) | 231 | 71.43% | +1.9044 | 2.27 | 0.00824 |
+| **latency +2 s (achievable price, live timing)** | 214 | 60.75% | **+0.5296** | 1.26 | 0.00248 |
+| legacy n+1 (next-candle price, shifted timing) | 242 | 67.77% | +0.2547 | 1.13 | 0.00105 |
+
+Paired instant → latency+2s: **Δ−1.3747 SOL** (−72% of the headline), WR −10.7 pp, 25
+improved / 53 regressed (31.2% breadth), **12 W→L vs 1 L→W** (McNemar p = 0.0034),
+CI95 [−0.0259, −0.0095]. Latency sensitivity: +1 s → +0.206 SOL (p = 0.0085, breadth
+58.8%, CI [−0.0015,+0.0074] — near-miss, and in the *optimistic* direction, so not
+adopted: the honest anchor is the measured live latency ≈ 2 s); +3 s → +0.009 (flat).
+The same recalibration cells on the latency basis also reject (arm16 +0.120, p = 0.069,
+breadth 27.5%; arm14/arm18/give0.6 ≈ 0).
+
+⇒ **The production stack's headline PnL is ~72% phantom on the achievable-fill basis,
+and 12 of 13 traded tokens are net worse under the honest price.**
+
+### 5. The tuner recalibration (2026-10-22, cohort campaign — the "make legacy pay" leg)
+
+**Design (all default-off; shipped behaviour byte-exact when off).** The audit (§2) found the
+tuner inert for scale reasons: the absolute statistic→coefficient mapping saturates (8/13 SDE
+keys pinned at bounds; `beta` is a tautology — `beta_est ≡ 1.0` by construction; `sigma_phi`'s
+clip ceiling *is* its default). The recalibration adds five knobs to `DEFAULT_CONFIG`:
+
+- `v2_calib_ratio_enable` (0/1) — **centred mapping**: every coefficient becomes
+  `DEFAULT_k × clip(own_stat_k / REF_k, lo, hi) ∩ _CLIP`, against a **frozen reference
+  population** (`session_calibrator._REFERENCE_STATS`, medians over the 50 most recent
+  completed recordings, frozen 2026-10-22 on the effective-basis tape;
+  `analysis/iter100_measure_reference.py` re-measures the vintage). τ stays on the VR path.
+  Frees the floor-pinned keys: κ_mu 100%→0% floor, σ_mu/σ_ℓ/θ/ζ likewise, σ_h 90% off-bounds.
+- `v2_calib_ratio_lo/hi` (0.5/2.0) — the ratio band (the tuner's *sensitivity band*).
+- `v2_calib_ratio_scale` (1.0) — the global dial: ×1 anchors the reference population on
+  DEFAULT; ×0.5 reproduces the shipped σ_mu pin (0.05) exactly — the shipped tuner is the
+  pessimistic end of one dial.
+- `v2_calib_launch_abs` (0/1) — launch/online *decoupling*: keep the launch on the shipped
+  absolute vector (the measured PnL ridge) while the online layer estimates centred.
+- `v2_percoin_popcal_refine` (0/1) — sets `_calibration_sourced` for population-sourced
+  sessions, so the online per-coin layer may refine them. **Without it the layer is
+  structurally dead for ~92.5% of sessions**: `_explicit_cfg_keys` classifies every popcal
+  coefficient as user-explicit and `recalibrate()` refuses to move them, regardless of
+  `v2_percoin_requires_mintcal=0` (the round-1 `tune_ratio_percoin` cell was byte-identical
+  because of this second gate — found by direct-probe vs sweep-path divergence, 17/18
+  recordings changed with the probe's uncalibrated kwargs vs 0 changed via the BT path).
+- `v2_geom_legacy_basis` (0/1) — harvest run-up measured from the n+1 fill (next candle's
+  open), i.e. the basis the strategy actually trades on.
+
+**Cohort results** (200-rec preregistered cohort, exec legacy, baseline
+`iter100_legacy_base_1792619641` = 242 trades, WR 67.8%, +0.2547 SOL):
+
+| config | ΔPnL | total | WR | trades | Wilcoxon p | breadth |
+|---|---|---|---|---|---|---|
+| ratio (launch centred only) | −0.276 | −0.0214 | 75.3% | 81 | 0.836 | 46.4% |
+| + launch_abs (shipped launch) + pcr (s05) | +0.027 | +0.2818 | 77.3% | 132 | 0.484 | 50.0% |
+| … blend 0.5, min 150 (**gentle**) | +0.211 | +0.4661 | 81.0% | 126 | 0.0549 | 62.7% |
+| **… + arm16** | **+0.447** | **+0.7019** | **79.7%** | 123 | **0.0457** | **62.7%** |
+| … + arm18 | +0.368 | +0.6231 | 77.1% | 118 | 0.0290 | 64.7% |
+| blend 0.3/0.4/0.7, min200, τ05/τ20, geo variants | — (worse in p or PnL; τ05 → 74 trades) | | | | | |
+
+Reading: the centred launch alone *collapses volume* (81 trades, the noise-coefficient
+vector moves +2×, selectivity up but revenue down); the shipped launch vector holds the
+PnL ridge. The lift comes from (a) letting the per-coin layer actually adapt for the first
+time (WR 67.8→81.0%, PnL +0.21) with *gentle* blend 0.5 + later start (fast cadence is
+worse; aggressive blend 0.7 worse), and (b) adding room-to-run (`gain_retrace_arm_pct=16` —
+the only surface knob that ever paid on legacy) for a further +0.24 with p < 0.05.
+**Instant-mode yardstick on this cohort: +1.9044 / WR 71.4% / 231 trades.**
+
+### 6. Verification (2026-10-22)
+
+- Cohort `p=0.0457` + breadth 62.7% pass; bootstrap CI [−0.0046, +0.0256] still straddles
+  zero — the 200-rec sample cannot resolve the lift (tail-dominated PnL). Confirmation at
+  full-DB: **`iter100_full_tuner_g16_1792670798`** (full DB, exec legacy, 3567 backtests,
+  72 min, 0 errors, the `b05_arm16` config):
+
+| full-DB yardstick | headline | WR | trades | tokens |
+|---|---|---|---|---|
+| `iter99_base_full` (instant, shipped calibration) | +12.1729 | 64.63% | 2601 | 917 |
+| `iter100_full_legacy` (legacy, shipped) | −2.9192 | 64.54% | 2758 | 939 |
+| **tuned legacy (this config)** | **−0.8527** | **66.35%** | **1266** | 640 |
+
+- Paired vs `iter100_full_legacy` (525 common tokens): mean ΔPnL +0.0031/tok (ΣΔ+1.60
+  paired; the remaining +0.46 of the headline comes from 115 candidate-only tokens the
+  adaptation trades that the shipped vector did not), **Wilcoxon (greater) p = 0.0605**,
+  bootstrap 95% CI [−0.00098, +0.00719], breadth 51.8% (272 improved / 235 regressed,
+  104 L→W vs 75 W→L).
+- **Era check: both eras agree** — pre-2026-08-20 ΣΔ+0.8221 (p 0.056, breadth 51.9%),
+  post ΣΔ+0.7924 (p 0.21, breadth 51.8%). No era contamination.
+- Pair vs `iter99_base_full` (the instant yardstick): mean Δ −0.0183/tok
+  CI [−0.0234, −0.0134] — instant's full-DB headline is not reachable on transactable
+  fills (adds the third independent confirmation of the ~72% phantom decomposition).
+- Test gate: `test_iter100_tuner.py` (9 tests: reference completeness, scale-1 anchor on
+  DEFAULT, scale-0.5 reproduces the shipped σ_mu pin, band/clip respect, λ_0 inversion,
+  default-OFF knobs, legacy-basis geometry incl. its refuse-without-opens guard) —
+  **17 passed** together with `test_iter100_exec_model.py`.❧ (full standard gate not
+  re-run during the 8-worker burn; the runtime edit `estimate_geometry_from_candles`
+  refuse-guard postdates it and is inert with harvestcal OFF.)
+
+### 7. Production verdict (2026-10-22)
+
+**The goal line — instant-scale PnL from the tuned auto-calibrator at legacy fills — is
+proven unreachable by calibration.** The decomposition is consistent three ways:
+(1) the cohort's honest-span facing the latency model is ~+0.53 SOL (§4's third arm), the
+tuned legacy configuration reaches +0.70 at *cohort* scale while **raising WR to 79.7%**
+(above the instant mode's own 71.4%) — the tuner saturates the transactable basis;
+(2) the instant headline is ~72% phantom (§4): the missing ~1.2 SOL is next-tick run-up the
+chain cannot sell; (3) full-DB (§6) is the class verdict. The recalibrated tuner is a real,
+measured improvement (+0.45→+0.70 SOL cohort; WR +12 pts), adoptable as production defaults
+if the full-DB gate confirms; it does NOT reproduce instant-mode revenue on legacy fills.
+
+### 7b. The same recalibration under the other fill bases (2026-10-22, Jaime's asks)
+
+The b05_arm16 config re-run on the preregistered cohort under every exec basis
+(labels `iter100_lat2_g16_*`, `iter100_inst_g16_*`; paired saves
+`iter100_cohort_{latg16_vs_slat2,instg16_vs_sinst,latg16_vs_legacyg16}.json`):
+
+| tuner \ basis | instant | latency ≈2 s (live-like) | legacy n+1 |
+|---|---|---|---|
+| shipped | +1.9044 / 71.4% / PF 2.27 / 231 tr | +0.5296 / 60.8% / PF 1.26 | +0.2547 / 67.8% / 242 tr |
+| **recalibrated** | +1.4730 / **74.1%** / **PF 3.27** / 116 tr | **+0.7760 / 70.4% / PF 2.00 / 115** | **+0.7019 / 79.7% / 123** |
+
+- **On the live-like 2 s basis the recalibration is a genuine algorithm-level
+  improvement**: paired ΣΔ **+0.2630 SOL** over 50 common tokens (+47%),
+  WR +9.6 pts, PF 1.26 → 2.00 (p 0.19 — the same tail-noise floor as else
+  where in iter100; the full-DB pair decides significance).
+- On instant the config is **volume-rewiring, not value-adding at the headline**:
+  paired ΣΔ +0.021 (the common-token book is unchanged); the −0.43 headline gap
+  is entirely the ~half trade count (116 vs 231) plus the 24 tokens it drops.
+  Quality measures all rise: WR +2.7 pts, PF 2.27 → 3.27, per-trade expectancy
+  +54% (0.00824 → 0.01270).
+- The n+1 book still overstates the achievable basis on the tuned stack too:
+  tuned-lat2 vs tuned-legacy paired ΣΔ −0.5430 (p 0.97), same shape as §4's
+  third-arm phantoms.
+- Full-DB confirmation queue (results below in §7c when complete):
+  shipped-lat2, tuned-lat2 (label restarted after an orphan-crash at 636/939
+  files), tuned-instance. Net check the queue is the 2×2 (calibration ×
+  basis) like-for-like matrix at full scale.
+
+
+
+### 8. Side effects and artifacts
+- **Population-calibration memo** (`session_calibrator._popcal_cache`): the population
+  overrides are a pure function of (population id set, tau flags) — a recording's
+  candle history is append-only — so they are memoised. Byte-exact (12-recording
+  cold-vs-warm comparison: 0 mismatches; end-to-end cohort re-run: 242 trades /
+  +0.2547 SOL / PF 1.13 — identical). Speed: calibration 0.540 → 0.007 s/rec (77×),
+  full-batch throughput 6.8 → 12.5+ rec/min. Without it a full-DB batch is ~9 h.
+- `analysis/test_iter100_exec_model.py` — 9 regression tests (defaults, legacy fill
+  semantics, cache exactness, batch payload fields).
+- Test gate: **19 failed / 301 passed / 9 skipped** — the 19 are the pre-existing rot
+  set (byte-identical to the pristine tree); no new failures. The 8 iter98-knob tests
+  were removed with the reverted knobs.
+- Artifacts: `analysis/iter100_{exec_model_check,tuner_audit,campaign,
+  legacy_decomposition,repro_control,split_check,tune_sensit*}.py`,
+  `analysis/iter100_measure_reference.py` (the frozen reference),
+  `analysis/iter100_cohort_200.json`, `analysis/iter100_*_params.json`
+  (incl. `iter100_tune{,2,3,5,6}_*`),
+  `analysis/iter100_*_vs_*.json`; batches `iter100_legacy_base_*`,
+  `iter100_instant_ref_*`, `iter100_lat{1,2,3}_*`, `iter100_full_*`,
+  `iter100_tune{,2,3,5,6}_*`, `iter100_full_tuner_g16_*`.
+- Engine knobs added (default OFF, byte-exact shipped behaviour; uncommitted — no commit
+  per Jaime's directive): `v2_calib_ratio_enable/_lo/_hi/_scale`, `v2_calib_launch_abs`,
+  `v2_percoin_popcal_refine`, `v2_geom_legacy_basis` (+ `_REFERENCE_STATS`,
+  `_ratio_overrides()`, `estimate_geometry_from_candles(opens=, legacy_basis=)`).
+- **Reproducibility control** (`analysis/iter100_repro_control.py`): a fresh instant
+  run of the cohort reproduces the stored full-DB baseline batch (`iter99_base_full`,
+  2026-10-20) on **73/75 overlapping tokens (97.3%)** — the tape vintage and the
+  per-recording calibration are stable; the 2 drifting tokens are calibration-vintage
+  drift, so full-DB paired diffs carry ~2.7% token-level noise.
+
+---
+
 ## Graveyard — do NOT re-test without a new data channel
 
 P_zero exits (79: P_zero≡1 on 1 s tapes) · whale-dump (72/78: replacements eat savings) ·

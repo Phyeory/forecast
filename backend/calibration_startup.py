@@ -77,10 +77,35 @@ async def initialize_calibration(mint: str, started_at: float, params: dict | No
                                    DEFAULT_CONFIG['v2_tau_vr_scale']))
 
     mint_on = bool(explicit.get('v2_mintcal_enable', DEFAULT_CONFIG['v2_mintcal_enable']))
+    # iter100 — the tuner's CALIBRATION MODE and SENSITIVITY:
+    #   v2_calib_ratio_enable : 0 = absolute (legacy) mapping, 1 = centred
+    #       ("ratio") mapping — every coefficient expressed as
+    #       DEFAULT x clip(stat / frozen_reference_stat, lo, hi).
+    #   v2_calib_ratio_lo/hi  : the sensitivity band of that ratio.
+    #   v2_geom_legacy_basis  : 1 = measure the harvest run-up from the
+    #       next candle's open (the n+1 fill price) instead of the signal
+    #       close — the basis the strategy actually trades on.
+    ratio_enable = bool(explicit.get('v2_calib_ratio_enable',
+                                     DEFAULT_CONFIG.get('v2_calib_ratio_enable', 0.0)))
+    ratio_lo = float(explicit.get('v2_calib_ratio_lo',
+                                  DEFAULT_CONFIG.get('v2_calib_ratio_lo', 0.5)))
+    ratio_hi = float(explicit.get('v2_calib_ratio_hi',
+                                  DEFAULT_CONFIG.get('v2_calib_ratio_hi', 2.0)))
+    ratio_scale = float(explicit.get('v2_calib_ratio_scale',
+                                     DEFAULT_CONFIG.get('v2_calib_ratio_scale', 1.0)))
+    geom_legacy_basis = bool(explicit.get('v2_geom_legacy_basis',
+                                          DEFAULT_CONFIG.get('v2_geom_legacy_basis', 0.0)))
+    # Launch/online decoupling: keep the launch on the shipped absolute vector
+    # while the engine's online per-coin layer runs the centred mapping.
+    launch_abs = bool(explicit.get('v2_calib_launch_abs',
+                                   DEFAULT_CONFIG.get('v2_calib_launch_abs', 0.0)))
+    launch_ratio_enable = ratio_enable and not launch_abs
     base = {}
     if mint_on and mint:
         base = await asyncio.to_thread(calibrate_from_mint_history, mint, cutoff,
-                                       db_path, lookback, tau_vr, tau_scale)
+                                       db_path, lookback, tau_vr, tau_scale,
+                                       launch_ratio_enable, ratio_lo, ratio_hi,
+                                       ratio_scale, geom_legacy_basis)
         chain_on = bool(explicit.get('v2_chain_fetch_enable', DEFAULT_CONFIG['v2_chain_fetch_enable']))
         if not base and chain_on:
             from mint_chain_history import fetch_and_persist
@@ -90,7 +115,9 @@ async def initialize_calibration(mint: str, started_at: float, params: dict | No
                     fetch_and_persist(mint, db_path=db_path, before_unix=cutoff,
                                       lookback_seconds=lookback), timeout=95.0)
                 base = await asyncio.to_thread(calibrate_from_mint_history, mint, cutoff,
-                                               db_path, lookback, tau_vr, tau_scale)
+                                               db_path, lookback, tau_vr, tau_scale,
+                                               launch_ratio_enable, ratio_lo, ratio_hi,
+                                               ratio_scale, geom_legacy_basis)
             except Exception as exc:
                 audit['chain_error'] = type(exc).__name__
         if base:
@@ -101,8 +128,24 @@ async def initialize_calibration(mint: str, started_at: float, params: dict | No
                 base['_geometry_sourced'] = 1
     if not base:
         base = await asyncio.to_thread(calibrate_from_population, db_path, cutoff,
-                                       tau_vr=tau_vr, tau_scale=tau_scale)
+                                       tau_vr=tau_vr, tau_scale=tau_scale,
+                                       ratio_enable=launch_ratio_enable,
+                                       ratio_lo=ratio_lo, ratio_hi=ratio_hi,
+                                       ratio_scale=ratio_scale,
+                                       geom_legacy_basis=geom_legacy_basis)
         audit['source'] = 'population' if any(k in base for k in _CLIP) else 'defaults'
+        # iter100: let the ONLINE per-coin layer refine population-sourced
+        # coefficients.  Without this sentinel the engine classifies every
+        # popcal coefficient as user-explicit and `recalibrate` refuses to
+        # move them — the per-coin layer stays dead for ~92.5% of sessions
+        # (population-sourced) even with v2_percoin_requires_mintcal=0.
+        # Default OFF (byte-exact shippable behaviour; iter86c gated this
+        # deliberately), enabled per sweep cell.  User-overridden _CLIP
+        # coefficients still protect themselves (sentinel withheld).
+        pop_refine = bool(explicit.get('v2_percoin_popcal_refine',
+                                       DEFAULT_CONFIG.get('v2_percoin_popcal_refine', 0.0)))
+        if pop_refine and not any(key in explicit for key in _CLIP):
+            base['_calibration_sourced'] = 1
         if not _geom_user_explicit and any(k in base for k in GEOMETRY_KEYS):
             base['_geometry_sourced'] = 1
 

@@ -37,6 +37,7 @@ import math
 import os
 import sqlite3
 import time
+from collections import OrderedDict
 from typing import Optional
 
 import numpy as np
@@ -392,6 +393,121 @@ def _compute_rec_stats(candles: np.ndarray, duration_s: float) -> Optional[dict]
 
 # ── Population aggregation (median across recordings) ────────────────────────
 
+# ── iter100: the frozen population reference (the tuner's pivot) ─────────────
+# WHY: the absolute estimator path (statistic → coefficient via a fixed
+# formula) is mis-scaled: the population medians land on the clip bounds for
+# 6 of the 13 SDE keys, so every session receives the SAME pinned vector
+# (8 of 13 keys carry no information at all — see the iter100 tuner audit).
+# The centred ("ratio") mode replaces the absolute scale with a ratio to this
+# frozen reference population, anchored on the engine's own DEFAULT:
+#
+#     coeff_k = DEFAULT_k x clip(own_stat_k / ref_stat_k, lo, hi)  (∩ _CLIP)
+#
+# so a session at the reference population gets exactly the DEFAULT, and a
+# session 1.3x more volatile gets 1.3x the default diffusion — instead of
+# saturating at a bound.  The same pivot serves all three layers:
+# population (regime ratio), mint history (per-coin ratio) and the online
+# per-coin layer (the session's own tape vs the reference).
+#
+# Frozen 2026-10-22 on the effective-basis tape: medians over the 50 most
+# recent completed recordings (analysis/iter100_measure_reference.py).
+# Vintage matters: re-measure with that script if the tape basis changes.
+_REFERENCE_STATS: dict = {
+    "sigma_mu":   0.027835544,
+    "lambda_mu":  0.25623669,
+    "kappa_mu":   0.010148046,
+    "sigma_phi":  1.118154,
+    "alpha":      0.26267693,
+    "beta":       1.0,
+    "eta":        0.11086959,
+    "sigma_h":    0.084267748,
+    "theta":      0.0040172557,
+    "sigma_ell":  0.017888645,
+    "zeta":       0.0040699027,
+    "duration_s": 3733.0443,
+    "tau_vr":     15.0,
+}
+
+
+def _ratio_overrides(stats: dict, ratio_lo: float = 0.5,
+                     ratio_hi: float = 2.0,
+                     ratio_scale: float = 1.0) -> dict:
+    """Centred coefficient mapping: DEFAULT x clip(stat/ref, lo, hi).
+
+    `stats` holds the raw per-layer statistics (the same dict the absolute
+    `_population_to_overrides` consumes).  The result is the coefficient
+    overrides, clipped to the physical `_CLIP` bounds as a backstop.
+
+    λ_0 is derived from the recording duration (λ_0 = 1/duration), so its
+    ratio is INVERTED.  tau_max is left on the VR path (it is already an
+    informative, non-pinned statistic — the ratio would double-count it).
+    """
+    try:
+        from strategy_engineV2 import DEFAULT_CONFIG
+    except Exception:                                  # pragma: no cover
+        return {}
+    out: dict = {}
+    for key, ref in _REFERENCE_STATS.items():
+        if key in ("tau_vr", "duration_s"):
+            continue
+        own = stats.get(key)
+        if own is None or ref in (None, 0) or not math.isfinite(float(own)):
+            continue
+        try:
+            d = float(DEFAULT_CONFIG.get(key, float("nan")))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(d) or d == 0.0:
+            continue
+        ratio = float(own) / float(ref)
+        ratio = min(max(ratio, float(ratio_lo)), float(ratio_hi))
+        # ratio_scale: the tuner's global sensitivity dial — 1.0 anchors the
+        # reference population exactly on the engine DEFAULT; <1 tightens
+        # toward the shipped bound-pinned end, >1 explores deeper-sigma
+        # beliefs (fewer, more selective entries).  Swept in iter100.
+        value = d * ratio * float(ratio_scale)
+        lo, hi = _CLIP.get(key, (float("-inf"), float("inf")))
+        out[key] = float(min(hi, max(lo, value)))
+    # λ_0: the KDE decay rate is 1/duration, so the ratio is inverted.
+    own_dur = stats.get("duration_s")
+    if own_dur and math.isfinite(float(own_dur)) and float(own_dur) > 0:
+        d0 = float(DEFAULT_CONFIG.get("lambda_0", 0.0))
+        if d0 > 0:
+            ratio = float(_REFERENCE_STATS["duration_s"]) / float(own_dur)
+            ratio = min(max(ratio, float(ratio_lo)), float(ratio_hi))
+            lo, hi = _CLIP["lambda_0"]
+            out["lambda_0"] = float(min(hi, max(lo, d0 * ratio * float(ratio_scale))))
+    return out
+
+
+# iter100 (perf): population-calibration memo.  The population overrides are a
+# pure function of (the frozen set of population recording ids, the tau flags)
+# — a recording's candle history is append-only, so the same id set always
+# yields the same numbers.  Batches calibrate thousands of sessions whose
+# populations overlap heavily, so this cache removes most of the repeated
+# 50-recording candle scan.  Key: (ids, tau_vr, tau_scale); value: the
+# coefficient overrides BEFORE the _ALWAYS_EXPLICIT merge.
+_POPCAL_CACHE_MAX = 128
+_popcal_cache: "OrderedDict[tuple, dict]" = OrderedDict()
+
+
+def _popcal_cache_get(key: tuple) -> Optional[dict]:
+    """Return the cached population overrides for `key`, or None."""
+    cached = _popcal_cache.get(key)
+    if cached is None:
+        return None
+    _popcal_cache.move_to_end(key)
+    return cached
+
+
+def _popcal_cache_put(key: tuple, overrides: dict) -> None:
+    """Memoize population overrides; evict the oldest entry when full."""
+    _popcal_cache[key] = dict(overrides)
+    _popcal_cache.move_to_end(key)
+    while len(_popcal_cache) > _POPCAL_CACHE_MAX:
+        _popcal_cache.popitem(last=False)
+
+
 def _aggregate_population(rec_stats: list[dict]) -> dict:
     """Aggregate per-recording stats into population-level medians."""
     if not rec_stats:
@@ -545,6 +661,8 @@ GEOMETRY_KEYS = ("gain_retrace_arm_pct",)
 def estimate_geometry_from_candles(
     closes: "np.ndarray",
     highs: "np.ndarray",
+    opens: "np.ndarray" = None,
+    legacy_basis: bool = False,
     arm_scale: float = GEOM_ARM_SCALE,
     arm_bounds: tuple[float, float] = GEOM_ARM_BOUNDS,
 ) -> dict:
@@ -556,6 +674,14 @@ def estimate_geometry_from_candles(
     arm the lock on their own scale and hot coins keep the wide trail.
     Pure function of past candles — causal by construction.
     Returns {} when the tape is too thin or degenerate.
+
+    iter100 — `legacy_basis`: on the n+1 execution model the entry fills at
+    the NEXT candle's open, not at this candle's close, so the harvest that
+    is actually available is measured from that fill price.  The statistic
+    is otherwise identical (same 60 s forward window, same median); only the
+    denominator changes, which shifts the estimate down by the entry's
+    one-candle run-up — i.e. the arm tracks what the strategy can harvest on
+    the basis it actually trades on.
     """
     c = np.asarray(closes, dtype=float)
     h = np.asarray(highs, dtype=float)
@@ -572,7 +698,21 @@ def estimate_geometry_from_candles(
     # own high is excluded so the statistic never sees the conditioning bar)
     win = sliding_window_view(h, K + 1)[:, 1:]
     fmax = win.max(axis=1)
-    runup = fmax / c[: len(fmax)] - 1.0
+    if legacy_basis:
+        # n+1 basis requested: refuse rather than silently measuring on the
+        # close basis (a silent fallback would reintroduce the basis mismatch).
+        if opens is None:
+            return {}
+        o = np.asarray(opens, dtype=float)
+        if len(o) != n or not np.all(np.isfinite(o)) or np.any(o <= 0):
+            return {}
+        # the n+1 fill price for the signal at candle i is open[i+1]
+        denom = o[1: len(fmax) + 1]
+        if len(denom) != len(fmax):
+            return {}
+        runup = fmax / denom - 1.0
+    else:
+        runup = fmax / c[: len(fmax)] - 1.0
     runup = runup[np.isfinite(runup)]
     if len(runup) < GEOM_MIN_CANDLES:
         return {}
@@ -591,6 +731,11 @@ def calibrate_from_population(
     n_recs: int = N_POPULATION_RECS,
     tau_vr: bool = False,
     tau_scale: float = TAU_VR_SCALE,
+    ratio_enable: bool = False,
+    ratio_lo: float = 0.5,
+    ratio_hi: float = 2.0,
+    ratio_scale: float = 1.0,
+    geom_legacy_basis: bool = False,
 ) -> dict:
     """Estimate SDE coefficients from recent recording population.
 
@@ -635,6 +780,22 @@ def calibrate_from_population(
             for r in rows
         }
 
+        # iter100 (perf): the expensive half of this function is re-reading the
+        # candles of the whole 50-recording population and re-deriving its
+        # statistics — but the result depends ONLY on (which recordings, the
+        # tau flags): a recording's candle history is append-only, so the same
+        # population id set always yields the same overrides.  A batch
+        # calibrates thousands of recordings whose populations overlap heavily
+        # (consecutive sessions share the same 50 ids), so this cache turns
+        # most of a batch's calibration cost into a dict lookup.
+        # Behaviour-preserving: byte-identical overrides, same source order.
+        cache_key = (tuple(rec_ids), bool(tau_vr), float(tau_scale),
+                     bool(ratio_enable), float(ratio_lo), float(ratio_hi),
+                     float(ratio_scale), bool(geom_legacy_basis))
+        cached = _popcal_cache_get(cache_key)
+        if cached is not None:
+            return {**cached, **_ALWAYS_EXPLICIT}
+
         # 2. Fetch all candles for those recordings in one query
         placeholders = ",".join("?" * len(rec_ids))
         candle_rows = cur.execute(
@@ -666,7 +827,10 @@ def calibrate_from_population(
             # percentiles are robust on thin tapes where the SDE
             # autocorrelation estimators saturate).
             try:
-                geom = estimate_geometry_from_candles(arr[:, 4], arr[:, 2])
+                geom = estimate_geometry_from_candles(
+                    arr[:, 4], arr[:, 2],
+                    opens=(arr[:, 1] if geom_legacy_basis else None),
+                    legacy_basis=bool(geom_legacy_basis))
             except Exception:
                 geom = {}
             if "gain_retrace_arm_pct" in geom:
@@ -685,9 +849,21 @@ def calibrate_from_population(
         # 6. Apply physics formulas to get coefficient overrides
         overrides = _population_to_overrides(pop, tau_vr=tau_vr, tau_scale=tau_scale)
 
+        # 6a. iter100: centred ("ratio") mode — the current regime expressed as
+        # a ratio to the FROZEN reference population, anchored on the engine
+        # DEFAULT.  The absolute path pins 6 of 13 keys at their clip bounds
+        # (the iter100 tuner audit); this path keeps the direction and the
+        # magnitude of the deviation instead of the bound.
+        if ratio_enable:
+            centred = _ratio_overrides(pop, ratio_lo, ratio_hi, ratio_scale)
+            if centred:
+                overrides.update(centred)
+
         # 6b. iter90: population harvest-geometry override (median arm).
         if geom_arms:
             overrides["gain_retrace_arm_pct"] = float(np.median(geom_arms))
+
+        _popcal_cache_put(cache_key, dict(overrides))
 
         # 7. Merge with the explicit delay/gate knobs
         result = {**overrides, **_ALWAYS_EXPLICIT}
@@ -734,6 +910,11 @@ def calibrate_from_mint_history(
     lookback_seconds: float = 6000.0,
     tau_vr: bool = False,
     tau_scale: float = TAU_VR_SCALE,
+    ratio_enable: bool = False,
+    ratio_lo: float = 0.5,
+    ratio_hi: float = 2.0,
+    ratio_scale: float = 1.0,
+    geom_legacy_basis: bool = False,
 ) -> dict:
     """Estimate SDE coefficients from THIS TOKEN's own prior tape.
 
@@ -804,6 +985,12 @@ def calibrate_from_mint_history(
         return {}
 
     overrides = _population_to_overrides(stats, tau_vr=tau_vr, tau_scale=tau_scale)
+    if ratio_enable:
+        # iter100: centred mode — this mint's statistics as a ratio to the
+        # frozen reference population, anchored on the engine DEFAULT.
+        centred = _ratio_overrides(stats, ratio_lo, ratio_hi, ratio_scale)
+        if centred:
+            overrides.update(centred)
 
     # iter90: harvest geometry from the same prior tape (the token's own
     # peak supply at tick 0).  Merged into the same overrides dict so it
@@ -812,6 +999,9 @@ def calibrate_from_mint_history(
         geom = estimate_geometry_from_candles(
             np.array([r[4] for r in rows], dtype=float),   # close
             np.array([r[2] for r in rows], dtype=float),   # high
+            opens=(np.array([r[1] for r in rows], dtype=float)
+                   if geom_legacy_basis else None),
+            legacy_basis=bool(geom_legacy_basis),
         )
     except Exception as e:
         logger.warning(f"[MintCal] geometry estimator error: {e}")
@@ -875,6 +1065,10 @@ def estimate_from_session_arrays(
     duration_s: float,
     tau_vr: bool = False,
     tau_scale: float = TAU_VR_SCALE,
+    ratio_enable: bool = False,
+    ratio_lo: float = 0.5,
+    ratio_hi: float = 2.0,
+    ratio_scale: float = 1.0,
 ) -> dict:
     """Estimate SDE coefficients from ONE coin's own candle tape.
 
@@ -911,6 +1105,13 @@ def estimate_from_session_arrays(
         return {}
 
     overrides = _population_to_overrides(stats, tau_vr=tau_vr, tau_scale=tau_scale)
+    if ratio_enable:
+        # iter100: centred mode — the session's own statistics expressed as a
+        # ratio to the frozen reference population, anchored on the engine
+        # DEFAULT.  Replaces the absolute (bound-pinned) mapping.
+        centred = _ratio_overrides(stats, ratio_lo, ratio_hi, ratio_scale)
+        if centred:
+            overrides.update(centred)
     if not overrides:
         return {}
     return overrides
