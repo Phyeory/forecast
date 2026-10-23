@@ -16,7 +16,9 @@ Research history: **RESEARCH_LOG.md** (condensed). Old 900-line inline version:
 
 cd backend && ./.venv/bin/python -m pytest analysis/ -q \
   --ignore=analysis/test_live_trader_balance.py \
-  --ignore=analysis/test_timeout_hypothesis.py
+  --ignore=analysis/test_timeout_hypothesis.py \
+  --ignore=analysis/test_iter98_fill_attribution.py \
+  --ignore=analysis/test_iter100_tuner.py
 
 BACKTEST_RESULTS_DIR=backend/v2_results python run_iteration.py --label <label> --max-workers 8
 BACKTEST_RESULTS_DIR=backend/v2_results python run_iteration.py --label <label> \
@@ -161,7 +163,11 @@ Removed (graveyard — need a new data channel to resurrect): futures, sniper, M
   · rate-split ON (10%/0.55/12) · kelly_flat ON (60/40%) · entry delay 0.0 · exit delay 20.0
   armed-only · warmup 100 · confidence_high 0.79 · popcal/mintcal/per-coin(gated) ON ·
   harvestcal OFF · **τ program = VR horizon** (`v2_tau_vr_enable/scale` 1.0/1.0, iter90e:
-  `tau_max=clip(H*×scale,10,60)`; +3.935 p=0.00014, breadth 60%, holdout p=0.017).
+  `tau_max=clip(H*×scale,10,60)`; +3.935 p=0.00014, breadth 60%, holdout p=0.017) ·
+  **spike guard ON @ 8.0** (iter101: quote > signal-state anchor ×1.08 skips cleanly;
+  EV breakeven ≈ +9–10% on the g16-instant offset curve) · **live calibration from `{}`**
+  (iter101 `strip_stale_sde_echo`: stale dashboard SDE echoes never win the merge;
+  `calibration_audit` journalled in `session_open`).
 
 ## Holder flow
 
@@ -179,6 +185,20 @@ post-iter72 ~full.
   (MSM/gates/delays changed 2026-09-11; calibration made causal 2026-09-17; the tape moved
   to the executable basis 2026-09-26 — iter94: pool-era prices were the raw vault ratio,
   understated by (vault+17.58)/vault). WR ~66% only cross-era invariant.
+  **Cross-STACK trap (iter101, 2026-10-23)**: `iter100_full_inst_g16` (+5.004) ran on the
+  **param-retune WIP** (commit 83098e9 on branch `param-retune` — legacy-default exec model,
+  `v2_calib_*` ratio-mapping quartet, popcal cache, n+1 geometry; tree checked back to main
+  2 min after committing, so the working tree silently reverted). Replaying its recorded
+  params on main gives DIFFERENT trades; the quartet is inert on main. Current-stack
+  full-DB reference = `iter101_full_confirm` **+10.6626/62.6%/2483** (937 recs).
+  Revised iter101 live target at measured fill premiums (mean +0.17% vs state,
+  guard cuts the +13.8%-mean tail): honest +10.66 → live ≈ +10.2 pre-rent →
+  **≈ +9–12 net cash after rent**.
+  **Causal verdict (user directive 2026-10-23): the live cash shortfall was NEVER
+  caused by god candles.** The god-bucket booked→honest table is only a map of
+  where the OLD book's candle-open anchor measurement was inflated — god-candle
+  harvesting is honestly profitable on the current stack+g16 (confirm +10.66).
+  SPIKE_GUARD @8 gates the FILL premium (execution timing), never the entry class.
 - **Traps**: 10× notional + restart-reset counters break live-vs-BT headlines (use iter67
   journal method); `v2_results` JSONs are survivor-conditioned; pool workers freeze code at
   spawn; thin tapes need random-sample probes; subset burns can't reconstruct engine-native
@@ -195,7 +215,21 @@ post-iter72 ~full.
   Standard run = command block above. Rot note (verified 2026-09-27 on pristine tree):
   8 failures in `test_live_chain_parity.py` + `test_real_entry_basis.py` target the
   stashed iter92/93 `buy_wallet_delta_sol` API (never merged) — see iter94/95 in
-  RESEARCH_LOG before resurrecting. Bare `ForwardTester()` defaults `slippage_pct=10.0`
+  RESEARCH_LOG before resurrecting. iter101 rot: `test_iter98_fill_attribution.py`
+  (import error, `execution_attribution` removed) + `test_iter100_tuner.py` (8 fails,
+  tuner unbuilt) now ignored in the standard run; `test_spike_premium_guard.py`
+  prefetch/ceiling tests skip-noted (APIs removed pre-HEAD f860a79).
+  **Full-suite triage (2026-10-23, verified against a pristine f860a79 worktree):**
+  all 51 standard-run failures fail IDENTICALLY at HEAD — zero caused by iter101.
+  Clusters: untracked (gitignored `backend/analysis/*`) test files from the parallel
+  main-branch lineage pinning APIs absent here — sell_quote_prefetch 13, cat_stop 6,
+  iter99_god_candle 5, iter100_exec_model 4, quote_premium_guard 4, real_entry_basis 4
+  (stashed iter92/93 API), exit_delay_hold_reset 3, buy_settle_finality 2,
+  iter80_exit_delay 2, live_chain_parity 1, pool_virtual_reserves 1 (pre-epoch V
+  correction under monkeypatched DB) — plus tracked `TestPopcalAdoption` 2 +
+  `TestAdoptionHatchMatrix` 4 (slow population-calibration expectations, also red at
+  HEAD). Only 3 analysis test files are git-tracked (test_live_parity,
+  test_percoin_calibration, test_session_calibrator); everything else is untracked. Bare `ForwardTester()` defaults `slippage_pct=10.0`
   vs 1.0 in `run_backtest`/live — always pass slippage explicitly in harnesses.
 - Deploy: restart `main.py` + hard-refresh browser (app.js cached). After EVERY deploy,
   confirm the first `session_open`'s `code_commit` == HEAD (a stale process silently

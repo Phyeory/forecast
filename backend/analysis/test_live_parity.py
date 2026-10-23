@@ -518,6 +518,64 @@ def test_decision_parity_with_backtester(rec):
     # deferred cell an exit can shift across an age-clock boundary
     # (EVR 120 s) from a one-state entry offset — recorded, not asserted.
 
+    # ── Contract C (iter101): entry 0 + exit 20 armed → INSTANT entry basis ──
+    # Production's adopted exit delay (20 s, armed-only) is an ENGINE knob
+    # orthogonal to entry fills.  The backtester's exec_model="instant"
+    # books entries at the SIGNAL-STATE close regardless; the live trader
+    # used to key the entry anchor off the entry-OR-exit mode, silently
+    # rerouting entries to the phantom candle-open anchor (the booked-vs-
+    # honest god-candle wedge).  Pinned here: with entry_delay=0 the live
+    # trader stays in entry-instant mode (state-close anchor, engine
+    # notified AT LAUNCH, no boundary hook pending) even while the exit
+    # delay keeps the trader in overall latency mode.
+    prod_kwargs = {"v2_rate_split_enable": 0.0,
+                   "v2_percoin_cal_enable": 0.0,
+                   "v2_entry_delay_seconds": 0.0,
+                   "v2_exit_delay_seconds": 20.0,
+                   "v2_exit_delay_armed_only": 1.0}
+
+    trader_c = _make_trader(engine_kwargs=dict(prod_kwargs))
+    assert trader_c._bt_latency_mode is True
+    assert trader_c._bt_entry_latency_mode is False
+
+    _notified = []
+    _orig_notify_open = trader_c.engine.notify_trade_opened
+
+    def _spy_notify_open(price, direction):
+        _notified.append((time.time(), float(price)))
+        return _orig_notify_open(price, direction)
+
+    trader_c.engine.notify_trade_opened = _spy_notify_open
+
+    async def drive_c():
+        await _feed_live(trader_c, candles)
+        await asyncio.sleep(0)
+    asyncio.run(drive_c())
+
+    assert trader_c.trade_history, "contract C produced no live trades"
+    # One engine notify-open PER trade, at launch, with the booked fill.
+    assert len(_notified) == len(trader_c.trade_history), (
+        f"notify-open count {len(_notified)} != trades "
+        f"{len(trader_c.trade_history)} — engine notified off the launch "
+        "schedule (boundary hook leaked into instant entries?)")
+    for tr, (ts, px) in zip(trader_c.trade_history, _notified):
+        assert px == pytest.approx(tr.entry_price, rel=1e-9), (
+            f"engine notify price {px} != booked entry {tr.entry_price} — "
+            "entry anchor no longer the signal-state close basis")
+    # No dangling entry-boundary hook state (would double-notify later).
+    assert trader_c._buy_engine_open_pending is False
+    assert trader_c._buy_engine_open_boundary_t is None
+
+    # NOTE: trade-count parity with the FT reference is deliberately NOT
+    # asserted here.  Contract B documents that this harness's one-tick-per-
+    # candle feed can diverge by one state from the FT's streaming 4-state
+    # feed after a mid-recording exit; under the 20 s armed exit deferral
+    # that offset compounds into re-entry divergence (observed 8 vs 6 on
+    # seed 2949).  The decouple contract above — entry flags, notify-at-
+    # launch schedule, state-close price basis, no dangling hook — is the
+    # regression surface for the iter101 change; exit-deferral parity is
+    # owned by test_exit_delay_hold_reset.py.
+
 
 if __name__ == "__main__":
     rc = pytest.main([__file__, "-v", "--tb=short"])

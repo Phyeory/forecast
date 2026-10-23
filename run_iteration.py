@@ -52,6 +52,11 @@ def main():
                     help="defer entry fills to t_signal + N s on the recorded path (iter73 overlay)")
     ap.add_argument("--exit-latency-seconds", type=float, default=0.0,
                     help="defer exit fills to t_signal + N s on the recorded path (iter73 overlay)")
+    # iter101: premium-sensitivity cells — reprice the simulated BUY fill
+    # N% worse (exec_offset_pct_buy, iter66 knob) without changing the
+    # selection.  Default 0.0 = byte-identical.
+    ap.add_argument("--exec-offset-pct-buy", type=float, default=0.0,
+                    help="shift simulated BUY fills +N%% (premium sensitivity, iter101)")
     args = ap.parse_args()
 
     params = _engine_params_from_file(args.params)
@@ -74,6 +79,7 @@ def main():
         recording_ids=recording_ids,
         entry_latency_seconds=args.entry_latency_seconds,
         exit_latency_seconds=args.exit_latency_seconds,
+        exec_offset_pct_buy=args.exec_offset_pct_buy,
     )
     elapsed = time.time() - t0
     errors_total = sum(1 for r in results if "error" in r)

@@ -635,6 +635,114 @@ engine_in_position=false`.
 
 ---
 
+## Iter 101 — fill-divergence audit: the +12 was phantom; live re-based onto the honest basis (2026-10-23, GLM-FIX)
+
+Question: "look through all the trades where the fill price is way more than the
+backtest entry price; develop a way to make the algorithm's real cash live pnl
+positive and high winrate — around the same pnl as the current backtester +12 sol
+on full batch." Full audit: `backend/analysis/iter101_fill_audit.md` + `.json`.
+
+**A. The +12.173 booked edge is phantom (god-candle economics).** Re-pricing
+every iter99_base_full entry at the signal-state close (what the executable
+basis actually was at decision time) moves +12.173/64.6% → **−2.280/50.7%**
+(2601 trades). All edge lives in entries whose signal state printed ≥2% above
+the candle open (buckets booked→honest: 0–2% n=1304 −1.69→−2.87; 2–5% +1.23→
++0.31; 5–8% +1.61→−0.41; 8–12% +2.36→−0.03; 12–20% +3.48→+0.22; >20% +5.41→
++0.46). Live fills confirm the same physics (151 iter98 trades, vs
+signal-state: p50 +1.0%, p75 +3.5%, p90 +6.0%, p95 +11.1%; two-sided —
+falling-knife p10 −8.7% cashWR 0.31, chase-spike >+12% cashWR 0.33). **Honest
++12 is unobtainable; target re-based** (this is the iter97 direction applied
+live-side-only: improve LIVE toward BT fills, never the reverse).
+
+**B. Honest selection = inst_g16: +5.004 / 61.6% / 1228 full-DB** at instant
+(state-close) fills — delta `gain_retrace_arm_pct 16` + `v2_percoin_requires_
+mintcal 0` + `v2_percoin_cal_blend 0.5` + `v2_percoin_cal_min_candles 150` +
+`v2_chain_fetch_enable 0` (the `v2_calib_ratio_*`/`v2_percoin_popcal_refine`
+keys in old batch params are inert no-ops — not in engine code).
+
+**C. Premium-absorption curve** (new `--exec-offset-pct-buy` knob plumbed
+through `run_backtest_batch`/`run_iteration`; frozen 200-token cohort, g16 +
+instant): off0 **+1.680**/68.8%/PF 1.99 → off2 +1.222 → off5 +0.682/PF 1.32 →
+off10 **−0.153**/PF 0.94; lat1 +0.802. ≈ **−0.19 SOL per +1% uniform premium,
+EV breakeven ≈ +9–10%, latency ≈ −0.88 SOL/s cohort** (~4 SOL/s full-DB).
+Config survives the measured live premium distribution with margin.
+
+**D. Selection-vs-execution = 10:1.** Paired live-vs-BT: −0.2116 selection vs
+−0.0200 execution. 8/13 calibrated coefficients diverged on the SAME
+recordings (live tau_max=60 vs BT 20). Root cause found: the dashboard
+`engineParamsV2` mirror echoes the previous session's calibrated coefficients
+into the next launch payload, and `initialize_calibration`'s
+`{**base, **explicit}` merge lets stale values win as false "user intent"
+(`_strip_default_sde` only removes default-valued keys; the Sep-29 session
+fought the last tape's physics).
+
+**E. Shipped (live-side only, BT untouched):**
+1. **Entry-basis decouple** — `_bt_entry_latency_mode = entry_delay_seconds >
+   0`: production entry 0.0 now anchors live entries at the **signal-state
+   close × (1+slippage)** with engine notified at launch (mirror of BT
+   `exec_model="instant"`), while the adopted 20 s armed-only exit deferral
+   keeps its own gate. Kills the phantom candle-open entry anchor at the
+   source. Parity Contract C pins the combination (entry 0 + exit 20 armed).
+2. **Spike guard ON @ 8.0** — sized from C (breakeven ≈ +9–10%) + live >8%
+   bucket cashWR 0.29; anchor = state×1.01 so 8% ≈ 9% over state; would have
+   skipped 11/151 iter98 trades carrying −0.020 cash. New instant-mode anchor
+   fallback (launch clears `_pending_buy_anchor`; guard reads the booked
+   entry price — without it the decouple silently disarms the guard).
+3. **Calibration parity** — `strip_stale_sde_echo()` removes every
+   non-default `_CLIP` key (incl. tau_max) from live launch params before
+   calibration (policy knobs + g16 geometry pass through);
+   `calibration_audit` (source/cutoff/coefficients/stripped) journalled into
+   `session_open`; DEPLOY GUARD logs loudly on dirty/unknown `code_commit`.
+4. Rot: `test_iter98_fill_attribution` (import error) + `test_iter100_tuner`
+   (8 fails) block suite collection → ignored in the standard run;
+   spike-guard prefetch/ceiling tests skip-noted (APIs removed pre-HEAD).
+
+**F. Verdict / targets.** Ship inst_g16 + decouple + guard. Honest ceiling
++5.0; realistic live ≈ +3.2–4.7 (premium drag at p75 fills); ≈ +2.5–4.0 net
+cash after ATA rent (−0.96 to −1.9 full-DB unless the Token-2022 sweeper
+reclaims). Sub-second execution is the biggest remaining lever (~4 SOL/s
+full-DB scale). Confirm batches: `iter101_full_confirm` + `iter101_full_off5`
+(uniform +5%). Symmetric falling-knife guard NOT adopted (unproven; needs a
+negative-offset cohort cell first).
+
+**G. Confirm batch + provenance reconciliation (2026-10-23, supersedes F's
+numbers).** Full-DB on the CURRENT stack (main + iter101, 937 eligible recs
+— DB grew from iter100's 640): `iter101_full_confirm` **+10.6626 / 62.6% /
+2483 trades / PF 1.46 / exp +0.00429**; `iter101_full_off5` (uniform +5%
+buy premium) −2.0450 / 54.8% / 2413 / PF 0.93 → uniform-premium slope
+−2.54 SOL/% full-DB scale.
+
+*Confirm ≠ iter100 (+5.004/1228) — resolved:*
+1. **Basis hypothesis DISPROVEN**: raw-basis replay
+   (`PUMPCHART_DISABLE_VR_FIX=1`, kill-switch verified at import — it is
+   read at module import, set env BEFORE importing) reproduces the confirm
+   byte-exactly on 6 overlap recs; the iter94 V-correction is a no-op on
+   curve-era tapes.
+2. **Real cause — param-retune (83098e9)**: reflog shows Oct-22 19:09
+   `checkout -b param-retune` → commit "Refactor execution model and
+   calibration parameters for backtesting" (legacy-default exec model,
+   ratio-based coefficient mapping = the `v2_calib_{launch_abs,
+   ratio_enable,ratio_scale}` + `v2_percoin_popcal_refine` quartet, popcal
+   caching, n+1 geometry) → 19:11 checkout back to main. iter100's batches
+   (16:13–17:04) ran on the dirty pre-commit tree; the confirm ran on
+   main+iter101. Replaying iter100's exact recorded params through current
+   code reproduces the confirm, not iter100 → code delta proven. The
+   quartet is INERT on main (no consumers).
+3. **Overlap (527 recs)**: param-retune +5.578/1100 trades vs main+iter101
+   **+8.280/1756** — the current stack is +2.70 SOL better on the same
+   tapes; the 410 new recordings add +2.3828/727 (exp +0.00328).
+
+*Revised live estimate*: live fill-vs-state mean over the 151 iter98 trades
+is **+0.17%** (median +1.0%); guard-skipped >+8% tail (11 trades) averages
++13.8% → post-guard taken-set mean **−0.90%**. At actual premiums:
+honest ceiling **+10.66**, realistic live ≈ **+10.2 pre-rent** (guard
+benefit pushes toward +11–13), **≈ +9 to +12 net cash** after rent. The
+original ~+12 target is reachable honestly on the current stack. COMPARE
+ONLY WITHIN A STACK: iter100-family numbers are param-retune-basis
+(83098e9, unmerged); do not mix with main-branch batches.
+
+---
+
 ## Graveyard — do NOT re-test without a new data channel
 
 P_zero exits (79: P_zero≡1 on 1 s tapes) · whale-dump (72/78: replacements eat savings) ·
@@ -661,6 +769,8 @@ json` INVALID (model-anchor vs real-fill comparison).
 | iter83_win_x20_full | 2,411 | +4.402 | 63.6% | + exit 20 armed (ADOPTED) |
 | iter89 causal base | 2,647 | +5.306 | 68.2% | honest (causal calibration) |
 | iter90e tauvr10 | 2,647 | +9.241 | 64.6% | + VR τ program (ADOPTED) |
+| iter99_base_full | 2,601 | +12.173 | 64.6% | PHANTOM anchor (candle-open bookings) |
+| iter100_full_inst_g16 | 1,228 | +5.004 | 61.6% | honest state-close basis (g16) |
 
 **All rows above were measured on the pre-iter94 phantom tape** (pool-era prices =
 raw vault ratio, understated by (vault+17.58)/vault vs executable). Re-baseline on the

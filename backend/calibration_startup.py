@@ -46,6 +46,43 @@ def _strip_default_sde(explicit: dict, DEFAULT_CONFIG: dict) -> None:
             del explicit[key]
 
 
+def strip_stale_sde_echo(params: dict) -> tuple[dict, dict]:
+    """iter101 (2026-10-23): remove non-default calibration-owned SDE keys
+    from live launch params before calibration.  Returns (params, stripped).
+
+    The dashboard mirror echoes the PREVIOUS session's calibrated
+    coefficients back into the launch payload (observed Sep-29: live
+    tau_max=60 vs the BT's fresh 20 on the SAME recording — 8/13
+    coefficients diverged, −0.21 SOL over 134 paired trades, 10× the
+    measured execution drag).  `_strip_default_sde` already removes
+    DEFAULT-valued echoes inside initialize_calibration; a stale
+    CALIBRATED value deviates from default and used to win the
+    `{**base, **explicit}` merge as false "user intent" (that merge
+    semantic is pinned by test_calibration_startup).  Production
+    backtests calibrate from `{}`: the live call site strips every
+    non-default `_CLIP` key and journals it, so the fresh population /
+    mint-history calibration wins the merge exactly like run_backtest.
+
+    Policy knobs — delays, gates, geometry (`gain_retrace_arm_pct`, e.g.
+    the g16 arm-16 policy) — pass through untouched.
+    """
+    from strategy_engineV2 import DEFAULT_CONFIG
+
+    stripped: dict = {}
+    for key in list(_CLIP):
+        if key not in params:
+            continue
+        try:
+            deviates = not math.isclose(
+                float(params[key]), float(DEFAULT_CONFIG[key]),
+                rel_tol=1e-6, abs_tol=1e-9)
+        except (TypeError, ValueError):
+            continue
+        if deviates:
+            stripped[key] = params.pop(key)
+    return params, stripped
+
+
 async def initialize_calibration(mint: str, started_at: float, params: dict | None = None,
                                  db_path: str = _DB_PATH) -> tuple[dict, dict]:
     from strategy_engineV2 import DEFAULT_CONFIG

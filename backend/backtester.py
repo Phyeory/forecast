@@ -146,6 +146,12 @@ def run_backtest_batch(
     exec_model: str = "instant",
     entry_latency_seconds: float = 0.0,
     exit_latency_seconds: float = 0.0,
+    # iter66 execution-level calibration (see run_backtest): shifts the
+    # simulated BUY fill to the live-executable level.  iter101: plumbed
+    # through the batch driver so premium-sensitivity cells run with only
+    # --params style knobs.  Default 0.0 = byte-identical.
+    exec_offset_pct_buy: float = 0.0,
+    exec_offset_pct_sell: float = 0.0,
 ) -> list[dict]:
     """
     Run backtests on ALL completed recordings.
@@ -228,6 +234,8 @@ def run_backtest_batch(
         exec_model=exec_model,
         entry_latency_seconds=entry_latency_seconds,
         exit_latency_seconds=exit_latency_seconds,
+        exec_offset_pct_buy=exec_offset_pct_buy,
+        exec_offset_pct_sell=exec_offset_pct_sell,
     )
 
     # Scheduling only (per-recording computation is identical either way):

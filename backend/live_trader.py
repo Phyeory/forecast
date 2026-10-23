@@ -248,8 +248,14 @@ WSOL_MINT         = "So11111111111111111111111111111111111111112"
 # block, no fail bookkeeping) when the premium exceeds the threshold.
 # OFF by default until a full-DB batch validates the selection effect
 # (it takes fewer trades than BT by design — report BT-all vs live-taken).
-SPIKE_GUARD_ENABLE = False
-SPIKE_GUARD_MAX_PREMIUM_PCT = 5.0
+# iter101 (2026-10-23): ON at 8.0.  The g16-instant cohort offset curve
+# (uniform buy repricing) stays positive to +5% (+0.68 SOL, PF 1.32) and
+# breaks even ≈ +9-10% (−0.153 at off10); live fills >8% over the
+# signal-state measured cashWR 0.29 (151 trades, iter98 traits).  Under the
+# entry-instant decouple the anchor is the signal-state close × 1.01, so an
+# 8% anchor premium ≈ 9% over state — just inside the EV breakeven.
+SPIKE_GUARD_ENABLE = True
+SPIKE_GUARD_MAX_PREMIUM_PCT = 8.0
 
 
 def jupiter_quote_price_sol(amount_lamports: int, out_amount_raw,
@@ -572,6 +578,12 @@ class LiveTrader:
         priority_fee_lamports: int = 100_000,
         min_market_cap_usd: float = 3_000.0,
         engine_kwargs: Optional[dict] = None,
+        # iter101: the session's calibration audit (source, cutoff,
+        # coefficients, stripped stale-echo keys) from main.py's
+        # initialize_calibration — journalled into session_open so every
+        # live session carries WHY its coefficients are what they are
+        # (the Sep-29 live-vs-BT divergence had no audit trail).
+        calibration_audit: Optional[dict] = None,
 
         # Skip on-chain simulation on the hot path (saves ~300 ms per swap).
         # Simulation is still run on explicit test buys if desired.
@@ -625,6 +637,8 @@ class LiveTrader:
                 "engine_kwargs": engine_kwargs,
                 "min_market_cap_usd": min_market_cap_usd,
                 "skip_simulation": skip_simulation,
+                # iter101: calibration provenance in every session_open.
+                "calibration_audit": calibration_audit or {},
             },
         )
         self._journal_ctx_token = _active_journal.set(self.journal)
@@ -735,6 +749,18 @@ class LiveTrader:
         # live trader mirrors whichever mode the engine knobs select.
         self._bt_latency_mode: bool = (
             self.entry_delay_seconds > 0.0 or self.exit_delay_seconds > 0.0)
+        # iter101 ENTRY-BASIS DECOUPLE: the backtester's exec_model="instant"
+        # books entries at the SIGNAL-STATE close regardless of the exit
+        # knobs (the adopted 20 s armed-only exit delay is an engine knob,
+        # orthogonal to entry fills).  The live trader used to key the ENTRY
+        # anchor off this OR, so production's exit_delay=20 silently rerouted
+        # entries to the phantom candle-open anchor while the BT booked the
+        # state close — the booked-vs-honest god-candle wedge (iter99/101).
+        # Entry routing now follows the ENTRY delay only: entry_delay=0 ⇒
+        # anchor = signal-state close × (1 + slippage), engine notified at
+        # launch — the exact mirror of exec_model="instant".  Exit deferral
+        # keeps its own gate (`exit_delay_seconds > 0`) and is untouched.
+        self._bt_entry_latency_mode: bool = self.entry_delay_seconds > 0.0
         self.exit_delay_armed_only: bool = float(getattr(
             self.engine, "v2_exit_delay_armed_only", 0.0)) > 0.0
         self._ARMED_EXIT_REASONS = frozenset({
@@ -2279,17 +2305,32 @@ class LiveTrader:
             except Exception:
                 pass  # attribution must never break the buy path
 
-            # ── Spike-premium skip guard (2026-09-30 handoff, OFF by default)
+            # ── Spike-premium skip guard (2026-09-30 handoff; iter101 ON) ───
             # A vertical spike moves the executable price far past the BT
             # booking between signal and quote; buying it manufactures
             # model-positive/chain-negative flips.  Skip CLEANLY here (before
             # swap build/broadcast): no re-entry block, no fail bookkeeping,
             # release the SOL reservation, unwind any engine-open the
             # boundary hook may already have notified, journal the skip.
-            # Fail-open: any unknown (disabled flag, unverified decimals,
-            # missing anchor/quote) trades normally.
+            # Fail-open: any unknown (unverified decimals, missing
+            # anchor/quote) trades normally.
+            #
+            # iter101 sizing: on the frozen 200-token g16-instant cohort a
+            # uniform entry premium costs ≈0.19 SOL per +1% (off0 +1.680 →
+            # off2 +1.222 → off5 +0.682 → off10 −0.153), EV breakeven ≈
+            # +9-10%; the live >8%-vs-state bucket measured cashWR 0.29
+            # (151 trades).  Threshold 8.0 vs the anchor (= signal-state
+            # close × 1.01 under the entry-instant decouple) sits just
+            # inside that breakeven.  Anchor source: `_pending_buy_anchor`
+            # in deferred-entry mode; in instant mode the launch cleared it,
+            # so fall back to the booked entry price (the same frozen
+            # anchor) — without this the decouple would silently disarm
+            # the guard.
             if SPIKE_GUARD_ENABLE and self._token_decimals_verified:
                 _anchor = self._pending_buy_anchor
+                if _anchor is None and self.current_trade is not None \
+                        and getattr(self.current_trade, "entry_price", None):
+                    _anchor = float(self.current_trade.entry_price)
                 _qpx = jupiter_quote_price_sol(
                     amount_lam, quote.get("outAmount", 0),
                     self._token_decimals)
@@ -4517,8 +4558,12 @@ class LiveTrader:
         # Latency mode only: runs BEFORE the engine consumes this state —
         # exactly where the backtester's Step-0 fill resolution notifies the
         # engine (its Step 0 precedes Step 2's engine.update on the same
-        # state).  Pure instant mode (all delay knobs 0.0) keeps the
-        # same-state notify schedule and never reaches here.
+        # state).  iter101: the BUY branch here is reachable only when the
+        # ENTRY delay armed it (`_buy_engine_open_pending`, set under
+        # `_bt_entry_latency_mode`); with the production entry_delay=0 the
+        # engine is notified at launch instead.  The hook stays gated on the
+        # combined `_bt_latency_mode` because the EXIT-close branch must
+        # still fire under the adopted 20 s armed-only exit delay.
         if t is not None and self._bt_latency_mode:
             if (self._buy_engine_open_pending
                     and float(t) > float(self._buy_engine_open_boundary_t)):
@@ -4651,10 +4696,15 @@ class LiveTrader:
                 self._last_motion_ts = now  # reset no-motion clock at position open
                 # If the buy later fails on-chain, _fail_buy_flat() rolls
                 # back with notify_trade_closed().
-                if not self._bt_latency_mode:
-                    # Pure instant mode: notify the engine at the launch —
-                    # the backtester's instant model opens the position at
-                    # the signal state itself.
+                if not self._bt_entry_latency_mode:
+                    # iter101: instant ENTRY basis (entry_delay == 0) — notify
+                    # the engine at the launch with the signal-state close
+                    # anchor, the backtester's exec_model="instant" schedule,
+                    # EVEN when the adopted exit delay keeps the trader in
+                    # overall latency mode.  (Pre-decouple this keyed off the
+                    # entry-or-exit OR, so production's exit_delay=20 pushed
+                    # entries onto the phantom candle-open anchor while the
+                    # BT booked the state close.)
                     self.engine.notify_trade_opened(fill, Direction.UP)
                     self._pending_buy_anchor = None
                     self._pending_buy_sig_t = None
@@ -4891,7 +4941,7 @@ class LiveTrader:
                 # fill at t+5 s).
                 self._pending_buy_delay_until_t = float(t or 0) + self.entry_delay_seconds
                 self._delay_hold_logged = False
-                if self._bt_latency_mode:
+                if self._bt_entry_latency_mode:
                     # iter90j (latency mode): freeze the engine anchor on the
                     # SIGNAL SECOND'S CANDLE OPEN × (1 + engine slippage) —
                     # the backtester's latency model resolves the fill at

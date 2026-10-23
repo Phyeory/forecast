@@ -2333,15 +2333,49 @@ async def _get_or_create_live_session(
         fleet_versions = [v for v in fleet_versions if v != engine_version]
         n_engines = 1 + len(fleet_versions)
 
-        from calibration_startup import initialize_calibration
+        from calibration_startup import (
+            initialize_calibration, strip_stale_sde_echo)
+        from live_session_logger import _code_commit, _code_dirty
         calibration_started_at = time.time()
         primary_kwargs = dict(engine_params or {})
         calibration_audit = {}
         if engine_version == 2 or 2 in fleet_versions:
+            # ── iter101 CALIBRATION PARITY: stale-echo strip (live-only) ────
+            # See strip_stale_sde_echo (calibration_startup.py): the
+            # dashboard mirror echoes the previous session's calibrated SDE
+            # coefficients into the launch payload; left in place they win
+            # the calibration merge and the session fights the last tape
+            # with stale physics (Sep-29 divergence, 8/13 coefficients).
+            # Production backtests calibrate from `{}` — live now does too.
+            # Policy knobs (delays, gates, gain_retrace_arm_pct) untouched.
+            _primary_kwargs, _stripped = strip_stale_sde_echo(primary_kwargs)
             primary_kwargs, calibration_audit = await initialize_calibration(
-                str(real_mint), calibration_started_at, primary_kwargs,
+                str(real_mint), calibration_started_at, _primary_kwargs,
             )
+            if _stripped:
+                calibration_audit['stripped_stale_echo'] = _stripped
+                logger.warning(
+                    "[Calibration] %s stripped %d stale mirror SDE echo(s) "
+                    "before calibration: %s", real_mint[:8],
+                    len(_stripped),
+                    {k: round(v, 6) if isinstance(v, float) else v
+                     for k, v in _stripped.items()})
         logger.info("[Calibration] %s %s", real_mint[:8], calibration_audit)
+        # ── iter101 DEPLOY GUARD: stale-code visibility at session open ────
+        # The journal already stamps code_commit/code_dirty into
+        # session_open; this makes a stale/dirty process LOUD at open time
+        # instead of silent (INU Sep-29: a session on dirty pre-iter94 code
+        # traded on the raw-vault price basis).  Deliberately does NOT
+        # block — the operator decides; the journal records the truth.
+        _open_commit, _open_dirty = _code_commit(), _code_dirty()
+        if _open_dirty or _open_commit in ("", "unknown"):
+            logger.warning(
+                "[DEPLOY GUARD] %s session opening with %s CODE "
+                "(commit=%s, dirty=%s) — live-vs-BT parity not guaranteed; "
+                "restart main.py at HEAD and hard-refresh after every deploy.",
+                real_mint[:8],
+                "DIRTY" if _open_dirty else "UNKNOWN-COMMIT",
+                _open_commit, _open_dirty)
         live_trader = LiveTrader(
             token_mint=real_mint,
             keypair=keypair,
@@ -2356,6 +2390,7 @@ async def _get_or_create_live_session(
             # signal / swap), so teardown never needs an emergency sell; the
             # auto-recording is finalised by the normal session teardown.
             no_motion_stop_seconds=120.0,
+            calibration_audit=calibration_audit,
         )
         extra_traders: list[LiveTrader] = []
         for ev in fleet_versions:
@@ -2369,6 +2404,7 @@ async def _get_or_create_live_session(
                 skip_simulation=skip_sim,
                 engine_version=ev,
                 no_motion_stop_seconds=120.0,
+                calibration_audit=calibration_audit,
             ))
         live_trader.start_watchdog()
         for _tr in extra_traders:
