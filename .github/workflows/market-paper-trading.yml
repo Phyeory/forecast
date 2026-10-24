@@ -34,7 +34,11 @@ permissions:
 jobs:
   paper:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 45 was fatal: the cold warm (67 symbols × full history through the
+    # 4-state engine) alone exceeds it on the 2-core runner, so every run
+    # died mid-prepare and no session ever processed a bar (Oct 19–24).
+    # 150 covers a cold re-bootstrap; snapshot-restored runs take ~5 min.
+    timeout-minutes: 150
     env:
       APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
       APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
@@ -58,6 +62,23 @@ jobs:
           # find_peaks without it, which would change decisions and break
           # backtest/live parity.
           pip install "numpy>=2.0" "scipy>=1.13"
+
+      - name: restore runtime state (snapshot + guard + resume)
+        working-directory: repo
+        run: |
+          # The runner is stateless by design; the engine snapshot, prop-guard
+          # state and resume cursor live on the journals branch.  Without the
+          # snapshot every run would re-warm the full tape (~1h on this
+          # runner); a fingerprint mismatch falls back to the warm safely.
+          git fetch origin market-live-journals --depth=1 2>/dev/null || true
+          if git show-ref --verify --quiet refs/remotes/origin/market-live-journals; then
+            git checkout origin/market-live-journals -- backend/data/live_market \
+              && echo "runtime state restored from market-live-journals" \
+              || echo "no prior state on journals branch — cold bootstrap (full warm)"
+            ls -la backend/data/live_market/runtime 2>/dev/null || true
+          else
+            echo "journals branch missing — cold bootstrap"
+          fi
 
       - name: prop-eval status (before)
         working-directory: repo/backend
