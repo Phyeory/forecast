@@ -88,5 +88,8 @@
   "paper": true,
   "time_in_force": "opg"
  },
- "broker_symbols": {}
+ "broker_symbols": {},
+ "state_path": "data/live_market/runtime/state.json",
+ "guard_path": "data/live_market/runtime/guard_state.json",
+ "snapshot_path": "data/live_market/runtime/engine_snap.bin.gz"
 }

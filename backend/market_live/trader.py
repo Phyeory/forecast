@@ -228,8 +228,13 @@ class MarketLiveTrader:
                                  "restored": True}
                 continue
             history = self.feed.history(sym)
+            # the engine must never see an unclosed (partial) bar: the
+            # backtester only consumes closed ones, and a mid-session warm
+            # would bake the partial bar into engine state (parity drift).
+            history = [b for b in history
+                       if bar_is_closed(int(b["time"]), self.cfg.interval)]
             if not history:
-                self._log(f"{sym}: no history — skipped")
+                self._log(f"{sym}: no closed history — skipped")
                 continue
             if sym in resume_ts:
                 t_last = int(resume_ts[sym])
