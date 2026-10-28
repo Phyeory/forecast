@@ -1,9 +1,9 @@
 {
- "saved_at": 1793084440.2492936,
+ "saved_at": 1793147070.9633813,
  "book": {
   "equity": 100000.0,
   "cash": 100000.0,
-  "buying_power": 392558.44,
+  "buying_power": 400000.0,
   "positions": [],
   "paper": true
  },
@@ -79,7 +79,7 @@
  "desired": {
   "AAPL": 0,
   "ABT": 1,
-  "ADBE": 0,
+  "ADBE": 1,
   "AMAT": 0,
   "AMD": 0,
   "AMGN": 0,
@@ -93,7 +93,7 @@
   "CAT": 0,
   "CL": 0,
   "COP": 0,
-  "COST": 1,
+  "COST": 0,
   "CRM": 0,
   "CSCO": 0,
   "CVX": 0,
