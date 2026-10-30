@@ -295,7 +295,13 @@ def prewarm_mints(mints, chunk: int = 30) -> int:
     """
     if not vr_fix_enabled():
         return 0
-    fresh = sorted({m for m in mints if m and m not in _cache})
+    # Fresh process (every run_iteration cell) starts with an empty _cache —
+    # consult the sidecar DB too, else every batch re-resolves its whole
+    # cohort and rewrites rows with luck-dependent values (DexScreener/RPC
+    # failures poison rows v_sol=0 WITH pair_created_at → raw replay), so
+    # per-recording basis silently differs across batch cells.
+    fresh = sorted({m for m in mints if m and m not in _cache
+                    and _sidecar_load(m) is None})
     if not fresh:
         return 0
     stored = 0
