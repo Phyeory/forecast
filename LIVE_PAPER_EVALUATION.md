@@ -96,8 +96,16 @@ working) → 400,000 from Oct 29 (canceled unfilled).
 - Workflow adds 13:35 + 14:35 UTC crons (one of the two is always ~9:35 ET year-round) to
   give paper entries their market-hours fill window.
 
-Tests: `market_live/test_opg_lifecycle.py` (7 lifecycle cases) + `test_late_fill.py` (paper
-parity unchanged) — 15/15 green; snapshot fingerprint untouched (no re-warm on deploy).
+Tests: `market_live/test_opg_lifecycle.py` (8 lifecycle cases) + `test_late_fill.py` (paper
+parity unchanged) — 16/16 green; snapshot fingerprint untouched (no re-warm on deploy).
+
+**Campaign restart decision (2026-10-30):** the persisted stall (9 desired, no pending,
+flat broker) is cleared by flipping `warm_sync` to `true` in `alpaca_paper.json` — the
+session adopts the engine's current book at the broker with real orders (opg/day per market
+state), and sync submissions register as `state_sync` pending so fills reconcile at venue
+prices. Consequence: the account becomes the engine's book from the next session; the missed
+Oct-26 ADBE entry is written off as a bug casualty (re-entering 4 days late would poison
+entry-price parity). The statistical clock (Section 5) restarts from the first real fill.
 
 ## 4. Backtest baseline (what live is being measured against)
 
