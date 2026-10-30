@@ -82,7 +82,7 @@
  "exec_mode": "next_open",
  "journal": true,
  "warmup_bars": 0,
- "warm_sync": false,
+ "warm_sync": true,
  "broker": "alpaca",
  "broker_kwargs": {
   "paper": true,

@@ -323,28 +323,42 @@ class MarketLiveTrader:
     def _sync_positions(self, synthetic: bool = False) -> list[BrokerFill]:
         fills: list[BrokerFill] = []
         eq = self._equity()
+        queueing = getattr(self.broker, "submits_immediately", False)
         for sym, host in self.hosts.items():
             px = self.prices.get(sym, 0.0)
             if px <= 0:
                 continue
             target = self._buy_qty(px, eq) if host.desired_position else 0.0
             already = []
-            if target and getattr(self.broker, "submits_immediately", False) \
-                    and hasattr(self.broker, "open_orders"):
+            if target and queueing and hasattr(self.broker, "open_orders"):
                 try:
                     already = self.broker.open_orders(self._bsym(sym))
                 except Exception:  # noqa: BLE001
                     already = []
             if already:
                 self._log(f"{sym}: sync skipped — open order queued")
-            else:
-                f = self.broker.target_position(self._bsym(sym), target, px,
-                                                reason="state_sync")
-                if f:
+                self.desired[sym] = host.desired_position
+                continue
+            f = self.broker.target_position(self._bsym(sym), target, px,
+                                            reason="state_sync")
+            if f:
+                if f.filled or not queueing:
                     f.synthetic = synthetic
                     fills.append(f)
                     if self.journal:
                         self.journal.order({**f.to_dict(), "event": "sync_fill"})
+                else:
+                    # queueing broker: the sync order queued (opg for the next
+                    # open) — register it as pending so the normal bar loop
+                    # reconciles the real fill instead of booking the stroke
+                    self.pending[sym] = {
+                        "desired": int(host.desired_position),
+                        "reason": "state_sync", "submitted": True,
+                        "order_id": f.order_id, "target_qty": target,
+                        "late": False}
+                    if self.journal:
+                        self.journal.order({**f.to_dict(),
+                                            "event": "sync_submit"})
             self.desired[sym] = host.desired_position
         return fills
 

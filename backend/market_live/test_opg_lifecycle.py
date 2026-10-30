@@ -243,3 +243,29 @@ def test_flip_cancels_the_working_order(tmp_path):
     p = tr.pending.get("AAA") or {}
     assert p.get("desired") == 0, "exit intent armed"
     assert not rec["fills"]
+
+
+def test_sync_submission_queues_pending_not_a_fill(tmp_path):
+    """warm_sync on a queueing broker registers a pending for the real fill;
+    it must not book the submission stroke as a sync_fill."""
+    br = _QueueBroker()
+    tr = _trader(tmp_path, br)
+
+    class _LongHost:
+        desired_position = 1
+
+    tr.hosts["AAA"] = _LongHost()
+    tr.prices["AAA"] = 100.0
+    fills = tr._sync_positions(synthetic=True)
+    assert fills == [], "a queued sync order is not a fill"
+    p = tr.pending.get("AAA") or {}
+    assert p.get("submitted") is True and p.get("order_id") == "ord-1"
+    assert p.get("reason") == "state_sync"
+    assert tr.desired["AAA"] == 1
+    # the queued sync order then reconciles like any other pending
+    br.queue_status("ord-1", {"status": "filled", "filled_qty": 75.0,
+                              "avg_price": 100.0})
+    tr.hosts["AAA"] = _StubHost(desired=1)
+    tr.last_ts["AAA"] = 0
+    rec = tr.step_bar("AAA", _bar(1_700_000_000, 100.0, 101.0))
+    assert len(rec["fills"]) == 1 and abs(rec["fills"][0]["price"] - 100.0) < 1e-9
