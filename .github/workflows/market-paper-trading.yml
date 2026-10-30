@@ -8,6 +8,11 @@ name: market-paper-trading
 #   21:05 UTC = 17:05 ET (EDT) — after the US close, before the next open.
 #   02:00 UTC = 22:00 ET (EDT) / 21:00 ET (EST) — catches the bar when the
 #              first run fired too early (US DST edge) + weekend catch-up.
+#   13:35 / 14:35 UTC = 9:35 ET (EDT) / 9:35 ET (EST) — one of the two always
+#              lands ~5 min into the US session: an opg order that missed the
+#              opening auction (Alpaca paper never fills opg and cancels it
+#              ~9:45) is canceled there and resubmitted as a day market order
+#              at the real price, so paper entries actually execute.
 # The job is stateless: the engine replays the full tape and the broker holds
 # the truth, so a missed day self-heals on the next run.
 
@@ -23,6 +28,8 @@ on:
   schedule:
     - cron: "5 21 * * 1-5"
     - cron: "0 2 * * 1-6"
+    - cron: "35 13 * * 1-5"
+    - cron: "35 14 * * 1-5"
 
 concurrency:
   group: market-paper

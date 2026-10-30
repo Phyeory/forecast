@@ -40,6 +40,8 @@ class BrokerFill:
     order_id: str = ""
     reason: str = ""
     synthetic: bool = False  # warm-start reconciliation print
+    filled: bool = True      # False = submission accepted, fill pending
+                             # (queueing brokers: opg orders awaiting the open)
 
     def to_dict(self) -> dict:
         return {
@@ -66,8 +68,16 @@ class Broker:
     def submits_immediately(self) -> bool:
         return False
 
+    # True when order_status() can interrogate the venue about a submitted
+    # order.  False (local ledger, MT5 bridge) → the fill returned at
+    # submission time is the only truth.
+    order_status_supported = False
+
     def order_status(self, order_id: str) -> Optional[dict]:
         return None
+
+    def cancel_order(self, order_id: str) -> bool:
+        return False
 
     def equity(self, prices: Optional[dict] = None) -> float:
         raise NotImplementedError
@@ -192,6 +202,7 @@ class AlpacaBroker(Broker):
 
     name = "alpaca"
     submits_immediately = True     # opg orders submitted at signal queue for the next open
+    order_status_supported = True
 
     def __init__(self, key: Optional[str] = None, secret: Optional[str] = None,
                  paper: bool = True, time_in_force: Optional[str] = None):
@@ -281,13 +292,26 @@ class AlpacaBroker(Broker):
             "client_order_id": f"mkt-{symbol}-{uuid.uuid4().hex[:12]}",
         }
         resp = self._req("POST", "/v2/orders", body)
+        # filled_avg_price is present only when the venue already executed
+        # (day market orders); an opg order awaiting the open leaves it empty
+        # — that is a submission, not a fill, and must never be booked as one.
         return BrokerFill(symbol=symbol,
                           side="buy" if delta > 0 else "sell",
                           qty=abs(delta),
                           price=float(resp.get("filled_avg_price") or ref_price),
                           notional=abs(delta) * float(ref_price),
                           fee=0.0, time=time.time(),
-                          order_id=str(resp.get("id", "")), reason=reason)
+                          order_id=str(resp.get("id", "")), reason=reason,
+                          filled=bool(resp.get("filled_avg_price")))
+
+    def cancel_order(self, order_id: str) -> bool:
+        try:
+            self._req("DELETE", f"/v2/orders/{order_id}")
+            return True
+        except RuntimeError as exc:
+            if "404" in str(exc):
+                return True          # already gone
+            return False
 
     def flatten_all(self, prices: dict[str, float],
                     reason: str = "flatten") -> list[BrokerFill]:

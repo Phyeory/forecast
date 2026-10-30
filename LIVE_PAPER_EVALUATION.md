@@ -54,9 +54,50 @@ verify the engine it ran against HEAD.
 | 2026-10-24 | `20261024_135929` (local run) | First live session; engine prepared 67 symbols, 956 bars warmup each; no orders |
 | 2026-10-26/27 | `20261027_070002` (GH) | ADBE buy 29 sh @ $258.60 submitted (`signal_1792987200` = Oct 26 bars, `opg`); apparently **did not fill** (broker book empty next morning) |
 | 2026-10-28 | `20261028_074203` (GH) | ADBE buy 29 sh re-issued, booked $255.775, notional $7,417; order working at open. Desired book: 9 long signals (ABT, ADBE, HD, IBM, LOW, META, MSTR, NKE, PG) |
+| 2026-10-29/30 | `20261029_074630`, `20261030_075231` (GH) | **No orders.** The Oct 28 `opg` order was cancelled unfilled (broker buying power restored to $400k, no position), but the engine still carries `desired: ADBE=1` (+ 8 others) and does not re-submit — a desired-vs-broker desync deadlock. Broker truth: **flat, $100,000, zero fills after 6 sessions** |
 
-Equity at last check: **$100,000.00** (guard status `ok`, no drawdown events). First
-mark-to-market will appear in `equity.jsonl` after the first fill settles.
+**⚠️ Open defect (2026-10-30) — signal→order pipeline stalls. FIXED same day, see below.**
+Sessions log `desired_position=1` with `pending={}` and no `orders.jsonl` entries, while the
+earlier session's pre-open `next_open_fill` booking (07:42 UTC, before the auction) suggests
+the engine believes an entry already happened. Broker truth: flat, $100k, zero fills.
+
+**Root cause (2026-10-30, three stacked bugs in the daily-restart path):**
+
+1. **`_save_state` stripped the order identity from pending orders** (kept only
+   `desired`/`reason`). Every daily restart downgraded a working `opg` order into a bare
+   intent with no `submitted` flag / `order_id`.
+2. **The resubmit branch booked a phantom fill**: `target_position` on a queueing broker
+   *submits* and returns a stroke record; the code booked it as `next_open_fill`
+   (29 ADBE @ 255.775 on Oct 28 — an order that was merely queued) and consumed the pending.
+   Engine book: "ADBE open". Broker: flat, cash untouched (cash stayed exactly $100,000).
+   With `desired=1`, no pending, and no broker position, nothing ever re-triggers — the
+   decision layer only acts on transitions. Permanent stall from Oct 28 onward.
+3. **Alpaca paper never fills `opg` orders** — the Oct 27 order sat unfilled and was
+   canceled (auction orders unfilled after the open are canceled by the venue). So even an
+   honest intent, resubmitted pre-open only, never converges on paper.
+
+Evidence chain: Oct 27 `signal_submit` order `305575d4…` ≠ Oct 28 fill order `792f3616…`
+(resubmit path booked the stroke); `state.json` cash $100,000.00 at every checkpoint
+(a real 7,417 fill would have drawn it down); buying power 392,820 on Oct 28 (an order was
+working) → 400,000 from Oct 29 (canceled unfilled).
+
+**Fix (2026-10-30, `market_live/trader.py`, `brokers.py`, workflow):**
+
+- Pending records round-trip verbatim through `state.json` (order id, submitted flag,
+  target qty survive restarts).
+- A queueing-broker submission is never booked as a fill (`BrokerFill.filled`); the real
+  fill reconciles from `order_status` on the next bar at the venue's average price.
+- A canceled/unfilled order is resubmitted with the pending kept alive; a stale opg found
+  open during market hours is canceled and resubmitted as a day market order at the real
+  price; an engine flip cancels the working order.
+- `prepare()` adopts orphaned working orders (belt-and-braces recovery).
+- Every `order_status` check is journaled (`orders.jsonl` events `order_status`,
+  `order_cancel_stale`, `order_adopted`) so forensics no longer depend on GH run logs.
+- Workflow adds 13:35 + 14:35 UTC crons (one of the two is always ~9:35 ET year-round) to
+  give paper entries their market-hours fill window.
+
+Tests: `market_live/test_opg_lifecycle.py` (7 lifecycle cases) + `test_late_fill.py` (paper
+parity unchanged) — 15/15 green; snapshot fingerprint untouched (no re-warm on deploy).
 
 ## 4. Backtest baseline (what live is being measured against)
 
