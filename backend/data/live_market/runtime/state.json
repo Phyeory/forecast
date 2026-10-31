@@ -1,9 +1,9 @@
 {
- "saved_at": 1793346810.3408077,
+ "saved_at": 1793407122.843022,
  "book": {
   "equity": 100000.0,
   "cash": 100000.0,
-  "buying_power": 400000.0,
+  "buying_power": 333569.69,
   "positions": [],
   "paper": true
  },
@@ -145,5 +145,78 @@
   "WMT": 0,
   "XOM": 0
  },
- "pending": {}
+ "pending": {
+  "ABT": {
+   "desired": 1,
+   "reason": "state_sync",
+   "submitted": true,
+   "order_id": "e8ab51da-07d9-44e0-a1ac-588f33e22db4",
+   "target_qty": 71.7291507268554,
+   "late": false
+  },
+  "ADBE": {
+   "desired": 1,
+   "reason": "state_sync",
+   "submitted": true,
+   "order_id": "62cb29c9-494d-41ea-a1e9-af913a039a43",
+   "target_qty": 30.235839548478133,
+   "late": false
+  },
+  "HD": {
+   "desired": 1,
+   "reason": "state_sync",
+   "submitted": true,
+   "order_id": "37bf1a24-a62d-4d34-901b-7d21c191dc1e",
+   "target_qty": 22.801203903566112,
+   "late": false
+  },
+  "IBM": {
+   "desired": 1,
+   "reason": "state_sync",
+   "submitted": true,
+   "order_id": "151c144a-1803-48e1-8d6e-2b01fe1346cd",
+   "target_qty": 29.05681576041687,
+   "late": false
+  },
+  "LOW": {
+   "desired": 1,
+   "reason": "state_sync",
+   "submitted": true,
+   "order_id": "76aa83a7-2c3e-4061-a29a-9c5bcac92e1c",
+   "target_qty": 36.18730549323298,
+   "late": false
+  },
+  "META": {
+   "desired": 1,
+   "reason": "state_sync",
+   "submitted": true,
+   "order_id": "587a8cb2-a36c-478f-a1d5-4b75669dd812",
+   "target_qty": 12.00960768614892,
+   "late": false
+  },
+  "MSTR": {
+   "desired": 1,
+   "reason": "state_sync",
+   "submitted": true,
+   "order_id": "9e41b7ba-e449-4bb8-aeac-fa738a80f61d",
+   "target_qty": 52.9623614151543,
+   "late": false
+  },
+  "NKE": {
+   "desired": 1,
+   "reason": "state_sync",
+   "submitted": true,
+   "order_id": "a70007da-f442-4adc-aa1e-1c5138c364d6",
+   "target_qty": 195.21082769390944,
+   "late": false
+  },
+  "PG": {
+   "desired": 1,
+   "reason": "state_sync",
+   "submitted": true,
+   "order_id": "9427123d-8cf9-4af3-9658-540daf9f82ce",
+   "target_qty": 46.70569186698219,
+   "late": false
+  }
+ }
 }
