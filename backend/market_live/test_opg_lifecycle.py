@@ -269,3 +269,66 @@ def test_sync_submission_queues_pending_not_a_fill(tmp_path):
     tr.last_ts["AAA"] = 0
     rec = tr.step_bar("AAA", _bar(1_700_000_000, 100.0, 101.0))
     assert len(rec["fills"]) == 1 and abs(rec["fills"][0]["price"] - 100.0) < 1e-9
+
+
+def test_venue_pass_resolves_a_fill_without_any_new_bar(tmp_path):
+    """The venue truth pass must work when no bar closed — an opg that
+    filled at the open is booked even on a market-hours-only run."""
+    br = _QueueBroker()
+    tr = _trader(tmp_path, br)
+    tr.pending["AAA"] = {"desired": 1, "reason": "state_sync", "submitted": True,
+                         "order_id": "ord-42", "target_qty": 29.0}
+    br.queue_status("ord-42", {"status": "filled", "filled_qty": 29.0,
+                               "avg_price": 250.23})
+    fills = tr._poll_pending_orders()
+    assert len(fills) == 1, "fill booked without a bar"
+    assert abs(fills[0].price - 250.23) < 1e-9
+    assert "AAA" not in tr.pending
+    assert tr.desired["AAA"] == 1
+
+
+def test_venue_pass_converts_a_stale_opg_at_market_open(tmp_path, monkeypatch):
+    """opg still open while the market trades → cancel + day resubmit."""
+    monkeypatch.setattr(trader_mod, "market_is_open", lambda: True)
+    br = _QueueBroker()
+    tr = _trader(tmp_path, br)
+    tr.pending["AAA"] = {"desired": 1, "reason": "state_sync", "submitted": True,
+                         "order_id": "ord-stale2", "target_qty": 29.0}
+    br.queue_status("ord-stale2", {"status": "open", "filled_qty": 0.0,
+                                   "avg_price": 0.0})
+    tr._poll_pending_orders()
+    assert br.cancels == ["ord-stale2"]
+    assert len(br.submissions) == 1, "resubmitted once at market"
+    p = tr.pending.get("AAA") or {}
+    assert p.get("submitted") is True and p.get("order_id") == "ord-1"
+
+
+def test_canceled_entry_does_not_block_the_exit_submission(tmp_path):
+    """After a flip-cancel the dead order may still be listed as open — it
+    must not be adopted as the new exit intent (that would strand the exit)."""
+    br = _QueueBroker()
+    br._open.append({"id": "ord-entry", "qty": "29.000000"})
+    tr = _trader(tmp_path, br)
+
+    class _FlipHost:
+        def on_bar(self, candle):
+            class _D:
+                desired_position = 0
+                fills: list = []
+
+                def to_dict(self):
+                    return {"desired_position": 0, "fills": []}
+
+            return _D()
+
+    tr.hosts["AAA"] = _FlipHost()
+    tr.desired["AAA"] = 1
+    tr.pending["AAA"] = {"desired": 1, "reason": "signal_1", "submitted": True,
+                         "order_id": "ord-entry", "target_qty": 29.0}
+    tr.step_bar("AAA", _bar(1_700_000_000, 100.0, 101.0))
+    assert br.cancels == ["ord-entry"]
+    p = tr.pending.get("AAA") or {}
+    assert p.get("desired") == 0
+    assert p.get("order_id") != "ord-entry", "must not adopt the dead entry"
+    assert p.get("submitted") is True, "the exit was really submitted"
+    assert len(br.submissions) == 1

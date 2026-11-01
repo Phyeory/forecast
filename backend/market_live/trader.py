@@ -414,6 +414,124 @@ class MarketLiveTrader:
         self.guard.start_day(self._equity(), day_key)
         self.current_day = day_key
 
+    # ── pending-order resolution (venue truth) ────────────────────────────
+    def _resolve_pending(self, sym: str, px_open: float,
+                         px_fill: float) -> tuple[list[BrokerFill], bool]:
+        """Reconcile one pending intent against the venue.
+
+        Returns (fills, done).  Kept separate from step_bar so it can also
+        run when NO new bar has closed: the venue's order lifecycle (opg
+        canceled after a missed auction, day order filled intraday) moves
+        between sessions, and a status check that only runs on a new bar
+        would let a stale opg sit forever.
+        """
+        pend = self.pending.pop(sym, None)
+        if pend is None:
+            return [], False
+        deferred_fills: list[BrokerFill] = []
+        if pend.get("late"):
+            # px_fill already carries the achievable price (the close) from
+            # the caller — a late order cannot catch the open it missed
+            pend["reason"] = f"{pend.get('reason', '')} [late_fill]".strip()
+        else:
+            px_fill = px_open
+        target = pend.get("target_qty")
+        if target is None:
+            target = self._buy_qty(px_open) if pend["desired"] else 0.0
+        done = False
+        if pend.get("submitted") and pend.get("order_id") is not None:
+            # the order went out at signal time (queueing broker); resolve
+            # the actual fill so the journal carries the broker's price
+            supported = getattr(self.broker, "order_status_supported", False)
+            st = (self.broker.order_status(pend["order_id"])
+                  if supported else None)
+            status = str((st or {}).get("status", "")).lower()
+            fq = float((st or {}).get("filled_qty") or 0.0)
+            ap = (float((st or {}).get("avg_price") or 0.0)
+                  or float(pend.get("stroke_price") or 0.0) or px_open)
+            if supported and st is not None and self.journal:
+                self.journal.order({"event": "order_status",
+                                    "symbol": self._bsym(sym),
+                                    "order_id": str(pend["order_id"]),
+                                    "status": status, "filled_qty": fq,
+                                    "avg_price": ap,
+                                    "reason": pend.get("reason", "")})
+            if st is None:
+                # no real order-status API (e.g. MT5 bridge) — the fill the
+                # broker returned at submission time is the truth
+                fq = float(pend.get("stroke_qty") or 0.0)
+                ap = float(pend.get("stroke_price") or 0.0) or px_open
+            if status in ("rejected", "canceled", "expired", "gone"):
+                self._log(f"{sym}: signal order {status or 'lost'} — "
+                          f"resubmitting at next_open")
+                pend.pop("submitted", None)
+                pend.pop("order_id", None)
+            elif fq > 0:
+                f = BrokerFill(symbol=self._bsym(sym),
+                               side="buy" if pend["desired"] else "sell",
+                               qty=abs(fq), price=ap,
+                               notional=abs(fq) * px_open, fee=0.0,
+                               time=time.time(),
+                               order_id=str(pend["order_id"]),
+                               reason=pend.get("reason", "next_open"))
+                deferred_fills.append(f)
+                if self.journal:
+                    self.journal.order({**f.to_dict(),
+                                        "event": "next_open_fill"})
+                done = True
+            elif supported and market_is_open():
+                # an unfilled opg still open while the market trades is a
+                # relic: the auction it targeted has passed (Alpaca paper
+                # never fills opg).  Cancel it and resubmit below as a day
+                # order at the real market price.
+                try:
+                    self.broker.cancel_order(pend["order_id"])
+                except Exception:  # noqa: BLE001
+                    pass
+                self._log(f"{sym}: stale unfilled order canceled — "
+                          f"resubmitting at market")
+                if self.journal:
+                    self.journal.order({"event": "order_cancel_stale",
+                                        "symbol": self._bsym(sym),
+                                        "order_id": str(pend["order_id"]),
+                                        "reason": pend.get("reason", "")})
+                pend.pop("submitted", None)
+                pend.pop("order_id", None)
+            else:
+                # submitted but not yet filled (opg awaiting the open):
+                # keep deferring — the intent is already at the broker
+                self.pending[sym] = pend
+        if not done and not pend.get("submitted"):
+            f = self.broker.target_position(self._bsym(sym), target, px_fill,
+                                            reason=pend.get("reason", "next_open"))
+            if f:
+                if f.filled or not getattr(self.broker, "submits_immediately", False):
+                    deferred_fills.append(f)
+                    if self.journal:
+                        self.journal.order({**f.to_dict(),
+                                            "event": "next_open_fill"})
+                else:
+                    # queueing broker: a submission is NOT a fill.  Keep
+                    # the intent alive with its order id — the real fill
+                    # reconciles from order_status on the next bar.
+                    # (Booking the stroke here is what phantom-filled the
+                    # Oct-28 ADBE entry while the broker stayed flat.)
+                    pend["submitted"] = True
+                    pend["order_id"] = f.order_id
+                    pend["target_qty"] = target
+                    pend["stroke_price"] = f.price
+                    pend["stroke_qty"] = f.qty
+                    if self.journal:
+                        self.journal.order({**f.to_dict(),
+                                            "event": "signal_submit"})
+            if getattr(self.broker, "submits_immediately", False) \
+                    and (f is not None or pend.get("submitted")):
+                # intent stays pending until the broker reports a fill
+                # (nothing submitted and nothing working → drop it)
+                self.pending[sym] = pend
+        self.desired[sym] = pend["desired"]
+        return deferred_fills, done
+
     # ── one closed bar ────────────────────────────────────────────────────
     def step_bar(self, sym: str, candle: dict) -> dict:
         host = self.hosts[sym]
@@ -422,114 +540,16 @@ class MarketLiveTrader:
 
         # 1) deferred (next_open) order from the previous close fills HERE
         deferred_fills: list[BrokerFill] = []
-        pend = self.pending.pop(sym, None)
-        if pend is not None:
+        if self.pending.get(sym) is not None:
             px_open = float(candle["open"])
             self.prices[sym] = px_open
             # ── late-fill rule (mirrors the live Alpaca broker): if the order
             #    was created while the market was OPEN, the targeted open had
             #    already passed → the achievable fill is the current price,
-            #    not an open we could not catch.
-            if pend.get("late"):
-                px_fill = float(candle["close"])
-                pend["reason"] = f"{pend.get('reason', '')} [late_fill]".strip()
-            else:
-                px_fill = px_open
-            target = pend.get("target_qty")
-            if target is None:
-                target = self._buy_qty(px_open) if pend["desired"] else 0.0
-            done = False
-            if pend.get("submitted") and pend.get("order_id") is not None:
-                # the order went out at signal time (queueing broker); resolve
-                # the actual fill so the journal carries the broker's price
-                supported = getattr(self.broker, "order_status_supported", False)
-                st = (self.broker.order_status(pend["order_id"])
-                      if supported else None)
-                status = str((st or {}).get("status", "")).lower()
-                fq = float((st or {}).get("filled_qty") or 0.0)
-                ap = (float((st or {}).get("avg_price") or 0.0)
-                      or float(pend.get("stroke_price") or 0.0) or px_open)
-                if supported and st is not None and self.journal:
-                    self.journal.order({"event": "order_status",
-                                        "symbol": self._bsym(sym),
-                                        "order_id": str(pend["order_id"]),
-                                        "status": status, "filled_qty": fq,
-                                        "avg_price": ap,
-                                        "reason": pend.get("reason", "")})
-                if st is None:
-                    # no real order-status API (e.g. MT5 bridge) — the fill the
-                    # broker returned at submission time is the truth
-                    fq = float(pend.get("stroke_qty") or 0.0)
-                    ap = float(pend.get("stroke_price") or 0.0) or px_open
-                if status in ("rejected", "canceled", "expired", "gone"):
-                    self._log(f"{sym}: signal order {status or 'lost'} — "
-                              f"resubmitting at next_open")
-                    pend.pop("submitted", None)
-                    pend.pop("order_id", None)
-                elif fq > 0:
-                    f = BrokerFill(symbol=self._bsym(sym),
-                                   side="buy" if pend["desired"] else "sell",
-                                   qty=abs(fq), price=ap,
-                                   notional=abs(fq) * px_open, fee=0.0,
-                                   time=time.time(),
-                                   order_id=str(pend["order_id"]),
-                                   reason=pend.get("reason", "next_open"))
-                    deferred_fills.append(f)
-                    if self.journal:
-                        self.journal.order({**f.to_dict(),
-                                            "event": "next_open_fill"})
-                    done = True
-                elif supported and market_is_open():
-                    # an unfilled opg still open while the market trades is a
-                    # relic: the auction it targeted has passed (Alpaca paper
-                    # never fills opg).  Cancel it and resubmit below as a day
-                    # order at the real market price.
-                    try:
-                        self.broker.cancel_order(pend["order_id"])
-                    except Exception:  # noqa: BLE001
-                        pass
-                    self._log(f"{sym}: stale unfilled order canceled — "
-                              f"resubmitting at market")
-                    if self.journal:
-                        self.journal.order({"event": "order_cancel_stale",
-                                            "symbol": self._bsym(sym),
-                                            "order_id": str(pend["order_id"]),
-                                            "reason": pend.get("reason", "")})
-                    pend.pop("submitted", None)
-                    pend.pop("order_id", None)
-                else:
-                    # submitted but not yet filled (opg awaiting the open):
-                    # keep deferring — the intent is already at the broker
-                    self.pending[sym] = pend
-            if not done and not pend.get("submitted"):
-                f = self.broker.target_position(self._bsym(sym), target, px_fill,
-                                                reason=pend.get("reason", "next_open"))
-                if f:
-                    if f.filled or not getattr(self.broker, "submits_immediately", False):
-                        deferred_fills.append(f)
-                        if self.journal:
-                            self.journal.order({**f.to_dict(),
-                                                "event": "next_open_fill"})
-                    else:
-                        # queueing broker: a submission is NOT a fill.  Keep
-                        # the intent alive with its order id — the real fill
-                        # reconciles from order_status on the next bar.
-                        # (Booking the stroke here is what phantom-filled the
-                        # Oct-28 ADBE entry while the broker stayed flat.)
-                        pend["submitted"] = True
-                        pend["order_id"] = f.order_id
-                        pend["target_qty"] = target
-                        pend["stroke_price"] = f.price
-                        pend["stroke_qty"] = f.qty
-                        if self.journal:
-                            self.journal.order({**f.to_dict(),
-                                                "event": "signal_submit"})
-                if getattr(self.broker, "submits_immediately", False) \
-                        and (f is not None or pend.get("submitted")):
-                    # intent stays pending until the broker reports a fill
-                    # (nothing submitted and nothing working → drop it)
-                    self.pending[sym] = pend
-            self.desired[sym] = pend["desired"]
+            #    not an open we could catch.
+            px_fill = (float(candle["close"]) if self.pending[sym].get("late")
+                       else px_open)
+            deferred_fills, _done = self._resolve_pending(sym, px_open, px_fill)
 
         # 2) engine sees the bar — the invariant call
         decision = host.on_bar(candle)
@@ -568,19 +588,21 @@ class MarketLiveTrader:
                 # right now, in which case that open has already passed and
                 # the achievable fill is the current price (late_fill).
                 old = self.pending.pop(sym, None)
+                canceled_id = ""
                 if old and old.get("submitted") and old.get("order_id") is not None \
                         and int(old.get("desired", 0)) != new:
                     # the engine flipped while an order was still working at
                     # the broker — cancel it so it can't fill into the wrong
                     # position
+                    canceled_id = str(old["order_id"])
                     try:
-                        self.broker.cancel_order(old["order_id"])
+                        self.broker.cancel_order(canceled_id)
                     except Exception:  # noqa: BLE001
                         pass
                     if self.journal:
                         self.journal.order({"event": "order_cancel_flip",
                                             "symbol": self._bsym(sym),
-                                            "order_id": str(old["order_id"]),
+                                            "order_id": canceled_id,
                                             "reason": old.get("reason", "")})
                 pend = {"desired": new, "reason": f"signal_{t}",
                         "signal_close": float(candle["close"]),
@@ -593,6 +615,10 @@ class MarketLiveTrader:
                     try:
                         already = (self.broker.open_orders(self._bsym(sym))
                                    if hasattr(self.broker, "open_orders") else [])
+                        # the order we just canceled can still be listed as
+                        # open for a moment — it must not block the new intent
+                        already = [o for o in (already or [])
+                                   if str(o.get("id", "")) != canceled_id]
                         if already:
                             pend["submitted"] = True
                             pend["order_id"] = str(already[0].get("id", ""))
@@ -653,9 +679,32 @@ class MarketLiveTrader:
         self.trades.append(rec)
         return rec
 
+    # ── venue-truth pass (runs even when no new bar closed) ───────────────
+    def _poll_pending_orders(self) -> list[BrokerFill]:
+        """Reconcile working orders against the venue, independently of bars.
+
+        The order lifecycle moves between sessions: an opg that missed the
+        auction is canceled, a day order fills intraday.  Without this pass a
+        stale opg would only ever be inspected when the next daily bar
+        arrives — by then it has been canceled for hours.
+        """
+        fills: list[BrokerFill] = []
+        for sym in list(self.pending):
+            pend = self.pending.get(sym) or {}
+            if not pend.get("submitted") or not pend.get("order_id"):
+                continue
+            px = float(self.prices.get(sym, 0.0))
+            if px <= 0:
+                continue
+            f, _done = self._resolve_pending(sym, px, px)
+            fills.extend(f)
+        return fills
+
     # ── polling (live) ────────────────────────────────────────────────────
     def poll_once(self) -> dict:
         out = {"processed": 0, "fills": 0}
+        # venue truth first: fills/cancels that happened since the last bar
+        out["fills"] += len(self._poll_pending_orders())
         for sym in list(self.hosts):
             try:
                 bars = self.feed.closed_bars(sym, since_ts=self.last_ts[sym])
