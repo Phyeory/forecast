@@ -54,7 +54,9 @@ verify the engine it ran against HEAD.
 | 2026-10-24 | `20261024_135929` (local run) | First live session; engine prepared 67 symbols, 956 bars warmup each; no orders |
 | 2026-10-26/27 | `20261027_070002` (GH) | ADBE buy 29 sh @ $258.60 submitted (`signal_1792987200` = Oct 26 bars, `opg`); apparently **did not fill** (broker book empty next morning) |
 | 2026-10-28 | `20261028_074203` (GH) | ADBE buy 29 sh re-issued, booked $255.775, notional $7,417; order working at open. Desired book: 9 long signals (ABT, ADBE, HD, IBM, LOW, META, MSTR, NKE, PG) |
-| 2026-10-29/30 | `20261029_074630`, `20261030_075231` (GH) | **No orders.** The Oct 28 `opg` order was cancelled unfilled (broker buying power restored to $400k, no position), but the engine still carries `desired: ADBE=1` (+ 8 others) and does not re-submit — a desired-vs-broker desync deadlock. Broker truth: **flat, $100,000, zero fills after 6 sessions** |
+| 2026-10-30 | `20261030_075231` (GH) | No orders. The Oct 28 `opg` order was canceled unfilled (broker buying power restored to $400k, no position), but the engine still carries `desired: ADBE=1` (+ 8 others) and does not re-submit — a desired-vs-broker desync deadlock. Broker truth: **flat, $100,000, zero fills after 6 sessions** |
+| 2026-10-30 20:38 ET | `20261031_003818` (GH) | **Fixed code runs.** `warm_sync` adoption submits 9 REAL orders (ABT 71 @104.56, ADBE 30 @248.05, HD 22 @328.93, IBM 29 @258.12, LOW 36 @207.26, META 12 @624.50, MSTR 52 @141.61, NKE 195 @38.42, PG 46 @160.58), journaled as `sync_submit` — **no phantom fill booked** |
+| 2026-10-31 03:42 ET | `20261031_074202` (GH) | Pending records **survived the restart with their order ids** (the core fix): 9 `order_status` checks, all "accepted", fq=0 → intent kept alive, nothing resubmitted, no phantom fills. Two engine flips (ABT, PG) fired exit signals → their working entry orders canceled (`order_cancel_flip`). Buying power $400k → $348.5k (7 working orders ≈ $51.5k reserved). Orders target Monday Nov 2's open |
 
 **⚠️ Open defect (2026-10-30) — signal→order pipeline stalls. FIXED same day, see below.**
 Sessions log `desired_position=1` with `pending={}` and no `orders.jsonl` entries, while the
@@ -96,8 +98,16 @@ working) → 400,000 from Oct 29 (canceled unfilled).
 - Workflow adds 13:35 + 14:35 UTC crons (one of the two is always ~9:35 ET year-round) to
   give paper entries their market-hours fill window.
 
-Tests: `market_live/test_opg_lifecycle.py` (8 lifecycle cases) + `test_late_fill.py` (paper
-parity unchanged) — 16/16 green; snapshot fingerprint untouched (no re-warm on deploy).
+Tests: `market_live/test_opg_lifecycle.py` (11 lifecycle cases) + `test_late_fill.py` (paper
+parity unchanged) — 19/19 green; snapshot fingerprint untouched (no re-warm on deploy).
+
+**Second fix (2026-10-31, `4100f80`):** the venue-truth check lived inside `step_bar`, so it
+only ran when a new daily bar closed — but the market-hours runs (13:35/14:35 UTC) usually
+process ZERO bars, so a stale opg could never be canceled and resubmitted as a day order at
+the live price, and an open-auction fill was not booked until the next session. The pending
+resolution is now `_resolve_pending`, and `_poll_pending_orders()` runs at the start of every
+poll. Also: after a flip-cancel the dead order can still be listed as open for a moment — it
+is excluded from the duplicate-submit guard so the exit order is actually sent.
 
 **Campaign restart decision (2026-10-30):** the persisted stall (9 desired, no pending,
 flat broker) is cleared by flipping `warm_sync` to `true` in `alpaca_paper.json` — the
