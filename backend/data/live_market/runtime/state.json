@@ -1,5 +1,5 @@
 {
- "saved_at": 1793432589.1643484,
+ "saved_at": 1793608550.5875068,
  "book": {
   "equity": 100000.0,
   "cash": 100000.0,
@@ -78,7 +78,7 @@
  },
  "desired": {
   "AAPL": 0,
-  "ABT": 1,
+  "ABT": 0,
   "ADBE": 1,
   "AMAT": 0,
   "AMD": 0,
@@ -129,7 +129,7 @@
   "ORCL": 0,
   "PEP": 0,
   "PFE": 0,
-  "PG": 1,
+  "PG": 0,
   "QCOM": 0,
   "SLB": 0,
   "T": 0,
@@ -146,17 +146,6 @@
   "XOM": 0
  },
  "pending": {
-  "ABT": {
-   "desired": 0,
-   "reason": "signal_1793332800",
-   "signal_close": 106.24,
-   "late": false,
-   "submitted": true,
-   "order_id": "e8ab51da-07d9-44e0-a1ac-588f33e22db4",
-   "target_qty": 0.0,
-   "stroke_price": 106.24,
-   "stroke_qty": 0.0
-  },
   "ADBE": {
    "desired": 1,
    "reason": "state_sync",
@@ -212,17 +201,6 @@
    "order_id": "a70007da-f442-4adc-aa1e-1c5138c364d6",
    "target_qty": 195.21082769390944,
    "late": false
-  },
-  "PG": {
-   "desired": 0,
-   "reason": "signal_1793332800",
-   "signal_close": 161.57,
-   "late": false,
-   "submitted": true,
-   "order_id": "9427123d-8cf9-4af3-9658-540daf9f82ce",
-   "target_qty": 0.0,
-   "stroke_price": 161.57,
-   "stroke_qty": 0.0
   }
  }
 }
