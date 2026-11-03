@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Optional, Callable, Awaitable, Iterable
 
 import rate_limiter as rl
+from feeds.feed_base import CandidateFeed
 
 logger = logging.getLogger("autofeed")
 
@@ -283,7 +284,7 @@ class AutofeedConfig:
 
 # ── AutoFeed Engine ─────────────────────────────────────────────────────────
 
-class AutoFeed:
+class AutoFeed(CandidateFeed):
     """
     Polling-only discovery loop.
 
@@ -299,19 +300,14 @@ class AutoFeed:
         forward_fn: Optional[Callable[[Candidate], Awaitable[None]]] = None,
         active_count_fn: Optional[Callable[[], int]] = None,
     ):
+        super().__init__(forward_fn=forward_fn, active_count_fn=active_count_fn)
         self.config = config or AutofeedConfig()
-        self._forward_fn = forward_fn
-        self._active_count_fn = active_count_fn
-        self._task: Optional[asyncio.Task] = None
-        self._stop_evt = asyncio.Event()
+        self._log = logger
+        self._label = "AutoFeed"
 
         # State
-        self._seen: dict[str, Candidate] = {}
         self._last_fed_at: float = 0.0
-        self.last_error: str = ""
         self.last_poll_at: float = 0.0
-        self.total_seen: int = 0
-        self.total_fed: int = 0
         # Auto-tune state
         self._market_conditions: Optional[dict] = None
         self._last_tuned_gates: Optional[dict] = None
@@ -319,19 +315,8 @@ class AutoFeed:
         self._last_tune_refresh_at: float = 0.0
         self._tune_history: list[dict] = []
 
-    # -- lifecycle ────────────────────────────────────────────────────────────
-    def start(self, forward_fn=None, active_count_fn=None):
-        if forward_fn is not None:
-            self._forward_fn = forward_fn
-        if active_count_fn is not None:
-            self._active_count_fn = active_count_fn
-
-        if self._task and not self._task.done():
-            logger.warning("[AutoFeed] Already running — ignoring duplicate start()")
-            return False
-
-        self._stop_evt.clear()
-        self._task = asyncio.ensure_future(self._loop())
+    def _log_started(self) -> None:
+        """Emit the start banner with the active gates."""
         logger.info(
             f"[AutoFeed] Started  interval={self.config.interval} "
             f"poll={self.config.poll_seconds}s "
@@ -339,33 +324,6 @@ class AutoFeed:
             f"rug≤{self.config.max_rug_ratio} bundled≤{self.config.max_bundler_rate} "
             f"insider≤{self.config.max_insider_rate} smart≤{self.config.min_smart_degen_count}"
         )
-        return True
-
-    async def stop(self):
-        self._stop_evt.set()
-        if self._task and not self._task.done():
-            try:
-                await asyncio.wait_for(self._task, timeout=10.0)
-            except asyncio.TimeoutError:
-                self._task.cancel()
-            except Exception:
-                pass
-        self._task = None
-        logger.info("[AutoFeed] Stopped")
-
-    def is_running(self) -> bool:
-        return bool(self._task and not self._task.done() and self.config.enabled)
-
-    # -- hot config update ────────────────────────────────────────────────────
-    def set_config(self, partial: dict):
-        changed = []
-        for k, v in partial.items():
-            if hasattr(self.config, k) and v is not None:
-                old = getattr(self.config, k)
-                if old != v:
-                    setattr(self.config, k, v)
-                    changed.append(k)
-        return changed
 
     # ── Market-condition auto-tune ──────────────────────────────────────────
 
@@ -899,13 +857,7 @@ class AutoFeed:
                 return
 
         # Backpressure — `active_count_fn` is async (returns count of live traders).
-        if self._active_count_fn is not None:
-            try:
-                active = int(await self._active_count_fn())
-            except Exception:
-                active = 0
-        else:
-            active = 0
+        active = await self._active_count_async()
 
         # Re-rank by motion first (per OP spec: "trending coins with lots of motion"):
         # volume desc → swaps desc → smart_degen_count desc → rug asc (organic tiebreak)
@@ -936,7 +888,8 @@ class AutoFeed:
 
     # ── Snapshot (REST/WS UI) ────────────────────────────────────────────────
 
-    def snapshot(self) -> dict:
+    def _snapshot_head(self) -> dict:
+        """Config and auto-tune status keys, in the dashboard's expected order."""
         return {
             "enabled":   self.config.enabled,
             "is_running": self.is_running(),
@@ -973,7 +926,7 @@ class AutoFeed:
             "max_created_age": self.config.max_created_age,
             "max_concurrent_feed": self.config.max_concurrent_feed,
             "cooldown_after_feed_minutes": self.config.cooldown_after_feed_minutes,
-            # Auto-tune block — conditions, effective gates, and provenance
+            # Auto-tune block: conditions, effective gates, and provenance
             "auto_tune_enabled": self.config.auto_tune_enabled,
             "auto_tune_refresh_seconds": self.config.auto_tune_refresh_seconds,
             "auto_tune_mcap_grad_discount": self.config.auto_tune_mcap_grad_discount,
@@ -982,9 +935,11 @@ class AutoFeed:
             "last_tune_at": self._last_tune_at,
             "tune_history": self._tune_history[-10:],
             "last_poll_at": self.last_poll_at,
-            "last_error": self.last_error,
-            "total_seen": self.total_seen,
-            "total_fed":  self.total_fed,
+        }
+
+    def _snapshot_tail(self) -> dict:
+        """Tracked-candidate status keys that follow the shared state block."""
+        return {
             "active_tracked": len(self._seen),
             "recent_candidates": [c.to_dict() for c in list(self._seen.values())[-10:]],
         }

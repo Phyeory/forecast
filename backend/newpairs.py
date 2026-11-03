@@ -40,6 +40,7 @@ import time
 from dataclasses import dataclass, asdict, field
 from typing import Optional, Callable, Awaitable
 
+from feeds.feed_base import CandidateFeed
 from pumpfun_client import NewPairsStream, get_ds_pairs_by_mints
 
 logger = logging.getLogger("newpairs")
@@ -114,7 +115,7 @@ class NewPairsConfig:
 
 # ── Feed engine ──────────────────────────────────────────────────────────────
 
-class NewPairsFeed:
+class NewPairsFeed(CandidateFeed):
     """
     Discovery-only loop over PumpPortal's new-token stream.
 
@@ -130,46 +131,41 @@ class NewPairsFeed:
         active_count_fn: Optional[Callable[[], int]] = None,
         notify_fn: Optional[Callable[[NewPairCandidate], Awaitable[None]]] = None,
     ):
+        super().__init__(forward_fn=forward_fn, active_count_fn=active_count_fn)
         self.config = config or NewPairsConfig()
-        self._forward_fn = forward_fn
-        self._active_count_fn = active_count_fn
+        self._log = logger
+        self._label = "NewPairs"
         self._notify_fn = notify_fn
-        self._task: Optional[asyncio.Task] = None
         self._qual_task: Optional[asyncio.Task] = None
-        self._stop_evt = asyncio.Event()
 
         # State
-        self._seen: dict[str, NewPairCandidate] = {}   # mint -> candidate (for dedupe/UI)
         self._last_fed: dict[str, float] = {}          # mint -> last spawn timestamp
-        # Births awaiting global-fees qualification (gate enabled only).
-        # Oldest-first sweeps measure each candidate's fees; qualified ones
-        # spawn, expired ones are dropped.
+        # Births awaiting global-fees qualification (gate enabled only):
+        # oldest-first sweeps measure fees; qualified spawn, expired drop.
         self._pending: dict[str, NewPairCandidate] = {}
-        self.last_error: str = ""
         self.last_event_at: float = 0.0
         self.last_sweep_at: float = 0.0
         self.last_sweep_checked: int = 0
-        self.total_seen: int = 0
-        self.total_fed: int = 0
         self.total_qualified: int = 0
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
-    def start(self, forward_fn=None, active_count_fn=None, notify_fn=None):
-        if forward_fn is not None:
-            self._forward_fn = forward_fn
-        if active_count_fn is not None:
-            self._active_count_fn = active_count_fn
+    def start(
+        self,
+        forward_fn: Optional[Callable[[NewPairCandidate], Awaitable[None]]] = None,
+        active_count_fn: Optional[Callable[[], int]] = None,
+        notify_fn: Optional[Callable[[NewPairCandidate], Awaitable[None]]] = None,
+    ) -> bool:
+        """Store the notify callback, then run the shared lifecycle start."""
         if notify_fn is not None:
             self._notify_fn = notify_fn
+        return super().start(forward_fn, active_count_fn)
 
-        if self._task and not self._task.done():
-            logger.warning("[NewPairs] Already running — ignoring duplicate start()")
-            return False
-
-        self._stop_evt.clear()
-        self._task = asyncio.ensure_future(self._loop())
+    def _on_started(self) -> None:
         self._qual_task = asyncio.ensure_future(self._qualification_loop())
+
+    def _log_started(self) -> None:
+        """Emit the start banner with the active feed gates."""
         logger.info(
             f"[NewPairs] Started  min_dev_buy={self.config.min_initial_buy_sol} SOL  "
             f"mcap_usd=[{self.config.min_mcap_usd}, {self.config.max_mcap_usd or '∞'}]  "
@@ -178,40 +174,16 @@ class NewPairsFeed:
             f"max_sessions={self.config.max_concurrent_sessions}  "
             f"no_motion_stop={self.config.no_motion_stop_seconds:.0f}s"
         )
-        return True
 
-    async def stop(self):
-        self._stop_evt.set()
-        for task in (self._qual_task, self._task):
-            if task and not task.done():
-                try:
-                    await asyncio.wait_for(task, timeout=10.0)
-                except asyncio.TimeoutError:
-                    task.cancel()
-                except Exception:
-                    pass
+    def _stoppable_tasks(self) -> tuple[Optional[asyncio.Task], ...]:
+        """The qualification loop drains before the discovery loop."""
+        return (self._qual_task, self._task)
+
+    def _clear_tasks(self) -> None:
         self._task = None
         self._qual_task = None
-        logger.info("[NewPairs] Stopped")
-
-    def is_running(self) -> bool:
-        return bool(self._task and not self._task.done() and self.config.enabled)
-
-    def set_config(self, partial: dict):
-        changed = []
-        for k, v in partial.items():
-            if hasattr(self.config, k) and v is not None:
-                old = getattr(self.config, k)
-                if old != v:
-                    setattr(self.config, k, v)
-                    changed.append(k)
-        return changed
 
     # ── filter ───────────────────────────────────────────────────────────────
-
-    def _excluded_set(self) -> set[str]:
-        raw = (self.config.exclude_mints or "").strip()
-        return {x.strip().lower() for x in raw.split(",") if x.strip()}
 
     def _to_candidate(self, raw: dict) -> Optional[NewPairCandidate]:
         """Raw PumpPortal new-token event → candidate.  None if filtered out."""
@@ -467,13 +439,7 @@ class NewPairsFeed:
         last = self._last_fed.get(mint, 0.0)
         if last > 0 and (now - last) < self.config.cooldown_seconds:
             return False
-        active = 0
-        if self._active_count_fn is not None:
-            try:
-                active = int(self._active_count_fn())
-            except Exception:
-                active = 0
-        if active >= self.config.max_concurrent_sessions:
+        if self._active_count() >= self.config.max_concurrent_sessions:
             return False
         return True
 
@@ -483,18 +449,8 @@ class NewPairsFeed:
 
     # ── snapshot (REST/WS UI) ────────────────────────────────────────────────
 
-    def snapshot(self) -> dict:
-        # UI list: the newest births PLUS the hottest pending candidates
-        # (highest measured fees) so the fees gate is visible — the newest
-        # births haven't been swept yet and would always show "—".
-        newest = sorted(self._seen.values(), key=lambda c: c.first_seen or 0, reverse=True)[:10]
-        hot = sorted(
-            (c for c in self._pending.values() if c.global_fees_sol > 0),
-            key=lambda c: c.global_fees_sol, reverse=True,
-        )[:10]
-        merged: dict[str, NewPairCandidate] = {}
-        for c in newest + hot:
-            merged.setdefault(c.mint, c)
+    def _snapshot_head(self) -> dict:
+        """Config and sweep status keys, in the dashboard's expected order."""
         return {
             "enabled": self.config.enabled,
             "is_running": self.is_running(),
@@ -517,9 +473,21 @@ class NewPairsFeed:
             "cooldown_seconds": self.config.cooldown_seconds,
             "no_motion_stop_seconds": self.config.no_motion_stop_seconds,
             "last_event_at": self.last_event_at,
-            "last_error": self.last_error,
-            "total_seen": self.total_seen,
-            "total_fed": self.total_fed,
+        }
+
+    def _snapshot_tail(self) -> dict:
+        """Qualification and tracked-candidate keys after the shared state block."""
+        # UI list mixes the newest births with the hottest pending candidates
+        # so the fees gate is visible; unswept newest births would show no fees.
+        newest = sorted(self._seen.values(), key=lambda c: c.first_seen or 0, reverse=True)[:10]
+        hot = sorted(
+            (c for c in self._pending.values() if c.global_fees_sol > 0),
+            key=lambda c: c.global_fees_sol, reverse=True,
+        )[:10]
+        merged: dict[str, NewPairCandidate] = {}
+        for c in newest + hot:
+            merged.setdefault(c.mint, c)
+        return {
             "total_qualified": self.total_qualified,
             "active_tracked": len(self._seen),
             "recent_candidates": [c.to_dict() for c in merged.values()],
