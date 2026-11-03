@@ -55,54 +55,15 @@ from typing import Optional
 from strategy_engine import Regime as _V1Regime, \
                             Signal as _V1Signal, \
                             Direction as _V1Direction
+from core.config import family_defaults
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
-DEFAULT_CONFIG = {
-    # ── Warmup / arming ────────────────────────────────────────────────
-    "v4_warmup_s":        120,    # let the session peak form before arming
-    "v4_min_age_s":       300,    # session age floor at arm time
-    "v4_min_peak_mcap":   20000,  # the flush must come off a real peak ($)
-
-    # ── The drawdown band ───────────────────────────────────────────────
-    "v4_dd_min":          0.40,   # primary cell: 40% drawdown from peak
-    "v4_dd_max":          1.00,   # disarm beyond this (dead-coin floor; the
-                                   # floor-bid cell sets 0.70–0.90 instead)
-
-    # ── Mode A — nuke-dip bounce (default) ─────────────────────────────
-    "v4_bounce_depth":    0.03,   # bounce ≥ 3% off the local low, i.e.
-                                   # trigger when D ≤ dd_min − depth
-    "v4_flow_window_states": 10,  # trailing 4-state ticks for the flow gate
-    "v4_flow_ratio":      0.90,   # Σbuy/Σsell ≥ 0.9 over the window
-
-    # ── Mode B — consolidation survival ────────────────────────────────
-    "v4_flat_window_s":   240,    # trailing window for the range box
-    "v4_flat_range_pct":  0.15,   # (max−min)/min of the box
-    "v4_flat_no_new_low_s": 120,  # no new low below post-flush low for this
-
-    # ── Mode select ────────────────────────────────────────────────────
-    "v4_mode":            "bounce",
-
-    # ── Exits (mechanical; jeet rule) ──────────────────────────────────
-    "v4_tp_pct":          45.0,   # nuke_tp at mcap ≥ peak-mcap basis
-    "v4_jeet_tol":        2.0,    # scratch when ≤ entry×(1−2/100)
-    "v4_jeet_grace_s":    20,     # ... only after this trade age
-    "v4_max_hold_s":      900,    # nuke_time_stop
-
-    # ── Entry cap (no cooldown — iter10) ───────────────────────────────
-    "v4_max_entries":     3,
-    "v4_two_stage":       0.0,    # default off
-
-    # ── V1-compat echo knobs (pipeline capture reads them) ─────────────
-    "confidence_high":         0.79,
-    "confidence_low":          0.19,
-    "entry_confidence_high":   0.79,
-    "entry_confidence_low":    0.19,
-    "confidence_very_high":    0.86,
-    "warmup_bars":             120,
-}
+# Every knob default lives in core.config; this dict preserves the
+# exact keys, values and order the rest of the system consumes.
+DEFAULT_CONFIG = family_defaults("v4")
 
 _V4_MODES = ("bounce", "flat")
 

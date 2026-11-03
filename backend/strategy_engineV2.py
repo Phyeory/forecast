@@ -54,6 +54,7 @@ import numpy as np
 from strategy_engine import Regime as _V1Regime, \
                             Signal as _V1Signal, \
                             Direction as _V1Direction
+from core.config import family_defaults, v2_default
 
 # numba is optional at import time so the module can still be imported in
 # environments where the JIT compiler is unavailable (kernels fall back to
@@ -139,274 +140,9 @@ class LatentState:
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Names correspond 1:1 to the equations in strategyV2.md §2.
-DEFAULT_CONFIG = {
-    # Drift-mean reversion + coupling to order-flow imbalance
-    "lambda_mu":  0.15,    # μ mean-reversion rate
-    "kappa_mu":   0.05,    # coupling (φ - φ̄) → μ
-    "sigma_mu":   0.10,    # drift shock std (per √s)
-
-    # Log-variance (Hestig-like) OU process
-    "eta":        0.10,    # h mean-reversion rate
-    "sigma_h":    0.20,    # log-var shock std
-
-    # Order-flow pressure AR(1)
-    "alpha":      0.20,    # φ mean-reversion rate
-    "beta":       1.00,    # δ_k / (v_k + ε) coefficient
-    "sigma_phi":  0.15,    # φ shock std
-
-    # Liquidity OU + jump dampener
-    "theta":      0.10,    # ℓ mean-reversion rate
-    "sigma_ell":  0.10,    # ℓ shock std
-    "zeta":       0.30,    # liquidity-jump decay magnitude
-
-    # Volume-profile decay (λ_d = 1/T_w).  iter16k: T_w = 14400 s (full
-    # recording-lifetime KDE); legacy 300 s wiggle window is gone.
-    "lambda_0":   1.0 / 14400.0,   # KDE exponential decay rate
-    "lambda_1":   0.10,           # secondary slow-decay component
-
-    # Jump-intensity Poisson rate per second (governs ℓ jumps)
-    "kappa_J":    0.05,
-
-    # Execution cost model coefficients  s(n, ℓ) = s_0(ℓ) + s_1(ℓ)·n
-    # iter16h cost-calibration to the real 1.11% one-way cost:
-    # ForwardTester at buy_size 0.1 SOL / 1% slippage ≈ 1.1% entry slippage
-    # + flat fees → pre-calibration the engine was modelling ~0.2% (10×
-    # undercount) and the spec §7 positive-EV gate was near-vacuous.
-    "s_0":        0.011,   # base slippage fraction
-    "s_1":        0.0005,  # marginal slippage per unit size
-
-    # Sz-fixed meta-parameters (NOT counted among the 16 — set via config too)
-    "n_particles":       200,    # N_p  — particle count
-    "n_grid":            200,    # spatial grid for U(x,t)
-    "grid_sigma_extent":  5.0,    # ±k·σ_t·√T_w  grid half-width
-    "tw_window_seconds": 14400.0,  # T_w  (iter16k structural KDE memory)
-    "tau_min":           5.0,    # shortest prediction horizon
-    "tau_max":           30.0,   # longest prediction horizon
-    "tau_step":          5.0,    # horizon sweep step
-    "eps_div":           1.0,    # ε in δ_k / (v_k + ε)  (spec: ε=1.0)
-    "fee_fraction":      0.0011,  # f   (iter16h cost-cal, ~0.11%)
-    "latency_seconds":   0.5,   # Δ_lat
-    "liquidity_cap_frac":0.10,   # n*  ≤ 0.1 · L_t
-    "warmup_bars":       400,    # V1-parity: 100 full candles = 400 sub-state intakes
-    # Deterministic RNG seed for the systematic resampler.  The RBF resample
-    # previously drew `np.random.random()` from the process-global (unseeded)
-    # stream, so identical backtests differed run-to-run AND across machines
-    # (macOS vs Codespaces Linux).  `default_rng` (PCG64) is stable for a
-    # given seed across numpy versions.  Set to None to fall back to the
-    # legacy global stream.
-    "rng_seed":           42,     # deterministic resample (None = legacy)
-                             #   gate suppresses signals for 400 engine bars (100 full candles); V2 matches.
-    "ticks_per_state":   4,      # V1 4-state intra-candle expansion count
-                                 #   (adapter-only; pure V2 ignores)
-    "sigma_floor":       1e-6,   # numerical floor on σ
-    "logprob_floor":     -50.0,  # clamp for log-likelihoods
-    # iter21 hypothesis B — fraction of drift-work `±½μΔx` term restored
-    # in Kramers `du_±` exponents (iter16d removed the full term).
-    # Default 0.0 = iter21_k60_offs40 production parity.  Sweep [0.0, 0.1,
-    # 0.3, 0.5].  REJECTED at smoke test (causes iter09-style churn).
-    "v2_drift_work_fraction": 0.0,
-    # Entry-Validation Response triage exit (iter48) — see RESEARCH_LOG.md Iter 48.
-    # evr9 config validated on 953-recording full cohort: +1.142 SOL kelly_flat saving,
-    # catastrophics ≤−30% cut 87→76 (p=0.0038), PnL +1.724→+1.753 SOL.
-    "v2_evr_enable":        1.0,    # 1.0 = ON (production default); 0.0 = OFF
-    "v2_evr_confirm_pct":   10.0,   # confirmation threshold: peak ≥ entry·(1+m); 0% catas never hit +10%
-    "v2_evr_eval_delay":    120,    # seconds after fill before triage can fire
-    "v2_evr_grace_seconds": 0,      # >0: fire only within [delay, delay+grace) (one-shot)
-    "v2_evr_flow_window":   20,     # trailing taker-flow window (s)
-    "v2_evr_buy_ratio_max": 0.45,   # fire when trailing buy-ratio < r (validated r=0.45)
-    "v2_evr_volume_min_sol": 1.0,   # no-data guard (below ⇒ no triage)
-    "v2_evr_require_offside": 1.0,  # fire only when close < entry
-    "v2_evr_offside_min_pct": 20.0, # require close ≤ entry*(1-20/100); winner MAE q10=−16.2%
-    # iter50 EVR concentration veto: a qualifying EVR tick whose trailing sell
-    # flow is dominated by ONE second (whale-sweep print, mean-reverting) is
-    # vetoed PERMANENTLY for the trade.  Distributed selling (organic bleed)
-    # still fires.  Screened on the 50 matched evr9 fires: share AUC 0.686,
-    # LOO Δ +0.1375 SOL.  Default: 0.25 (ACCEPTED iter50 best config).
-    "v2_evr_skip_sell_conc_min": 0.25,   # veto when maxsec sell share > this (0 = OFF)
-    "v2_evr_skip_conc_window":  60,     # trailing window (s) for the share
-    # ── iter36/43/56/66: Holder-Flow & Dev Sell Monitoring ───────────────
-    "v2_holder_flow_entry_block":          0.0,   # 1.0 = ON, 0.0 = OFF (iter62 user policy; re-applied OFF 2026-09-11 — the git-surgery reset resurrected the committed 1.0)
-    "v2_holder_flow_exit_enable":          0.0,   # 1.0 = ON, 0.0 = OFF (iter62 user policy; see entry_block note)
-    "v2_holder_flow_require_tag":          0.0,   # 0.0 = all large sells (gate 1.0); 1.0 = verified tags only
-    "v2_holder_flow_min_usd":            100.0,   # Min sell USD threshold to filter dust
-    "v2_holder_flow_entry_window_seconds":  30,   # Lookback window (s) before entry for dev/whale sell
-    "v2_holder_flow_exit_window_seconds":   15,   # Lookback window (s) in-position for dev/whale sell exit
-    # ── iter64: stationary Kramers rate-split exit (PRODUCTION ON) ──────
-    # REPLACES the iter57/58 give-back adaptation and the iter61
-    # participation floor (removed 2026-08-24 by explicit user decision).
-    # Sweep + full-cohort battery (2026-08-25, RESEARCH_LOG.md Iter 64 §6):
-    # θ=0.55 / K=12 / arm=10 verified as the local optimum on all seven
-    # perturbed directions; the regime Q-gate was measured NET-NEGATIVE and
-    # its Q machinery (cache/load/gate) removed in the 2026-09-02 dead-code
-    # cleanup — the flip is ungated (iter64 production semantics).
-    "v2_rate_split_arm_pct": 10.0,        # arm at +10% peak gain
-    "v2_rate_split_offside_pct": 0.0,     # offside scope exists but REJECTED (0 = off)
-    "v2_rate_split_theta": 0.55,          # sustained stationary-split threshold
-    "v2_rate_split_persist": 12,          # consecutive 4-state ticks (≈3 s)
-    "v2_rate_split_min_peak_age_ticks": 0,  # runner-immunity veto — REJECTED (0 = off)
-
-    # ── iter78 ADOPTION: 5-second deferred-entry execution cell ────────────
-    # (user decision 2026-09-02; the only both-era-positive cell of the
-    # 78-iteration program — RESEARCH_LOG.md Iter 78 §5).  The backtest cell
-    # `iter78_lat5` (entry fills deferred to t_signal+5 s on the recorded
-    # intra-candle path; ENGINE DECISIONS UNTOUCHED) measured +2.1237 SOL /
-    # 65.7% WR on the 2,127-rec DB vs the instant-fill baseline +0.9459 /
-    # 64.9%: Δ+1.178, Wilcoxon p=1.4e-4, CI strictly positive, BOTH eras
-    # positive (OLD +0.646 / DEAD +0.519), tail ≤−30% 123→104, negative
-    # days 17→12, day-σ 0.162→0.161.  Mechanism (978 matched pairs): the 5 s
-    # fill buys the transient micro-dip (mean −0.38% below the signal close,
-    # −6.2% on eventual-tail trades) — entries filled into the dip re-arm
-    # the +10% profit-lock on the bounce and exit as winners instead of
-    # riding kelly_flat/recording_ended to the tail.  The grid is NON-MONOTONE
-    # (10 s Δ−0.21 era-inverted, 15 s +0.03, 10 s×sell 2.3 s +0.04) — do NOT
-    # move the default off 5.0 without re-gating.  (2026-09-11: user set the
-    # production default to 0.0 = OFF; the mechanism stays available.)
-    # Consumption: the pipelines read this knob and defer the BUY FILL by
-    # N seconds after the signal state — backtester.py passes it as
-    # ForwardTester(entry_latency_seconds=…), live_trader.py delays the swap
-    # launch by N seconds.  Setting it to 0.0 restores the signal-instant
-    # fill byte-exactly (the iter73 model).  It does NOT touch any engine
-    # decision, exit, or size — only the execution timing of entries.
-    "v2_entry_delay_seconds": 0.0,   # iter83 REJECTED on the current stack 2026-09-12 (pure e5/e3 era-inverting, post Δ<0; e2/e5 stacked on x20a cost −1.8/−1.7 SOL vs x20a alone — keep 0.0); >0 = iter78 deferred fill
-
-    # ── iter80 ADOPTION: 20-second deferred-exit execution (armed-only) ────
-    # (user decision 2026-09-03; the sell-side mirror of the iter78 entry
-    # delay — RESEARCH_LOG.md Iter 80).  Ground truth on the frozen lat5
-    # book: after ARMED exit fires the recorded path is +8.95% above the
-    # fill in the 30s median (share ≥+2% = 68%) — the give-back harvest
-    # fires at the bottom of its own micro-dip; UNARMED exits average
-    # E[Δp30] = −0.25% so deferral is RESTRICTED to the armed/harvest exit
-    # classes (gain_retrace / rate_split_flip:armed / tp_v2 /
-    # breakeven_scratch / reversal_exit); the loss book (kelly_flat,
-    # evr_triage, kramers_down_exit, dev_sell_exit, recording_ended) fills
-    # at the signal instant exactly as before.  The full-DB cell
-    # `iter80_xa20` (1,003 trades / 61.8% WR / +3.1873 SOL / PF 1.41 vs
-    # base +2.1469 / 65.6% / 1.29): Δ+1.0405, Wilcoxon p=0.0038, CI
-    # [+0.00073,+0.00380], BOTH eras positive (OLD +0.59 / DEAD +0.51),
-    # expectancy/trade +48% (+0.00208→+0.00318), negative days 12→11,
-    # worst day −0.193→−0.129.  The uniform x15 cell (loss book deferred)
-    # was REJECTED (p=0.34; tail 105→118) — do NOT defer the loss book.
-    # Trade-count drops 1,032→1,003 (deferred closes push same-recording
-    # re-entry windows past their signal; the lost re-entries were net
-    # −0.155 SOL).  Escape hatch: `{"v2_exit_delay_seconds": 0.0}` restores
-    # the pre-iter80 signal-instant exit fill byte-exactly.
-    # Consumption: the pipelines read these knobs off the ENGINE and defer
-    # the EXIT FILL by N seconds — backtester.py keys ForwardTester
-    # enable_exit_latency(L, armed_only) on them; live_trader.py holds the
-    # queued armed EXIT on the candle clock then launches the sell.  The
-    # exit DECISIONS are untouched — only the fill timing of armed exits.
-    "v2_exit_delay_seconds":     20.0,  # iter83 ADOPTED 2026-09-12 (armed-only 20s: full-DB Δ+5.06 SOL p=5.6e-17, both eras+, holdout-confirmed; >0 = iter80 armed deferred fill)
-    "v2_exit_delay_armed_only":   1.0,  # 1.0 = defer armed/harvest exit classes only (applies when exit delay > 0)
-
-    # ── iter85: per-coin online SDE recalibration ─────────────────────────
-    # The engine re-estimates all 13 free SDE coefficients from THIS coin's
-    # own rolling candle tape (same physics formulas + _CLIP stability
-    # bounds as backend/session_calibrator.py).  Lives INSIDE the engine so
-    # Backtester / ForwardTester / LiveTrader stay in pipeline parity by
-    # construction (invariant 1).  Default OFF — opt-in with
-    # {"v2_percoin_cal_enable": 1.0}; bare-{} batches never silently change.
-    "v2_percoin_cal_enable":      1.0,  # ADOPTED 2026-09-13 (iter86b combined stack: refines the mint-history/population start mid-session; standalone-rejected, adopted in combination)
-    # iter86c: per-coin refinement is evidence-backed ONLY on top of the
-    # mint-history layer (long prior tape → meaningful online estimates).
-    # On thin-mint/popcal sessions it is noise (true full-DB burn: −0.94
-    # train vs +1.64 holdout imbalance).  1.0 = per-coin fires only when the
-    # mint-history layer actually supplied the session's coefficients.
-    "v2_percoin_requires_mintcal": 1.0,
-    "v2_percoin_cal_min_candles": 120,  # tape length before first recalibration
-    "v2_percoin_cal_every":       100,  # legacy count diagnostic; scheduling uses seconds
-    "v2_percoin_cal_interval_seconds": 100.0,  # elapsed candle-clock time between attempts
-    "v2_percoin_cal_blend":       1.0,  # [0,1]: current cfg → estimated coefficients
-    "v2_percoin_cal_window":      600,  # completed candles, plus one in-progress row
-
-    # ── iter90: per-coin harvest-geometry calibration ──────────────────────
-    # Status 2026-09-18: REJECTED — the machinery stays (default OFF) because
-    # it is smoke-proven, causal and config-responsive, but the surface is
-    # measured-closed.  Evidence: (1) the preregistered campaign (iter90_
-    # geometry_results/) — screen cells all PnL-noise, chosen cell geo_gate
-    # holdout 0/96 recordings changed; (2) the (arm × give) trade-level
-    # counterfactual grid on the 887-trade causal baseline (analysis/
-    # cal_cf_geometry.py, cf_grid.json): EVERY geometry cell ≤ 0 vs the
-    # production lock (arm 10, give 0.5) — tighter arms −0.3..−1.0 SOL
-    # (marginal arming trades are net winners left unlocked), tighter gives
-    # −0.17..−1.05 SOL — the iter27/iter64 static optimum already sits at the
-    # surface optimum, and the marginal arming band's outcomes do not track
-    # the coin's prior-tape amplitude statistics.  Do NOT re-test arm/give
-    # per-coin calibration without a new data channel.
-    # The SDE-coefficient channel above remains the adopted calibration
-    # stack; its decision-inertness (iter89) is structural: saturation at
-    # stability floors + KDE-density-ratio direction decision.
-    "v2_harvestcal_enable":       0.0,  # iter90 candidate REJECTED (explicit 1.0 arms it; absent ≠ OFF applies post-adoption only)
-    "v2_harvest_arm_scale":       1.0,  # arm_pct = scale × runup_q50(%)
-    "v2_harvest_arm_min":         4.0,  # arm floor (quiet coins arm no lower)
-    "v2_harvest_arm_max":         14.0, # arm ceiling (hot coins keep a wide trail)
-    "v2_percoin_geo_enable":      1.0,  # per-coin online geometry refinement (requires _geometry_sourced or explicit pass; killed by v2_harvestcal_enable=0 and the NONCAL hatch)
-    "v2_percoin_geo_requires_mintcal": 0.0,  # 1.0 = refine geometry only on mint-sourced sessions (SDE-gate mirror; screening cell)
-
-    # ── iter90d: variance-ratio decision horizon (τ) calibration ───────────
-    # The legacy tau estimator (1/lambda_mu inversion) conflates the drift
-    # mean-reversion timescale with the DECISION HORIZON and saturates at its
-    # floor (tau=10) on ~100% of sessions — the engine runs P⁰-dominated and
-    # overly conservative.  Leverage experiment #2 (16 traded recordings, on
-    # top of production): tau60 +76 trades Δ+0.258 SOL (10/16 diverge),
-    # tau90 +95/+0.206, tau45 +58/+0.042 — the τ family is the ONLY surface
-    # with both decision leverage and positive raw direction.  The VR
-    # estimator maps the coin's trend-resolution timescale H* (argmax of
-    # directional variance per unit time; bimodal chop H*=15 vs trend
-    # H*≥30) to tau_max = clip(scale × H*, 10, 60): chop coins keep the
-    # conservative short horizon, trend coins commit.  All estimation layers
-    # (population/mint/per-coin) switch to VR when enabled; OFF = legacy
-    # byte-parity.
-    # ADOPTED 2026-09-19 (iter90e, preregistered campaign iter90e_tauvr_
-    # results/): full-DB 2,647 recs Δ+3.935 SOL (baseline +5.31 → +9.24),
-    # Wilcoxon p=0.00014, bootstrap CI [+0.0007,+0.0023], 565 changed with
-    # 61% improved, token breadth 60%; HOLDOUT Δ+0.462 p=0.017 CI+ 82%
-    # improved; eras pre +1.28 / post +2.65 both positive; day-blocked
-    # sign-flip permutation p=0.0005 (49 days, 31 positive).  Trades
-    # 887→1,991 (+124%), WR 68.2%→64.6% (added trades win ≈62%),
-    # expectancy +0.0060→+0.0046/trade.  The static tau60 reference was
-    # NOT adopted (+3.07 but p=0.83, diffuse); the per-coin VR selectivity
-    # concentrates the edge and is what makes it significant.
-    "v2_tau_vr_enable":           1.0,  # ADOPTED 2026-09-19 (iter90e): full-DB Δ+3.935 SOL p=0.00014 CI+ breadth 60% (565 changed, 61% improved), holdout Δ+0.462 p=0.017 CI+ 82% improved, both eras positive, day-blocked permutation p=0.0005
-    "v2_tau_vr_scale":            1.0, # tau_max = scale × H* (ADOPTED cell; screened 0.25/0.5/1.0/2.0 + static reference)
-
-    # ── ADOPTED 2026-09-12 (user directive): population SDE calibration ──
-    # At session start, all 13 free SDE coefficients are estimated from the
-    # last 50 completed recordings before the session (physics-based
-    # population estimator in backend/session_calibrator.py).  ADOPTED CELL
-    # iter84b_cal_full (full-DB 2,437 recs): 777 trades, WR 68.3%, PnL +4.86
-    # SOL, exp +0.0063/trade — vs DEFAULT 1,311 / 63.5% / +4.47 / +0.0034.
-    # The engine knob is the single source of truth: the backtest sentinel
-    # and the live session builder both default to it, so backtest and live
-    # calibrate identically.  0.0 = OFF (pre-adoption byte-parity hatch).
-    "v2_popcal_enable":          1.0,
-
-    # ── iter86: mint-history calibration (user proposal — full token picture) ──
-    # BEFORE the population layer, estimate from THIS TOKEN's own prior
-    # recorded tape (all candles from prior completed recordings of the same
-    # mint, backtest-safe).  A coin re-visited by the platform gets its own
-    # physics at tick 0 instead of a cross-population prior.  Falls through
-    # to the population layer when the mint has <120 prior candles (~71% of
-    # sessions).
-    # ADOPTED 2026-09-13 as iter86b COMBINED STACK (mint-history tick-0 +
-    # per-coin online recalibration refining it): affected-cohort (702 recs)
-    # Δ+0.71 SOL p=0.0057 CI[+0.0002,+0.0019] breadth 62.1%; full-DB Δ+0.68
-    # p=0.0027 CI[+0.0001,+0.0005] breadth 70.7%; HOLDOUT +0.26 p=0.0033
-    # breadth 77.8%; PRE-era p=0.0036 CI+ breadth 80% — every gate passed vs
-    # the adopted population stack.  WR 63.8→76.8%, expectancy ×8 (both
-    # 69-trade: decision quality, not throttling).  Thin mints (<120 prior
-    # candles) fall through to population — byte-identical there.
-    "v2_mintcal_enable":         1.0,
-
-    # ── iter86d: live chain fetch of full mint history (user proposal) ──
-    # Thin-mint live sessions fetch the token's COMPLETE bonding-curve trade
-    # history from Solana RPC once at session start (bounded 90s, fits inside
-    # the 100-candle warmup), persist it to price_data.db
-    # `mint_history_candles`, and calibrate from the full picture at tick 0.
-    # Persisted rows are shared by live AND backtest (parity by construction).
-    # Failure → population fallback, logged.
-    "v2_chain_fetch_enable":     1.0,
-
-}
+# Every knob default lives in core.config; this dict preserves the
+# exact keys, values and order the rest of the system consumes.
+DEFAULT_CONFIG = family_defaults("v2")
 
 
 def _merge_config(user: dict) -> dict:
@@ -2843,20 +2579,20 @@ class StrategyEngineV2Adapter:
 
     def __init__(self, **engine_kwargs):
         # Pull V1 TPSL params if provided (passed through engine_kwargs).
-        self._v1_takeprofit_low  = float(engine_kwargs.pop("takeprofit_pct_low", 30.0))
-        self._v1_takeprofit_high = float(engine_kwargs.pop("takeprofit_pct_high", 300.0))
-        self._v1_stoploss_low    = float(engine_kwargs.pop("stoploss_pct_low", 12.0))
-        self._v1_stoploss_high   = float(engine_kwargs.pop("stoploss_pct_high", 25.0))
+        self._v1_takeprofit_low  = float(engine_kwargs.pop("takeprofit_pct_low", v2_default("takeprofit_pct_low")))
+        self._v1_takeprofit_high = float(engine_kwargs.pop("takeprofit_pct_high", v2_default("takeprofit_pct_high")))
+        self._v1_stoploss_low    = float(engine_kwargs.pop("stoploss_pct_low", v2_default("stoploss_pct_low")))
+        self._v1_stoploss_high   = float(engine_kwargs.pop("stoploss_pct_high", v2_default("stoploss_pct_high")))
         # Hard-stop removed (iter18b): stoploss_pct=0 disables all price-floor
         # exits.  The engine relies exclusively on Bayesian posterior exits
         # (Kramers P_down, reversal regime, gain-retrace, mu_drift_down_exit).
-        self.stoploss_pct         = float(engine_kwargs.pop("stoploss_pct", 0.0))
-        self.takeprofit_pct       = float(engine_kwargs.pop("takeprofit_pct", 0.0))
+        self.stoploss_pct         = float(engine_kwargs.pop("stoploss_pct", v2_default("stoploss_pct")))
+        self.takeprofit_pct       = float(engine_kwargs.pop("takeprofit_pct", v2_default("takeprofit_pct")))
         # warmup counts engine update() intakes (bars).  100 full candles = 400 sub-states.
         # Accept either 'warmup_bars' or 'warmup' (in candles <= 100 or sub-bars).
         _warmup_val = engine_kwargs.pop("warmup_bars", None)
         if _warmup_val is None:
-            _warmup_val = engine_kwargs.pop("warmup", 100)
+            _warmup_val = engine_kwargs.pop("warmup", v2_default("warmup"))
         if _warmup_val <= 100:
             self._warmup_bars = int(_warmup_val * 4)
         else:
@@ -3072,14 +2808,14 @@ class StrategyEngineV2Adapter:
         # ── V1 config knobs the capture enumerates (cfg_*) ──
         # We echo them onto `eng` so the ForwardTester's _capture_entry_params
         # dictionary doesn't AttributeError.  All defaults, mirroring V1.
-        self.confidence_high = float(engine_kwargs.pop("confidence_high", 0.79))
-        self.confidence_low = float(engine_kwargs.pop("confidence_low", 0.19))
-        self.entry_confidence_high = float(engine_kwargs.pop("entry_confidence_high", 0.79))
-        self.entry_confidence_low = float(engine_kwargs.pop("entry_confidence_low", 0.19))
-        self.confidence_very_high = float(engine_kwargs.pop("confidence_very_high", 0.86))
+        self.confidence_high = float(engine_kwargs.pop("confidence_high", v2_default("confidence_high")))
+        self.confidence_low = float(engine_kwargs.pop("confidence_low", v2_default("confidence_low")))
+        self.entry_confidence_high = float(engine_kwargs.pop("entry_confidence_high", v2_default("entry_confidence_high")))
+        self.entry_confidence_low = float(engine_kwargs.pop("entry_confidence_low", v2_default("entry_confidence_low")))
+        self.confidence_very_high = float(engine_kwargs.pop("confidence_very_high", v2_default("confidence_very_high")))
         # V2 Bayesian entry floor on P_up — iter17a counterfactual-validated
         # (404-trade logged-batch replay) — 0.62 raised WR & PnL ~7× vs 0.35.
-        self._v2_p_up_min = float(engine_kwargs.pop("v2_p_up_min", 0.62))
+        self._v2_p_up_min = float(engine_kwargs.pop("v2_p_up_min", v2_default("v2_p_up_min")))
         # iter17: counterfactual-validated entry/exit overlays (see
         # RESEARCH_LOG.md iter17 — 404-trade logged-batch replay).
         # Defaults below = the iter17a validated config (the
@@ -3091,9 +2827,9 @@ class StrategyEngineV2Adapter:
         #   gain_retrace_give_frac: exit when gain retraces to peak_gain*(1-g)
         #   breakeven_arm_dd_pct:  arm scratch exit after -X% drawdown
         #   breakeven_buffer_pct:  scratch exit level (entry*(1+buf))
-        self._v2_sigma_t_min       = float(engine_kwargs.pop("v2_sigma_t_min", 0.021))
+        self._v2_sigma_t_min       = float(engine_kwargs.pop("v2_sigma_t_min", v2_default("v2_sigma_t_min")))
         # iter18b_opt optimized exit parameters
-        self._gain_retrace_arm_pct  = float(engine_kwargs.pop("gain_retrace_arm_pct", 10.0))
+        self._gain_retrace_arm_pct  = float(engine_kwargs.pop("gain_retrace_arm_pct", v2_default("gain_retrace_arm_pct")))
         # iter27: give_frac default 0.4 → 0.5.  Post-exit regret analysis on the
         # 606-recording fresh dataset showed gain_retrace exited far too early
         # (median winner ran a further +48.7% after exit).  Full-batch sweep:
@@ -3103,21 +2839,21 @@ class StrategyEngineV2Adapter:
         # g=0.5 is the Pareto-optimal give-back: captures runner upside via
         # later kramers/tp_v2 exits while limiting the modest-winner→scratch
         # conversion that erodes win rate at looser trails.
-        self._gain_retrace_give_frac = float(engine_kwargs.pop("gain_retrace_give_frac", 0.5))
+        self._gain_retrace_give_frac = float(engine_kwargs.pop("gain_retrace_give_frac", v2_default("gain_retrace_give_frac")))
         # iter63 diagnostic — write-only per-tick posterior capture.  When set
         # to a file path, every in-position tick appends one JSON line with
         # the Kramers geometry (k_up/k_down), escape probabilities, and the
         # decision snapshot.  Used ONLY by offline analysis harnesses
         # (analysis/iter63_capture.py).  Default "" = OFF → zero state/flow
         # change → byte-identical production behaviour (parity-proven).
-        self._v2_debug_tick_log = str(engine_kwargs.pop("v2_debug_tick_log", "") or "")
-        self._breakeven_arm_dd_pct  = float(engine_kwargs.pop("breakeven_arm_dd_pct", 25.0))
-        self._breakeven_buffer_pct  = float(engine_kwargs.pop("breakeven_buffer_pct", 2.5))
+        self._v2_debug_tick_log = str(engine_kwargs.pop("v2_debug_tick_log", v2_default("v2_debug_tick_log")) or "")
+        self._breakeven_arm_dd_pct  = float(engine_kwargs.pop("breakeven_arm_dd_pct", v2_default("breakeven_arm_dd_pct")))
+        self._breakeven_buffer_pct  = float(engine_kwargs.pop("breakeven_buffer_pct", v2_default("breakeven_buffer_pct")))
         # iter18b: reversal-regime persistence guard.  Number of consecutive
         # REVERSAL-regime bars required before the reversal_exit fires.
         # Default 2 (optimized in iter18b_opt): requires 2s of sustained
         # REVERSAL posterior majority to distinguish trend reversal from noise.
-        self._reversal_exit_bars    = int(engine_kwargs.pop("reversal_exit_bars", 2))
+        self._reversal_exit_bars    = int(engine_kwargs.pop("reversal_exit_bars", v2_default("reversal_exit_bars")))
         # ── iter21: sustained-no-long-Kelly exit ("kelly_flat" / exit #7). ──
         # Bayesian decision-theoretic theorem: a long position ceases to be
         # optimal when the engine's own per-tick Kelly utility for "stay long"
@@ -3141,8 +2877,8 @@ class StrategyEngineV2Adapter:
         # _no_long_offside_pct: the trade must be at least X% underwater
         # before this exit can fire (guards against the natural consolidation
         # E_long-neg phases that healthy winners pass through).
-        self._no_long_exit_bars     = int(engine_kwargs.pop("no_long_exit_bars", 60))
-        self._no_long_offside_pct   = float(engine_kwargs.pop("no_long_offside_pct", 40.0))
+        self._no_long_exit_bars     = int(engine_kwargs.pop("no_long_exit_bars", v2_default("no_long_exit_bars")))
+        self._no_long_offside_pct   = float(engine_kwargs.pop("no_long_offside_pct", v2_default("no_long_offside_pct")))
         # iter21 hypothesis K (μ-persistence guard): require that
         # fraction of trailing 60 ticks with negative EMA-smoothed μ_t is
         # at least this high.  REJECTED at full batch (iter21k_mu75 vs
@@ -3152,7 +2888,7 @@ class StrategyEngineV2Adapter:
         # mu_neg_frac=1.00, highest possible).  Default 0.0 = OFF
         # (preserves iter21_k60_offs40 production parity).
         # 0.75 means 75% of last 60 ticks had EMA-mu < 0.
-        self._no_long_mu_neg_frac   = float(engine_kwargs.pop("no_long_mu_neg_frac", 0.0))
+        self._no_long_mu_neg_frac   = float(engine_kwargs.pop("no_long_mu_neg_frac", v2_default("no_long_mu_neg_frac")))
         self._no_long_streak        = 0
         self._entry_E_star = 0.0
         self.confidence_w1 = 0.3
@@ -3202,22 +2938,22 @@ class StrategyEngineV2Adapter:
         self.stoploss_pct_high = self._v1_stoploss_high
         # V1-only adapter-visible attrs (queried by ForwardTester's
         # _capture_entry_params() but not used by the V2 core).
-        self.max_entry_bar_count   = int(engine_kwargs.pop("max_entry_bar_count", 5700))
-        self.forbidden_bc_lo       = int(engine_kwargs.pop("forbidden_bc_lo", 2000))
-        self.forbidden_bc_hi       = int(engine_kwargs.pop("forbidden_bc_hi", 3000))
-        self.trail_floor_pct       = float(engine_kwargs.pop("trail_floor_pct", 13.0))
-        self.reversal_exit_bars_max = int(engine_kwargs.pop("reversal_exit_bars_max", 20))
+        self.max_entry_bar_count   = int(engine_kwargs.pop("max_entry_bar_count", v2_default("max_entry_bar_count")))
+        self.forbidden_bc_lo       = int(engine_kwargs.pop("forbidden_bc_lo", v2_default("forbidden_bc_lo")))
+        self.forbidden_bc_hi       = int(engine_kwargs.pop("forbidden_bc_hi", v2_default("forbidden_bc_hi")))
+        self.trail_floor_pct       = float(engine_kwargs.pop("trail_floor_pct", v2_default("trail_floor_pct")))
+        self.reversal_exit_bars_max = int(engine_kwargs.pop("reversal_exit_bars_max", v2_default("reversal_exit_bars_max")))
         # `iter05_decay_window` (default 60): sliding-window size for the
         # decay prevalence counter — the(rbish)rolling-fraction signal.
         # 60 ticks ≈ 15 candles under 4-state expansion.  Empirically the
         # catastrophic-coin dumps (BREAD, WEN, CHAIRSEM) lose -40% to -70%
         # within ~10-15 minutes of state-time, so a 60-tick window captures
         # the prolonged decay preceding a re-entry purchase.
-        self.iter05_decay_window       = int(engine_kwargs.pop("iter05_decay_window", 60))
+        self.iter05_decay_window       = int(engine_kwargs.pop("iter05_decay_window", v2_default("iter05_decay_window")))
         # `iter05_decay_window_thresh` (default 0.8): fraction of the
         # window for which sma must be negative to declare the trajectory
         # "locked downward" and gate new entries.
-        self.iter05_decay_window_thresh = float(engine_kwargs.pop("iter05_decay_window_thresh", 0.8))
+        self.iter05_decay_window_thresh = float(engine_kwargs.pop("iter05_decay_window_thresh", v2_default("iter05_decay_window_thresh")))
         # `iter05_decay_entry_block` (default 1.0 = ON): toggle the
         # entry-side decay BLOCK.  When ≥ `iter05_decay_window_thresh`
         # of the last `iter05_decay_window` state-updates had sma<0,
@@ -3231,7 +2967,7 @@ class StrategyEngineV2Adapter:
         # losses are follow-up trades that immediately re-enter after a
         # `kramers_down_exit` on a token whose μ̇ has been continuously
         # declining.
-        self.iter05_decay_entry_block  = float(engine_kwargs.pop("iter05_decay_entry_block", 1.0))
+        self.iter05_decay_entry_block  = float(engine_kwargs.pop("iter05_decay_entry_block", v2_default("iter05_decay_entry_block")))
         # V2 only — used by ForwardTester when it generates the cfg dict
         # via the V1 attr names; defaults = spec defaults
         self.lambda_mu = self.cfg["lambda_mu"]
@@ -3276,12 +3012,12 @@ class StrategyEngineV2Adapter:
         #   When no holder_flow events are loaded, `_has_recent_dev_sell`
         #   always returns False, so behaviour is byte-identical to the
         #   pre-iter36 engine (parity-safe on recordings without holder_flow).
-        self._v2_holder_flow_entry_block = float(engine_kwargs.pop("v2_holder_flow_entry_block", 0.0))
-        self._v2_holder_flow_exit_enable = float(engine_kwargs.pop("v2_holder_flow_exit_enable", 0.0))
-        self._v2_holder_flow_require_tag = float(engine_kwargs.pop("v2_holder_flow_require_tag", 0.0))
-        self._v2_holder_flow_min_usd     = float(engine_kwargs.pop("v2_holder_flow_min_usd", 100.0))
-        self._v2_holder_flow_entry_window_seconds = int(engine_kwargs.pop("v2_holder_flow_entry_window_seconds", 30))
-        self._v2_holder_flow_exit_window_seconds  = int(engine_kwargs.pop("v2_holder_flow_exit_window_seconds", 15))
+        self._v2_holder_flow_entry_block = float(engine_kwargs.pop("v2_holder_flow_entry_block", v2_default("v2_holder_flow_entry_block")))
+        self._v2_holder_flow_exit_enable = float(engine_kwargs.pop("v2_holder_flow_exit_enable", v2_default("v2_holder_flow_exit_enable")))
+        self._v2_holder_flow_require_tag = float(engine_kwargs.pop("v2_holder_flow_require_tag", v2_default("v2_holder_flow_require_tag")))
+        self._v2_holder_flow_min_usd     = float(engine_kwargs.pop("v2_holder_flow_min_usd", v2_default("v2_holder_flow_min_usd")))
+        self._v2_holder_flow_entry_window_seconds = int(engine_kwargs.pop("v2_holder_flow_entry_window_seconds", v2_default("v2_holder_flow_entry_window_seconds")))
+        self._v2_holder_flow_exit_window_seconds  = int(engine_kwargs.pop("v2_holder_flow_exit_window_seconds", v2_default("v2_holder_flow_exit_window_seconds")))
         self._candle_volume_history: list[dict] = []
         # ── Entry-Validation Response triage exit (iter48) ──────────────────
         # Post-entry evidence channel: the market's taker-flow RESPONSE to the
@@ -3292,18 +3028,18 @@ class StrategyEngineV2Adapter:
         # 20 s).  EVR exits an UNCONFIRMED, flow-INVALIDATED, offside position
         # once `eval_delay` seconds have elapsed since entry.  Default 1.0 =
         # ON (evr9 production config, full-cohort validated iter48).
-        self._v2_evr_enable        = float(engine_kwargs.pop("v2_evr_enable", 1.0))
-        self._v2_evr_confirm_pct   = float(engine_kwargs.pop("v2_evr_confirm_pct", 10.0))
-        self._v2_evr_eval_delay    = int(engine_kwargs.pop("v2_evr_eval_delay", 120))
-        self._v2_evr_grace_seconds = int(engine_kwargs.pop("v2_evr_grace_seconds", 0))
-        self._v2_evr_flow_window   = int(engine_kwargs.pop("v2_evr_flow_window", 20))
-        self._v2_evr_buy_ratio_max = float(engine_kwargs.pop("v2_evr_buy_ratio_max", 0.45))
-        self._v2_evr_volume_min_sol = float(engine_kwargs.pop("v2_evr_volume_min_sol", 1.0))
-        self._v2_evr_require_offside = float(engine_kwargs.pop("v2_evr_require_offside", 1.0))
-        self._v2_evr_offside_min_pct = float(engine_kwargs.pop("v2_evr_offside_min_pct", 20.0))
+        self._v2_evr_enable        = float(engine_kwargs.pop("v2_evr_enable", v2_default("v2_evr_enable")))
+        self._v2_evr_confirm_pct   = float(engine_kwargs.pop("v2_evr_confirm_pct", v2_default("v2_evr_confirm_pct")))
+        self._v2_evr_eval_delay    = int(engine_kwargs.pop("v2_evr_eval_delay", v2_default("v2_evr_eval_delay")))
+        self._v2_evr_grace_seconds = int(engine_kwargs.pop("v2_evr_grace_seconds", v2_default("v2_evr_grace_seconds")))
+        self._v2_evr_flow_window   = int(engine_kwargs.pop("v2_evr_flow_window", v2_default("v2_evr_flow_window")))
+        self._v2_evr_buy_ratio_max = float(engine_kwargs.pop("v2_evr_buy_ratio_max", v2_default("v2_evr_buy_ratio_max")))
+        self._v2_evr_volume_min_sol = float(engine_kwargs.pop("v2_evr_volume_min_sol", v2_default("v2_evr_volume_min_sol")))
+        self._v2_evr_require_offside = float(engine_kwargs.pop("v2_evr_require_offside", v2_default("v2_evr_require_offside")))
+        self._v2_evr_offside_min_pct = float(engine_kwargs.pop("v2_evr_offside_min_pct", v2_default("v2_evr_offside_min_pct")))
         # iter50: EVR sell-concentration veto (see DEFAULT_CONFIG note).
-        self._v2_evr_skip_sell_conc_min = float(engine_kwargs.pop("v2_evr_skip_sell_conc_min", 0.25))
-        self._v2_evr_skip_conc_window   = int(engine_kwargs.pop("v2_evr_skip_conc_window", 60))
+        self._v2_evr_skip_sell_conc_min = float(engine_kwargs.pop("v2_evr_skip_sell_conc_min", v2_default("v2_evr_skip_sell_conc_min")))
+        self._v2_evr_skip_conc_window   = int(engine_kwargs.pop("v2_evr_skip_conc_window", v2_default("v2_evr_skip_conc_window")))
         self._evr_entry_time: int = 0
         # ── iter78 ADOPTION: 5-second deferred-entry execution cell ─────────
         # Popped here so every pipeline can read the adopted default off the
@@ -3313,7 +3049,7 @@ class StrategyEngineV2Adapter:
         # adoption used).  The engine itself never consumes this value: it is
         # pure execution timing, applied by ForwardTester (backtest) and
         # LiveTrader (live).  0.0 restores the signal-instant fill.
-        self.v2_entry_delay_seconds = float(engine_kwargs.pop("v2_entry_delay_seconds", 0.0))
+        self.v2_entry_delay_seconds = float(engine_kwargs.pop("v2_entry_delay_seconds", v2_default("v2_entry_delay_seconds")))
         # ── iter80 ADOPTED: deferred exit-fill execution (armed-only 20s) ──
         # Popped here so every pipeline can read the knobs off the engine
         # object (the backtester keys its ForwardTester
@@ -3329,12 +3065,12 @@ class StrategyEngineV2Adapter:
         # 2026-09-03); 2026-09-11 the user set the production default to
         # 0.0 = instant exit fill (the pre-iter80 model, byte-exact); >0
         # re-enables the armed deferral.
-        self.v2_exit_delay_seconds = float(engine_kwargs.pop("v2_exit_delay_seconds", 20.0))
+        self.v2_exit_delay_seconds = float(engine_kwargs.pop("v2_exit_delay_seconds", v2_default("v2_exit_delay_seconds")))
         # 1.0: defer only the armed/harvest exit classes (gain_retrace,
         # rate_split_flip:armed, tp_v2, breakeven_scratch, reversal_exit);
         # the loss book (kelly_flat, evr_triage, kramers_down_exit,
         # dev_sell_exit, recording_ended) fills at the signal instant.
-        self.v2_exit_delay_armed_only = float(engine_kwargs.pop("v2_exit_delay_armed_only", 1.0))
+        self.v2_exit_delay_armed_only = float(engine_kwargs.pop("v2_exit_delay_armed_only", v2_default("v2_exit_delay_armed_only")))
         # ── iter63/64: stationary Kramers rate-split early exit ─────────
         # ("rate_split_flip").  The production kramers_down_exit (#5) asks
         #   P_down(τ) = (k_d/k)(1−e^{−kτ}) ≥ 0.5
@@ -3352,11 +3088,11 @@ class StrategyEngineV2Adapter:
         #   arm_pct  — armed winners only: peak ≥ entry·(1+A/100)  (0=off)
         #   offside  — deep-offside only: c ≤ entry·(1−X/100)      (0=off)
         # Default enable=1.0 = ON (production, post-iter64 adoption).
-        self._v2_rate_split_enable      = float(engine_kwargs.pop("v2_rate_split_enable", 1.0))
-        self._v2_rate_split_arm_pct     = float(engine_kwargs.pop("v2_rate_split_arm_pct", 10.0))
-        self._v2_rate_split_offside_pct = float(engine_kwargs.pop("v2_rate_split_offside_pct", 0.0))
-        self._v2_rate_split_theta       = float(engine_kwargs.pop("v2_rate_split_theta", 0.55))
-        self._v2_rate_split_persist     = int(engine_kwargs.pop("v2_rate_split_persist", 12))
+        self._v2_rate_split_enable      = float(engine_kwargs.pop("v2_rate_split_enable", v2_default("v2_rate_split_enable")))
+        self._v2_rate_split_arm_pct     = float(engine_kwargs.pop("v2_rate_split_arm_pct", v2_default("v2_rate_split_arm_pct")))
+        self._v2_rate_split_offside_pct = float(engine_kwargs.pop("v2_rate_split_offside_pct", v2_default("v2_rate_split_offside_pct")))
+        self._v2_rate_split_theta       = float(engine_kwargs.pop("v2_rate_split_theta", v2_default("v2_rate_split_theta")))
+        self._v2_rate_split_persist     = int(engine_kwargs.pop("v2_rate_split_persist", v2_default("v2_rate_split_persist")))
         # iter63 runner-immunity veto (REJECTED — see RESEARCH_LOG Iter63 §6):
         # during ACTIVE price discovery the stationary split saturates
         # (s → 1) on every breather — price is above all KDE mass so the
@@ -3365,15 +3101,15 @@ class StrategyEngineV2Adapter:
         # ≥N ticks stale; screened net-negative (UB −0.18..−0.10, screen
         # Δ+0.115/−0.070 vs unfiltered +0.284).  0 = no veto (default).
         self._v2_rate_split_min_peak_age_ticks = int(engine_kwargs.pop(
-            "v2_rate_split_min_peak_age_ticks", 0))
+            "v2_rate_split_min_peak_age_ticks", v2_default("v2_rate_split_min_peak_age_ticks")))
         self._rate_split_streak = 0
         self._last_peak_tick = 0
 
         # ── Market-cap bound trade block ────────────────────────────────────
         # Block all BUY entries when the USD market cap is below mcap_low_usd
         # or above mcap_high_usd.  Both default to 0 = deactivated.
-        self._mcap_low_usd  = float(engine_kwargs.pop("mcap_low_usd", 0.0))
-        self._mcap_high_usd = float(engine_kwargs.pop("mcap_high_usd", 0.0))
+        self._mcap_low_usd  = float(engine_kwargs.pop("mcap_low_usd", v2_default("mcap_low_usd")))
+        self._mcap_high_usd = float(engine_kwargs.pop("mcap_high_usd", v2_default("mcap_high_usd")))
         self._market_cap_usd: float = 0.0
         # Holder-flow events: list of dicts with keys time, wallet, tag, side,
         # amount_usd, amount_sol, tx_hash.  Passed in by the pipeline layer

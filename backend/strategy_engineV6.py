@@ -57,47 +57,15 @@ from typing import Optional
 from strategy_engine import Regime as _V1Regime, \
                             Signal as _V1Signal, \
                             Direction as _V1Direction
+from core.config import family_defaults
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
-DEFAULT_CONFIG = {
-    # ── Qualifying event ────────────────────────────────────────────────
-    # tag IN the engine's verified-insider set (dev/sniper/bundler/
-    # rat_trader), side='sell', usd_amount ≥ v6_min_event_usd.
-    # The `whale` fallback class is EXCLUDED by design (6.7% coverage
-    # artifact pre-08-29 — see module docstring).
-    "v6_min_event_usd":     100.0,
-
-    # ── Absorption window ─────────────────────────────────────────────
-    "v6_absorb_window_s":   45,
-    "v6_absorb_dd":         0.08,    # A: min price ≥ p0×(1−8/100)
-    # B: post-event sell volume ≤ mult × event size.  The build prompt's
-    # 2.0 was calibrated against the event's own size, but measured on
-    # the recordings the median post-45s sell flow is ~9.9× a single
-    # insider print (normal tape flow dwarfs one dump) — 2.0 rejects 85%
-    # of A-holds including the profitable ones.  10.0 ≈ the measured
-    # median; the engine-burn screen sweeps {off, 10, 20} to bracket it.
-    "v6_post_sell_mult":    10.0,
-
-    # ── Entry trigger ─────────────────────────────────────────────────
-    "v6_reclaim_pct":       1.0,     # p ≥ p0×(1+1/100) after window held
-
-    # ── Exits ─────────────────────────────────────────────────────────
-    "v6_tp_pct":            25.0,    # absorb_tp
-    "v6_scratch_tol":      2.0,     # absorb_scratch (after grace)
-    "v6_scratch_grace_s":   20,
-    "v6_max_hold_s":       600,     # absorb_time_stop
-
-    # ── V1-compat echo knobs (pipeline capture reads them) ─────────────
-    "confidence_high":         0.79,
-    "confidence_low":          0.19,
-    "entry_confidence_high":   0.79,
-    "entry_confidence_low":    0.19,
-    "confidence_very_high":    0.86,
-    "warmup_bars":             60,
-}
+# Every knob default lives in core.config; this dict preserves the
+# exact keys, values and order the rest of the system consumes.
+DEFAULT_CONFIG = family_defaults("v6")
 
 # Verified-insider sell classes (the V2 engine's own _DEV_TAGS set).
 _INSIDER_TAGS = frozenset({"dev", "sniper", "bundler", "rat_trader"})

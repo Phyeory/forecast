@@ -72,6 +72,7 @@ from strategy_engineV2 import (
     R_REVERSAL,
     _REGIME_NAMES,
 )
+from core.config import family_defaults
 
 # V2 adapter-level config the lifecycle inherits.  V2's DEFAULT_CONFIG keys
 # that reach the core are forwarded verbatim (SDE rates, KDE memory, tau
@@ -122,123 +123,9 @@ _PHASE_NAMES = {
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
-DEFAULT_CONFIG = {
-    # ── V2 core passthrough (subset; the full V2 set also works) ──────────
-    # Retuned for the newborn regime: faster OU reversion — a newborn coin's
-    # microstructure lives on a 10–60 s clock, not the 100+ s trends V2's
-    # spot calibration assumes.  The τ horizon sweep stays at the V2-validated
-    # 5–30 s range (see the tau_max note below).
-    "lambda_mu":  0.30,
-    "kappa_mu":   0.05,
-    "sigma_mu":   0.10,
-    "eta":        0.10,
-    "sigma_h":    0.20,
-    "alpha":      0.30,
-    "beta":       1.00,
-    "sigma_phi":  0.15,
-    "theta":      0.10,
-    "sigma_ell":  0.10,
-    "zeta":       0.30,
-    "lambda_0":   1.0 / 3600.0,   # KDE memory: 1 h — a newborn tape IS the memory
-    "lambda_1":   0.10,
-    "kappa_J":    0.05,
-    "s_0":        0.011,
-    "s_1":        0.0005,
-    "n_particles":       200,
-    "n_grid":            200,
-    "grid_sigma_extent": 5.0,
-    "tw_window_seconds": 3600.0,
-    # τ horizon sweep kept at the V2-validated 5–30 s range: the escape
-    # probabilities P±(τ) = (k±/k)·(1−e^{−kτ}) need the full 30 s for
-    # P_zero to decay on newborn tapes (a compressed τ_max=10 sweep left
-    # direction ≡ 0 across an entire organic recovery — measured 257 vs 57
-    # gate-clearing ticks on the same tape).  Newborn speed lives in the
-    # OU rates above, not in the escape horizon.
-    "tau_min":           5.0,
-    "tau_max":           30.0,
-    "tau_step":          5.0,
-    "eps_div":           1.0,
-    "fee_fraction":      0.0011,
-    "latency_seconds":   0.5,
-    "liquidity_cap_frac": 0.10,
-    "warmup_bars":       60,     # 15 full candles × 4 states — newborn tapes are short
-    "rng_seed":          42,
-    "v2_drift_work_fraction": 0.0,
-
-    # ── V3 lifecycle: LAUNCH PUMP detection ─────────────────────────────
-    # A newborn recording starts at birth; the launch pump is "the price
-    # rises materially above the first traded levels while flow is one-
-    # sided".  Measured on the candle-close EMA of price, not on ticks.
-    "v3_launch_gain_min_pct": 20.0,  # launch high ≥ open·(1+20/100)
-
-    # ── V3 lifecycle: DUMP detection ────────────────────────────────────
-    # The dump is: (a) price has round-tripped ≥ dump_retrace_pct of the
-    # launch move (launch_high → down), AND (b) sustained sell-side taker
-    # dominance (organic OR sniper — supply leaving the tape).
-    "v3_dump_retrace_pct": 50.0,    # dump low ≤ launch_high·(1−50/100)
-    "v3_dump_sell_ratio_min": 0.60, # trailing buy/(buy+sell) ≤ 0.60 for dump window
-    "v3_dump_window_seconds": 60,  # the flow window the sell ratio is read over
-
-    # ── V3 lifecycle: BOTTOM / organic-demand confirmation ──────────────
-    # Flow exhaustion: the trailing sell dominance decays below the dump
-    # threshold while price stops making new lows.  Then the ORGANIC gate:
-    # BUY requires ALL of
-    #   1. Bayesian confirmation  — V2 posterior P_up ≥ v3_p_up_min at the
-    #      E_star-maximising horizon AND direction == +1 AND E_star > 0
-    #      (the same Kramers escape mathematics V2 uses for trend entries).
-    #   2. Organic flow          — trailing taker buy-ratio ≥
-    #      v3_organic_buy_ratio_min over v3_organic_window_seconds, with
-    #      window volume ≥ v3_organic_volume_min_sol (no-data ⇒ no entry —
-    #      silence is never organic demand).
-    #   3. Market-cap band       — v3_mcap_entry_min_usd ≤ mcap ≤
-    #      v3_mcap_entry_max_usd (user spec: 2k–4k).
-    #   4. Volatility floor      — posterior σ_t ≥ v3_sigma_t_min so the
-    #      Kramers barrier geometry is resolved, not noise.
-    "v3_p_up_min":               0.60,
-    "v3_organic_buy_ratio_min":  0.60,
-    "v3_organic_window_seconds": 30,
-    "v3_organic_volume_min_sol": 0.05,   # newborn tapes are thin — 0.05 SOL is real flow
-    "v3_sigma_t_min":            0.010,
-    "v3_mcap_entry_min_usd":     2000.0,   # user spec: entry band 2k–4k
-    "v3_mcap_entry_max_usd":     4000.0,
-
-    # ── V3 STRICT exits (user spec: "strict stoploss and take profit") ──
-    # Fixed levels, evaluated on every tick against the intra-candle extremes
-    # (l for stop, c for TP — matching V2's tp_v2 semantics but STRICT: no
-    # confidence lerp, no posterior veto, no give-back).  One trade, one
-    # decision: dead coin cut at -SL, winner banked at +TP.
-    # TP 250%: the 2k→8k mcap band is a 3–4× price move at constant supply;
-    # 250% banks it before the mcap-band exit would force the sell anyway.
-    # SL  30%: newborn noise is violent (median 1-candle range >15% on the
-    # dump tape); 30% survives the chop while capping the dead-coin tail.
-    "v3_stoploss_pct":  30.0,   # exit when close ≤ entry·(1−30/100)
-    "v3_takeprofit_pct": 250.0, # exit when close ≥ entry·(1+250/100)
-
-    # ── V3 mcap-band SELL side (user spec: exit ≈ 7k–8k) ────────────────
-    # The band exit fires as soon as mcap ≥ v3_mcap_exit_usd (7.5k = the
-    # user's 7–8k midpoint) — before the strict TP on most runners, because
-    # newborn supply dynamics make the 8k+ region the next sniper exit.
-    "v3_mcap_exit_usd": 7500.0,
-
-    # ── V3 Bayesian safety exits (in addition to the strict levels) ────
-    # The strict SL/TP are the spine; two posterior-only exits remain as
-    # cheap protection, both offside-guarded so they can never cut a
-    # winner: a sustained Kramers down-flip on a losing trade, and a
-    # holder-flow dev/insider sell (the same iter43-validated observable
-    # V2 consumes — newborn dumps are exactly the insider-supply event).
-    "v3_kramers_down_persist":   12,    # consecutive down-dominant ticks (≈3 s)
-    "v3_kramers_offside_pct":    15.0,  # only on trades ≤ −15% offside
-    "v3_holder_flow_enable":     1.0,   # dev/insider sell exit + entry block
-    "v3_holder_flow_min_usd":    100.0,
-    "v3_holder_flow_window_seconds": 30,
-
-    # V1-compat echo knobs (pipeline capture reads them; values mirror V2).
-    "confidence_high":         0.79,
-    "confidence_low":          0.19,
-    "entry_confidence_high":   0.79,
-    "entry_confidence_low":    0.19,
-    "confidence_very_high":   0.86,
-}
+# Every knob default lives in core.config; this dict preserves the
+# exact keys, values and order the rest of the system consumes.
+DEFAULT_CONFIG = family_defaults("v3")
 
 
 def _merge_config(user: Optional[dict]) -> dict:
