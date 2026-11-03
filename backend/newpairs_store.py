@@ -1,5 +1,5 @@
 """
-NewPairs Store — SQLite persistence for NEW-PAIR (pre-migration pump.fun)
+NewPairs Store: SQLite persistence for NEW-PAIR (pre-migration pump.fun)
 price-action recordings.
 
 Deliberately a SEPARATE database (backend/data/newpairs_data.db) from the
@@ -14,39 +14,28 @@ the day an engine is attached to this tab (explicitly NOT wired yet).
 
 Extra recording metadata columns (creator / socials / dev-buy / initial
 market cap) capture the birth event that PumpPortal's subscribeNewToken
-feed delivers — information that no longer exists after the token dies.
+feed delivers: information that no longer exists after the token dies.
 """
 
 from __future__ import annotations
 
-import sqlite3
-import time
 from pathlib import Path
 from typing import Optional
+
+from stores.recordings import RecordingStore, StoreSchema
 
 DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
 NEWPAIRS_DB = DATA_DIR / "newpairs_data.db"
 
+# Birth-event metadata from PumpPortal subscribeNewToken, stored alongside the
+# base recording columns.
+_BIRTH_COLUMNS = ("creator", "twitter", "telegram", "website",
+                  "initial_sol", "market_cap_sol0", "global_fees_sol")
 
-def _get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(NEWPAIRS_DB))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
-
-
-def _get_read_conn() -> sqlite3.Connection:
-    """Open a read-only connection (mirrors data_store's isolation pattern)."""
-    conn = sqlite3.connect(f"file:{NEWPAIRS_DB}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_newpairs_db():
-    conn = _get_conn()
-    conn.executescript("""
+_NEWPAIRS_SCHEMA = StoreSchema(
+    init_sql="""
         CREATE TABLE IF NOT EXISTS recordings (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             mint        TEXT NOT NULL,
@@ -84,14 +73,18 @@ def init_newpairs_db():
         );
 
         CREATE INDEX IF NOT EXISTS idx_np_candles_rec_time ON candles(recording_id, time);
-    """)
-    # Migrate DBs created before the fees-qualification gate existed
-    try:
-        conn.execute("ALTER TABLE recordings ADD COLUMN global_fees_sol REAL DEFAULT 0")
-    except Exception:
-        pass  # column already exists
-    conn.commit()
-    conn.close()
+    """,
+    migrations=(
+        ("ALTER TABLE recordings ADD COLUMN global_fees_sol REAL DEFAULT 0", True),
+    ),
+)
+
+_STORE = RecordingStore(NEWPAIRS_DB, _NEWPAIRS_SCHEMA)
+
+
+def init_newpairs_db():
+    """Create the new-pair recordings schema and apply pending migrations."""
+    _STORE.init_db()
 
 
 def create_recording(
@@ -108,33 +101,18 @@ def create_recording(
     market_cap_sol0: float = 0.0,
     global_fees_sol: float = 0.0,
 ) -> int:
-    conn = _get_conn()
-    cur = conn.execute(
-        """INSERT INTO recordings
-           (mint, token_name, token_symbol, timeframe, started_at,
-            creator, twitter, telegram, website, initial_sol, market_cap_sol0, global_fees_sol)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (mint, token_name, token_symbol, timeframe, time.time(),
-         creator, twitter, telegram, website, initial_sol, market_cap_sol0, global_fees_sol),
+    """Insert one new-pair recording row, with its birth metadata, and return its id."""
+    return _STORE.create_recording(
+        mint, timeframe, token_name, token_symbol,
+        extra_columns=_BIRTH_COLUMNS,
+        extra_values=(creator, twitter, telegram, website,
+                      initial_sol, market_cap_sol0, global_fees_sol),
     )
-    rec_id = cur.lastrowid
-    conn.commit()
-    conn.close()
-    return rec_id
 
 
 def stop_recording(recording_id: int):
-    """Finalise a recording: stamp stop time, persist the candle count."""
-    conn = _get_conn()
-    count = conn.execute(
-        "SELECT COUNT(*) FROM candles WHERE recording_id = ?", (recording_id,)
-    ).fetchone()[0]
-    conn.execute(
-        "UPDATE recordings SET stopped_at = ?, candle_count = ?, status = 'completed' WHERE id = ?",
-        (time.time(), count, recording_id),
-    )
-    conn.commit()
-    conn.close()
+    """Stamp the stop time, persist the candle count, and mark the recording completed."""
+    _STORE.stop_recording(recording_id)
 
 
 def insert_candle(
@@ -146,121 +124,41 @@ def insert_candle(
     pool_sol: float = 0.0,
     market_cap_usd: float = 0.0,
 ):
-    """Upsert a single candle row (delete-then-insert, same semantics as
-    data_store.insert_candle so only one row ever exists per time bucket)."""
-    conn = _get_conn()
-    conn.execute(
-        "DELETE FROM candles WHERE recording_id = ? AND time = ?",
-        (recording_id, t),
-    )
-    conn.execute(
-        "INSERT INTO candles (recording_id, time, open, high, low, close, volume, buy_volume, sell_volume, pool_sol, market_cap_usd)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (recording_id, t, o, h, l, c, vol, buy_vol, sell_vol, pool_sol, market_cap_usd),
-    )
-    conn.commit()
-    conn.close()
+    """Upsert one candle row: the previous row for the same bucket is deleted first."""
+    _STORE.insert_candle(recording_id, t, o, h, l, c, vol,
+                         buy_vol, sell_vol, pool_sol, market_cap_usd)
 
 
 def insert_candles_batch(recording_id: int, candles: list[dict]):
-    conn = _get_conn()
-    conn.executemany(
-        "INSERT OR REPLACE INTO candles"
-        " (recording_id, time, open, high, low, close, volume, buy_volume, sell_volume, pool_sol, market_cap_usd)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-            (
-                recording_id,
-                c["time"], c["open"], c["high"], c["low"], c["close"],
-                c.get("volume", 0),
-                c.get("buy_volume", 0.0),
-                c.get("sell_volume", 0.0),
-                c.get("pool_sol", 0.0),
-                c.get("market_cap_usd", 0.0),
-            )
-            for c in candles
-        ],
-    )
-    conn.commit()
-    conn.close()
+    """Insert many candle rows with INSERT OR REPLACE semantics."""
+    _STORE.insert_candles_batch(recording_id, candles)
 
 
 def list_recordings() -> list[dict]:
-    conn = _get_read_conn()
-    rows = conn.execute("SELECT * FROM recordings ORDER BY started_at DESC").fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    """Return every new-pair recording, newest first."""
+    return _STORE.list_recordings()
 
 
 def get_recording(recording_id: int) -> Optional[dict]:
-    conn = _get_read_conn()
-    row = conn.execute("SELECT * FROM recordings WHERE id = ?", (recording_id,)).fetchone()
-    conn.close()
-    return dict(row) if row else None
+    """Return one recording row, or None when the id is unknown."""
+    return _STORE.get_recording(recording_id)
 
 
 def get_recording_candles(recording_id: int) -> list[dict]:
-    """One candle per time bucket, highest-id row per bucket (mirrors
-    data_store.get_recording_candles dedupe semantics)."""
-    conn = _get_read_conn()
-    rows = conn.execute(
-        """
-        SELECT time, open, high, low, close, volume,
-               COALESCE(buy_volume, 0.0)  AS buy_volume,
-               COALESCE(sell_volume, 0.0) AS sell_volume,
-               COALESCE(pool_sol, 0.0)    AS pool_sol,
-               COALESCE(market_cap_usd, 0.0) AS market_cap_usd
-        FROM   candles
-        WHERE  id IN (
-            SELECT MAX(id)
-            FROM   candles
-            WHERE  recording_id = ?
-            GROUP BY time
-        )
-        ORDER BY time
-        """,
-        (recording_id,),
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    """One candle per time bucket, highest-id row per bucket."""
+    return _STORE.get_recording_candles(recording_id, effective_basis=False)
 
 
 def delete_recording(recording_id: int):
-    conn = _get_conn()
-    conn.execute("DELETE FROM candles WHERE recording_id = ?", (recording_id,))
-    conn.execute("DELETE FROM recordings WHERE id = ?", (recording_id,))
-    conn.commit()
-    conn.close()
+    """Delete one recording and its candles."""
+    _STORE.delete_recording(recording_id)
 
 
 def cleanup_small_recordings(min_candles: int = 30) -> int:
-    """Delete recordings with fewer than `min_candles` candles.  New-pair
-    recordings are cheap but numerous (dead-on-arrival tokens); the default
-    is lower than the price-data store's 100."""
-    conn = _get_conn()
-    rows = conn.execute(
-        """
-        SELECT r.id
-        FROM recordings r
-        LEFT JOIN (
-            SELECT recording_id, COUNT(DISTINCT time) as cnt
-            FROM candles
-            GROUP BY recording_id
-        ) c ON r.id = c.recording_id
-        WHERE COALESCE(c.cnt, r.candle_count, 0) < ?
-        """,
-        (min_candles,),
-    ).fetchall()
-    deleted_ids = [row[0] for row in rows]
-    if deleted_ids:
-        placeholders = ",".join("?" * len(deleted_ids))
-        conn.execute(f"DELETE FROM candles WHERE recording_id IN ({placeholders})", deleted_ids)
-        conn.execute(f"DELETE FROM recordings WHERE id IN ({placeholders})", deleted_ids)
-        conn.commit()
-    conn.close()
-    return len(deleted_ids)
+    """Delete recordings with fewer than ``min_candles`` candles and return the count."""
+    return _STORE.cleanup_small_recordings(min_candles)
 
 
-# ── Init on import (mirrors data_store) ────────────────────────────────────
+# Init on import
 
 init_newpairs_db()

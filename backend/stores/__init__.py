@@ -1,0 +1,1 @@
+"""Shared SQLite store implementations."""
