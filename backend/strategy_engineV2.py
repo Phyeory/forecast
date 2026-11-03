@@ -811,24 +811,6 @@ def _barrier_find_kernel(U_grid, x_idx):
             U_grid[x_idx], U_grid[idx_up_peak], U_grid[idx_down_peak])
 
 
-@njit(cache=True)
-def _second_derivative_grid(U_grid, dx):
-    """Central-difference second derivative along a 1-D grid.
-
-    (iter16f: `dx` added — the previous form returned the raw second
-    DIFFERENCE ×0.5 without dividing by Δx², understating U'' by
-    ~Δx²/2 ≈ 4e-5 on typical grids.  That made the Kramers attempt
-    frequency √(ω₀²·ω_b²) ~160× too small and silenced all escapes once
-    the anti-physical vol_corr inflation was removed.)
-    """
-    G = U_grid.shape[0]
-    d2 = np.zeros(G)
-    if G < 3 or dx <= 0:
-        return d2
-    inv_dx2 = 1.0 / (dx * dx)
-    for i in range(1, G - 1):
-        d2[i] = (U_grid[i + 1] - 2.0 * U_grid[i] + U_grid[i - 1]) * inv_dx2
-    return d2
 
 
 @njit(cache=True)
@@ -1038,132 +1020,12 @@ def _rbpf_step_batched(
     return resid_mean_sq, pzz_mean
 
 
-@njit(cache=True)
-def _rbpf_step_single(
-    mu,
-    P,
-    sqrtP,
-    log_w,
-    cfg_arr,
-    dt,
-    obs_log_return,
-    obs_delta_ratio,
-    jump_indicator,
-    R_meas,
-    bar_phi,
-    bar_h,
-    bar_ell,
-):
-    """Mutate one representative deterministic RBPF state in-place."""
-    h_i = mu[2]
-    sigma_eff = math.exp(0.5 * h_i) if h_i < 15.0 else math.exp(7.5)
-    if sigma_eff < 1e-6:
-        sigma_eff = 1e-6
-
-    prev_x = mu[0]
-    mu_pred, P_pred, Y_sigma = _ukf_predict_step(
-        mu, P, sqrtP, cfg_arr, dt,
-        bar_phi, bar_h, bar_ell,
-        sigma_eff, obs_delta_ratio, jump_indicator,
-    )
-    mu_post, P_post, Pzz, z_pred = _ukf_update_step(
-        mu_pred, P_pred, Y_sigma, obs_log_return, R_meas, prev_x,
-    )
-
-    resid = obs_log_return - z_pred
-    var_z = Pzz if Pzz > 0.0 else 1e-12
-    log_lik = -0.5 * (resid * resid) / var_z - 0.5 * math.log(2.0 * math.pi * var_z)
-    if not math.isfinite(log_lik):
-        log_lik = -50.0
-
-    for a in range(5):
-        mu[a] = mu_post[a]
-    for a in range(5):
-        for b in range(5):
-            P[a, b] = P_post[a, b]
-
-    for r in range(5):
-        for c in range(r + 1):
-            s = P_post[r, c]
-            for k in range(c):
-                s -= sqrtP[r, k] * sqrtP[c, k]
-            if r == c:
-                if s <= 0.0:
-                    s = 1e-12
-                sqrtP[r, c] = math.sqrt(s)
-            else:
-                sqrtP[r, c] = s / sqrtP[c, c] if sqrtP[c, c] > 0.0 else 0.0
-        for c in range(r + 1, 5):
-            sqrtP[r, c] = 0.0
-
-    log_w = log_w + log_lik
-    if not math.isfinite(log_w):
-        log_w = -1e18
-    return resid, Pzz, log_w
 
 
-@njit(cache=True)
-def _posterior_mean_repeated(mu, weights):
-    """Exact weighted reduction for a population represented by one state."""
-    out = np.zeros(5)
-    weight_sum = 0.0
-    for i in range(weights.shape[0]):
-        w = weights[i]
-        if (not math.isfinite(w)
-                or not math.isfinite(mu[0])
-                or not math.isfinite(mu[1])
-                or not math.isfinite(mu[2])
-                or not math.isfinite(mu[3])
-                or not math.isfinite(mu[4])):
-            continue
-        weight_sum += w
-        for a in range(5):
-            out[a] += w * mu[a]
-    if weight_sum > 0.0:
-        for a in range(5):
-            out[a] /= weight_sum
-    if not math.isfinite(out[0]): out[0] = 0.0
-    if not math.isfinite(out[1]): out[1] = 0.0
-    if not math.isfinite(out[2]): out[2] = -4.0
-    if not math.isfinite(out[3]): out[3] = 0.0
-    if not math.isfinite(out[4]): out[4] = 0.0
-    return out
 
 
-@njit(cache=True)
-def _posterior_var_repeated(mu, weights, mean):
-    """Exact weighted variance for a population represented by one state."""
-    out = np.zeros(5)
-    weight_sum = 0.0
-    for i in range(weights.shape[0]):
-        w = weights[i]
-        if (not math.isfinite(w)
-                or not math.isfinite(mu[0])
-                or not math.isfinite(mu[1])
-                or not math.isfinite(mu[2])
-                or not math.isfinite(mu[3])
-                or not math.isfinite(mu[4])):
-            continue
-        weight_sum += w
-        for a in range(5):
-            d = mu[a] - mean[a]
-            out[a] += w * d * d
-    if weight_sum > 0.0:
-        for a in range(5):
-            out[a] /= weight_sum
-    for a in range(5):
-        if not math.isfinite(out[a]) or out[a] < 0.0:
-            out[a] = 0.0
-    return out
 
 
-@njit(cache=True)
-def _repeated_scalar_mean(value, count):
-    """Mirror the original per-particle scalar reduction order."""
-    total = 0.0
-    for _ in range(count):
-        total += value
-    return total / count if count > 0 else 0.0
 
 
 @njit(cache=True)
@@ -1449,18 +1311,6 @@ class RaoBlackwellisedParticleFilter:
     # The batched state is now held in stacked arrays, so we materialise a
     # list of `_Particle` views on demand.  Hot paths must not call this —
     # they should read the stacked arrays directly.
-    @property
-    def particles_list(self) -> list[_Particle]:
-        ps: list[_Particle] = []
-        for i in range(self.N):
-            p = _Particle(int(self._regime_arr[i]),
-                          self._mu_arr[i].copy(),
-                          self._P_arr[i].copy(),
-                          float(self._weights[i]))
-            p.sqrt_P = self._sqrtP_arr[i].copy()
-            p.log_w = float(self._log_w[i])
-            ps.append(p)
-        return ps
 
     # ── individual-particle predict / update ─────────────────────────────
     def _step_particle(
@@ -1892,25 +1742,6 @@ class MarketPotential:
     def _refresh_buffer_arrays(self):
         """Compatibility no-op: active samples are written directly to arrays."""
 
-    def _silverman_bandwidth(self) -> float:
-        if self._buffer_count < 2:
-            return 1e-3
-        self._refresh_buffer_arrays()
-        n = self._buffer_count
-        x = self._prices_arr[:n]
-        v = self._volumes_arr[:n]
-        # Volume-weighted std σ.
-        if v.sum() <= 0:
-            s = float(np.std(x))
-        else:
-            w = v / v.sum()
-            mean = float(np.sum(w * x))
-            var = float(np.sum(w * (x - mean) ** 2))
-            s = math.sqrt(max(var, 1e-12))
-        h = 0.9 * s * (n ** (-1.0 / 5.0))
-        if h <= 0:
-            h = 1e-3
-        return float(h)
 
     def compute(self, x_t: float, h_t: float, bid_depth: float, ask_depth: float):
         """
@@ -2519,8 +2350,6 @@ class MemecoinStrategyEngine:
 # 10.  Convenience exports
 # ─────────────────────────────────────────────────────────────────────────────
 
-def regime_name(code: int) -> str:
-    return _REGIME_NAMES.get(int(code), "unknown")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
