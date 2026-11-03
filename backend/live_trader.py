@@ -39,6 +39,8 @@ from strategy_engine import Signal, Direction, Regime
 from engine_factory import create_engine
 from live_session_logger import SessionJournal
 from signal_capture import SignalCaptureJournal
+from core.state4 import candle_states, intrabar_price, path_price_at, record_path_candle
+from core.fills import fill_fraction
 
 # SPL Token / ATA program ids (used for deterministic ATA derivation and
 # Token-2022 detection without pulling in the heavyweight `spl-token` package).
@@ -4789,60 +4791,26 @@ class LiveTrader:
                 "price": sc,
             }
 
-    # ── iter91 fill-path pricing ──────────────────────────────────────────
-    # Byte-mirror of forward_tester._intrabar_price / _fill_fraction /
-    # _record_path_candle / _path_price_at (that file is the read-only
-    # fill-contract reference — do not diverge).
+    # ── Fill-path pricing ─────────────────────────────────────────────────
+    # Delegates to core.state4 / core.fills, the same implementation the
+    # backtester uses; replay and live price fills identically by
+    # construction.
 
     @staticmethod
     def _intrabar_price(o: float, h: float, l: float, c: float, frac: float) -> float:
-        bullish = c >= o
-        if bullish:
-            p0, p1, p2, p3 = o, h, l, c
-        else:
-            p0, p1, p2, p3 = o, l, h, c
-        if frac <= 1 / 3:
-            tt = frac * 3
-            return p0 + (p1 - p0) * tt
-        elif frac <= 2 / 3:
-            tt = (frac - 1 / 3) * 3
-            return p1 + (p2 - p1) * tt
-        else:
-            tt = (frac - 2 / 3) * 3
-            return p2 + (p3 - p2) * tt
+        return intrabar_price(o, h, l, c, frac)
 
     def _fill_fraction(self) -> float:
-        # forward_tester._fill_fraction with the live's fee/size/slippage
-        # (its _REFERENCE_FEE=0.0001 SOL, _REFERENCE_SIZE=0.1 SOL).
-        total_fee = max(self.priority_fee_lamports / 1e9, 1e-12)
-        base_delay = 0.0001 / (0.0001 + total_fee)
-        size_penalty = 1.0 + math.log10(max(1.0, self.buy_size_sol / 0.1))
-        slippage_factor = 1.0 + self.engine_fill_slippage_pct / 100.0
-        return max(0.02, min(0.98, base_delay * size_penalty * slippage_factor))
+        return fill_fraction(self.priority_fee_lamports / 1e9, 0.0,
+                             self.buy_size_sol, self.engine_fill_slippage_pct)
 
     def _record_path_candle(self, time, o: float, h: float, l: float, c: float) -> None:
-        t = int(time)
-        if t not in self._fill_path_candles:
-            self._fill_path_times.append(t)
-        self._fill_path_candles[t] = (o, h, l, c)
+        record_path_candle(self._fill_path_candles, self._fill_path_times,
+                           time, o, h, l, c)
 
     def _path_price_at(self, target_ts: float) -> float:
-        import bisect
-        if not self._fill_path_times:
-            return 0.0
-        t0 = int(target_ts)
-        idx = bisect.bisect_right(self._fill_path_times, t0) - 1
-        if idx < 0:
-            o, _h, _l, _c = self._fill_path_candles[self._fill_path_times[0]]
-            return o
-        t = self._fill_path_times[idx]
-        o, h, l, c = self._fill_path_candles[t]
-        if idx + 1 < len(self._fill_path_times):
-            span = self._fill_path_times[idx + 1] - t
-        else:
-            span = 1
-        frac = max(0.0, min(1.0, (target_ts - t) / span))
-        return self._intrabar_price(o, h, l, c, frac)
+        return path_price_at(self._fill_path_candles, self._fill_path_times,
+                             target_ts)
 
     def _queue_signal_from_state(self, result: dict, t: Optional[int] = None,
                                  so: Optional[float] = None, sh: Optional[float] = None,
@@ -5158,71 +5126,34 @@ class LiveTrader:
         Returns the engine result from the final sub-state (state 4) with
         the earliest signal of the candle propagated.
         """
-        # ── 4-state expansion with per-state execute/update/queue ──────────
-        bullish = c >= o
-        if bullish:
-            mid_first, mid_second = h, l
-        else:
-            mid_first, mid_second = l, h
-
-        # iter91: feed the fill-path buffer (the backtester's Step-0
-        # _record_path_candle writes the same four progressive state tuples
-        # per candle) so boundary-anchor lookups price on the recorded path.
-        for _st in ((o, o, o, o),
-                    (o, max(o, mid_first), min(o, mid_first), mid_first),
-                    (o, h, l, mid_second),
-                    (o, h, l, c)):
+        # One candle feeds the engine as exactly four states, in this order,
+        # everywhere (core.state4).  The fill-path buffer records each
+        # progressive state tuple so latency fills price on the recorded
+        # path.
+        for _st in candle_states(o, h, l, c):
             self._record_path_candle(t, *_st)
 
         final_signal = None
         final_regime = None
         final_reason = ""
 
-        # State 1: open tick
-        self._execute_pending_signals(t, o, o, o, o)
-        result = self.engine.update(t, o, o, o, o, 0.0, _build_full_result=False)
-        self._queue_signal_from_state(result, t, o, o, o, o)
-        sig = result.get("signal", "none")
-        if sig not in (Signal.NONE.value, "none"):
-            final_signal = sig
-            final_regime = result.get("regime")
-            final_reason = result.get("exit_reason", "")
-
-        # State 2: first extreme
-        h2 = max(o, mid_first)
-        l2 = min(o, mid_first)
-        self._execute_pending_signals(t, o, h2, l2, mid_first)
-        result = self.engine.update(t, o, h2, l2, mid_first, 0.0, _build_full_result=False)
-        self._queue_signal_from_state(result, t, o, h2, l2, mid_first)
-        sig = result.get("signal", "none")
-        if sig not in (Signal.NONE.value, "none") and final_signal is None:
-            final_signal = sig
-            final_regime = result.get("regime")
-            final_reason = result.get("exit_reason", "")
-
-        # State 3: both extremes
-        self._execute_pending_signals(t, o, h, l, mid_second)
-        result = self.engine.update(t, o, h, l, mid_second, 0.0, _build_full_result=False)
-        self._queue_signal_from_state(result, t, o, h, l, mid_second)
-        sig = result.get("signal", "none")
-        if sig not in (Signal.NONE.value, "none") and final_signal is None:
-            final_signal = sig
-            final_regime = result.get("regime")
-            final_reason = result.get("exit_reason", "")
-
-        # State 4: close tick — buy/sell split lands here
-        self._execute_pending_signals(t, o, h, l, c)
-        result = self.engine.update(t, o, h, l, c, vol,
-                                    buy_volume=buy_vol, sell_volume=sell_vol,
-                                    pool_sol=pool_sol,
-                                    market_cap_usd=market_cap_usd,
-                                    _build_full_result=False)
-        self._queue_signal_from_state(result, t, o, h, l, c)
-        sig = result.get("signal", "none")
-        if sig not in (Signal.NONE.value, "none") and final_signal is None:
-            final_signal = sig
-            final_regime = result.get("regime")
-            final_reason = result.get("exit_reason", "")
+        for _state_index, (so, sh, sl, sc) in enumerate(candle_states(o, h, l, c)):
+            self._execute_pending_signals(t, so, sh, sl, sc)
+            if _state_index == 3:
+                result = self.engine.update(t, so, sh, sl, sc, vol,
+                                            buy_volume=buy_vol, sell_volume=sell_vol,
+                                            pool_sol=pool_sol,
+                                            market_cap_usd=mcap_usd,
+                                            _build_full_result=False)
+            else:
+                result = self.engine.update(t, so, sh, sl, sc, 0.0,
+                                            _build_full_result=False)
+            self._queue_signal_from_state(result, t, so, sh, sl, sc)
+            sig = result.get("signal", "none")
+            if sig not in (Signal.NONE.value, "none") and final_signal is None:
+                final_signal = sig
+                final_regime = result.get("regime")
+                final_reason = result.get("exit_reason", "")
 
         # Propagate earliest signal into the final result dict
         if final_signal is not None:

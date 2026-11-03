@@ -64,6 +64,8 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 from strategy_engine import Signal, Direction, Regime
 from engine_factory import create_engine
+from core.state4 import intrabar_price, path_price_at, record_path_candle
+from core.fills import fill_fraction
 
 
 def _v2_entry_snapshot(eng) -> dict:
@@ -320,121 +322,33 @@ class ForwardTester:
     def total_fees_per_trade(self) -> float:
         return self.priority_fee + self.bribe_fee
 
-    def _slippage_cost_buy(self, raw_price: float, trade_size_sol: float) -> float:
-        """
-        SOL lost to slippage on a buy.
-        We pay raw_price * (1 + slip) effective price instead of raw_price.
-        Extra cost = trade_size_sol * slip / (1 + slip)  ≈ trade_size_sol * slip
-        (exact: we get fewer tokens than ideal, so effective cost = trade_size_sol * slip/(1+slip))
-        """
-        slip = self.slippage_pct / 100.0
-        # tokens we'd get at perfect price vs slipped price
-        # cost is expressed as SOL we didn't get back
-        return trade_size_sol * slip / (1.0 + slip)
-
-    def _slippage_cost_sell(self, raw_price: float, size_tokens: float) -> float:
-        """
-        SOL lost to slippage on a sell.
-        We receive raw_price * (1 - slip) instead of raw_price per token.
-        """
-        slip = self.slippage_pct / 100.0
-        return raw_price * size_tokens * slip
-
-    # ── Timed-delay fill parameters ────────────────────────────────────────
-    _REFERENCE_FEE: float = 0.0001   # SOL — fixed per-transaction fee
-    _REFERENCE_SIZE: float = 0.1      # SOL — typical retail order size
-
     def _fill_fraction(self) -> float:
-        """
-        Compute how far into the execution candle (0 → 1) the transaction
-        completes, driven by fee competitiveness, order size, and slippage.
-
-        Formula:  fill_fraction = clamp(base_delay * size_penalty * slippage_factor, 0.02, 0.98)
-
-          base_delay   = ref_fee / (ref_fee + total_fee)
-                         Smooth bounded decay (unlike ref/fee which blows up for low fees):
-                           total_fee ~0.00011 → base ~0.82  (fills late — low priority)
-                           total_fee ~0.0006  → base ~0.45  (fills mid-bar)
-                           total_fee ~0.0025  → base ~0.17  (fills early — aggressive)
-          size_penalty = 1 + log10(max(1, buy_size / ref_size))
-                         Larger orders sit deeper in the queue → slower fill.
-          slippage_factor = 1 + slippage_pct / 100
-                         Higher slippage tolerance adds modest extra latency.
-        """
-        import math
-        total_fee = max(self.priority_fee + self.bribe_fee, 1e-12)
-        # Bounded smooth decay: high fee → small base_delay → fills early in the bar
-        base_delay = self._REFERENCE_FEE / (self._REFERENCE_FEE + total_fee)
-        size_penalty = 1.0 + math.log10(max(1.0, self.buy_size_sol / self._REFERENCE_SIZE))
-        slippage_factor = 1.0 + self.slippage_pct / 100.0
-        frac = base_delay * size_penalty * slippage_factor
-        return max(0.02, min(0.98, frac))
+        """How far into the execution candle (0 to 1) a legacy-model fill
+        lands; the shared arithmetic lives in core.fills."""
+        return fill_fraction(self.priority_fee, self.bribe_fee,
+                             self.buy_size_sol, self.slippage_pct)
 
     @staticmethod
-    def _intrabar_price(o: float, h: float, l: float, c: float, frac: float) -> float:
-        """
-        Interpolate a price along the realistic intra-bar path at position
-        *frac* (0 = open, 1 = close).
-
-        The path is split into three equal segments:
-          [0, 1/3)  →  open  →  first_extreme  (high for bull, low for bear)
-          [1/3,2/3) →  first_extreme → second_extreme
-          [2/3, 1]  →  second_extreme → close
-        """
-        bullish = c >= o
-        if bullish:
-            p0, p1, p2, p3 = o, h, l, c
-        else:
-            p0, p1, p2, p3 = o, l, h, c
-
-        if frac <= 1 / 3:
-            t = frac * 3
-            return p0 + (p1 - p0) * t
-        elif frac <= 2 / 3:
-            t = (frac - 1 / 3) * 3
-            return p1 + (p2 - p1) * t
-        else:
-            t = (frac - 2 / 3) * 3
-            return p2 + (p3 - p2) * t
+    def _intrabar_price(o: float, h: float, l: float, c: float,
+                        frac: float) -> float:
+        """Price along the intra-candle path at frac; the shared contract
+        lives in core.state4."""
+        return intrabar_price(o, h, l, c, frac)
 
     # ── Latency-mode price-path resolution ──────────────────────────────────
 
     def _record_path_candle(self, time: int, o: float, h: float, l: float,
                             c: float) -> None:
         """Buffer the candle's OHLC so latency fills can price against the
-        recorded path.  States 1-3 share the candle time and progressively
-        complete h/l/c; the final write per time is the full candle."""
+        recorded path (latency mode only)."""
         if self._exec_mode != "latency":
             return
-        t = int(time)
-        if t not in self._path_candles:
-            self._path_times.append(t)
-        self._path_candles[t] = (o, h, l, c)
+        record_path_candle(self._path_candles, self._path_times, time, o, h, l, c)
 
     def _path_price_at(self, target_ts: float) -> float:
-        """Price on the recorded intra-candle path at absolute time *target_ts*.
-
-        Locates the candle containing the timestamp (greatest buffered candle
-        time ≤ target) and interpolates along its open→extreme→extreme→close
-        path using the NEXT buffered candle time as the bar span.  Beyond the
-        recording end this clamps to the last close (the same convention as
-        the recording_ended force-close)."""
-        import bisect
-        if not self._path_times:
-            return 0.0
-        t0 = int(target_ts)
-        idx = bisect.bisect_right(self._path_times, t0) - 1
-        if idx < 0:
-            o, h, l, c = self._path_candles[self._path_times[0]]
-            return o
-        t = self._path_times[idx]
-        o, h, l, c = self._path_candles[t]
-        if idx + 1 < len(self._path_times):
-            span = self._path_times[idx + 1] - t
-        else:
-            span = 1  # recording end — assume the recording's bar length
-        frac = max(0.0, min(1.0, (target_ts - t) / span))
-        return self._intrabar_price(o, h, l, c, frac)
+        """Price on the recorded intra-candle path at absolute time
+        *target_ts* (core.state4)."""
+        return path_price_at(self._path_candles, self._path_times, target_ts)
 
     def _resolve_latency_fill(self, time: int, o: float, h: float, l: float,
                               c: float) -> tuple[Optional[str], Optional[Trade]]:

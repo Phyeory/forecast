@@ -59,6 +59,7 @@ from data_store import (
     list_recordings,
 )
 from session_calibrator import calibrate_from_history
+from core.state4 import candle_states
 
 
 import multiprocessing
@@ -419,53 +420,25 @@ def run_backtest(
         pool_sol = candle.get("pool_sol", 0.0)
         mcap_usd = candle.get("market_cap_usd", 0.0)
 
-        # Bull bar: high comes before low; bear bar: low before high
-        bullish = c >= o
-        if bullish:
-            mid_first, mid_second = h, l
-        else:
-            mid_first, mid_second = l, h
-
-        # ── ALL 4 states use fast path — no result dict construction ──────
+        # One candle feeds the engine as exactly four states, in this order,
+        # everywhere (core.state4).  Replay, backtest, and live must not
+        # diverge here.
         trade_action_for_candle: Optional[str] = None
         trade_label_for_candle:  Optional[str] = None
 
-        # State 1: open tick
-        result = ft_update(time=t, o=o, h=o, l=o, c=o, volume=0.0,
-                           _build_full_result=False)
-        fwd = result.get("forward_test")
-        if fwd and fwd.get("trade_action"):
-            trade_action_for_candle = fwd["trade_action"]
-            trade_label_for_candle  = fwd.get("trade_label")
-
-        # State 2: first extreme
-        h2 = max(o, mid_first)
-        l2 = min(o, mid_first)
-        result = ft_update(time=t, o=o, h=h2, l=l2, c=mid_first, volume=0.0,
-                           _build_full_result=False)
-        fwd = result.get("forward_test")
-        if fwd and trade_action_for_candle is None and fwd.get("trade_action"):
-            trade_action_for_candle = fwd["trade_action"]
-            trade_label_for_candle  = fwd.get("trade_label")
-
-        # State 3: both extremes
-        result = ft_update(time=t, o=o, h=h, l=l, c=mid_second, volume=0.0,
-                           _build_full_result=False)
-        fwd = result.get("forward_test")
-        if fwd and trade_action_for_candle is None and fwd.get("trade_action"):
-            trade_action_for_candle = fwd["trade_action"]
-            trade_label_for_candle  = fwd.get("trade_label")
-
-        # State 4: close tick — buy/sell split lands here
-        result = ft_update(time=t, o=o, h=h, l=l, c=c, volume=vol,
-                           buy_volume=buy_vol, sell_volume=sell_vol,
-                           pool_sol=pool_sol,
-                           market_cap_usd=mcap_usd,
-                           _build_full_result=False)
-        fwd = result.get("forward_test")
-        if fwd and trade_action_for_candle is None and fwd.get("trade_action"):
-            trade_action_for_candle = fwd["trade_action"]
-            trade_label_for_candle  = fwd.get("trade_label")
+        for _state_index, (so, sh, sl, sc) in enumerate(candle_states(o, h, l, c)):
+            if _state_index == 3:
+                result = ft_update(time=t, o=so, h=sh, l=sl, c=sc, volume=vol,
+                                   buy_volume=buy_vol, sell_volume=sell_vol,
+                                   pool_sol=pool_sol, market_cap_usd=mcap_usd,
+                                   _build_full_result=False)
+            else:
+                result = ft_update(time=t, o=so, h=sh, l=sl, c=sc, volume=0.0,
+                                   _build_full_result=False)
+            fwd = result.get("forward_test")
+            if fwd and trade_action_for_candle is None and fwd.get("trade_action"):
+                trade_action_for_candle = fwd["trade_action"]
+                trade_label_for_candle  = fwd.get("trade_label")
 
         if candle_results is not None:
             # Read indicators directly from engine state — no dict overhead
