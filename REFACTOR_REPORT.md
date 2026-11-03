@@ -132,7 +132,49 @@ frontend work (seam 11) and were not started.
 
 ### Seam 4: one adapter base for the engine forks
 
-(delegated to a worktree agent; to be integrated)
+`engines/adapter_base.py` (171 lines) holds the V1-compat init surface
+(`_init_v1_compat` 57 constants + `_init_v1_state` + `_init_v1_indicators`,
+identical across V3/V4/V6) and the helpers whose bodies are byte-identical
+across engine copies (verified by AST + dedented source equivalence classes,
+not by eye): `_price_overextended` and `_momentum_past_peak` (V2/V3/V4/V6),
+`_confidence_lerp`, `_is_chop_zone`, `_global_stoploss_pct`,
+`_update_peak_price` (V3/V4/V6 or V4/V6 subsets). V2 inherits only the two
+helpers byte-identical to the merged copy and keeps its 9 divergent ones
+explicitly. The brief's "byte-identical 3x" claim was inexact: `stoploss_pct`
+and `takeprofit_pct` init values differ per family, so the compat init takes
+them as parameters. `engine_factory.py` (158→90) became one
+`_ADAPTER_PATHS` table + one loader; the fake `_V2_IMPORT_LOCK` boolean (not
+thread-safe, its RuntimeError unreachable — no engine module imports the
+factory) removed as dead code. Net −299 lines. Attribute-equivalence probe:
+110 V1-compat attrs across V1/V2/V3/V4/V6 byte-identical; 19 moved method
+bodies verified byte-identical to the originals. Golden corpus 183/183
+PASS. Commit `82e799a`, cherry-picked as `e27c3c7`.
+
+### Regression fixes the safety net caught
+
+Commit `22bed72` records both; they are documented here because they are
+part of the refactor's history:
+
+1. **Seam 2 introduced a `NameError` in the live trader.** The rewritten
+   state-4 call passed a nonexistent `mcap_usd` local (the parameter is
+   `market_cap_usd`). The golden corpus cannot see the live trader — this
+   was caught by the pytest baseline (`test_signal_capture`), which is
+   exactly why the brief mandates running it after risky seams. The
+   incident validates the two-layer gate design.
+2. **Seam 5 broke the `data_store.PRICE_DB` runtime repoint contract.**
+   Freezing the DB path into a module-scope `RecordingStore` at import made
+   tests that retarget `PRICE_DB` to a scratch database hit the real one.
+   `_price_store()` now rebinds on path drift; single-path production
+   behaviour is unchanged. Caught by `test_engineV4V6` +
+   `test_live_parity` (the latter via a `RecursionError` from an over-eager
+   first patch, fixed before commit).
+
+### Deferred deletions landed
+
+The 8 zero-caller `strategy_engineV2` functions (second-derivative grid,
+single-step RBPF, repeated-posterior helpers, scalar mean, `particles_list`,
+`_silverman_bandwidth`, `regime_name`) were deleted after seam 4 landed
+(they live in a file the engine seam owned). −171 lines. Commit `795558b`.
 
 ### Seam 5: one recordings store, two facades
 
