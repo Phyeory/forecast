@@ -1,9 +1,9 @@
 {
- "saved_at": 1793608550.5875068,
+ "saved_at": 1793674350.3918748,
  "book": {
   "equity": 100000.0,
   "cash": 100000.0,
-  "buying_power": 348503.69,
+  "buying_power": 347985.37,
   "positions": [],
   "paper": true
  },
@@ -150,56 +150,56 @@
    "desired": 1,
    "reason": "state_sync",
    "submitted": true,
-   "order_id": "62cb29c9-494d-41ea-a1e9-af913a039a43",
-   "target_qty": 30.235839548478133,
+   "order_id": "9917e43b-0277-4579-9b81-f4fbbe437d3d",
+   "target_qty": 29.985606908683835,
    "late": false
   },
   "HD": {
    "desired": 1,
    "reason": "state_sync",
    "submitted": true,
-   "order_id": "37bf1a24-a62d-4d34-901b-7d21c191dc1e",
-   "target_qty": 22.801203903566112,
+   "order_id": "1424da69-56b2-4976-87dd-72c5fbcf21d2",
+   "target_qty": 22.779735147612687,
    "late": false
   },
   "IBM": {
    "desired": 1,
    "reason": "state_sync",
    "submitted": true,
-   "order_id": "151c144a-1803-48e1-8d6e-2b01fe1346cd",
-   "target_qty": 29.05681576041687,
+   "order_id": "caeaecf7-df69-4654-85de-a63837865436",
+   "target_qty": 29.087806391560665,
    "late": false
   },
   "LOW": {
    "desired": 1,
    "reason": "state_sync",
    "submitted": true,
-   "order_id": "76aa83a7-2c3e-4061-a29a-9c5bcac92e1c",
-   "target_qty": 36.18730549323298,
+   "order_id": "26bf8109-c32c-4e20-984b-31d65f1bae59",
+   "target_qty": 35.874868458815655,
    "late": false
   },
   "META": {
    "desired": 1,
    "reason": "state_sync",
    "submitted": true,
-   "order_id": "587a8cb2-a36c-478f-a1d5-4b75669dd812",
-   "target_qty": 12.00960768614892,
+   "order_id": "26a81949-19ec-4fc9-99b4-de8fa9bdc5d7",
+   "target_qty": 12.197898708649124,
    "late": false
   },
   "MSTR": {
    "desired": 1,
    "reason": "state_sync",
    "submitted": true,
-   "order_id": "9e41b7ba-e449-4bb8-aeac-fa738a80f61d",
-   "target_qty": 52.9623614151543,
+   "order_id": "6b4b8f14-a070-4932-8f55-8f07aadbca91",
+   "target_qty": 57.45805561939785,
    "late": false
   },
   "NKE": {
    "desired": 1,
    "reason": "state_sync",
    "submitted": true,
-   "order_id": "a70007da-f442-4adc-aa1e-1c5138c364d6",
-   "target_qty": 195.21082769390944,
+   "order_id": "263131d7-9b52-4f8b-9a66-ff682de2d69f",
+   "target_qty": 193.8485396743345,
    "late": false
   }
  }
