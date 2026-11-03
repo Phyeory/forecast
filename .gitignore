@@ -71,3 +71,5 @@ audit_report/
 degen/
 
 backend/backend/v2_results
+# golden harness scratch (never committed)
+backend/tools/golden/scratch/

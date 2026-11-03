@@ -1,0 +1,1 @@
+{"entry_reasons": ["buy_continuation", "buy_exhaustion", "buy_idle", "buy_reversal", "buy_trend"], "exit_reasons": ["continuation_exit", "gain_retrace", "kelly_flat", "kramers_down_exit", "rate_split_flip:armed", "recording_ended"]}

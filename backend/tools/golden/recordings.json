@@ -1,0 +1,192 @@
+{
+  "engines": [
+    1,
+    2,
+    3,
+    4,
+    6
+  ],
+  "exec_models": [
+    "instant",
+    "legacy",
+    "latency"
+  ],
+  "extra_cells": [
+    {
+      "engine_version": 2,
+      "exec_model": "instant",
+      "reason": "holder_flow_replay (23 holder-flow rows; V1 lacks set_holder_flow_events so HF recordings cannot join the matrix)",
+      "recording_id": 5829
+    }
+  ],
+  "recordings": [
+    {
+      "candle_count": 1934,
+      "chain_attempted": false,
+      "ended_open": false,
+      "era": "pool_pre_fix",
+      "exit_reasons": [],
+      "id": 2,
+      "mint": "K16JV4YxuyVdvBqxq4CSDhGpSX2r1TwRKeYd7G3pump",
+      "reason": "pool_pre_fix",
+      "seconds": 6.5,
+      "token_symbol": "speedrun",
+      "trade_count": 0
+    },
+    {
+      "candle_count": 21070,
+      "chain_attempted": false,
+      "ended_open": false,
+      "era": "pool_pre_fix",
+      "exit_reasons": [],
+      "id": 3,
+      "mint": "4FnZDvrkvEJf1MLZrcDKCMeSjuVx5BsHuKWqm3b6pump",
+      "reason": "zero_trades",
+      "seconds": 247.4,
+      "token_symbol": "\u25ce",
+      "trade_count": 0
+    },
+    {
+      "candle_count": 5553,
+      "chain_attempted": false,
+      "ended_open": false,
+      "era": "pool_pre_fix",
+      "exit_reasons": [],
+      "id": 4,
+      "mint": "Dh5GKcPQFBJXw74yP4u7BCHYQzHoG6JX8dXQaNwvpump",
+      "reason": "diversity",
+      "seconds": 12.9,
+      "token_symbol": "WAN",
+      "trade_count": 0
+    },
+    {
+      "candle_count": 11140,
+      "chain_attempted": false,
+      "ended_open": false,
+      "era": "pool_pre_fix",
+      "exit_reasons": [],
+      "id": 5,
+      "mint": "9ZtbETDNjnST9Y2zs82FZYy49xUMPgqXRh46YjjRpump",
+      "reason": "diversity",
+      "seconds": 21.5,
+      "token_symbol": "Br\u00f6tchen",
+      "trade_count": 0
+    },
+    {
+      "candle_count": 9093,
+      "chain_attempted": false,
+      "ended_open": false,
+      "era": "pool_pre_fix",
+      "exit_reasons": [
+        "gain_retrace",
+        "kelly_flat"
+      ],
+      "id": 21,
+      "mint": "8vgaTBW1nz4fBboCYFph7MVSLsgL8wBbex9M1hE5pump",
+      "reason": "gain_retrace",
+      "seconds": 23.8,
+      "token_symbol": "whitedog",
+      "trade_count": 5
+    },
+    {
+      "candle_count": 1068,
+      "chain_attempted": false,
+      "ended_open": false,
+      "era": "pool_pre_fix",
+      "exit_reasons": [],
+      "id": 37,
+      "mint": "8qw8VRw5EajAjaijrLrnqP9AgThRsnvLeHxeSWyCfFhA",
+      "reason": "mid_volume",
+      "seconds": 2.2,
+      "token_symbol": "JOEY",
+      "trade_count": 0
+    },
+    {
+      "candle_count": 29012,
+      "chain_attempted": false,
+      "ended_open": false,
+      "era": "pool_pre_fix",
+      "exit_reasons": [
+        "gain_retrace"
+      ],
+      "id": 209,
+      "mint": "H3GtwGSrYRVqp7dtjkaDfjE2inydLkHwFkFJSPzrpump",
+      "reason": "top_volume",
+      "seconds": 133.9,
+      "token_symbol": "BNUT",
+      "trade_count": 3
+    },
+    {
+      "candle_count": 303,
+      "ended_open": true,
+      "era": "pool_pre_fix",
+      "exit_reasons": [
+        "recording_ended"
+      ],
+      "id": 776,
+      "mint": "",
+      "reason": "recording_ended",
+      "seconds": 0.5,
+      "token_symbol": "REPLACED",
+      "trade_count": 1
+    },
+    {
+      "candle_count": 28391,
+      "chain_attempted": false,
+      "ended_open": false,
+      "era": "pool_pre_fix",
+      "exit_reasons": [
+        "kramers_down_exit"
+      ],
+      "id": 943,
+      "mint": "DeNGDha55v7iVaZXMzjA9wZUmFrhhubcpBP5VM4qpump",
+      "reason": "top_volume",
+      "seconds": 112.1,
+      "token_symbol": "DECK",
+      "trade_count": 1
+    },
+    {
+      "candle_count": 134,
+      "chain_attempted": false,
+      "ended_open": false,
+      "era": "pool_post_fix",
+      "exit_reasons": [],
+      "id": 5831,
+      "mint": "4YHbtGNfwdr1H11rJbVeizeEVVJzFYYiX7qFWJ1WPoaS",
+      "reason": "low_volume",
+      "seconds": 0.6,
+      "token_symbol": "PLEASEINU",
+      "trade_count": 0
+    },
+    {
+      "candle_count": 104,
+      "chain_attempted": false,
+      "ended_open": false,
+      "era": "pool_post_fix",
+      "exit_reasons": [],
+      "id": 5832,
+      "mint": "79FCJqG2DrYzH2G3eCQedRoWRbjri7MSgMkyGeZ7cLrm",
+      "reason": "low_volume",
+      "seconds": 0.6,
+      "token_symbol": "TETSUOAI",
+      "trade_count": 0
+    },
+    {
+      "candle_count": 1443,
+      "ended_open": false,
+      "era": "pool_post_fix",
+      "exit_reasons": [],
+      "id": 5834,
+      "mint": "",
+      "reason": "pool_post_fix",
+      "seconds": 3.1,
+      "token_symbol": "REPLACED",
+      "trade_count": 0
+    }
+  ],
+  "warnings": [
+    "no curve-prefix recording exists in the DB (closest starts 64s after pool creation)",
+    "rec5828/5829 swapped out of the matrix: holder_flow rows crash the V1 cell (pre-existing bug, logged in REFACTOR_REPORT.md); 5829 kept as extra cell",
+    "mint/token_symbol fields above are placeholders for the two swapped-in recs"
+  ]
+}

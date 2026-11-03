@@ -1,0 +1,34 @@
+scanning 32 candidates (V2/instant)
+[1/32] rec2 1934c 0t 6.5s 
+[2/32] rec3 21070c 0t 247.4s 
+[3/32] rec4 5553c 0t 12.9s 
+[4/32] rec5 11140c 0t 21.5s 
+[5/32] rec7 177c 0t 0.4s 
+[6/32] rec9 246c 0t 0.5s 
+[7/32] rec10 202c 0t 0.4s 
+[8/32] rec15 149c 0t 0.3s 
+[9/32] rec20 496c 0t 1.0s 
+[10/32] rec21 9093c 5t 23.8s gain_retrace,kelly_flat
+[11/32] rec22 7055c 0t 35.9s 
+[12/32] rec23 236c 0t 0.5s 
+[13/32] rec24 822c 0t 2.0s 
+[14/32] rec32 588c 0t 1.4s 
+[15/32] rec37 1068c 0t 2.2s 
+[16/32] rec209 29012c 3t 133.9s gain_retrace
+[17/32] rec943 28391c 1t 112.1s kramers_down_exit
+[18/32] rec5828 1377c 1t 3.1s gain_retrace
+[19/32] rec5829 1113c 2t 2.6s gain_retrace,kelly_flat
+[20/32] rec5830 432c 0t 1.2s 
+[21/32] rec5831 134c 0t 0.6s 
+[22/32] rec5832 104c 0t 0.6s 
+[23/32] rec5833 414c 1t 1.1s rate_split_flip:armed
+[24/32] rec5834 1443c 0t 3.1s 
+[25/32] rec5839 227c 0t 0.8s 
+[26/32] rec5842 179c 0t 0.7s 
+[27/32] rec5850 243c 0t 0.5s 
+[28/32] rec5917 6957c 5t 16.1s breakeven_scratch,gain_retrace
+[29/32] rec6080 6782c 0t 14.4s 
+[30/32] rec6116 7149c 12t 16.0s breakeven_scratch,evr_triage,gain_retrace
+[31/32] rec6119 5656c 1t 13.5s rate_split_flip:armed
+[32/32] rec6129 12875c 0t 30.0s 
+scan report written: /Users/jaime/pump-chart/backend/tools/golden/scan_report.json

@@ -1,0 +1,411 @@
+[
+  {
+    "candle_count": 1934,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_pre_fix",
+    "exit_reasons": [],
+    "id": 2,
+    "mint": "K16JV4YxuyVdvBqxq4CSDhGpSX2r1TwRKeYd7G3pump",
+    "seconds": 6.5,
+    "token_symbol": "speedrun",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 21070,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_pre_fix",
+    "exit_reasons": [],
+    "id": 3,
+    "mint": "4FnZDvrkvEJf1MLZrcDKCMeSjuVx5BsHuKWqm3b6pump",
+    "seconds": 247.4,
+    "token_symbol": "\u25ce",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 5553,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_pre_fix",
+    "exit_reasons": [],
+    "id": 4,
+    "mint": "Dh5GKcPQFBJXw74yP4u7BCHYQzHoG6JX8dXQaNwvpump",
+    "seconds": 12.9,
+    "token_symbol": "WAN",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 11140,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_pre_fix",
+    "exit_reasons": [],
+    "id": 5,
+    "mint": "9ZtbETDNjnST9Y2zs82FZYy49xUMPgqXRh46YjjRpump",
+    "seconds": 21.5,
+    "token_symbol": "Br\u00f6tchen",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 177,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_pre_fix",
+    "exit_reasons": [],
+    "id": 7,
+    "mint": "Azzp6FJzN1DfqqXxrNVNpMSDeomN5s8TNW6v3NHUpump",
+    "seconds": 0.4,
+    "token_symbol": "22M",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 246,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_pre_fix",
+    "exit_reasons": [],
+    "id": 9,
+    "mint": "FZY8nt54e5DkyEHnTHbL122Ktqzbh4CNYeSp86W4pump",
+    "seconds": 0.5,
+    "token_symbol": "CHILLDOG",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 202,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_pre_fix",
+    "exit_reasons": [],
+    "id": 10,
+    "mint": "8MZT8qRy2kb5JYtDjdHzZinCQbDJ56bzgic1eHBJpump",
+    "seconds": 0.4,
+    "token_symbol": "IMAX",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 149,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_pre_fix",
+    "exit_reasons": [],
+    "id": 15,
+    "mint": "7V6Sk63y8Rr1MvcN5mYNp61wgFhy4EeQg5gUASk9pump",
+    "seconds": 0.3,
+    "token_symbol": "HBULL",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 496,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_pre_fix",
+    "exit_reasons": [],
+    "id": 20,
+    "mint": "AsSeDt3PQCQhKqpAdPAe1pYCoFBAHCRu7Zu5TSoZpump",
+    "seconds": 1.0,
+    "token_symbol": "Kim",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 9093,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_pre_fix",
+    "exit_reasons": [
+      "gain_retrace",
+      "kelly_flat"
+    ],
+    "id": 21,
+    "mint": "8vgaTBW1nz4fBboCYFph7MVSLsgL8wBbex9M1hE5pump",
+    "seconds": 23.8,
+    "token_symbol": "whitedog",
+    "trade_count": 5
+  },
+  {
+    "candle_count": 7055,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_pre_fix",
+    "exit_reasons": [],
+    "id": 22,
+    "mint": "CKv8UuRDpEYou2QQvwQ2ivVK8yA9wxoM5wYnYpbGpump",
+    "seconds": 35.9,
+    "token_symbol": "Bruno",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 236,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_pre_fix",
+    "exit_reasons": [],
+    "id": 23,
+    "mint": "CrJPSvj625TnPdWS42aG5ybMcHeFvnNqq5AExVespump",
+    "seconds": 0.5,
+    "token_symbol": "Momota",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 822,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_pre_fix",
+    "exit_reasons": [],
+    "id": 24,
+    "mint": "GiRrLzdan5Gz31ngH4zgxk6ybYaryNVCSLdAJyn1pump",
+    "seconds": 2.0,
+    "token_symbol": "SalaryCat",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 588,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_pre_fix",
+    "exit_reasons": [],
+    "id": 32,
+    "mint": "MeDy6nEaqwRs6g8bDuthTrMJfV8WEQDHA7bSHm3pump",
+    "seconds": 1.4,
+    "token_symbol": "Tiana",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 1068,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_pre_fix",
+    "exit_reasons": [],
+    "id": 37,
+    "mint": "8qw8VRw5EajAjaijrLrnqP9AgThRsnvLeHxeSWyCfFhA",
+    "seconds": 2.2,
+    "token_symbol": "JOEY",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 29012,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_pre_fix",
+    "exit_reasons": [
+      "gain_retrace"
+    ],
+    "id": 209,
+    "mint": "H3GtwGSrYRVqp7dtjkaDfjE2inydLkHwFkFJSPzrpump",
+    "seconds": 133.9,
+    "token_symbol": "BNUT",
+    "trade_count": 3
+  },
+  {
+    "candle_count": 28391,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_pre_fix",
+    "exit_reasons": [
+      "kramers_down_exit"
+    ],
+    "id": 943,
+    "mint": "DeNGDha55v7iVaZXMzjA9wZUmFrhhubcpBP5VM4qpump",
+    "seconds": 112.1,
+    "token_symbol": "DECK",
+    "trade_count": 1
+  },
+  {
+    "candle_count": 1377,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_post_fix",
+    "exit_reasons": [
+      "gain_retrace"
+    ],
+    "id": 5828,
+    "mint": "4ecSqqdPi5DZ5wpajg5kVUGDU13rjr19weBHLz2Kpump",
+    "seconds": 3.1,
+    "token_symbol": "RELOAD",
+    "trade_count": 1
+  },
+  {
+    "candle_count": 1113,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_post_fix",
+    "exit_reasons": [
+      "gain_retrace",
+      "kelly_flat"
+    ],
+    "id": 5829,
+    "mint": "G6vNKu5xhB2RN7tK6HXRPTG5pYgy5nc6CEnWqPuG2edn",
+    "seconds": 2.6,
+    "token_symbol": "WOOLLY",
+    "trade_count": 2
+  },
+  {
+    "candle_count": 432,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_post_fix",
+    "exit_reasons": [],
+    "id": 5830,
+    "mint": "jLz71QZfjnZZMLjUaCBw7KmUyftkkNq8NkWi2u9dyap",
+    "seconds": 1.2,
+    "token_symbol": "YAP",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 134,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_post_fix",
+    "exit_reasons": [],
+    "id": 5831,
+    "mint": "4YHbtGNfwdr1H11rJbVeizeEVVJzFYYiX7qFWJ1WPoaS",
+    "seconds": 0.6,
+    "token_symbol": "PLEASEINU",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 104,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_post_fix",
+    "exit_reasons": [],
+    "id": 5832,
+    "mint": "79FCJqG2DrYzH2G3eCQedRoWRbjri7MSgMkyGeZ7cLrm",
+    "seconds": 0.6,
+    "token_symbol": "TETSUOAI",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 414,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_post_fix",
+    "exit_reasons": [
+      "rate_split_flip:armed"
+    ],
+    "id": 5833,
+    "mint": "GDT8UZGGuaa9YAevWxh7yBcNvj4otQUv4xf6j4RsForK",
+    "seconds": 1.1,
+    "token_symbol": "FORK",
+    "trade_count": 1
+  },
+  {
+    "candle_count": 1443,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_post_fix",
+    "exit_reasons": [],
+    "id": 5834,
+    "mint": "BxftAowY2dVa2h9KMqDTPk4oMxzU9k6uVbZuoorXpump",
+    "seconds": 3.1,
+    "token_symbol": "Holdoween",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 227,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_post_fix",
+    "exit_reasons": [],
+    "id": 5839,
+    "mint": "DRKGYsGALqr5p2aTcGLK9zqiPB5wk7JV78bJv4mPpump",
+    "seconds": 0.8,
+    "token_symbol": "SPLIT",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 179,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_post_fix",
+    "exit_reasons": [],
+    "id": 5842,
+    "mint": "FdfMy7b1pxPCZ4LBo38D2BRSX8dhzc3srL9byrXBGLZH",
+    "seconds": 0.7,
+    "token_symbol": "shitcoin",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 243,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_post_fix",
+    "exit_reasons": [],
+    "id": 5850,
+    "mint": "GDT8UZGGuaa9YAevWxh7yBcNvj4otQUv4xf6j4RsForK",
+    "seconds": 0.5,
+    "token_symbol": "FORK",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 6957,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_post_fix",
+    "exit_reasons": [
+      "breakeven_scratch",
+      "gain_retrace"
+    ],
+    "id": 5917,
+    "mint": "GW5xNXBtW9usH62Uimis4L5T1Fi5ceeMa9dupjTVpxaD",
+    "seconds": 16.1,
+    "token_symbol": "lemon",
+    "trade_count": 5
+  },
+  {
+    "candle_count": 6782,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_post_fix",
+    "exit_reasons": [],
+    "id": 6080,
+    "mint": "2yu92oYzBWLAdVpu8BoaLzmM1oxPsHoboay2BXmeDDZr",
+    "seconds": 14.4,
+    "token_symbol": "FROINK",
+    "trade_count": 0
+  },
+  {
+    "candle_count": 7149,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_post_fix",
+    "exit_reasons": [
+      "breakeven_scratch",
+      "evr_triage",
+      "gain_retrace",
+      "kramers_down_exit",
+      "rate_split_flip:armed"
+    ],
+    "id": 6116,
+    "mint": "4JUv66RqP9ed78ajpNpuTbC1rGGgQwBwei4agQtGanTb",
+    "seconds": 16.0,
+    "token_symbol": "Loomer",
+    "trade_count": 12
+  },
+  {
+    "candle_count": 5656,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_post_fix",
+    "exit_reasons": [
+      "rate_split_flip:armed"
+    ],
+    "id": 6119,
+    "mint": "DAemPFNc3RtibBDKkUA4eL2Ns11q9VRdbpptmqm8DGqN",
+    "seconds": 13.5,
+    "token_symbol": "CAKE",
+    "trade_count": 1
+  },
+  {
+    "candle_count": 12875,
+    "chain_attempted": false,
+    "ended_open": false,
+    "era": "pool_post_fix",
+    "exit_reasons": [],
+    "id": 6129,
+    "mint": "BxftAowY2dVa2h9KMqDTPk4oMxzU9k6uVbZuoorXpump",
+    "seconds": 30.0,
+    "token_symbol": "Holdoween",
+    "trade_count": 0
+  }
+]
