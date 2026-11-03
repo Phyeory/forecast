@@ -1,10 +1,10 @@
 """
-Engine factory — picks the right strategy engine class based on `engine_version`.
+Engine factory: builds the strategy engine for a requested `engine_version`.
 
 The three execution pipelines (Backtester, ForwardTester, LiveTrader) plus
-the FastAPI layer in `main.py` all build a strategy engine via
-`create_engine(engine_version, **engine_kwargs)`.  This is the single
-indirection point that decides V1 vs V2.
+`main.py` all build a strategy engine via `create_engine(engine_version,
+**engine_kwargs)`.  This is the single indirection point between the pipelines
+and the engines.
 
     Contract:
         eng = create_engine(engine_version=1, **kwargs)   # → V1 StrategyEngine
@@ -12,140 +12,72 @@ indirection point that decides V1 vs V2.
         eng = create_engine(engine_version=3, **kwargs)   # → V3 StrategyEngineV3Adapter
             (V3 = newborn-coin dump-bottom engine on the V2 mathematical core)
         eng = create_engine(engine_version=4, **kwargs)   # → V4 StrategyEngineV4Adapter
-            (V4 = post-nuke reversion: bounce-confirmed flush harvest, iter77)
+            (V4 = post-nuke reversion: bounce-confirmed flush harvest)
         eng = create_engine(engine_version=6, **kwargs)   # → V6 StrategyEngineV6Adapter
-            (V6 = insider-dump absorption entry, iter77)
+            (V6 = insider-dump absorption entry)
 
-Both V1 and V2 expose the EXACT same call surface used by the pipelines:
+Every engine exposes the EXACT same call surface used by the pipelines:
     eng.update(time, o, h, l, c, volume, buy_volume, sell_volume, ...)
     eng.notify_trade_opened(entry_price, direction)
     eng.notify_trade_closed()
 All V1 indicator attributes (`m_hat`, `ema_fast_val`, `trend_confidence`, ...)
-are also present on the V2 adapter.  See `StrategyEngineV2Adapter` docstring
-in `strategy_engineV2.py` for the full mapping table.
+are present on every adapter.  See `engines/adapter_base.py` for the shared
+surface and the per-engine docstrings for the full mapping.
 """
 
 from __future__ import annotations
+import inspect
 from typing import Any
 
-# V1 — always importable (pure-Python).
+# V1 is always importable (pure Python).
 from strategy_engine import StrategyEngine
 
-
-# Lazy-import V2 — the module imports `numba` and `scipy` which are heavy and
-# optional at runtime; bringing them in unconditionally on every `import
-# engine_factory` would slow startup for V1-only runs and would crash the
-# process if the wheels are not installed yet (e.g. cold boot, CI).  We use a
-# module-level cache to keep the second call path-fast.
-_V2Adapter = None
-_V2_IMPORT_LOCK = False
-
-# V3 (newborn dump-bottom engine) re-imports the same V2 core and is cached
-# the same way.
-_V3Adapter = None
-
-# V4 (post-nuke reversion) / V6 (insider-dump absorption) — iter77 archetype
-# engines; pure-Python standalone machines, cached the same way.
-_V4Adapter = None
-_V6Adapter = None
+# Adapter modules import heavy optional deps (numba, scipy), so they load
+# lazily on first use; the resolved class refs are cached module-side.
+_ADAPTER_PATHS = {
+    2: ("strategy_engineV2", "StrategyEngineV2Adapter"),
+    3: ("strategy_engineV3", "StrategyEngineV3Adapter"),
+    4: ("strategy_engineV4", "StrategyEngineV4Adapter"),
+    6: ("strategy_engineV6", "StrategyEngineV6Adapter"),
+}
+_ADAPTER_CLASSES: dict[int, type] = {}
 
 
-def _load_v2_adapter():
-    """Import `StrategyEngineV2Adapter` lazily and cache the class ref."""
-    global _V2Adapter, _V2_IMPORT_LOCK
-    if _V2Adapter is not None:
-        return _V2Adapter
-    if _V2_IMPORT_LOCK:
-        # Re-entrant guard — would only happen if a misbehaving caller
-        # constructed a circular import.  Defensive hard-stop.
-        raise RuntimeError("Recursive V2 adapter import detected")
-    _V2_IMPORT_LOCK = True
-    try:
-        from strategy_engineV2 import StrategyEngineV2Adapter  # noqa: WPS433
-        _V2Adapter = StrategyEngineV2Adapter
-        return _V2Adapter
-    finally:
-        _V2_IMPORT_LOCK = False
-
-
-def _load_v3_adapter():
-    """Import `StrategyEngineV3Adapter` lazily and cache the class ref."""
-    global _V3Adapter
-    if _V3Adapter is not None:
-        return _V3Adapter
-    from strategy_engineV3 import StrategyEngineV3Adapter  # noqa: WPS433
-    _V3Adapter = StrategyEngineV3Adapter
-    return _V3Adapter
-
-
-def _load_v4_adapter():
-    """Import `StrategyEngineV4Adapter` lazily and cache the class ref."""
-    global _V4Adapter
-    if _V4Adapter is not None:
-        return _V4Adapter
-    from strategy_engineV4 import StrategyEngineV4Adapter  # noqa: WPS433
-    _V4Adapter = StrategyEngineV4Adapter
-    return _V4Adapter
-
-
-def _load_v6_adapter():
-    """Import `StrategyEngineV6Adapter` lazily and cache the class ref."""
-    global _V6Adapter
-    if _V6Adapter is not None:
-        return _V6Adapter
-    from strategy_engineV6 import StrategyEngineV6Adapter  # noqa: WPS433
-    _V6Adapter = StrategyEngineV6Adapter
-    return _V6Adapter
+def _load_adapter(engine_version: int) -> type:
+    """Import and cache the adapter class for a non-V1 engine version."""
+    cls = _ADAPTER_CLASSES.get(engine_version)
+    if cls is None:
+        module_name, class_name = _ADAPTER_PATHS[engine_version]
+        module = __import__(module_name, fromlist=[class_name])
+        cls = getattr(module, class_name)
+        _ADAPTER_CLASSES[engine_version] = cls
+    return cls
 
 
 def create_engine(engine_version: int = 1, **engine_kwargs: Any):
     """
     Return a fresh strategy engine instance for the requested version.
 
-    Args
-    ----
-    engine_version : int
-        1 → V1 `StrategyEngine` (physics / Langevin / Kalman regime detector)
-        2 → V2 `StrategyEngineV2Adapter`
-            (RBPF + UKF + KDE + Kramers escape, wrapped to V1 surface)
-        3 → V3 `StrategyEngineV3Adapter`
-            (newborn-coin dump-bottom recovery on the V2 core: launch →
-            dump → bottom → organic-buyer entry, strict TP/SL + mcap band)
-    **engine_kwargs : Any
-        Free parameters passed straight through to the chosen engine
-        constructor.  V1 ignores unknown V2 keys (and vice-versa); the V2
-        adapter silently filters its kwargs against `DEFAULT_CONFIG` so
-        passing a mixed bag is safe.
+    1 → V1 `StrategyEngine` (physics / Langevin / Kalman regime detector);
+    2 → V2 `StrategyEngineV2Adapter` (RBPF + UKF + KDE + Kramers escape,
+    wrapped to the V1 surface); 3/4/6 → the specialised adapters.
 
-    Returns
-    -------
-    StrategyEngine | StrategyEngineV2Adapter   (both expose the V1 contract)
+    Free parameters pass straight through to the chosen engine constructor.
+    V1 ignores unknown V2 keys (and vice versa); the V2 adapter silently
+    filters its kwargs against `DEFAULT_CONFIG` so a mixed bag is safe.
     """
     if engine_version is None:
         engine_version = 1
     engine_version = int(engine_version)
 
     if engine_version == 1:
-        import inspect
         sig = inspect.signature(StrategyEngine.__init__)
         v1_valid = set(sig.parameters.keys()) - {"self"}
         filtered = {k: v for k, v in engine_kwargs.items() if k in v1_valid}
         return StrategyEngine(**filtered)
 
-    if engine_version == 2:
-        Adapter = _load_v2_adapter()
-        return Adapter(**engine_kwargs)
-
-    if engine_version == 3:
-        Adapter = _load_v3_adapter()
-        return Adapter(**engine_kwargs)
-
-    if engine_version == 4:
-        Adapter = _load_v4_adapter()
-        return Adapter(**engine_kwargs)
-
-    if engine_version == 6:
-        Adapter = _load_v6_adapter()
+    if engine_version in _ADAPTER_PATHS:
+        Adapter = _load_adapter(engine_version)
         return Adapter(**engine_kwargs)
 
     raise ValueError(
@@ -153,6 +85,6 @@ def create_engine(engine_version: int = 1, **engine_kwargs: Any):
     )
 
 
-# Convenience alias documented in strategy_engineV2.spec and referenced
-# from call sites that prefer the `build_engine(...)` spelling.
+# Convenience alias referenced from call sites that prefer the
+# `build_engine(...)` spelling.
 build_engine = create_engine

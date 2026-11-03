@@ -58,6 +58,7 @@ from strategy_engine import Regime as _V1Regime, \
                             Signal as _V1Signal, \
                             Direction as _V1Direction
 from core.config import family_defaults
+from engines.adapter_base import AdapterBase
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration
@@ -105,7 +106,7 @@ def _event_fields(ev: dict) -> Optional[tuple[int, float]]:
     return int(ev.get("time", 0)), usd
 
 
-class StrategyEngineV6Adapter:
+class StrategyEngineV6Adapter(AdapterBase):
     """
     V1-surface engine: insider-dump absorption, event-driven, long-only.
 
@@ -122,63 +123,7 @@ class StrategyEngineV6Adapter:
         self.cfg = cfg
 
         # V1-compat echo surface.
-        self.confidence_high = float(cfg["confidence_high"])
-        self.confidence_low = float(cfg["confidence_low"])
-        self.entry_confidence_high = float(cfg["entry_confidence_high"])
-        self.entry_confidence_low = float(cfg["entry_confidence_low"])
-        self.confidence_very_high = float(cfg["confidence_very_high"])
-        self.confidence_w1 = 0.3
-        self.confidence_w2 = 0.25
-        self.confidence_w3 = 0.25
-        self.confidence_w4 = 0.2
-        self.ema_fast_p = 3
-        self.ema_slow_p = 7
-        self.atr_period = 7
-        self.roc_period = 3
-        self.warmup = int(cfg["warmup_bars"]) // 4
-        self.stoploss_pct = 2.0
-        self.takeprofit_pct = float(cfg["v6_tp_pct"])
-        self.takeprofit_pct_low = self.takeprofit_pct
-        self.takeprofit_pct_high = self.takeprofit_pct
-        self.stoploss_pct_low = self.stoploss_pct
-        self.stoploss_pct_high = self.stoploss_pct
-        self.max_entry_bar_count = 5700
-        self.forbidden_bc_lo = 0
-        self.forbidden_bc_hi = 0
-        self.trail_floor_pct = 0.0
-        self.reversal_exit_bars_max = 0
-        self.overextension_k = 0.08
-        self.momentum_peak_bars = 1
-        self.S_strong = 4.0
-        self.S_weak = 2.0
-        self.S_noise = 1.15
-        self.delta_threshold = 0.3
-        self.min_trend_bars = 2
-        self.ema_min_spread_pct = 0.02
-        self.ema_macro_period = 7
-        self.exhaustion_persist_bars = 6
-        self.regime_lookback = 6
-        self.persistence_threshold = 2
-        self.momentum_mean_threshold = 0.0
-        self.chop_atr_pct = 0.3
-        self.chop_spread_pct = 0.05
-        self.local_range_bars = 80
-        self.local_range_threshold_pct = 10.0
-        self.sign_flip_threshold = 0
-        self.stability_bars = 5
-        self.atr_floor_k = 0.0
-        self.ema_cross_persist_bars = 2
-        self.exhaustion_bars_limit = 3
-        self.reversal_confirm_bars = 2
-        self.reversal_exit_confirm_bars = 0
-        self.s_effective_threshold = 0.5
-        self.exhaustion_s_decay_bars = 1
-        self.exhaustion_stall_bars = 6
-        self.exhaustion_stall_atr_pct = 3.0
-        self.spike_atr_multiplier = 1.2
-        self.spike_lookback_bars = 9
-        self.body_baseline_bars = 160
-        self.consolidation_range_pct = 25.0
+        self._init_v1_compat(cfg, 2.0, float(cfg["v6_tp_pct"]))
 
         # ── Event stream (indexed by timestamp, V2-adapter semantics) ──
         self._events: list[dict] = []
@@ -198,59 +143,10 @@ class StrategyEngineV6Adapter:
         }
 
         # V1 surface state.
-        self.regime: _V1Regime = _V1Regime.IDLE
-        self.direction: _V1Direction = _V1Direction.NONE
-        self.prev_direction: _V1Direction = _V1Direction.NONE
-        self.trend_before_exhaustion: _V1Direction = _V1Direction.NONE
-        self.position_direction: _V1Direction = _V1Direction.NONE
-        self.in_position = False
-        self.entry_price = 0.0
-        self._peak_price = 0.0
-        self.entry_bar_count = 0
-        self.bar_count = 0
-        self._current_time = 0
-        self.exit_signal_reason = ""
-        self.trend_bar_count = 0
-        self.exhaustion_bar_count = 0
-        self.exhaustion_persist_count = 0
-        self.reversal_confirm_count = 0
-        self.trend_reversal_confirm_count = 0
-        self.reversal_bar_count = 0
-        self.no_motion_count = 0
-        self.trend_start_bar = 0
-        self.trend_start_price = 0.0
-        self.trend_start_atr = 0.0
-        self._exhaustion_phase_high = 0.0
-        self._exhaustion_s_decay_count = 0
-        self._momentum_peak_declining_count = 0
-        self._momentum_past_peak_flag = False
-        self._pre_entry_stable = False
-        self._pre_entry_stable_up = False
-        self._pre_entry_stable_down = False
-        self._in_local_chop = False
-        self._ema_cross_valid = False
-        self._ema_cross_persist_count = 0
-        self.iter05_s_effective_min = 0.0
+        self._init_v1_state()
 
         # V1 indicator attributes (ForwardTester._capture_entry_params).
-        self.m_hat = 0.0
-        self.prev_m_hat = 0.0
-        self.p_hat = 0.0
-        self.momentum_acceleration = 0.0
-        self.signal_strength = 0.0
-        self.s_effective = 0.0
-        self.ema_fast_val: Optional[float] = None
-        self.ema_slow_val: Optional[float] = None
-        self.ema_macro_val: Optional[float] = None
-        self.ema_spread = 0.0
-        self.prev_ema_spread = 0.0
-        self.spread_expanding = False
-        self.atr_val: Optional[float] = None
-        self.atr_floor = 0.0
-        self.trend_confidence = 0.0
-        self.is_trending = False
-        self._price_overextended_flag = False
-        self._prev_close: Optional[float] = None
+        self._init_v1_indicators()
 
     # ── Holder-flow surface (pipeline parity with the V2/V3 adapters) ──
 
@@ -316,42 +212,11 @@ class StrategyEngineV6Adapter:
         if self.state == S_IN:
             self.state = S_IDLE
 
-    def _update_peak_price(self, h: float, l: float):
-        if self.in_position and h > self._peak_price:
-            self._peak_price = h
-
-    def _price_overextended(self, c: float) -> bool:
-        if not self.p_hat:
-            return False
-        return c > self.p_hat * (1.0 + self.overextension_k)
-
-    def _momentum_past_peak(self, c=None) -> bool:
-        return self._momentum_past_peak_flag
-
-    def _is_chop_zone(self, c: float) -> bool:
-        return False
-
-    def _confidence_lerp(self, low_val: float, high_val: float) -> float:
-        lo = low_val if low_val != 0.0 else high_val
-        hi = high_val if high_val != 0.0 else low_val
-        if lo == hi:
-            return lo
-        t = min(max(self.trend_confidence, 0.0), 1.0)
-        if self.confidence_high > self.confidence_low:
-            frac = (t - self.confidence_low) / (self.confidence_high - self.confidence_low)
-        else:
-            frac = 0.0
-        frac = max(0.0, min(1.0, frac))
-        return low_val + (high_val - low_val) * frac
-
     def _effective_stoploss_pct(self) -> float:
         return -abs(float(self.cfg["v6_scratch_tol"]))
 
     def _effective_takeprofit_pct(self) -> float:
         return abs(float(self.cfg["v6_tp_pct"]))
-
-    def _global_stoploss_pct(self) -> float:
-        return self._effective_stoploss_pct()
 
     def _compute_trail_stop_price(self):
         if not self.in_position:

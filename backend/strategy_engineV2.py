@@ -55,6 +55,7 @@ from strategy_engine import Regime as _V1Regime, \
                             Signal as _V1Signal, \
                             Direction as _V1Direction
 from core.config import family_defaults, v2_default
+from engines.adapter_base import AdapterBase
 
 # numba is optional at import time so the module can still be imported in
 # environments where the JIT compiler is unavailable (kernels fall back to
@@ -2554,7 +2555,7 @@ _V2_TO_V1_REGIME = {
 }
 
 
-class StrategyEngineV2Adapter:
+class StrategyEngineV2Adapter(AdapterBase):
     """
     V1-surface wrapper around `MemecoinStrategyEngine`.
 
@@ -3411,14 +3412,6 @@ class StrategyEngineV2Adapter:
         elif self.position_direction == _V1Direction.DOWN:
             if l < self._peak_price or self._peak_price == 0.0:
                 self._peak_price = l
-
-    def _price_overextended(self, c: float) -> bool:
-        if not self.p_hat:
-            return False
-        return c > self.p_hat * (1.0 + self.overextension_k)
-
-    def _momentum_past_peak(self, c=None) -> bool:
-        return self._momentum_past_peak_flag
 
     def _is_chop_zone(self, c: float) -> bool:
         return self._in_local_chop if self.atr_val else False
