@@ -5112,7 +5112,7 @@ class LiveTrader:
                 result = self.engine.update(t, so, sh, sl, sc, vol,
                                             buy_volume=buy_vol, sell_volume=sell_vol,
                                             pool_sol=pool_sol,
-                                            market_cap_usd=mcap_usd,
+                                            market_cap_usd=market_cap_usd,
                                             _build_full_result=False)
             else:
                 result = self.engine.update(t, so, sh, sl, sc, 0.0,

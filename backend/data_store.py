@@ -99,6 +99,19 @@ _PRICE_SCHEMA = StoreSchema(
 _PRICE_STORE = RecordingStore(PRICE_DB, _PRICE_SCHEMA)
 
 
+def _price_store() -> RecordingStore:
+    """The price store, rebound when PRICE_DB is repointed at runtime.
+
+    PRICE_DB is module state that isolated tests and tools retarget to a
+    scratch database; a store frozen at import would silently keep reading
+    the real one.
+    """
+    global _PRICE_STORE
+    if str(_PRICE_STORE.db_path) != str(PRICE_DB):
+        _PRICE_STORE = RecordingStore(PRICE_DB, _PRICE_SCHEMA)
+    return _PRICE_STORE
+
+
 def _get_price_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(str(PRICE_DB))
     conn.row_factory = sqlite3.Row
@@ -115,19 +128,19 @@ def _get_price_read_conn() -> sqlite3.Connection:
 
 def init_price_db():
     """Create the price recordings schema and apply pending migrations."""
-    _PRICE_STORE.init_db()
+    _price_store().init_db()
 
 
 def create_recording(mint: str, timeframe: str, token_name: str = "", token_symbol: str = "",
                      *, started_at: float | None = None) -> int:
     """Insert one price recording row and return its id."""
-    return _PRICE_STORE.create_recording(mint, timeframe, token_name, token_symbol,
+    return _price_store().create_recording(mint, timeframe, token_name, token_symbol,
                                          started_at=started_at)
 
 
 def stop_recording(recording_id: int):
     """Stamp the stop time, persist the candle count, and mark the recording completed."""
-    _PRICE_STORE.stop_recording(recording_id)
+    _price_store().stop_recording(recording_id)
 
 
 def insert_candle(
@@ -140,13 +153,13 @@ def insert_candle(
     market_cap_usd: float = 0.0,
 ):
     """Upsert one candle row: the previous row for the same bucket is deleted first."""
-    _PRICE_STORE.insert_candle(recording_id, t, o, h, l, c, vol,
+    _price_store().insert_candle(recording_id, t, o, h, l, c, vol,
                                buy_vol, sell_vol, pool_sol, market_cap_usd)
 
 
 def insert_candles_batch(recording_id: int, candles: list[dict]):
     """Insert many candle rows with INSERT OR REPLACE semantics."""
-    _PRICE_STORE.insert_candles_batch(recording_id, candles)
+    _price_store().insert_candles_batch(recording_id, candles)
 
 
 def insert_holder_flow(
@@ -206,12 +219,12 @@ def get_holder_flow_since(recording_id: int, after_id: int, limit: int = 500) ->
 
 def list_recordings() -> list[dict]:
     """Return every price recording, newest first."""
-    return _PRICE_STORE.list_recordings()
+    return _price_store().list_recordings()
 
 
 def get_recording(recording_id: int) -> Optional[dict]:
     """Return one recording row, or None when the id is unknown."""
-    return _PRICE_STORE.get_recording(recording_id)
+    return _price_store().get_recording(recording_id)
 
 
 def get_recording_candles(recording_id: int, effective_basis: bool = True) -> list[dict]:
@@ -222,22 +235,22 @@ def get_recording_candles(recording_id: int, effective_basis: bool = True) -> li
     candle's stored vault depth; pass ``False`` for a byte-exact replay of the
     pre-fix phantom basis.
     """
-    return _PRICE_STORE.get_recording_candles(recording_id, effective_basis=effective_basis)
+    return _price_store().get_recording_candles(recording_id, effective_basis=effective_basis)
 
 
 def delete_recording(recording_id: int):
     """Delete one recording and its candles."""
-    _PRICE_STORE.delete_recording(recording_id)
+    _price_store().delete_recording(recording_id)
 
 
 def update_recording_candle_count(recording_id: int):
     """Recount a recording's candles and persist the count."""
-    _PRICE_STORE.update_recording_candle_count(recording_id)
+    _price_store().update_recording_candle_count(recording_id)
 
 
 def cleanup_small_recordings(min_candles: int = 100) -> int:
     """Delete recordings with fewer than ``min_candles`` candles and return the count."""
-    return _PRICE_STORE.cleanup_small_recordings(min_candles)
+    return _price_store().cleanup_small_recordings(min_candles)
 
 
 # --- Backtest DB ---
