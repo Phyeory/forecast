@@ -86,7 +86,7 @@
  "broker": "alpaca",
  "broker_kwargs": {
   "paper": true,
-  "time_in_force": "opg"
+  "time_in_force": "day"
  },
  "broker_symbols": {},
  "state_path": "data/live_market/runtime/state.json",
