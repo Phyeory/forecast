@@ -47,13 +47,6 @@ class CandleAggregator:
     def _bucket(self, ts: float) -> int:
         return int(ts // self.tf_seconds) * self.tf_seconds
 
-    def get_last_n(self, n: int) -> list[Candle]:
-        """Return the last N completed candles plus the current in-progress candle."""
-        result = list(self._history)
-        if self.current_candle is not None:
-            result.append(self.current_candle)
-        return result[-n:]
-
     def process_trade(
         self,
         price: float,

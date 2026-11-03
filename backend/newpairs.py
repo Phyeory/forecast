@@ -70,11 +70,6 @@ class NewPairCandidate:
     def to_dict(self) -> dict:
         return asdict(self)
 
-    @property
-    def age_seconds(self) -> float:
-        return time.time() - (self.first_seen or time.time())
-
-
 # ── Settings ─────────────────────────────────────────────────────────────────
 
 @dataclass

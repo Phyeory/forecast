@@ -502,38 +502,6 @@ class HolderFlowMonitor:
                 return event
         return None
 
-    def get_recent_sells(self, mint: str, window_seconds: float = 30.0) -> list[HolderFlowEvent]:
-        """Get all dev/insider sells for a token within the window."""
-        state = self._watched.get(mint)
-        if not state:
-            return []
-        now = int(time.time())
-        cutoff = now - int(window_seconds)
-        return [e for e in state.recent_events if e.side == "sell" and e.timestamp >= cutoff]
-
-    def has_recent_dev_sell(self, mint: str, window_seconds: float = 30.0, min_usd: float = 100.0) -> bool:
-        """Check if a significant dev/insider sell occurred within the window."""
-        event = self.get_recent_sell(mint, window_seconds)
-        return event is not None and event.amount_usd >= min_usd
-
-    def get_events_as_dicts(self, mint: str) -> list[dict]:
-        """Return all retained events for a token as plain dicts (engine-facing)."""
-        state = self._watched.get(mint)
-        if not state:
-            return []
-        return [
-            {
-                "time": e.timestamp,
-                "wallet": e.wallet,
-                "tag": e.tag,
-                "side": e.side,
-                "amount_usd": e.amount_usd,
-                "amount_sol": e.amount_sol,
-                "tx_hash": e.tx_hash,
-            }
-            for e in state.recent_events
-        ]
-
     @property
     def event_queue(self) -> asyncio.Queue[HolderFlowEvent]:
         """Queue of all detected events (for consumers that want to process every event)."""

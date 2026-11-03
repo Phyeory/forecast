@@ -204,11 +204,6 @@ def get_holder_flow_since(recording_id: int, after_id: int, limit: int = 500) ->
     return [dict(r) for r in rows]
 
 
-def get_holder_flow_for_window(recording_id: int, center_time: int, window_seconds: int) -> list[dict]:
-    """Fetch holder-flow events within ±window_seconds of a center time."""
-    return get_holder_flow(recording_id, center_time - window_seconds, center_time + window_seconds)
-
-
 def list_recordings() -> list[dict]:
     """Return every price recording, newest first."""
     return _PRICE_STORE.list_recordings()

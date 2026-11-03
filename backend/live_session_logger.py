@@ -123,10 +123,6 @@ class SessionJournal:
         # have no _sid — exclude them from the per-session file.
         return getattr(record, "_sid", None) is self
 
-    def bind_record(self, record: logging.LogRecord) -> None:
-        """Stamp a log record as belonging to this session (called by LiveTrader)."""
-        record._sid = self
-
     # ── Structured trade ledger ───────────────────────────────────────────
 
     def event(self, kind: str, data: Optional[dict] = None) -> None:

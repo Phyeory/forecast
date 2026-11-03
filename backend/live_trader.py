@@ -1267,9 +1267,6 @@ class LiveTrader:
     def _get_cached_sol_balance(self) -> float:
         return self._cached_sol_balance
 
-    def _get_cached_token_balance(self) -> int:
-        return self._cached_token_balance
-
     def _release_sol_reserve(self) -> None:
         """Release THIS trader's wallet SOL reservation (idempotent)."""
         amt = float(getattr(self, "_sol_reserved", 0.0) or 0.0)
@@ -2972,34 +2969,6 @@ class LiveTrader:
         if sol_received > 0 and tokens_sold > 0:
             return sol_received / tokens_sold
         return self._last_price or 0.0
-
-    async def _get_tx_rent_sol(self, sig: str) -> float:
-        """One-time account-creation rent inside a confirmed BUY tx.
-
-        The first buy of a session creates the wallet's WSOL ATA (~0.0015 SOL,
-        once per wallet lifetime) and the token ATA (~0.0015 SOL, once per
-        mint) — 15–30% of a 0.01 SOL notional when they land inside the swap
-        tx.  They are refundable deposits, not swap costs, so they must be
-        journaled separately from the fill for wallet truth to reconcile
-        with the booked (backtester-basis) PnL."""
-        result = await self._get_tx_result(sig)
-        if not result:
-            return 0.0
-        try:
-            meta = result.get("meta") or {}
-            if meta.get("err"):
-                return 0.0
-            rent = 0
-            for inner in meta.get("innerInstructions") or []:
-                for ins in inner.get("instructions") or []:
-                    parsed = ins.get("parsed") or {}
-                    info = parsed.get("info") or {}
-                    if parsed.get("type") in ("createAccount", "create") and \
-                            "lamports" in info:
-                        rent += int(info.get("lamports") or 0)
-            return rent / 1e9
-        except Exception:
-            return 0.0
 
     async def _get_tx_rent_net_fee(
         self, sig: str, input_sol: float
@@ -5679,15 +5648,3 @@ class LiveTrader:
             stats=self.stats.to_dict(),
         )
         return trade
-
-    def confirm_failed(self, action: str, error: str):
-        logger.error(f"Swap FAILED ({action}): {error}")
-        self._journal_event(
-            "swap_failed", action=action, error=error,
-            trade=(self.current_trade.to_dict() if self.current_trade else None),
-        )
-        if action == "buy" and self.current_trade is not None:
-            self.current_trade = None
-            self.engine.notify_trade_closed()
-        elif action == "sell" and self.current_trade is not None:
-            self.current_trade.status = "open"
