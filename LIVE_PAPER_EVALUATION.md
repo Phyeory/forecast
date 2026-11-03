@@ -57,6 +57,20 @@ verify the engine it ran against HEAD.
 | 2026-10-30 | `20261030_075231` (GH) | No orders. The Oct 28 `opg` order was canceled unfilled (broker buying power restored to $400k, no position), but the engine still carries `desired: ADBE=1` (+ 8 others) and does not re-submit — a desired-vs-broker desync deadlock. Broker truth: **flat, $100,000, zero fills after 6 sessions** |
 | 2026-10-30 20:38 ET | `20261031_003818` (GH) | **Fixed code runs.** `warm_sync` adoption submits 9 REAL orders (ABT 71 @104.56, ADBE 30 @248.05, HD 22 @328.93, IBM 29 @258.12, LOW 36 @207.26, META 12 @624.50, MSTR 52 @141.61, NKE 195 @38.42, PG 46 @160.58), journaled as `sync_submit` — **no phantom fill booked** |
 | 2026-10-31 03:42 ET | `20261031_074202` (GH) | Pending records **survived the restart with their order ids** (the core fix): 9 `order_status` checks, all "accepted", fq=0 → intent kept alive, nothing resubmitted, no phantom fills. Two engine flips (ABT, PG) fired exit signals → their working entry orders canceled (`order_cancel_flip`). Buying power $400k → $348.5k (7 working orders ≈ $51.5k reserved). Orders target Monday Nov 2's open |
+| 2026-11-02 04:35 ET | `20261102_083538` (GH) | Monday's auction came and went: the 7 `opg` orders still "accepted" at fq=0 pre-open, then **canceled unfilled** (gone from the broker by Monday night — paper opg now confirmed dead across 3 auction cycles). ABT/PG exit intents resolved as no-ops (entries were canceled, nothing to sell) |
+| 2026-11-02 17:27/17:50 ET | `20261102_222726/225114` (GH) | **Both runs died in prepare on transient Alpaca API errors** (died between `guard_init` and heartbeat) — lost the Monday booking day |
+| 2026-11-02 21:51 ET | `20261103_025136` (GH) | Recovery: warm_sync re-submitted 7 fresh `opg` orders (ADBE 29 @250.12, HD 22 @329.24, IBM 29 @257.84, LOW 35 @209.06, META 12 @614.86, MSTR 57 @130.53, NKE 193 @38.69) targeting Tuesday's open |
+| 2026-11-03 03:47 ET | `20261103_084722` (GH) | Venue pass + bar pass both ran (14 `order_status` checks — the `_poll_pending_orders` fix working): all "accepted", fq=0, awaiting Tuesday's auction |
+
+**Third fix (2026-11-03, `329c151`): tif `opg` → `day` on the Alpaca paper account.** Paper
+`opg` has never filled across three auctions (accepted, then canceled ~9:45 ET). Per Alpaca
+docs, `day` market orders submitted after the close are **queued and execute at the next
+open** — exactly the backtest's `next_open` semantics, with no auction participation and no
+dependence on a market-hours runner (the 13:35/14:35 UTC crons have never fired — GitHub
+never registered them). `prepare` is also hardened against transient venue API errors (the
+Nov-2 double failure); a skipped sync self-heals next session since `warm_sync` re-runs
+every prepare. Convergence is now: evening run submits → broker executes at next open →
+next evening run books the fills at venue prices.
 
 **⚠️ Open defect (2026-10-30) — signal→order pipeline stalls. FIXED same day, see below.**
 Sessions log `desired_position=1` with `pending={}` and no `orders.jsonl` entries, while the
