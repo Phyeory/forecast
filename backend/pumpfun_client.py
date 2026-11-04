@@ -470,6 +470,7 @@ async def get_historical_candles(
                 "volume": float(row.get("volume", 0)),
             })
         except (KeyError, ValueError, TypeError):
+            logger.debug("malformed candle row skipped")
             continue
     candles.sort(key=lambda c: c["time"])
     return candles
@@ -549,7 +550,7 @@ class _SharedPumpPortalHub:
         try:
             self._vq_tasks[mint] = asyncio.ensure_future(_refresh())
         except RuntimeError:
-            pass
+            logger.debug("no running loop, vq refresh not started")
 
     def _cancel_vq_refresh(self, mint: str):
         task = self._vq_tasks.pop(mint, None)
@@ -567,7 +568,8 @@ class _SharedPumpPortalHub:
                 self._pending_subscribe.discard(mint)
                 logger.info(f"[PumpHub] +subscribe {mint[:8]}…")
             except Exception:
-                pass  # will be re-sent on reconnect
+                logger.debug("PumpPortal subscribe send failed, re-sent on reconnect",
+                             exc_info=True)
 
     async def _unsubscribe(self, mint: str):
         """Send an unsubscribe message if the connection is live."""
@@ -578,7 +580,8 @@ class _SharedPumpPortalHub:
                 )
                 logger.info(f"[PumpHub] -unsubscribe {mint[:8]}…")
             except Exception:
-                pass
+                logger.debug("PumpPortal unsubscribe send failed, mint is not "
+                             "re-subscribed on reconnect", exc_info=True)
 
     def _fan_out(self, trade: dict):
         """Push a normalised trade to every queue watching that mint."""
@@ -587,7 +590,8 @@ class _SharedPumpPortalHub:
             try:
                 q.put_nowait(trade)
             except asyncio.QueueFull:
-                pass  # slow consumer — drop rather than back-pressure the hub
+                # Slow consumer: drop the tick rather than back-pressure the hub.
+                logger.debug("trade queue full, tick dropped (backpressure)")
 
     async def _run(self):
         backoff = 0.1
@@ -625,7 +629,9 @@ class _SharedPumpPortalHub:
                             await ws.send(json.dumps(
                                 {"method": "subscribeMigration", "keys": all_mints}))
                         except Exception:
-                            pass
+                            logger.debug("subscribeMigration not accepted, the VQ "
+                                         "re-poll still catches graduations",
+                                         exc_info=True)
                         for m in all_mints:
                             self._schedule_vq_refresh(m)
 
@@ -633,6 +639,7 @@ class _SharedPumpPortalHub:
                         try:
                             msg = json.loads(raw)
                         except json.JSONDecodeError:
+                            logger.debug("malformed PumpPortal frame ignored")
                             continue
                         if "txType" in msg:
                             mint = msg.get("mint", "")
@@ -723,7 +730,7 @@ class PumpFunWSClient:
             try:
                 self._queue.put_nowait(None)  # sentinel
             except asyncio.QueueFull:
-                pass
+                logger.debug("stop sentinel not delivered, poll loop exits on timeout")
 
     async def stream(self) -> AsyncGenerator[dict, None]:
         q = await _pump_hub.register(self.mint)
@@ -932,7 +939,7 @@ class _SharedSolanaWSHub:
                 loop = asyncio.get_running_loop()
                 self._task = loop.create_task(self._run())
             except RuntimeError:
-                pass
+                logger.debug("no running loop, vault-diff task not started")
 
     async def _send_subscribe(self, account: str):
         """Send accountSubscribe for *account* on the live WS (if available)."""
@@ -981,6 +988,7 @@ class _SharedSolanaWSHub:
                         try:
                             msg = json.loads(raw)
                         except json.JSONDecodeError:
+                            logger.debug("malformed vault-diff frame ignored")
                             continue
 
                         # Handle subscription acknowledgement
@@ -1016,7 +1024,8 @@ class _SharedSolanaWSHub:
                             try:
                                 q.put_nowait((sub_id, amount))
                             except asyncio.QueueFull:
-                                pass
+                                logger.debug("vault balance queue full, update dropped "
+                                             "(backpressure)")
 
             except (ConnectionClosed, asyncio.TimeoutError, OSError) as e:
                 logger.warning(f"[SolanaHub] {e} — reconnecting in {backoff:.1f}s")
@@ -1120,7 +1129,8 @@ class PumpSwapRPCClient:
                 else:
                     asyncio.run(sess.close())
             except Exception:
-                pass
+                logger.debug("session close kick failed, async close path still "
+                             "owns cleanup", exc_info=True)
 
     async def _rpc(self, session: aiohttp.ClientSession, method: str, params: list) -> dict:
         """Execute a Solana JSON-RPC call with global rate-limiting and 429 retry."""
@@ -1432,7 +1442,9 @@ class PumpSwapRPCClient:
                             await _solana_hub.unsubscribe(base_account, queue)
                             await _solana_hub.unsubscribe(quote_account, queue)
                         except Exception:
-                            pass
+                            logger.debug("pool account unsubscribe failed at teardown, "
+                                         "hub entry lingers until restart",
+                                         exc_info=True)
                         # FD-leak fix: clear the stop()-visible ref on every
                         # exit path (normal, exception, GeneratorExit) so a
                         # later stop() can never close a session the
@@ -1608,6 +1620,7 @@ class NewPairsStream:
                         try:
                             msg = json.loads(raw)
                         except json.JSONDecodeError:
+                            logger.debug("malformed pump.fun frame ignored")
                             continue
 
                         if not isinstance(msg, dict):

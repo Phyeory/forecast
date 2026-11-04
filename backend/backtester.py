@@ -47,8 +47,11 @@ from typing import Optional
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import os
 import json
+import logging
 import re
 import datetime
+
+logger = logging.getLogger(__name__)
 
 from forward_tester import ForwardTester
 from data_store import (
@@ -260,7 +263,8 @@ def run_backtest_batch(
             _w_eng = create_engine(engine_version=engine_version)
             _w_eng.update(time=0, o=1.0, h=1.0, l=1.0, c=1.0, volume=1.0, buy_volume=0.5, sell_volume=0.5)
         except Exception:
-            pass
+            logger.debug("engine warmup probe failed, workers build engines at spawn",
+                         exc_info=True)
 
     tasks = [
         {

@@ -317,7 +317,8 @@ async def live_get_private_key(request: Request):
         try:
             pubkey = str(keypair_from_private_key(pk).pubkey())
         except Exception:
-            pass
+            logger.debug("stored private key unparseable, pubkey reported empty",
+                         exc_info=True)
     return JSONResponse({
         "connected": bool(pk),
         "pubkey": pubkey,
@@ -572,6 +573,7 @@ async def live_trading_ws(
                 try:
                     msg = json.loads(data)
                 except Exception:
+                    logger.debug("malformed control frame ignored, listener continues")
                     continue
                 msg_type = msg.get("type", "")
 

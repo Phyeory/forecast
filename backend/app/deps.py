@@ -189,6 +189,7 @@ def _load_ledger_sessions(limit: int = 20) -> list[dict]:
                         try:
                             rec = json.loads(line)
                         except Exception:
+                            logger.debug("malformed journal line skipped, rest still parsed")
                             continue
                         event = rec.get("event")
                         if event == "session_open":
@@ -202,7 +203,8 @@ def _load_ledger_sessions(limit: int = 20) -> list[dict]:
                                     **t,
                                 })
             except Exception:
-                pass
+                logger.debug("journal read failed, session listed with default meta",
+                             exc_info=True)
             sessions.append({
                 "session_id": d.name,
                 "token_mint": meta["token_mint"] or d.name.split("_", 2)[-1],

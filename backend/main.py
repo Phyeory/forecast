@@ -18,7 +18,7 @@ try:
         if _candidate.exists():
             load_dotenv(_candidate, override=False)
 except ImportError:
-    pass
+    pass  # python-dotenv is optional; the environment may already carry the values
 from typing import Optional
 
 import uvicorn
@@ -231,7 +231,7 @@ class _LiveSession:
             try:
                 q.put_nowait(obj)
             except asyncio.QueueFull:
-                pass
+                logger.debug("viewer queue full, message dropped (backpressure)")
 
     async def broadcast_text(self, payload: str) -> None:
         # LiveTrader._broadcast_status sends pre-serialised JSON strings
@@ -247,7 +247,8 @@ class _LiveSession:
                         payload=data,
                     )
         except Exception:
-            pass
+            logger.debug("server trade event recording failed, broadcast unaffected",
+                         exc_info=True)
         self.broadcast(payload)
 
     def wallet(self) -> str:
@@ -344,7 +345,8 @@ class _LiveSession:
                                 except AttributeError:
                                     pass  # V1 engine has no holder-flow surface
                 except Exception:
-                    pass
+                    logger.debug("holder flow pump iteration failed, loop continues",
+                                 exc_info=True)
                 # Realtime delivery: wake the instant the shared monitor
                 # dispatches any event instead of sleeping out a full second.
                 # Entry gates and dev_sell exits must see holder-flow data at
@@ -364,7 +366,8 @@ class _LiveSession:
                     try:
                         holder_monitor.new_event_signal().clear()
                     except Exception:
-                        pass
+                        logger.debug("event signal clear failed, pump may wake once "
+                                     "early", exc_info=True)
 
         try:
             holder_monitor = get_shared_monitor()
@@ -641,7 +644,8 @@ class _LiveSession:
                 try:
                     await _hf_pump_task
                 except (asyncio.CancelledError, Exception):
-                    pass
+                    logger.debug("holder flow pump task raised during stop, reaped",
+                                 exc_info=True)
 
             # Stop the no-motion watcher
             if _nm_watch_task is not None:
@@ -649,7 +653,8 @@ class _LiveSession:
                 try:
                     await _nm_watch_task
                 except (asyncio.CancelledError, Exception):
-                    pass
+                    logger.debug("no-motion watcher task raised during stop, reaped",
+                                 exc_info=True)
 
             # Stop the holder-flow monitor for this session
             if holder_monitor is not None:
@@ -657,7 +662,8 @@ class _LiveSession:
                     holder_monitor.unwatch_token(real_mint)
                     await holder_monitor.stop()
                 except Exception:
-                    pass
+                    logger.debug("holder monitor teardown failed, continuing session "
+                                 "cleanup", exc_info=True)
 
             # ── Emergency position cleanup before session teardown ──────────
             # If a position is still open when the session ends, execute an
@@ -788,7 +794,7 @@ class _NewPairSession:
             try:
                 q.put_nowait(obj)
             except asyncio.QueueFull:
-                pass
+                logger.debug("viewer queue full, message dropped (backpressure)")
 
     def stop(self, reason: str = "manual_stop") -> None:
         if not self.cancelled.is_set():
@@ -1045,7 +1051,8 @@ class _NewPairSession:
                 try:
                     await t
                 except (asyncio.CancelledError, Exception):
-                    pass
+                    logger.debug("stream task raised during stop, reaped",
+                                 exc_info=True)
 
             # Finalize the recording (no position cleanup — nothing was ever
             # traded; recording finalisation is the whole teardown).
@@ -1189,7 +1196,8 @@ async def _get_or_create_live_session(
                     )
                     token_info = token_info or fetched_info
             except Exception:
-                pass
+                logger.debug("token resolve failed, continuing with the input mint",
+                             exc_info=True)
 
         token_name = token_name or (token_info or {}).get("name", "")
         token_symbol = token_symbol or (token_info or {}).get("symbol", "")
@@ -1352,7 +1360,7 @@ async def _autofeed_forward(cand: Candidate):
             q.put_nowait(payload)
             pushed += 1
         except asyncio.QueueFull:
-            pass
+            logger.debug("autofeed client queue full, payload dropped (backpressure)")
     logger.info(f"[AutoFeed] Forward ${cand.symbol} to {pushed}/{n_clients} WS clients")
 
     # If backend has a private key, auto-spawn live trader session server-side.
@@ -1396,7 +1404,8 @@ async def _autofeed_forward(cand: Candidate):
                             "timestamp": time.time(),
                         })
                     except asyncio.QueueFull:
-                        pass
+                        logger.debug("autofeed WS client queue full, event dropped "
+                                     "(backpressure)")
         except Exception as e:
             logger.error(f"[AutoFeed] Error auto-starting session for {cand.mint[:8]}…: {e}")
 
@@ -1419,7 +1428,8 @@ async def _newpairs_notify(cand: NewPairCandidate):
         try:
             q.put_nowait(payload)
         except asyncio.QueueFull:
-            pass
+            logger.debug("newpairs viewer queue full, birth event dropped "
+                         "(backpressure)")
 
 
 async def _newpairs_spawn(cand: NewPairCandidate):
@@ -1453,7 +1463,8 @@ async def _newpairs_spawn(cand: NewPairCandidate):
                         "timestamp": time.time(),
                     })
                 except asyncio.QueueFull:
-                    pass
+                    logger.debug("newpairs viewer queue full, session_started dropped "
+                                 "(backpressure)")
     except Exception as e:
         logger.error(f"[NewPairs] Error auto-starting session for {cand.mint[:8]}…: {e}")
 

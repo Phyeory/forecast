@@ -29,6 +29,8 @@ from typing import Optional
 
 LOG_ROOT = Path(__file__).parent / "data" / "live_logs"
 
+logger = logging.getLogger(__name__)
+
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -142,7 +144,8 @@ class SessionJournal:
                 self._ledger.flush()
         except Exception:
             # Logging must never break trading.
-            pass
+            logger.debug("ledger write failed, event dropped from trades.jsonl",
+                         exc_info=True)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -150,13 +153,16 @@ class SessionJournal:
         try:
             self.event("session_close", summary or {})
         except Exception:
-            pass
+            logger.debug("session_close event not written, ledger already failing "
+                         "or closed", exc_info=True)
         try:
             self._logger.removeHandler(self._handler)
             self._handler.close()
         except Exception:
-            pass
+            logger.debug("console handler detach failed at close, teardown continues",
+                         exc_info=True)
         try:
             self._ledger.close()
         except Exception:
-            pass
+            logger.debug("ledger close failed at teardown, OS closes the handle at "
+                         "exit", exc_info=True)

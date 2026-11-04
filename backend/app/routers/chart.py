@@ -304,7 +304,7 @@ async def chart_ws(
                 try:
                     json.loads(data)  # pong / future cmds
                 except Exception:
-                    pass
+                    logger.debug("non-JSON client frame ignored, pongs carry no payload")
         except WebSocketDisconnect:
             pass
         finally:
@@ -317,7 +317,8 @@ async def chart_ws(
         try:
             await websocket.close(code=1000, reason="Session stopped")
         except Exception:
-            pass
+            logger.debug("websocket close failed at shutdown, client already gone",
+                         exc_info=True)
 
     try:
         await asyncio.gather(stream_live(), keepalive(), listen(), shutdown())

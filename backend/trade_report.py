@@ -24,6 +24,7 @@ Usage:
 import argparse
 import glob
 import json
+import logging
 import os
 from collections import Counter, defaultdict
 
@@ -32,6 +33,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy import stats as sps
+
+logger = logging.getLogger(__name__)
 
 # SOL->USD conversion. No USD price is persisted in price_data.db, so we use a
 # fixed rate. Recordings span 2026-07-27..2026-08-07; user-confirmed SOL = $70.
@@ -945,7 +948,8 @@ def metric_tests(rows):
                 p_mw = float(sps.mannwhitneyu(xw, xl, alternative="two-sided").pvalue)
                 p_ks = float(sps.ks_2samp(xw, xl).pvalue)
             except Exception:
-                pass
+                logger.debug("statistical test failed, p-value stays NaN",
+                             exc_info=True)
         out.append(dict(key=key, label=label,
                         mean_w=float(xw.mean()) if len(xw) else np.nan,
                         mean_l=float(xl.mean()) if len(xl) else np.nan,

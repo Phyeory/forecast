@@ -200,7 +200,8 @@ async def _get_sol_usd() -> float:
                         _sol_usd_cache.update(ts=now, px=px)
                         return px
     except Exception:
-        pass
+        logger.debug("SOL/USD fetch failed, serving cached or fallback price",
+                     exc_info=True)
     return _sol_usd_cache["px"] if _sol_usd_cache["px"] > 0 else _SOL_USD_FALLBACK
 
 
@@ -282,7 +283,8 @@ async def _fetch_dev_token_account(owner: str, mint: str) -> tuple[str, Optional
         raw = _b64.b64decode(result[0]["account"]["data"][0])
         initial_raw = _decode_spl_token_amount(raw)
     except Exception:
-        pass
+        logger.debug("initial ATA balance decode failed, first observed balance "
+                     "becomes the baseline", exc_info=True)
     return addr, initial_raw
 
 
@@ -414,7 +416,8 @@ class HolderFlowMonitor:
                 try:
                     await task
                 except (asyncio.CancelledError, Exception):
-                    pass
+                    logger.debug("monitor task raised during stop, reaped",
+                                 exc_info=True)
         self._poll_task = None
         self._registry_task = None
         # iter66: stop all per-mint on-chain watchers too
@@ -424,13 +427,15 @@ class HolderFlowMonitor:
             try:
                 await task
             except (asyncio.CancelledError, Exception):
-                pass
+                logger.debug("watcher task raised or was cancelled during stop, reaped",
+                             exc_info=True)
         self._onchain_tasks.clear()
         if self._session:
             try:
                 await self._session.close()
             except Exception:
-                pass
+                logger.debug("holder flow session close failed at stop, teardown continues",
+                             exc_info=True)
             self._session = None
         logger.info("[HolderFlow] Monitor stopped")
 
@@ -458,12 +463,13 @@ class HolderFlowMonitor:
         try:
             self._watch_signal.set()
         except Exception:
-            pass
+            logger.debug("watch signal set failed, poll loop covers the token on its "
+                         "next interval", exc_info=True)
         # Queue a wallet-registry fetch (processed serially by the registry loop)
         try:
             self._registry_queue.put_nowait(mint)
         except asyncio.QueueFull:
-            pass
+            logger.debug("registry fetch dropped, queue full (backpressure)")
         # iter66: spawn the realtime on-chain dev-sell watcher.  It runs
         # independently of (and regardless of) the GMGN poller — no API key,
         # no rate limits.  Delivery to the engine stays exclusively via the
@@ -586,13 +592,14 @@ class HolderFlowMonitor:
         try:
             self._event_queue.put_nowait(event)
         except asyncio.QueueFull:
-            pass
+            logger.debug("holder flow event dropped, event queue full (backpressure)")
 
         # Wake any consumer pump waiting on new events (see __init__).
         try:
             self._new_event_signal.set()
         except Exception:
-            pass
+            logger.debug("new event signal set failed, consumers poll on the next pump "
+                         "tick", exc_info=True)
 
         if event.side == "sell" and event.amount_usd >= _MIN_SELL_USD:
             logger.info(
@@ -775,7 +782,8 @@ class HolderFlowMonitor:
                 try:
                     await hub.unsubscribe(account, q)
                 except Exception:
-                    pass
+                    logger.debug("hub unsubscribe failed during watcher teardown, "
+                                 "server cleans up the subscription", exc_info=True)
 
     def observe_trade(self, mint: str, trade: dict):
         """Feed one live trade into the monitor (called from main.py's stream
@@ -809,7 +817,7 @@ class HolderFlowMonitor:
                 self._warn_log_ts["_solusd_refresh"] = time.time()
                 asyncio.create_task(_get_sol_usd())
         except RuntimeError:
-            pass
+            logger.debug("no running loop, SOL/USD refresh not scheduled")
         return px if px > 0 else _SOL_USD_FALLBACK
 
     # ── Internal: HTTP plumbing ───────────────────────────────────────────
@@ -990,6 +998,7 @@ class HolderFlowMonitor:
             try:
                 ts = int(t.get("timestamp") or 0)
             except (TypeError, ValueError):
+                logger.debug("trade with unparseable timestamp skipped")
                 continue
             if ts > 0:
                 stamps.append(ts)

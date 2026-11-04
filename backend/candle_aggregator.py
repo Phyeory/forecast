@@ -1,6 +1,9 @@
 from dataclasses import dataclass, asdict, field
 from typing import Optional, Callable
 from collections import deque
+import logging
+
+logger = logging.getLogger(__name__)
 
 TIMEFRAME_SECONDS: dict[str, int] = {
     "1s": 1,
@@ -99,7 +102,8 @@ class CandleAggregator:
                 try:
                     self.on_candle_close(closed_candle)
                 except Exception:
-                    pass
+                    logger.debug("candle close callback failed, aggregation continues",
+                                 exc_info=True)
 
             buy_vol = volume if is_buy is True else 0.0
             sell_vol = volume if is_buy is False else 0.0

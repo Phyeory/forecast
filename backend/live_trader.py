@@ -448,7 +448,8 @@ def _custom_error_code(err_str: object) -> Optional[int]:
         if m:
             return int(m.group(1))
     except Exception:
-        pass
+        logger.debug("RPC error value unparseable for a custom code, returning None",
+                     exc_info=True)
     return None
 
 
@@ -671,7 +672,8 @@ class LiveTrader:
                 self.engine._v2_debug_tick_log = str(
                     self.journal.dir / "engine_ticks.jsonl")
         except Exception:
-            pass
+            logger.debug("engine tick-log pointer not set, engine default applies",
+                         exc_info=True)
         self.buy_size_sol = buy_size_sol
         self.slippage_bps = slippage_bps
         # Buy-side budget is a fixed constant (BUY_SLIPPAGE_BPS): the sell-side
@@ -1111,7 +1113,8 @@ class LiveTrader:
         try:
             self._release_sol_reserve()
         except Exception:
-            pass
+            logger.debug("SOL reserve release failed during close, in-process only",
+                         exc_info=True)
         for task_attr in ("_watchdog_task", "_balance_cache_task", "_blockhash_task"):
             task = getattr(self, task_attr, None)
             if task is not None and not task.done():
@@ -1119,7 +1122,8 @@ class LiveTrader:
                 try:
                     await task
                 except (asyncio.CancelledError, Exception):
-                    pass
+                    logger.debug("trader task raised during close, reaped",
+                                 exc_info=True)
                 setattr(self, task_attr, None)
         if self._session and not self._session.closed:
             await self._session.close()
@@ -1274,7 +1278,8 @@ class LiveTrader:
             try:
                 wallet_release_reserve(self.wallet_pubkey, amt)
             except Exception:
-                pass
+                logger.debug("SOL reserve release failed, reservation may linger in map",
+                             exc_info=True)
             self._sol_reserved = 0.0
 
     def _note_suppressed(self, kind: str, detail: str,
@@ -1302,7 +1307,8 @@ class LiveTrader:
                     suppressed_total=int(self._suppressed_total[key]),
                 )
         except Exception:
-            pass
+            logger.debug("suppression counter update failed, diagnostic only",
+                         exc_info=True)
 
     def _get_fresh_blockhash(self) -> Optional[tuple]:
         """Return ``(blockhash, last_valid_block_height)`` if still fresh."""
@@ -1365,7 +1371,8 @@ class LiveTrader:
             if first is not None:
                 return first
         except Exception:
-            pass
+            logger.debug("preferred RPC phase failed, falling through to the others",
+                         exc_info=True)
 
         # Phase 2: fan out to the other RPCs concurrently.
         others = [SOLANA_RPCS[i] for i in order[1:]]
@@ -1786,7 +1793,8 @@ class LiveTrader:
                             if sig is None:
                                 sig = r
                     except Exception:
-                        pass
+                        logger.debug("send task result unusable, sig ignored, "
+                                     "send errors logged in _send_one", exc_info=True)
                 if sig is not None:
                     # Return immediately on fastest RPC acceptance, but DO NOT
                     # cancel pending send tasks — let them complete concurrently
@@ -3060,7 +3068,8 @@ class LiveTrader:
                     rent_sol_net=0.0, buy_fee_sol=fee,
                     trade=self.current_trade)
         except Exception:
-            pass
+            logger.warning("buy rent/fee journaling failed, wallet stats miss this fill",
+                           exc_info=True)
 
     async def _get_tx_token_delivered(self, sig: str) -> Optional[int]:
         """EXACT raw token amount a confirmed BUY delivered to this wallet,
@@ -3951,7 +3960,8 @@ class LiveTrader:
             try:
                 fleet_release_sell(self)
             except Exception:
-                pass
+                logger.debug("fleet sell slot release failed, slot may linger in map",
+                             exc_info=True)
 
     async def _broadcast_status(self, event: str, detail: str, reason: str = "",
                                  tokens: float = 0, sol_received: float = 0, closed_trade=None):
@@ -3974,7 +3984,8 @@ class LiveTrader:
             try:
                 await self.broadcast_fn(json.dumps(msg))
             except Exception:
-                pass
+                logger.debug("trade status broadcast failed, frontend misses one update",
+                             exc_info=True)
 
     # ── Emergency sell watchdog ───────────────────────────────────────────────
 
@@ -4148,7 +4159,8 @@ class LiveTrader:
                                     engine_was_in_position=True,
                                 )
                 except Exception:
-                    pass
+                    logger.debug("engine resync check failed, retried on next watchdog "
+                                 "tick", exc_info=True)
 
                 if self.current_trade is None or self._swap_in_flight:
                     continue
@@ -4564,7 +4576,8 @@ class LiveTrader:
                         price=float(anchor) if anchor is not None else None,
                     )
                 except Exception:
-                    pass
+                    logger.debug("engine_boundary open event not journalled, "
+                                 "diagnostics only", exc_info=True)
             if (self._exit_engine_close_pending
                     and float(t) > float(self._exit_engine_close_boundary_t)):
                 _close_boundary = self._exit_engine_close_boundary_t
@@ -4579,7 +4592,8 @@ class LiveTrader:
                         boundary_t=_close_boundary,
                     )
                 except Exception:
-                    pass
+                    logger.debug("engine_boundary close event not journalled, "
+                                 "diagnostics only", exc_info=True)
 
         if self._pending_buy:
             if self.current_trade is None and not self._swap_in_flight \
@@ -4652,7 +4666,8 @@ class LiveTrader:
                         fill_price=float(fill) if fill else None,
                     )
                 except Exception:
-                    pass
+                    logger.debug("signal_launch buy event not journalled, "
+                                 "diagnostics only", exc_info=True)
                 trade = LiveTrade(
                     token_mint=self.token_mint,
                     entry_time=int(entry_t) if entry_t is not None else t,
@@ -4749,7 +4764,8 @@ class LiveTrader:
                         "instant_or_fallback"),
                 )
             except Exception:
-                pass
+                logger.debug("signal_launch exit event not journalled, "
+                             "diagnostics only", exc_info=True)
 
             asyncio.ensure_future(self.execute_sell(exit_reason))
 
@@ -5074,7 +5090,8 @@ class LiveTrader:
                  "vol": vol, "buy_vol": buy_vol, "sell_vol": sell_vol}
             ) + "\n")
         except Exception:
-            pass
+            logger.debug("intake audit row not written, diagnostics only",
+                         exc_info=True)
         """
         Mirror ForwardTester.update() — called once per completed candle,
         once per intra-candle state:
@@ -5165,7 +5182,8 @@ class LiveTrader:
                     )
                 self._percoin_drained = len(_pclog)
         except Exception:
-            pass
+            logger.debug("percoin recalibration drain failed, engine log unaffected",
+                         exc_info=True)
         # 2026-09-29 INU audit: engine heartbeat.  A position held with no
         # engine signal for many minutes is undebuggable post-hoc from
         # signals alone (absence of evidence).  One small record per 15
@@ -5211,7 +5229,8 @@ class LiveTrader:
                         _dec["regime"] = str(
                             getattr(getattr(self.engine, "regime", ""), "value", "") or "")
                     except Exception:
-                        pass
+                        logger.debug("heartbeat confidence/regime snapshot failed, "
+                                     "keys omitted", exc_info=True)
                 self._journal_event(
                     "engine_heartbeat",
                     candle_time=int(t),
@@ -5234,7 +5253,8 @@ class LiveTrader:
                     },
                 )
         except Exception:
-            pass
+            logger.debug("engine heartbeat not journalled, diagnostics only",
+                         exc_info=True)
         return result
 
     def check_immediate_holder_flow_exit(self) -> Optional[str]:

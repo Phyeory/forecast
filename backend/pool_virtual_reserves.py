@@ -37,12 +37,15 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import sqlite3
 import struct
 import time
 import urllib.request
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 PRICE_DB_PATH = os.path.join(BACKEND_DIR, "data", "price_data.db")
@@ -131,6 +134,8 @@ def _rpc_get_account_b64(address: str) -> Optional[bytes]:
             if val and val.get("data"):
                 return base64.b64decode(val["data"][0])
         except Exception:
+            logger.debug("getAccountInfo failed on one endpoint, trying the next",
+                         exc_info=True)
             continue
     return None
 
@@ -165,6 +170,7 @@ def _sidecar_load(mint: str) -> Optional[dict]:
             "source": "sidecar",
         }
     except Exception:
+        logger.debug("sidecar read failed, treating as cache miss", exc_info=True)
         return None
 
 
@@ -195,7 +201,9 @@ def _sidecar_store(mint: str, info: dict):
         finally:
             conn.close()
     except Exception:
-        pass  # sidecar is a cache, never a hard dependency
+        # Sidecar is a cache, never a hard dependency.
+        logger.warning("sidecar cache write failed, resolves re-fetch per process",
+                       exc_info=True)
 
 
 def _dex_pumpswap_pair_sync(mint: str) -> Optional[dict]:
@@ -210,7 +218,8 @@ def _dex_pumpswap_pair_sync(mint: str) -> Optional[dict]:
                                         if created else None),
                 }
     except Exception:
-        pass
+        logger.debug("DexScreener pair lookup failed, pool stays unresolved",
+                     exc_info=True)
     return None
 
 
@@ -318,7 +327,8 @@ def prewarm_mints(mints, chunk: int = 30) -> int:
                         if mint and mint not in pairs_by_mint:
                             pairs_by_mint[mint] = pair
         except Exception:
-            pass
+            logger.warning("DexScreener batch failed, group resolves as negative "
+                           "cache this run", exc_info=True)
         # one RPC batch for every pool address we learned
         addrs = [pairs_by_mint[m].get("pairAddress") or ""
                  for m in group if m in pairs_by_mint]
@@ -334,7 +344,8 @@ def prewarm_mints(mints, chunk: int = 30) -> int:
                             vq_by_addr[addr] = decode_virtual_quote_lamports(
                                 base64.b64decode(val["data"][0]))
                 except Exception:
-                    pass
+                    logger.warning("pool account batch decode failed, mints resolve "
+                                   "with v_sol=0 this run", exc_info=True)
         for m in group:
             pair = pairs_by_mint.get(m)
             if pair and pair.get("pairAddress"):
