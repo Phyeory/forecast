@@ -486,16 +486,18 @@ class MarketLiveTrader:
                 # broker returned at submission time is the truth
                 fq = float(pend.get("stroke_qty") or 0.0)
                 ap = float(pend.get("stroke_price") or 0.0) or px_open
-            if status in ("rejected", "canceled", "expired", "gone"):
-                self._log(f"{sym}: signal order {status or 'lost'} — "
-                          f"resubmitting at next_open")
-                pend.pop("submitted", None)
-                pend.pop("order_id", None)
-            elif fq > 0:
+            # book only the NEWLY filled delta: Alpaca reports CUMULATIVE
+            # filled_qty, so re-booking fq outright would double-count.  The
+            # Nov-3 audit found 41% of fill notional missing from the journal
+            # exactly because auction partial fills (expired/canceled with
+            # fq>0) and day-order remainders were never booked.
+            booked = float(pend.get("booked_qty") or 0.0)
+            delta = fq - booked
+            if delta > 1e-9:
                 f = BrokerFill(symbol=self._bsym(sym),
                                side="buy" if pend["desired"] else "sell",
-                               qty=abs(fq), price=ap,
-                               notional=abs(fq) * px_open, fee=0.0,
+                               qty=abs(delta), price=ap,
+                               notional=abs(delta) * px_open, fee=0.0,
                                time=time.time(),
                                order_id=str(pend["order_id"]),
                                reason=pend.get("reason", "next_open"))
@@ -503,7 +505,32 @@ class MarketLiveTrader:
                 if self.journal:
                     self.journal.order({**f.to_dict(),
                                         "event": "next_open_fill"})
+                pend["booked_qty"] = booked + delta
+            filled_all = (target is not None
+                          and float(pend.get("booked_qty") or 0.0)
+                          >= float(target) - 0.5)
+            if status in ("rejected", "canceled", "expired", "gone"):
+                if filled_all:
+                    done = True          # everything filled before the cancel
+                else:
+                    self._log(f"{sym}: signal order {status or 'lost'} — "
+                              f"resubmitting the unfilled remainder")
+                    # shrink the intent to what is still missing
+                    if target is not None:
+                        target = max(0.0, float(target)
+                                     - float(pend.get("booked_qty") or 0.0))
+                        pend["target_qty"] = target
+                    if target < 1.0:
+                        done = True      # sub-share residual — nothing to do
+                    else:
+                        pend.pop("submitted", None)
+                        pend.pop("order_id", None)
+            elif fq > 0 and filled_all:
                 done = True
+            elif fq > 0:
+                # partially filled and still working — keep the intent alive
+                # so the remainder reconciles on a later pass
+                self.pending[sym] = pend
             elif supported and market_is_open():
                 # an unfilled opg still open while the market trades is a
                 # relic: the auction it targeted has passed (Alpaca paper

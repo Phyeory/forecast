@@ -332,3 +332,47 @@ def test_canceled_entry_does_not_block_the_exit_submission(tmp_path):
     assert p.get("order_id") != "ord-entry", "must not adopt the dead entry"
     assert p.get("submitted") is True, "the exit was really submitted"
     assert len(br.submissions) == 1
+
+
+def test_partial_fill_books_delta_then_the_remainder(tmp_path):
+    """Cumulative filled_qty must be booked as deltas, never re-booked; a
+    still-working partial order stays pending for the next pass."""
+    br = _QueueBroker()
+    tr = _trader(tmp_path, br)
+    tr.pending["AAA"] = {"desired": 1, "reason": "state_sync", "submitted": True,
+                         "order_id": "ord-p", "target_qty": 29.0}
+    br.queue_status("ord-p", {"status": "partially_filled", "filled_qty": 10.0,
+                              "avg_price": 246.56})
+    tr.hosts["AAA"] = _StubHost(desired=1)   # engine still wants long
+    r1 = tr.step_bar("AAA", _bar(1_700_000_000, 246.56, 247.0))
+    assert len(r1["fills"]) == 1 and abs(r1["fills"][0]["qty"] - 10.0) < 1e-9
+    p = tr.pending.get("AAA") or {}
+    assert p.get("booked_qty") == 10.0, "still working — intent stays alive"
+    # the order fills fully later
+    br.queue_status("ord-p", {"status": "filled", "filled_qty": 29.0,
+                              "avg_price": 247.0})
+    tr.hosts["AAA"] = _StubHost(desired=1)
+    r2 = tr.step_bar("AAA", _bar(1_700_000_100, 247.0, 248.0))
+    assert len(r2["fills"]) == 1 and abs(r2["fills"][0]["qty"] - 19.0) < 1e-9, \
+        "only the 19-share delta, not the cumulative 29"
+    assert "AAA" not in tr.pending
+
+
+def test_expired_with_partial_fill_books_fills_and_resubmits_remainder(tmp_path):
+    """The Nov-3 LOW case: opg expired having filled 34 of 35 — the 34 must
+    be journaled and only 1 share resubmitted."""
+    br = _QueueBroker()
+    tr = _trader(tmp_path, br)
+    tr.pending["AAA"] = {"desired": 1, "reason": "state_sync", "submitted": True,
+                         "order_id": "ord-low", "target_qty": 35.0}
+    br.queue_status("ord-low", {"status": "expired", "filled_qty": 34.0,
+                                "avg_price": 217.49})
+    tr.hosts["AAA"] = _StubHost(desired=1)   # engine still wants long
+    r = tr.step_bar("AAA", _bar(1_700_000_000, 217.49, 218.0))
+    assert len(r["fills"]) == 1 and abs(r["fills"][0]["qty"] - 34.0) < 1e-9, \
+        "the 34 filled shares are journaled"
+    assert abs(r["fills"][0]["price"] - 217.49) < 1e-9
+    p = tr.pending.get("AAA") or {}
+    assert p.get("target_qty") == 1.0, "only the missing share is resubmitted"
+    assert p.get("submitted") is True
+    assert tr.desired["AAA"] == 1
