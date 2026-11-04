@@ -12,7 +12,7 @@ position).
 
 Also persists events to the recording DB so future backtests can replay them.
 
-Implementation notes (iter36 rate-limit fix):
+Implementation notes (rate-limit fix):
   * Uses a *shared* process-wide singleton (`get_shared_monitor()`) so that
     N concurrent live sessions / recorders share ONE poller instead of each
     hammering the GMGN API independently.
@@ -49,8 +49,6 @@ _GMGN_HOST = "https://openapi.gmgn.ai"
 # Wallet tags we care about (dev/insider cohorts)
 _TRACKED_TAGS = ("dev", "sniper", "bundler", "rat_trader")
 
-# iter38: map GMGN's assorted maker-tag spellings onto our tracked set, and
-# recognise additional insider-ish labels.  Anything not matched stays "".
 _TAG_SYNONYMS = {
     "dev": "dev",
     "token_deployer": "dev",
@@ -68,9 +66,6 @@ _TAG_SYNONYMS = {
 
 # Tag assigned to a LARGE sell (>= _MIN_SELL_USD) whose wallet is NOT in the
 # tracked registry and carries no recognised maker tag.  This keeps the
-# "big-seller circuit breaker" signal (which was net-positive in iter38) but
-# makes it explicitly distinguishable from a verified dev/insider sell, so the
-# engine's `v2_holder_flow_require_tag` gate can tell them apart.
 LARGE_SELLER_TAG = "whale"
 
 
@@ -146,7 +141,8 @@ _REGISTRY_REFRESH_INTERVAL = 60.0
 # Minimum sell amount (USD) to consider significant
 _MIN_SELL_USD = 100.0
 
-# ── iter66: realtime on-chain holder-flow watcher ─────────────────────────
+# realtime on-chain holder-flow watcher
+
 # A second event source alongside the GMGN poller, built entirely on
 # infrastructure this process already runs — no third-party indexer, no API
 # key, no rate limits, no indexing lag:
@@ -157,12 +153,12 @@ _MIN_SELL_USD = 100.0
 #                    hub) — an event lands within ~1 s of the swap;
 #   • whale sells    classified straight off the session's trade stream via
 #                    observe_trade() (size + direction need no identity).
-# Coverage mirrors the iter43 production gate semantics (require_tag=0):
+# Coverage mirrors the production gate semantics (require_tag=0):
 #   tag='dev'    creator-wallet trades            (verified provenance)
 #   tag='whale'  any other wallet selling ≥ _MIN_SELL_USD
 # GMGN stays as the enrichment source for sniper/bundler/rat_trader tags,
 # for bonding-curve tokens with no pool to decode, and as a late fallback.
-# Live probe 2026-08-26: PumpPortal subscribeTokenTrade does NOT deliver
+# Live probe : PumpPortal subscribeTokenTrade does NOT deliver
 # trades for graduated PumpSwap tokens (active tokens returned 0 events),
 # so the PumpPortal hub is NOT used here.
 _ONCHAIN_IDLE_SLEEP = 1.0        # idle wait on the trade queue (seconds)
@@ -306,21 +302,13 @@ class _TokenWatchState:
     """Per-token state for the holder-flow monitor."""
     mint: str
     recording_id: Optional[int] = None
-    # PumpSwap pool address (when known) — used by the iter66 on-chain
-    # watcher to resolve the token creator (dev) wallet.
     pool_address: Optional[str] = None
-    # iter66: last token price seen in SOL (fed by observe_trade) so the
-    # dev-wallet ATA balance deltas can be converted into SOL/USD notionals.
     last_price_sol: float = 0.0
-    # iter66: dev wallet's SPL token account for this mint (resolved once),
-    # plus the previous raw balance for delta extraction.
     dev_ata: Optional[str] = None
     prev_ata_raw: Optional[int] = None
     # wallet → tag mapping (dev/sniper/bundler wallets for this token)
     wallet_registry: dict[str, str] = field(default_factory=dict)
     last_registry_refresh: float = 0.0
-    # Round-robin cursor: which tag in _TRACKED_TAGS to fetch next (iter38
-    # rate-limit fix — one tag per _refresh_wallet_registry call).
     _tag_cursor: int = 0
     # Recent events for quick lookup (mint → list of events)
     recent_events: list[HolderFlowEvent] = field(default_factory=list)
@@ -359,10 +347,7 @@ class HolderFlowMonitor:
         self._api_key: str = os.environ.get("GMGN_API_KEY", "")
         # Refcount of active users (live sessions + recorders)
         self._refcount: int = 0
-        # iter38: rate-limited error log timestamps (key -> last emit time)
         self._err_log_ts: dict[str, float] = {}
-        # iter66: per-mint on-chain dev-sell watcher tasks, resolved dev
-        # wallets and rate-limited warn-log timestamps.
         self._onchain_tasks: dict[str, asyncio.Task] = {}
         self._dev_wallets: dict[str, str] = {}
         self._warn_log_ts: dict[str, float] = {}
@@ -381,8 +366,6 @@ class HolderFlowMonitor:
         # oldest one in the current window — used to detect that the global
         # rolling window turned over between polls (⇒ events lost, not late).
         self._feed_newest_ts: int = 0
-
-    # ── Public API ────────────────────────────────────────────────────────
 
     async def start(self):
         """Start the background polling loop (idempotent, refcounted)."""
@@ -420,7 +403,6 @@ class HolderFlowMonitor:
                                  exc_info=True)
         self._poll_task = None
         self._registry_task = None
-        # iter66: stop all per-mint on-chain watchers too
         for task in list(self._onchain_tasks.values()):
             task.cancel()
         for mint, task in list(self._onchain_tasks.items()):
@@ -443,7 +425,7 @@ class HolderFlowMonitor:
                     pool_address: Optional[str] = None):
         """Start watching a token for dev/insider sells.
 
-        `pool_address` (optional, iter66): the token's PumpSwap pool — lets
+        `pool_address` (optional, ): the token's PumpSwap pool — lets
         the realtime on-chain watcher resolve the creator (dev) wallet from
         the pool account itself instead of relying on the GMGN registry.
         """
@@ -470,7 +452,7 @@ class HolderFlowMonitor:
             self._registry_queue.put_nowait(mint)
         except asyncio.QueueFull:
             logger.debug("registry fetch dropped, queue full (backpressure)")
-        # iter66: spawn the realtime on-chain dev-sell watcher.  It runs
+        # spawn the realtime on-chain dev-sell watcher.  It runs
         # independently of (and regardless of) the GMGN poller — no API key,
         # no rate limits.  Delivery to the engine stays exclusively via the
         # DB id-cursor pump in main.py so backtest replay stays exactly-once.
@@ -516,8 +498,6 @@ class HolderFlowMonitor:
     def new_event_signal(self) -> asyncio.Event:
         """Asyncio Event set on every dispatched event (realtime wakeup)."""
         return self._new_event_signal
-
-    # ── iter66: realtime on-chain dev-sell detection ──────────────────────
 
     def _warn_once_min(self, key: str, msg: str, min_interval: float = 60.0):
         """Rate-limited warning log (one line per key per min_interval)."""
@@ -655,7 +635,7 @@ class HolderFlowMonitor:
         ))
 
     async def _onchain_devsell_loop(self, mint: str):
-        """Realtime per-mint dev-wallet watcher (iter66).
+        """Realtime per-mint dev-wallet watcher ().
 
         1. Resolve the dev wallet from the token's PumpSwap pool account
            (`coin_creator`) — one RPC call, retried every 30 s until the
@@ -695,7 +675,6 @@ class HolderFlowMonitor:
                             # Seed the GMGN registry too so late-arriving GMGN
                             # trades from this wallet carry the verified 'dev'
                             # tag even when the registry fetch lagged/failed
-                            # (the iter38 root cause).
                             state.wallet_registry[dev] = "dev"
                             logger.info(
                                 f"[HolderFlow:onchain] {mint[:8]}… dev wallet "
@@ -820,8 +799,6 @@ class HolderFlowMonitor:
             logger.debug("no running loop, SOL/USD refresh not scheduled")
         return px if px > 0 else _SOL_USD_FALLBACK
 
-    # ── Internal: HTTP plumbing ───────────────────────────────────────────
-
     def _auth_query(self, extra: dict) -> dict:
         """Exist-auth query params: timestamp + client_id (no signature needed)."""
         return {**extra, "timestamp": int(time.time()), "client_id": str(uuid.uuid4())}
@@ -829,7 +806,7 @@ class HolderFlowMonitor:
     async def _get(self, path: str, extra: dict) -> Optional[dict]:
         """Authenticated GET against the GMGN OpenAPI.  Returns parsed JSON or None.
 
-        iter38: failures are now logged at INFO/WARNING (rate-limited) instead of
+        failures are now logged at INFO/WARNING (rate-limited) instead of
         DEBUG so the root cause of an empty wallet registry is observable in the
         server log.  Returns None on any non-200.
         """
@@ -853,8 +830,6 @@ class HolderFlowMonitor:
                     rl.note_gmgn_429(reset, source="holder_flow")
                 else:
                     # Surface non-429 failures — these are why the registry was
-                    # silently empty in iter36/38 (e.g. 404 wrong endpoint, 401
-                    # bad auth, Cloudflare challenge).
                     self._log_rl(
                         f"http_{resp.status}",
                         f"[HolderFlow] GMGN {path} HTTP {resp.status}: {text[:200]}",
@@ -879,8 +854,6 @@ class HolderFlowMonitor:
 
     def _ban_active(self) -> bool:
         return rl.gmgn_banned()
-
-    # ── Internal: polling loops ───────────────────────────────────────────
 
     async def _poll_loop(self):
         """Main polling loop: fetch smartmoney trades and match against watched tokens.
@@ -944,10 +917,6 @@ class HolderFlowMonitor:
             tag = state.wallet_registry.get(maker, "")
 
             # If not in registry, check maker_info tags from the feed.
-            # iter38: accept several tag spellings GMGN uses (e.g. "dev",
-            # "token_deployer", "sniper", "bundler", "rat_trader", "insider")
-            # and normalise them onto our tracked set so provenance is captured
-            # even when the registry is still populating.
             if not tag:
                 maker_info = trade.get("maker_info", {}) or {}
                 maker_tags = maker_info.get("tags", []) or []
@@ -962,10 +931,6 @@ class HolderFlowMonitor:
             if not tag and side == "sell" and amount_usd < _MIN_SELL_USD:
                 continue
 
-            # iter38: a large sell with no recognised provenance is tagged
-            # "whale" so it stays distinguishable from a verified dev/insider
-            # sell in the recorded dataset (and so the engine's require_tag
-            # gate can treat them differently).
             if not tag and side == "sell" and amount_usd >= _MIN_SELL_USD:
                 tag = LARGE_SELLER_TAG
 
@@ -1030,7 +995,7 @@ class HolderFlowMonitor:
     async def _registry_loop(self):
         """Serially fetch per-token wallet registries with strict rate-limit pacing.
 
-        iter38/iter67: Paced at >= 3.0s between requests (<= 0.33 req/s),
+        /Paced at >= 3.0s between requests (<= 0.33 req/s),
         ensuring GMGN's rate limits are never triggered.
 
         Prioritizes:
@@ -1083,7 +1048,7 @@ class HolderFlowMonitor:
     async def _refresh_wallet_registry(self, mint: str):
         """Fetch ONE tracked-wallet tag for a token (round-robin per call).
 
-        iter38 rate-limit fix: GMGN allows roughly one request per 30s before
+        rate-limit fix: GMGN allows roughly one request per 30s before
         429-ing.  The old code fetched all 4 tags (dev/sniper/bundler/
         rat_trader) back-to-back with 0.3s pacing — dev succeeded, then
         sniper got 429'd and `last_registry_refresh` was set anyway, marking
@@ -1151,9 +1116,6 @@ class HolderFlowMonitor:
             state.registry_retry_count = 0
 
 
-# ── Process-wide shared singleton ─────────────────────────────────────────
-# All live sessions and recorders share ONE monitor so the GMGN API is polled
-# once per interval regardless of how many tokens are being watched.
 _shared_monitor: Optional[HolderFlowMonitor] = None
 
 

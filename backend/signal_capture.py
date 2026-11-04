@@ -12,7 +12,7 @@ event.  Each record is::
 
     {
       "ts": 1757...,                       # wall-clock unix seconds
-      "iso": "2026-09-04T...Z",            # ISO-8601
+      "iso": "<iso8601-ts>",               # ISO-8601
       "event": "buy_signal" | "exit_signal",
       "signal": "buy" | "exit",
       "engine_version": 2,

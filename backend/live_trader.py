@@ -48,14 +48,19 @@ SPL_TOKEN_PROGRAM_ID  = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss6
 TOKEN_2022_PROGRAM_ID = Pubkey.from_string("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")
 ATA_PROGRAM_ID        = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
 
+# Fleet share registry: traders sharing one wallet and mint each claim
+# their bought units; sells clamp to the claim, unclaimed residue is
+# sellable by any sole claimant.  See docs/architecture.md.
+
+# Journal records stamp from a ContextVar so each task logs under its own
+# session, following the task's context rather than a module global.
+
 logger = logging.getLogger("live-trader")
 
 
 # Task-scoped pointer to the emitting session's SessionJournal.  Concurrent
 # sessions run in separate asyncio tasks; a single class attribute made every
 # new session hijack ALL sessions' console.log lines (the cross-contaminated
-# 2026-08-25 logs).  ContextVar lookup follows each task's context, so every
-# session's records stamp with its own journal.
 _active_journal: ContextVar[Optional[SessionJournal]] = ContextVar(
     "_active_journal", default=None
 )
@@ -75,19 +80,6 @@ class _SessionTagFilter(logging.Filter):
 logger.addFilter(_SessionTagFilter())
 
 
-# ── Fleet share registry (iter77 multi-engine live trading) ──────────────────
-# When several LiveTrader instances (one per strategy engine) share ONE wallet
-# and trade the SAME mint, the wallet's single token account holds the SUM of
-# their positions.  The sell path quotes "the wallet balance" — without a
-# registry, trader A's sell would quote B's tokens too (single-engine sessions
-# are unaffected: a sole trader always claims the full balance).
-#
-# Mechanics: each trader registers its CLAIMED token units (the buy's exact
-# on-chain delivery, updated on buy settle).  A selling trader clamps its
-# sell amount to its claimed share; unclaimed residue (dust, pre-registry
-# positions, adopt-orphan tokens) stays sellable by any sole claimant.
-# Registry entries are cleaned on session close (claims fall back to 0, and a
-# sole remaining trader's claim share naturally returns to the full balance).
 import threading as _threading
 
 _fleet_share_lock = _threading.Lock()
@@ -147,10 +139,10 @@ def fleet_trader_count(wallet_pubkey: str, mint: str) -> int:
             _fleet_claim_key(wallet_pubkey, mint), {}).values() if v > 0)
 
 
-# ── Fleet sell mutex + wallet SOL reservations (2026-09-28 consolidation) ───
+# Fleet sell mutex + wallet SOL reservations (consolidation)
+
 # Two shared-wallet races manufacture on-chain failures that the backtester
 # (synchronous fills, infinite wallet) never sees:
-#
 #   1. Concurrent sellers on one (wallet, mint) quote the same full balance
 #      simultaneously — the loser's TX fails with `Custom: 6024`
 #      (insufficient token balance).  The per-trader `_swap_in_flight` flag
@@ -159,7 +151,6 @@ def fleet_trader_count(wallet_pubkey: str, mint: str) -> int:
 #      balance after acquiring, so a sibling's just-landed sale is visible
 #      before quoting.  Loop-agnostic spin flag (no asyncio.Lock objects —
 #      tests and main.py run different loops).
-#
 #   2. Concurrent buyers on one wallet each pass their own SOL check against
 #      the same full balance and overspend into `insufficient_sol` deaths.
 #      Pending buys RESERVE `buy_size + gas + rent` against the wallet;
@@ -225,7 +216,8 @@ def wallet_release_reserve(wallet_pubkey: str, amount_sol: float) -> None:
             0.0, _wallet_sol_reserved.get(w, 0.0) - amount_sol)
 
 
-# ── Jupiter & Solana constants ────────────────────────────────────────────────
+# Jupiter & Solana constants
+
 # NOTE: Using the newer Swap API v1 (lite-api.jup.ag) instead of the V6 API
 # (public.jupiterapi.com). The V6 on-chain program (JUP6L...) does NOT handle
 # Token-2022 mints correctly in its Route instruction, causing error 6014
@@ -235,12 +227,11 @@ JUPITER_QUOTE_URL = "https://lite-api.jup.ag/swap/v1/quote"
 JUPITER_SWAP_URL  = "https://lite-api.jup.ag/swap/v1/swap"
 # lite-api routinely takes >3s per response under load; a 3s total timeout
 # turned one slow window into 7 consecutive quote failures and a 47s sell
-# delay (2026-08-26 Brezy49c).  A slow-but-successful quote beats three
-# fast timeouts.
 JUPITER_API_TIMEOUT_S = 8.0
 WSOL_MINT         = "So11111111111111111111111111111111111111112"
 
-# ── Spike-premium skip guard (2026-09-30 handoff) ──────────────────────────
+# Spike-premium skip guard (handoff)
+
 # Vertical spikes move 5–50% in the ~2 s signal→fill window while the
 # backtester books the pre-spike print — buying them manufactures
 # model-positive/chain-negative flips (TRENCHDOTS #4, KAEDE #1, both proven
@@ -250,10 +241,10 @@ WSOL_MINT         = "So11111111111111111111111111111111111111112"
 # block, no fail bookkeeping) when the premium exceeds the threshold.
 # OFF by default until a full-DB batch validates the selection effect
 # (it takes fewer trades than BT by design — report BT-all vs live-taken).
-# iter101 (2026-10-23): ON at 8.0.  The g16-instant cohort offset curve
+# (): ON at 8.0.  The g16-instant cohort offset curve
 # (uniform buy repricing) stays positive to +5% (+0.68 SOL, PF 1.32) and
 # breaks even ≈ +9-10% (−0.153 at off10); live fills >8% over the
-# signal-state measured cashWR 0.29 (151 trades, iter98 traits).  Under the
+# signal-state measured cashWR 0.29 (151 trades, traits).  Under the
 # entry-instant decouple the anchor is the signal-state close × 1.01, so an
 # 8% anchor premium ≈ 9% over state — just inside the EV breakeven.
 SPIKE_GUARD_ENABLE = True
@@ -287,12 +278,12 @@ def spike_premium_pct(quote_price_sol: float,
     except (TypeError, ValueError):
         return None
 
-# ── Multi-RPC fanout ──────────────────────────────────────────────────────────
+# Multi-RPC fanout
+
 # Broadcast every signed TX to ALL of these endpoints simultaneously.
 # If ANY one forwards it to a slot leader, the TX lands on-chain.
 # All are free, no API key required.  Order matters: first = primary
 # (used for reads like balance queries and confirmation polling).
-#
 # IMPORTANT: api.mainnet-beta.solana.com is the MOST rate-limited free RPC
 # (public, no API key, aggressive per-IP caps).  Using it as the primary read
 # endpoint causes 429 storms that also starve pumpfun_client.py's gated reads
@@ -313,7 +304,8 @@ CONFIRM_TIMEOUT_S:  float = 12.0   # per-attempt confirm window (short — we re
 CONFIRM_POLL_MS:    float = 0.25   # poll cadence while waiting for confirmation
 CONFIRM_REBROADCAST_S: float = 1.5 # re-broadcast same signed TX every N s while confirming
 
-# ── BUY FINALITY INVARIANT ────────────────────────────────────────────────────
+# BUY FINALITY INVARIANT
+
 # A buy may ONLY be declared "failed" once the transaction is *cryptographically
 # dead* — i.e. its blockhash has expired (~150 slots ≈ 60 s) — AND a direct
 # on-chain wallet-balance probe confirms zero tokens arrived.  The 12 s
@@ -322,7 +314,6 @@ CONFIRM_REBROADCAST_S: float = 1.5 # re-broadcast same signed TX every N s while
 # queues keep it alive until the blockhash expires).  Declaring failure at
 # t=12 s previously produced unmonitored on-chain positions that the algorithm
 # believed were closed.
-#
 # While the outcome is unknown the trade stays in status="pending", which
 # blocks new entries everywhere (update(), force_buy(), watchdog, no-motion).
 BUY_CONFIRM_TIMEOUT_S:   float = 75.0  # absolute cap: blockhash (~60 s) + grace
@@ -330,7 +321,8 @@ BUY_SETTLE_GRACE_S:      float = 8.0   # post-expiry grace for processed-commitm
 BUY_BALANCE_PROBE_EVERY_S: float = 1.5 # wallet-balance probe cadence while settling
 BUY_SETTLE_POLL_S:       float = 0.4   # settle-loop iteration cadence (fast)
 
-# ── RETRY / ESCALATION POLICY ────────────────────────────────────────────────
+# RETRY / ESCALATION POLICY
+
 # ASYMMETRIC FAILURE POLICY (per requirements):
 #   • BUY  — single attempt, NO retry.  If the broadcast is rejected or the TX
 #            never confirms, the trade is logged as failed and the algorithm is
@@ -340,12 +332,10 @@ BUY_SETTLE_POLL_S:       float = 0.4   # settle-loop iteration cadence (fast)
 #            zero.  A missed sell on a memecoin can mean riding it to zero, so
 #            the sell loop re-quotes/re-broadcasts back-to-back (escalating
 #            slippage/fee) and the watchdog remains as the final backstop.
-#
 # SINGLE-CLOSE INVARIANT: a position is closed (``confirm_sell``) EXACTLY ONCE,
 # and only AFTER the sell TX is confirmed on-chain.  Broadcast does NOT close
 # the trade — so N failed attempts followed by 1 success yields exactly ONE
 # closed trade, never N phantom closes.
-#
 # AMOUNT ACCURACY: sells ALWAYS read the authoritative on-chain token balance
 # before building the swap.  This eliminates `Custom: 6024` (insufficient token
 # account balance) caused by a stale/overstated cached figure (e.g. the buy's
@@ -355,7 +345,8 @@ NONSIMULATION_ABORT_CODES = frozenset({6024, 1, 0x1771})  # swallowed — handle
 PRIORITY_FEE_ESCALATION  = [100_000, 100_000, 100_000, 100_000]  # micro-lamports — fixed 0.0001 SOL
 MAX_PRIORITY_FEE         = 100_000  # micro-lamports — 0.0001 SOL, never exceeded
 
-# ── BUY SLIPPAGE BUDGET ───────────────────────────────────────────────────────
+# BUY SLIPPAGE BUDGET
+
 # A BUY is broadcast exactly once — there is no retry, ever.  The slippage
 # budget is therefore the only lever that decides whether the one shot lands:
 # measured on-chain landing gaps (blockTime vs broadcast) need ~3500 bps to
@@ -365,7 +356,8 @@ MAX_PRIORITY_FEE         = 100_000  # micro-lamports — 0.0001 SOL, never excee
 # knob + escalation ladder below — they land in ~0.5–2 s and never failed.
 BUY_SLIPPAGE_BPS = 3500
 
-# ── BUY-FAILURE RE-ENTRY BLOCK ────────────────────────────────────────────────
+# BUY-FAILURE RE-ENTRY BLOCK
+
 # After a buy fails (broadcast rejected, TX dead, never landed) NO further
 # automatic buy may fire for this many seconds.  The engine is notified FLAT
 # on failure and would otherwise re-emit a BUY on the very next candle with
@@ -379,12 +371,13 @@ BUY_FAIL_REENTRY_BLOCK_S: float = 120.0
 WATCHDOG_INTERVAL_S: float = 6.0
 WATCHDOG_TIMEOUT_S:  float = 45.0
 
-# ── SELL PROCEEDS SANITY FLOOR ────────────────────────────────────────────────
+# SELL PROCEEDS SANITY FLOOR
+
 # The wallet-delta proceeds measurement (post − pre + fee) is only correct if
 # both balance reads are fresh.  A lagging RPC can return the STALE pre-sell
 # balance, yielding received ≈ fee ≈ ~1e-6 SOL — which used to OVERRIDE the
 # (correct) Jupiter quote and book a phantom −100% trade (Shoob, rec3680,
-# 2026-08-27 03:51: a swap confirmed at +6.9% but was logged as −100%).
+# 03:51: a swap confirmed at +6.9% but was logged as −100%).
 # Execution reality bounds how low a REAL fill can go: the slippage ladder is
 # capped at 9000 bps, so an executed swap always pays out ≥ 10% of its quoted
 # outAmount.  Any measured delta below that floor cannot come from this TX —
@@ -398,7 +391,8 @@ PROCEEDS_SANITY_FRAC: float = 0.10
 # (_monitor_trade) keeps trying to settle even after this fires.
 MCAP_STOP_SELL_TIMEOUT_SECONDS: float = 300.0
 
-# ── Hot-path cache tuning ─────────────────────────────────────────────────────
+# Hot-path cache tuning
+
 # How often the background tasks refresh the cached balances / blockhash.
 # These run OFF the critical path: the swap reads the cache instantly instead
 # of blocking on an RPC round-trip before it can even build the transaction.
@@ -453,8 +447,6 @@ def _custom_error_code(err_str: object) -> Optional[int]:
     return None
 
 
-# ── Data classes ──────────────────────────────────────────────────────────────
-
 @dataclass
 class LiveTrade:
     token_mint: str
@@ -475,23 +467,14 @@ class LiveTrade:
     status: str = "open"  # open, closing, closed, failed
     cost_sol: float = 0.0  # ACTUAL SOL spent on the buy incl. fees (0 = fall back to size_sol)
 
-    # iter91 backtester-basis booking: pnl_sol / pnl_pct / exit_price are
-    # booked on the SAME fill anchors the backtester registers (tape price ×
-    # (1 ± engine slippage), its _close_long fee formula), so live WR/PnL are
-    # directly comparable to batch runs at any notional.  Wallet truth stays
-    # in the cash_* fields (real Jupiter fills incl. chain fees and rent).
     exit_price_actual: Optional[float] = None  # cash fill price per token
     cash_sol_received: float = 0.0  # net SOL credited by the sell swap
     cash_pnl_sol: float = 0.0  # cash_sol_received − buy basis
     fee_sol: float = 0.0  # fees deducted in the booked pnl
-    # iter94: one-time account-creation rent inside the BUY tx (WSOL/token
+    # one-time account-creation rent inside the BUY tx (WSOL/token
     # ATA ~0.0015 SOL each).  Real wallet cost, excluded from trade PnL
     # (basis is size_sol) — the backtester never creates accounts.
     rent_sol: float = 0.0
-    # iter95: rent that PERSISTS in the wallet after the buy tx settles —
-    # the gross rent minus accounts the same tx closed and refunded
-    # (Jupiter's ephemeral WSOL ATA is created AND closed inside one swap,
-    # so only the token-ATA part is a real cost until the ATA is swept).
     rent_sol_net: float = 0.0
     # Entry-premium attribution — journal-only, no behavior change.  The
     # executable quote-implied price and its premium over the booked entry
@@ -517,8 +500,9 @@ class LiveTraderStats:
     max_drawdown_pct: float = 0.0
     peak_balance: float = 0.0
     win_rate: float = 0.0
-    # ── iter95 display truth ──────────────────────────────────────────
-    # total_pnl_sol above is the BACKTEST-BASIS booking (iter91b): tape
+    # display truth
+
+    # total_pnl_sol above is the BACKTEST-BASIS booking (): tape
     # fill anchors + the model's 0.2% round-trip fee.  It is NOT what the
     # wallet paid.  The fields below carry the wallet truth so every
     # surface can show both, labelled:
@@ -532,7 +516,7 @@ class LiveTraderStats:
     # fee burns are journaled (swap_failed / sell journal) but are not in
     # the stats counters — the audit bridge reconciles them.
     #   wallet_delta_ex_rent_sol — the DISPLAY number (user directive
-    # 2026-10-03): same ledger calculation with ATA rent ignored — rent
+    # ): same ledger calculation with ATA rent ignored — rent
     # parked in token ATAs is not a trading loss, the user reclaims it
     # manually after every session.  Purely ledger-derived; no wallet reads.
     total_cash_pnl_sol: float = 0.0
@@ -550,8 +534,6 @@ class LiveTraderStats:
         )
         return d
 
-
-# ── Main LiveTrader class ─────────────────────────────────────────────────────
 
 class LiveTrader:
     """
@@ -581,11 +563,6 @@ class LiveTrader:
         priority_fee_lamports: int = 100_000,
         min_market_cap_usd: float = 3_000.0,
         engine_kwargs: Optional[dict] = None,
-        # iter101: the session's calibration audit (source, cutoff,
-        # coefficients, stripped stale-echo keys) from main.py's
-        # initialize_calibration — journalled into session_open so every
-        # live session carries WHY its coefficients are what they are
-        # (the Sep-29 live-vs-BT divergence had no audit trail).
         calibration_audit: Optional[dict] = None,
 
         # Skip on-chain simulation on the hot path (saves ~300 ms per swap).
@@ -593,7 +570,8 @@ class LiveTrader:
         skip_simulation: bool = True,
         engine_version: int = 2,
 
-        # ── No-motion session stop ────────────────────────────────────────
+        # No-motion session stop
+
         # If the price has not moved for this many wall-clock seconds AND the
         # trader is fully idle (no open position, no pending entry/exit signal,
         # no swap in flight), flag the session for termination via
@@ -605,10 +583,11 @@ class LiveTrader:
         # coin's trade stream goes completely silent (a tick-loop-only check
         # would starve exactly when it is needed).  Default 0 = disabled;
         # live sessions enable 120.0 explicitly in main.py (user policy,
-        # 2026-08-26: terminate motionless coins to free hardware).
+        # : terminate motionless coins to free hardware).
         no_motion_stop_seconds: float = 0.0,
 
-        # ── Pending-signal staleness bound (iter57 parity fix) ────────────
+        # Pending-signal staleness bound (parity fix)
+
         # A BUY signal that cannot execute at its candle boundary (previous
         # sell still settling, swap in flight, …) stays pending and retries
         # — mirroring the backtester, which never drops a queued signal.
@@ -624,11 +603,6 @@ class LiveTrader:
         self.keypair = keypair
         self.wallet_pubkey = str(keypair.pubkey())
 
-        # ── Per-session persistent logging ─────────────────────────────────
-        # Physical files under backend/data/live_logs/<session>/:
-        #   console.log  — every console log line emitted by this session
-        #   trades.jsonl — structured ledger of every trade transaction
-        #   (entry/exit timestamps, broadcast/confirm/fail, sizes, tx hashes)
         self.journal = SessionJournal(
             token_mint,
             self.wallet_pubkey,
@@ -640,27 +614,19 @@ class LiveTrader:
                 "engine_kwargs": engine_kwargs,
                 "min_market_cap_usd": min_market_cap_usd,
                 "skip_simulation": skip_simulation,
-                # iter101: calibration provenance in every session_open.
                 "calibration_audit": calibration_audit or {},
             },
         )
         self._journal_ctx_token = _active_journal.set(self.journal)
-        # iter90j intake-audit file handle (opened lazily on first candle)
         self._intake_audit_fh = None
         logger.info(
             f"[SESSION] Logging to {self.journal.dir} "
             f"(console.log + trades.jsonl)"
         )
-        # ── Signal-time parameter capture (2026-09-04) ─────────────────────
-        # One JSON record per BUY/EXIT signal: every decision value the
-        # engine computed at the signal instant vs the dashboard-set
-        # threshold it was gated against, plus the full coefficient set.
-        # Written to <session>/signals.jsonl; read-only on the engine so
-        # trading behaviour is untouched.
         self.signal_capture = SignalCaptureJournal(
             self.journal.dir, engine_version)
         self._signal_capture_enabled: bool = True
-        # 2026-09-29 INU audit: point the engine's built-in per-state tick
+        # INU audit: point the engine's built-in per-state tick
         # diagnostic at this session's dir (unless the caller pinned an
         # explicit path via engine_kwargs).  One line per in-position
         # engine.update: OHLC, entry/peak, Kramers K/P, direction, E*, tau,
@@ -682,7 +648,8 @@ class LiveTrader:
         self.priority_fee_lamports = 100_000  # fixed: 0.0001 SOL per transaction
         self.skip_simulation = skip_simulation
 
-        # ── Market-cap safety floor ───────────────────────────────────────
+        # Market-cap safety floor
+
         # If the live market cap (USD) drops below this value while a
         # position is open, an emergency sell is triggered and the session
         # is flagged for shutdown by main.py.
@@ -691,7 +658,6 @@ class LiveTrader:
         self.mcap_stop_triggered: bool = False   # set True once triggered
         self.no_motion_stop_triggered: bool = False  # set True once idle no-motion condition fires
 
-        # ── No-motion stop tracking ──────────────────────────────────────
         self.no_motion_stop_seconds: float = no_motion_stop_seconds
         # Initialised to session start (NOT 0) so a coin that never yields a
         # single moving tick still terminates no_motion_stop_seconds after
@@ -699,19 +665,20 @@ class LiveTrader:
         self._last_motion_ts: float = time.time()  # wall-clock timestamp of last price change
         self._last_motion_price: float = 0.0    # close price at that moment
 
-        # ── Pending-signal bookkeeping (iter57 parity fix) ────────────────
+        # Pending-signal bookkeeping (parity fix)
+
         # Signals retry until executed (or aged out for buys); timestamps
         # track staleness for the retry cap.
         self.pending_signal_max_age_seconds: float = pending_signal_max_age_seconds
         self._pending_buy_ts: float = 0.0
-        # iter78 adopted cell: deferred-entry execution.  `entry_delay_seconds`
+        # adopted cell: deferred-entry execution.  `entry_delay_seconds`
         # is read from the ENGINE's `v2_entry_delay_seconds` knob (default
-        # 5.0 s since the 2026-09-02 adoption) so live and backtest share one
+        # 5.0 s since the adoption) so live and backtest share one
         # knob; explicit `{"v2_entry_delay_seconds": 0.0}` in engine_kwargs
-        # restores the pre-iter78 signal-instant launch.  The executor holds
+        # restores the pre-signal-instant launch.  The executor holds
         # a queued BUY until `signal_ts + entry_delay_seconds`, then launches
         # the swap at the then-current prices — the live mirror of the
-        # backtest's entry-latency overlay (batch iter78_lat5: Δ+1.178 SOL,
+        # backtest's entry-latency overlay (adopted cell: Δ+1.178 SOL,
         # both eras positive, tail 123→104; RESEARCH_LOG.md Iter 78 §5).
         self.entry_delay_seconds: float = float(getattr(
             self.engine, "v2_entry_delay_seconds", 0.0))
@@ -721,19 +688,20 @@ class LiveTrader:
         # wall-clock — live 1 s candles are wall-aligned so the semantics are
         # identical in production, while parity harnesses that replay
         # recordings faster than real time still exercise the delay
-        # deterministically (the iter73 live-parity contract).
+        # deterministically (the live-parity contract).
         self._pending_buy_delay_until_t: float = 0.0
         # One-shot log flag for the current held BUY (reset per signal).
         self._delay_hold_logged: bool = False
-        # ── iter80: deferred-EXIT execution (the sell-side basis) ──────────
+        # deferred-EXIT execution (the sell-side basis)
+
         # Read off the ENGINE's knobs (`v2_exit_delay_seconds` /
-        # `v2_exit_delay_armed_only`, defaults 0.0 = OFF = pre-iter80
+        # `v2_exit_delay_armed_only`, defaults 0.0 = OFF = pre-
         # signal-instant exit launch).  When armed, a queued EXIT whose
         # reason is in the armed/harvest set is held until
         # `signal_ts + exit_delay_seconds` on the CANDLE CLOCK (the same
         # keying as the entry delay), then the swap launches at the
         # then-current prices — the live mirror of the backtester's
-        # exit-latency overlay (iter80 cells; the recorded path is +8.95%
+        # exit-latency overlay (cells; the recorded path is +8.95%
         # above armed exit fills in the 30s median — the give-back harvest
         # fires at the bottom of its own micro-dip).  The LOSS book
         # (kelly_flat / evr_triage / kramers_down_exit / dev_sell_exit /
@@ -744,22 +712,22 @@ class LiveTrader:
         # deferred fill, so live must anchor the exit geometry the same way.
         self.exit_delay_seconds: float = float(getattr(
             self.engine, "v2_exit_delay_seconds", 0.0))
-        # iter90j: mode mirror.  run_backtest switches the ForwardTester into
+        # mode mirror.  run_backtest switches the ForwardTester into
         # exec_mode="latency" iff ANY engine delay knob is > 0 (entry or
         # exit); latency mode resolves EVERY fill on the first state strictly
         # after its target second and notifies the engine there.  With all
         # knobs at 0.0 the tester stays in pure instant mode (same-state
-        # fills, same-state notifies) — the iter73/iter80 escape hatch.  The
+        # fills, same-state notifies) — the /escape hatch.  The
         # live trader mirrors whichever mode the engine knobs select.
         self._bt_latency_mode: bool = (
             self.entry_delay_seconds > 0.0 or self.exit_delay_seconds > 0.0)
-        # iter101 ENTRY-BASIS DECOUPLE: the backtester's exec_model="instant"
+        # ENTRY-BASIS DECOUPLE: the backtester's exec_model="instant"
         # books entries at the SIGNAL-STATE close regardless of the exit
         # knobs (the adopted 20 s armed-only exit delay is an engine knob,
         # orthogonal to entry fills).  The live trader used to key the ENTRY
         # anchor off this OR, so production's exit_delay=20 silently rerouted
         # entries to the phantom candle-open anchor while the BT booked the
-        # state close — the booked-vs-honest god-candle wedge (iter99/101).
+        # state close — the booked-vs-honest god-candle wedge (/101).
         # Entry routing now follows the ENTRY delay only: entry_delay=0 ⇒
         # anchor = signal-state close × (1 + slippage), engine notified at
         # launch — the exact mirror of exec_model="instant".  Exit deferral
@@ -775,37 +743,33 @@ class LiveTrader:
         self._exit_delay_hold_logged: bool = False
         # Engine anchor captured at SIGNAL time so a BUY that retries after a
         # blocked launch still notifies the engine on the same price basis the
-        # backtester registered for that signal.  iter90j basis: the SIGNAL
-        # SECOND'S CANDLE OPEN × (1 + engine slippage) — the backtester's
-        # latency model anchors entries at path_price_at(target_ts) with
-        # frac=0 (= the candle open) plus _open_long's slippage multiplier.
         self._pending_buy_anchor: Optional[float] = None
-        # iter91 fill-anchor booking (SELL side): the backtester's _close_long
+        # fill-anchor booking (SELL side): the backtester's _close_long
         # fill is path_price_at(target_ts) × (1 − engine slippage) for
         # deferred (armed) exits — frac 0 on the boundary candle ⇒ its open —
         # and the detection state's close × (1 − slip) for instant (loss-book)
         # exits.  Frozen at detection (instant) or when the boundary candle
         # arrives (deferred); consumed by confirm_sell.
         self._pending_exit_anchor: Optional[float] = None
-        # 2026-09-29 INU audit: anchor grade.  False = provisional freeze
+        # INU audit: anchor grade.  False = provisional freeze
         # (target passed but the successor candle hasn't buffered yet, so the
         # span saturates to 1 — e.g. a drain-launch ahead of the boundary
         # candle); upgraded to a BT-exact re-freeze once a buffered time
         # strictly greater than the target exists (same span the backtester
         # resolves with).  confirm_sell consumes either grade.
         self._pending_exit_anchor_exact: bool = False
-        # iter91: the deferred exit's fill-target second — survives the launch
+        # the deferred exit's fill-target second — survives the launch
         # clearing _pending_exit / _pending_exit_delay_until_t so the anchor
         # still freezes if the launch ran early (drain) or the sell is still
         # settling when the boundary candle completes.
         self._exit_anchor_target_t: Optional[float] = None
-        # iter91 fill-path buffer — byte-mirror of the backtester's
+        # fill-path buffer — byte-mirror of the backtester's
         # _record_path_candle/_path_price_at (forward_tester.py is the
         # read-only fill-contract reference), so deferred-exit book anchors
         # price on the recorded intra-candle path (incl. gap seconds).
         self._fill_path_times: list = []
         self._fill_path_candles: dict = {}
-        # iter90j parity: the ENGINE's position state mirrors the backtester's
+        # parity: the ENGINE's position state mirrors the backtester's
         # latency-mode fill resolution, NOT the real swap lifecycle.  The
         # backtester (exec overlay ON ⇒ exec_mode="latency") resolves every
         # fill on the first candle-state strictly AFTER its target second and
@@ -841,8 +805,6 @@ class LiveTrader:
 
         self._last_price: float = 0.0
         self._token_decimals: int = 6  # pump.fun default
-        # 2026-09-30: True once decimals were confirmed by an on-chain read
-        # (the spike-premium guard refuses to price quotes otherwise).
         self._token_decimals_verified: bool = False
         self._token_balance: int = 0   # raw token units held
         # True once the cached figure is on-chain-proven (balance probe or TX
@@ -854,17 +816,10 @@ class LiveTrader:
         # Async swap task tracker (so we don't overlap swaps)
         self._swap_in_flight: bool = False
 
-        # 2026-09-28 consolidation: SOL reserved against the shared wallet
-        # by THIS trader's unresolved buy (buy_size + gas + rent).  Released
-        # when the buy resolves (confirm or fail) — see wallet_*_reserve.
         self._sol_reserved: float = 0.0
-        # 2026-09-29 INU audit: count of engine percoin-log entries already
-        # journaled (see drain in _process_completed_candle).
         self._percoin_drained: int = 0
-        # 2026-09-29 INU audit: last candle time an engine_heartbeat was
-        # journaled (see _process_completed_candle).
         self._last_engine_heartbeat: int = 0
-        # 2026-09-30 debug audit: suppression telemetry.  Engine signals that
+        # debug audit: suppression telemetry.  Engine signals that
         # arrive while a queue guard holds (position open, engine in position,
         # already pending, …) are silently dropped by design — but silence is
         # exactly what made the INU hold undebuggable.  `_suppress_last`
@@ -873,15 +828,10 @@ class LiveTrader:
         # heartbeat.  Read-only/diagnostic: never gates trading.
         self._suppress_last: dict = {}
         self._suppressed_total: dict = {}
-        # 2026-09-30 debug audit: wall time the current exit was queued (for
-        # pending-age reporting in the heartbeat; buy side reuses
-        # `_pending_buy_ts`).
         self._pending_exit_queued_ts: Optional[float] = None
-        # 2026-09-29 INU audit: wall time a trader/engine position mismatch
-        # was first seen (steady-state resync in _monitor_trade; None = none).
         self._engine_desync_since: Optional[float] = None
 
-        # iter94: True until this session's first buy confirms on-chain.  The
+        # True until this session's first buy confirms on-chain.  The
         # first buy of a fresh mint creates the token ATA (≈0.0015 SOL) and
         # the WSOL ATA (≈0.0015 SOL) INSIDE the swap tx — hard on-chain
         # liquidity requirements the pre-flight check must include (a
@@ -896,7 +846,8 @@ class LiveTrader:
         # Websocket broadcast callback (set by main.py)
         self.broadcast_fn = None
 
-        # ── Candle buffering (match backtester's 4-state expansion) ───────
+        # Candle buffering (match backtester's 4-state expansion)
+
         # We buffer the current accumulating candle.  When main.py signals
         # is_new=True we know the previous candle is now final.  We expand
         # it into 4 intra-candle sub-states and run engine.update() on each
@@ -917,15 +868,12 @@ class LiveTrader:
         self._pending_exit: bool = False
         self._pending_exit_reason: str = ""
 
-        # ── Lifecycle / watchdog state ─────────────────────────────────────
-        # Never give up on a sell: if the on-chain balance still shows tokens
-        # WATCHDOG_TIMEOUT_S after the exit signal fired, the watchdog
-        # re-triggers execute_sell so positions can't ride to zero.
         self._alive: bool = True
         self._last_exit_signal_ts: float = 0.0
         self._watchdog_task: Optional[asyncio.Task] = None
 
-        # ── Hot-path caches (balance + blockhash) ──────────────────────────
+        # Hot-path caches (balance + blockhash)
+
         # The pre-optimization hot path blocked on an RPC read BEFORE building
         # the swap TX (~0.3–1.5s each).  We keep a warm cache of both balances
         # and a fresh blockhash so a signal can go straight to Jupiter with
@@ -940,34 +888,14 @@ class LiveTrader:
         self._balance_cache_task: Optional[asyncio.Task] = None
         self._blockhash_task: Optional[asyncio.Task] = None
 
-        # ── Hot-path RPC affinity ──────────────────────────────────────────
-        # Free public RPCs vary wildly in latency. Track the last RPC that
-        # successfully served a balance/confirm read and try it FIRST next
-        # time — empirically cuts "first-wins" wait time in half. Falls back
-        # to the full fanout if that RPC ever fails or stalls.
         self._fast_rpc_idx: int = 0
 
-        # ── Buy-finality state ─────────────────────────────────────────────
-        # While a buy TX is broadcast-but-unconfirmed the trade stays
-        # "pending" and ALL entry paths are blocked (see _is_buy_pending).
-        # If the wallet ever holds tokens that no tracked trade accounts for
-        # (e.g. a buy landed after we gave up on it — should no longer be
-        # possible, but belt-and-braces), the watchdog adopts the bag into a
-        # monitored trade instead of leaving it invisible.
         self._adopted_bag: bool = False
 
-        # ── Explicit buy-in-flight flag ────────────────────────────────────
-        # True from the moment a buy TX is broadcast until it is either
-        # confirmed on-chain (→ open) or proven dead (→ failed).  This is the
-        # authoritative buy-pending signal used by _is_buy_pending() — it is
-        # INDEPENDENT of trade.status, because the exit path sets status to
-        # "closing" BEFORE execute_sell runs, which used to disarm the old
-        # status-based check and let a sell race an unconfirmed buy (the
-        # 2026-08-11 EGPtQP race: sell_attempt fired 4 s before buy_confirmed,
-        # closing the trade via verified_empty_wallet with no sell hash).
         self._buy_tx_in_flight: bool = False
 
-        # ── Buy-failure re-entry block ──────────────────────────────────────
+        # Buy-failure re-entry block
+
         # Wall-clock timestamp until which NO automatic buy may fire after a
         # failed buy (see BUY_FAIL_REENTRY_BLOCK_S).  A failed buy is NOT
         # retried — and the engine re-emitting a BUY on the next candle with
@@ -975,7 +903,8 @@ class LiveTrader:
         self._buy_failed_until: float = 0.0
         self._buy_fail_block_announced: bool = False
 
-        # ── Actual-SOL-received accounting ─────────────────────────────────
+        # Actual-SOL-received accounting
+
         # SOL balance captured when the buy confirmed (post-buy baseline).  A
         # completed sell's proceeds are MEASURED on-chain (exact per-TX
         # pre/post balances, wallet-delta fallback) instead of estimated from
@@ -990,8 +919,6 @@ class LiveTrader:
         # previously those paths closed with tx_hash_sell="" so the UI showed
         # a SELL row with no transaction.
         self._last_sell_sig: str = ""
-
-    # ── Structured session ledger helpers ─────────────────────────────────────
 
     def set_session_meta(self, **meta):
         """Record extra session metadata (e.g. recording_id) into the ledger."""
@@ -1030,8 +957,6 @@ class LiveTrader:
             and not ct.tx_hash_sell
             and ct.exit_time is None
         )
-
-    # ── No-motion session stop (idle-only termination) ────────────────────
 
     def _no_motion_stop_due(self) -> bool:
         """True when the idle no-motion termination condition holds.
@@ -1104,12 +1029,7 @@ class LiveTrader:
     async def close(self):
         """Stop the watchdog, cache tasks and close the HTTP session."""
         self._alive = False
-        # iter77 fleet: drop this trader's token claim first — sibling
-        # traders' sell caps unclamp immediately even if close is aborted.
         fleet_release_claim(self)
-        # 2026-09-28 consolidation: drop any unresolved SOL reservation too
-        # (idempotent — the settle task's confirm/fail path releases again
-        # harmlessly if it still resolves after teardown).
         try:
             self._release_sol_reserve()
         except Exception:
@@ -1142,8 +1062,6 @@ class LiveTrader:
             pass  # cleanup ran from a different task context than __init__
         self.journal.close(summary)
 
-    # ── Session lifecycle ─────────────────────────────────────────────────────
-
     async def _get_session(self) -> aiohttp.ClientSession:
         """Return (or lazily create) the persistent aiohttp session."""
         if self._session is None or self._session.closed:
@@ -1157,8 +1075,6 @@ class LiveTrader:
                 headers={"Content-Type": "application/json"},
             )
         return self._session
-
-    # ── Hot-path cache background loops ───────────────────────────────────────
 
     async def _balance_cache_loop(self):
         """
@@ -1178,13 +1094,6 @@ class LiveTrader:
                 if sol is not None:
                     self._cached_sol_balance = sol
                     self._cached_balance_ts = time.time()
-                    # iter95 display truth: seed the session's starting
-                    # balance ONCE from the first successful read (the old
-                    # code overwrote starting_balance after every buy, so
-                    # the card showed the last post-buy balance), and keep
-                    # the on-chain wallet balance fresh for the all-in
-                    # display.  current_balance is the model-basis
-                    # evolution and is seeded from the same first read.
                     self.stats.wallet_balance = sol
                     if self.stats.starting_balance <= 0.0:
                         self.stats.starting_balance = sol
@@ -1286,7 +1195,7 @@ class LiveTrader:
                          t: Optional[int] = None) -> None:
         """Journal a dropped engine signal (throttled) + count it.
 
-        2026-09-30 debug audit: queue-guard drops were completely silent, so
+        The queue-guard drops used to be completely silent, so
         "engine screaming but trader blocked" was indistinguishable from
         "engine silent" (the INU post-mortem's central ambiguity).  One
         `signal_suppressed` record per 60 candle-seconds per (kind, detail);
@@ -1433,8 +1342,6 @@ class LiveTrader:
                 logger.error("[CLEANUP] Emergency sell timed out after 90s — watchdog continues in background")
 
         await self.close()
-
-    # ── Jupiter helpers ───────────────────────────────────────────────────────
 
     async def _get_quote(self, input_mint: str, output_mint: str, amount: int,
                          slippage_bps: Optional[int] = None) -> Optional[dict]:
@@ -1624,8 +1531,6 @@ class LiveTrader:
         last_broadcast = 0.0
 
         while time.time() - start < timeout_s:
-            # ── Aggressive rebroadcast of the same signed TX while confirming ──
-            # Capped at the first CONFIRM_TIMEOUT_S window (see docstring).
             if (
                 signed_b64
                 and (time.time() - last_broadcast) >= CONFIRM_REBROADCAST_S
@@ -1634,12 +1539,6 @@ class LiveTrader:
                 last_broadcast = time.time()
                 asyncio.ensure_future(self._broadcast_multi(signed_b64))
 
-            # ── Single fast status probe (first non-null answer wins) ─────────
-            # The old implementation gathered a status poll from ALL RPCs every
-            # round, paying the slowest endpoint's latency each time (~1.5s+).
-            # _get_signature_status returns the FIRST RPC that knows the sig
-            # (fast-RPC-first + concurrent fanout), so a confirmed TX is
-            # detected in ~0.3–0.5s.
             status = await self._get_signature_status(sig)
             if status is not None:
                 err = status.get("err")
@@ -1883,7 +1782,6 @@ class LiveTrader:
             raw_tx = base64.b64decode(swap_tx_b64)
             tx = VersionedTransaction.from_bytes(raw_tx)
 
-            # ── Rebuild with the freshest cached blockhash if available ────
             last_valid_height: Optional[int] = None
             fresh_bh: Optional[str] = None
             fresh = self._get_fresh_blockhash()
@@ -1891,7 +1789,6 @@ class LiveTrader:
             # Jupiter's embedded hash: lite-api caches swap responses, so its
             # hash can be >60 s old — every RPC rejects such a TX instantly
             # ("blockhash not found"), the all-RPC broadcast_rejected storm
-            # seen at 2026-08-25 21:44 where the cache had gone stale.
             if force_fresh_blockhash or fresh is None:
                 fetched = await self._fetch_latest_blockhash()
                 if fetched:
@@ -1916,7 +1813,6 @@ class LiveTrader:
                 f"fresh_bh={bool(fresh_bh)} age={bh_age:.1f}s)"
             )
 
-            # ── Optional simulation (disabled on hot path) ─────────────────
             if not self.skip_simulation:
                 sim = await self._simulate_tx(signed_b64)
                 if not sim["ok"]:
@@ -1928,14 +1824,12 @@ class LiveTrader:
                     )
                     return None
 
-            # ── Broadcast to ALL RPCs simultaneously ──────────────────────
             sig = await self._broadcast_multi(signed_b64)
 
             if sig is None:
                 return None
 
             if wait_for_confirmation:
-                # ── Wait for confirmation (with in-flight rebroadcast) ───────
                 confirm_result = await self._confirm_tx(sig, signed_b64=signed_b64)
                 if not confirm_result["confirmed"]:
                     logger.error(f"[TX FAILED ON-CHAIN] sig={sig[:16]}… error={confirm_result['error']}")
@@ -1946,7 +1840,8 @@ class LiveTrader:
                         "error": confirm_result["error"],
                     }
             else:
-                # ── Fire-and-forget confirmation (also rebroadcasts) ─────────
+                # Fire-and-forget confirmation (also rebroadcasts)
+
                 # NOTE: rebroadcast is capped at the first CONFIRM_TIMEOUT_S
                 # window inside _confirm_tx — we must NOT keep the TX alive in
                 # RPC forwarding queues past the point where the settle task
@@ -2038,8 +1933,6 @@ class LiveTrader:
                 if decimals != self._token_decimals:
                     logger.info(f"[BAL] Token decimals detected: {decimals} (was {self._token_decimals})")
                     self._token_decimals = decimals
-                # 2026-09-30: decimals confirmed from an on-chain read (the
-                # spike-premium guard needs trustworthy decimals).
                 self._token_decimals_verified = True
                 return amount
             except Exception:
@@ -2154,7 +2047,6 @@ class LiveTrader:
                             dec = int(value["decimals"])
                             if dec != self._token_decimals:
                                 self._token_decimals = dec
-                            # 2026-09-30: see above — on-chain confirmed.
                             self._token_decimals_verified = True
                         return amt
                 except Exception:
@@ -2171,8 +2063,6 @@ class LiveTrader:
         except Exception as e:
             logger.warning(f"[BAL] ATA balance read failed: {e}")
             return None
-
-    # ── Swap execution ────────────────────────────────────────────────────────
 
     async def execute_buy(self, reason: str = "signal") -> Optional[str]:
         """
@@ -2202,7 +2092,8 @@ class LiveTrader:
             amount_lam = int(self.buy_size_sol * 1e9)
             mint_str = str(self.token_mint)
 
-            # ── Cached SOL balance (no RPC round-trip on the hot path) ──────
+            # Cached SOL balance (no RPC round-trip on the hot path)
+
             # The background balance cache keeps this figure fresh (~8s).  If
             # the cache has never been populated (session just started) or is
             # zero/stale, we perform an inline RPC read.
@@ -2240,18 +2131,11 @@ class LiveTrader:
                 await self._fail_buy_flat("RPC balance check failed", reason)
                 return None
 
-            # ── iter94: rent-aware liquidity pre-flight ─────────────────────
-            # A fresh mint's first buy creates the token ATA (+ the WSOL ATA
-            # when Jupiter re-opens it) inside the swap tx — ≈0.0030 SOL of
-            # rent on top of the swap amount and fees.  The old check
-            # (buy + 50k lamports) passed with 0.0131 SOL while the tx
-            # actually needed ≈0.0131+ SOL, so every fresh-mint buy failed
-            # on-chain with Custom:1 and burned the priority fee each time.
             first_buy = self._session_first_buy
             gas_floor = 0.00025
             rent_floor = 0.0034 if first_buy else 0.0
             required_sol = self.buy_size_sol + gas_floor + rent_floor
-            # 2026-09-28 consolidation: subtract sibling sessions' pending-buy
+            # consolidation: subtract sibling sessions' pending-buy
             # reservations on this wallet before comparing.  Without this, N
             # concurrent sessions each see the full balance and overspend
             # into on-chain insufficient-SOL deaths the backtester never has.
@@ -2274,7 +2158,6 @@ class LiveTrader:
             wallet_add_reserve(self.wallet_pubkey, required_sol)
             self._sol_reserved = required_sol
 
-            # ── Single quote → swap → broadcast (NO retry) ───────────────────
             fee = PRIORITY_FEE_ESCALATION[0]
 
             quote = await self._get_quote(WSOL_MINT, self.token_mint, amount_lam,
@@ -2285,7 +2168,8 @@ class LiveTrader:
                 await self._fail_buy_flat("Jupiter quote failed", reason)
                 return None
 
-            # ── Entry-premium attribution (journal-only, always on) ──────
+            # Entry-premium attribution (journal-only, always on)
+
             # Measures the executable quote against the BOOKED entry anchor
             # (signal-candle open × engine slippage).  On launch-candle
             # spikes the book holds the pre-launch print while the
@@ -2312,7 +2196,8 @@ class LiveTrader:
             except Exception:
                 pass  # attribution must never break the buy path
 
-            # ── Spike-premium skip guard (2026-09-30 handoff; iter101 ON) ───
+            # Spike-premium skip guard (handoff; ON)
+
             # A vertical spike moves the executable price far past the BT
             # booking between signal and quote; buying it manufactures
             # model-positive/chain-negative flips.  Skip CLEANLY here (before
@@ -2321,8 +2206,7 @@ class LiveTrader:
             # boundary hook may already have notified, journal the skip.
             # Fail-open: any unknown (unverified decimals, missing
             # anchor/quote) trades normally.
-            #
-            # iter101 sizing: on the frozen 200-token g16-instant cohort a
+            # sizing: on the frozen 200-token g16-instant cohort a
             # uniform entry premium costs ≈0.19 SOL per +1% (off0 +1.680 →
             # off2 +1.222 → off5 +0.682 → off10 −0.153), EV breakeven ≈
             # +9-10%; the live >8%-vs-state bucket measured cashWR 0.29
@@ -2382,7 +2266,6 @@ class LiveTrader:
                 await self._fail_buy_flat("Swap TX build failed", reason)
                 return None
 
-            # ── Fire-and-forget broadcast ─────────────────────────────────────
             send_res = await self._sign_and_send(swap_tx, wait_for_confirmation=False)
             if not send_res:
                 logger.error("[BUY FAILED] Broadcast rejected by all RPCs — not retrying")
@@ -2396,7 +2279,8 @@ class LiveTrader:
             last_valid_height = send_res.get("last_valid_block_height")
             signed_b64 = send_res.get("signed_b64")
 
-            # ── PENDING until on-chain confirmation ───────────────────────────
+            # PENDING until on-chain confirmation
+
             # DO NOT mark the trade open here — the TX may still fail or never
             # land.  The trade stays "pending" (blocking new entries) until
             # _background_buy_settle either confirms it on-chain (→ open) or
@@ -2464,10 +2348,6 @@ class LiveTrader:
         update).  A failed buy is never retried; the engine re-emitting a BUY
         on subsequent candles is NOT allowed to become an implicit retry.
         """
-        # 2026-09-28 consolidation: the buy resolved (dead or landed-and-
-        # adopted below) — release this trader's wallet SOL reservation.
-        # Post-confirm the spend is real and visible in balances; holding
-        # the reservation too would double-count it for siblings.
         self._release_sol_reserve()
         if self.current_trade is not None:
             failed = self.current_trade
@@ -2513,12 +2393,12 @@ class LiveTrader:
         self._token_balance = 0
         self._cached_token_balance = 0
         self._token_balance_verified = False
-        fleet_release_claim(self)   # iter77 fleet: failed buy ⇒ no claim
+        fleet_release_claim(self)   # fleet: failed buy ⇒ no claim
         self._buy_tx_in_flight = False
         self._pending_buy = False
         self._pending_buy_reason = ""
         self._pending_buy_anchor = None
-        # iter90j: cancel the queued-buy engine boundary and any exit that
+        # cancel the queued-buy engine boundary and any exit that
         # was detected against the phantom engine position (the engine is
         # reset flat by notify_trade_closed() below — the same reset the
         # backtester never needs because its fills never fail).
@@ -2579,7 +2459,7 @@ class LiveTrader:
             self._token_balance = settled
             self._cached_token_balance = settled
             self._token_balance_verified = True
-            fleet_register_claim(self, settled)   # iter77 fleet share registry
+            fleet_register_claim(self, settled)   # fleet share registry
             ct = self.current_trade
             if ct and ct.tx_hash_buy == sig:
                 ct.size_tokens = settled / (10 ** self._token_decimals)
@@ -2629,7 +2509,7 @@ class LiveTrader:
             self._buy_tx_in_flight = False
             self._token_balance = balance
             self._cached_token_balance = balance
-            # iter77 fleet: register this trader's claim so a sibling engine's
+            # fleet: register this trader's claim so a sibling engine's
             # sell can never quote these tokens (shared-wallet isolation).
             fleet_register_claim(self, balance)
             ct = self.current_trade
@@ -2638,14 +2518,7 @@ class LiveTrader:
                 ct.size_tokens = balance / (10 ** self._token_decimals)
             self._session_first_buy = False  # ATA rent paid — later buys need only swap+fees
             await self._refresh_sol_balance_async()
-            # 2026-09-28 consolidation: buy resolved — the SOL spend is now
-            # real (see refreshed balance above); release the reservation so
-            # siblings stop discounting it (holding it would double-count).
             self._release_sol_reserve()
-            # iter94: journal one-time account-creation rent (WSOL/token
-            # ATA) inside the buy tx separately from the fill — 15–30% of a
-            # 0.01 SOL first buy, invisible in trade PnL by design (the
-            # backtester has no account costs).
             asyncio.ensure_future(self._journal_buy_rent(sig))
             await self._broadcast_status(
                 "buy_confirmed", sig, "signal",
@@ -2666,7 +2539,6 @@ class LiveTrader:
         signed_b64 = getattr(self, "_last_signed_buy_b64", None)
         last_rebroadcast = time.time()
         while time.time() < deadline:
-            # ── Active rebroadcast during confirm window (capped at 12s) ─────
             if (
                 signed_b64
                 and (time.time() - last_rebroadcast) >= CONFIRM_REBROADCAST_S
@@ -2675,7 +2547,6 @@ class LiveTrader:
                 last_rebroadcast = time.time()
                 asyncio.ensure_future(self._broadcast_multi(signed_b64))
 
-            # ── 1. Single signature-status probe ─────────────────────────────
             status = await self._get_signature_status(sig)
             if status is not None:
                 if status.get("err"):
@@ -2689,7 +2560,7 @@ class LiveTrader:
                     )
                     break
                 if status.get("confirmationStatus") in ("confirmed", "finalized"):
-                    # Confirmed — OPEN FIRST, reconcile after (iter91 latency).
+                    # Confirmed — OPEN FIRST, reconcile after (latency).
                     # Buy-finality clause 1: confirmation status alone resolves
                     # the buy.  The exact-delivery reconcile used to run BEFORE
                     # the open and held the trade `pending` for 8-20 s of
@@ -2708,7 +2579,6 @@ class LiveTrader:
                     await self._verify_buy_settled(sig, expected_amount)
                     return
 
-            # ── 2. Wallet-balance probe (catches landed-but-unseen TXs) ───────
             if time.time() - last_probe >= BUY_BALANCE_PROBE_EVERY_S:
                 last_probe = time.time()
                 try:
@@ -2719,7 +2589,6 @@ class LiveTrader:
                     await _confirm_open(on_chain, "balance_probe")
                     return
 
-            # ── 3. Cryptographic deadness check (blockhash expiry) ────────────
             if last_valid_height is not None and (time.time() - last_height_check) >= 2.0:
                 last_height_check = time.time()
                 height = await self._get_block_height()
@@ -2755,8 +2624,6 @@ class LiveTrader:
 
             await asyncio.sleep(BUY_SETTLE_POLL_S)
 
-        # ── Absolute deadline hit (or definitive on-chain error) ──────────────
-        # Final balance probe is the tie-breaker: tokens present ⇒ confirmed.
         try:
             final_bal = await self._get_token_balance()
         except Exception:
@@ -2851,7 +2718,7 @@ class LiveTrader:
 
         Returns ``(received_sol, fee_sol)`` or None if the TX can't be read
         yet (not finalized / RPC miss); callers fall back to the
-        wallet-delta measurement.  iter95: the fee is returned alongside so
+        wallet-delta measurement.  the fee is returned alongside so
         the confirmed-sell path can accumulate real chain costs without a
         second TX fetch.
         """
@@ -2906,7 +2773,7 @@ class LiveTrader:
     ) -> Optional[tuple]:
         """Find whichever sell sig in this attempt window actually landed.
 
-        iter95 (JACK t2 class): the sell loop re-broadcasts with a FRESH
+        (JACK t2 class): the sell loop re-broadcasts with a FRESH
         blockhash when a confirm poll misses (CONFIRM_REBROADCAST), so
         ``_last_sell_sig`` can be a LATER sig that reverted on-chain
         (slippage error 0x1788) while an EARLIER sig in the same window
@@ -2967,9 +2834,9 @@ class LiveTrader:
             return None
 
     def _actual_fill_price(self, sol_received: float, tokens_sold: float) -> float:
-        """iter94: real on-chain fill price = proceeds / tokens actually sold.
+        """real on-chain fill price = proceeds / tokens actually sold.
 
-        The pre-iter94 code passed ``self._last_price`` (the TAPE price) as
+        The pre-code passed ``self._last_price`` (the TAPE price) as
         ``actual_price``, so ``exit_price_actual`` was a fiction of the
         recording basis rather than the fill.  With the tape now on the
         executable basis the two agree within fees — but the journal should
@@ -2983,11 +2850,11 @@ class LiveTrader:
     ) -> tuple:
         """Gross rent, NET persistent rent, and tx fee for a confirmed BUY tx.
 
-        iter95: Jupiter creates an ephemeral WSOL ATA inside almost every
+        Jupiter creates an ephemeral WSOL ATA inside almost every
         SOL→token swap and closes it in the SAME tx, refunding its rent.
         Gross rent (createAccount lamports) therefore overstates the real
         cost ~2x on repeat buys (gross 0.001488, net ~0 — verified on the
-        2026-09-27 block: repeat-buy wallet delta −0.010019 = input + fee
+        block: repeat-buy wallet delta −0.010019 = input + fee
         exactly).  Net rent comes from the tx's own wallet delta, which the
         ledger reports exactly:
 
@@ -3039,7 +2906,7 @@ class LiveTrader:
     async def _journal_buy_rent(self, sig: str):
         """Best-effort rent+fee journaling for a confirmed buy (never blocks).
 
-        iter95: journals the tx's real base+priority fee and the NET
+        journals the tx's real base+priority fee and the NET
         persistent rent alongside the legacy gross rent, and accumulates
         both into the wallet-truth stats (total_fees_sol / total_rent_sol).
         Gross stays on the trade for continuity; the wallet-Δ derivation
@@ -3271,7 +3138,8 @@ class LiveTrader:
             # past the watchdog timeout without a clear "we tried" mark.
             self._last_exit_signal_ts = time.time()
 
-            # ── If a buy is still pending, WAIT for it to settle ──────────────
+            # If a buy is still pending, WAIT for it to settle
+
             # Selling into a pending buy races the landing TX (the sell would
             # quote against a provisional balance and could close a position
             # that never actually opened on-chain).  Wait for the settle loop
@@ -3307,7 +3175,8 @@ class LiveTrader:
                     )
                     return None
 
-            # ── 2026-09-28 consolidation: fleet sell mutex ─────────────────
+            # consolidation: fleet sell mutex
+
             # Serialize sellers per (wallet, mint).  Without this, sibling
             # engines quote the same full balance simultaneously and the
             # loser's TX dies with `Custom: 6024`.  Bounded wait — on
@@ -3324,11 +3193,6 @@ class LiveTrader:
                     detail="proceeding_with_confirmed_read",
                 )
 
-            # ── Pre-sell SOL baseline for proceeds measurement ────────────────
-            # The proceeds of the sell are MEASURED as the on-chain SOL-balance
-            # delta from this baseline (see _measure_sell_proceeds).  Prefer
-            # the balance captured when the buy confirmed (zero extra reads on
-            # the hot path); fall back to one fresh bounded read.
             if self._post_buy_sol_balance > 0:
                 self._pre_sell_sol_balance = self._post_buy_sol_balance
             else:
@@ -3348,22 +3212,6 @@ class LiveTrader:
                 "sell_attempt", reason=reason,
                 cached_token_balance=self._token_balance,
             )
-            # ── Authoritative on-chain token balance (accuracy + SPEED) ──────
-            # `Custom: 6024` (insufficient token account balance) is the #1
-            # cause of failed sells, and it happens when we try to sell MORE
-            # tokens than the wallet actually holds — typically because the
-            # cached figure came from the buy's Jupiter outAmount (inflated by
-            # slippage / a partial fill).  We therefore ALWAYS read the live
-            # on-chain balance before building the swap.
-            #
-            # Speed: ONE bounded read (fast-RPC-first fanout, ~0.2–0.5s).  The
-            # old 4-probe loop (each probe up to ~2.4s + 0.5s sleeps) burned
-            # ~9s BEFORE the first attempt — the dominant cost of the 10s+
-            # sells seen in production.  If the single read returns 0 we use
-            # the last-known cached figure for the FIRST attempt; the retry
-            # loop re-reads and clamps the amount before every subsequent
-            # quote, so a wrong first amount costs one 6024 round-trip at
-            # most — not nine seconds.
             fresh_bal = 0
             # e927330 moved the buy-TX-ledger clamp below the truth-read to run
             # on every sell — these two must therefore be initialized on ALL
@@ -3371,14 +3219,6 @@ class LiveTrader:
             # would otherwise hit UnboundLocalError on `ct` and never sell).
             ct = self.current_trade
             _exact_known = False
-            # iter91 latency: an ADOPTED cache is already the authoritative
-            # on-chain figure (exact delivery read at buy settle / prior live
-            # read) — re-reading it burns ~0.5-1 s of RPC fanout on the exit
-            # hot path for a number that cannot have changed under sole-
-            # trader custody.  The live read still runs whenever the cache is
-            # provisional (buy-quote outAmount, inflated 0.3-2 %) or empty,
-            # and every retry group re-reads before its quote regardless — a
-            # stale-high first amount costs one 6024 round-trip at most.
             if self._token_balance_verified and self._token_balance > 0:
                 fresh_bal = self._token_balance
             else:
@@ -3410,10 +3250,6 @@ class LiveTrader:
                 # restart the very 6024 chain this correction exists to kill.
                 token_balance = self._token_balance
 
-            # 2026-09-28 consolidation + 2026-10-03 fix: confirmed balance truth.
-            # If the balance is unverified, fetch the confirmed on-chain balance
-            # FIRST before quoting.  Never apply a blind proactive haircut before
-            # querying the chain and discard the true confirmed figure.
             _needs_truth_read = (not self._token_balance_verified) or (
                 fleet_trader_count(self.wallet_pubkey, self.token_mint) > 1)
             if _needs_truth_read:
@@ -3494,7 +3330,8 @@ class LiveTrader:
                 f"[SELL] Authoritative balance: {token_balance} units (on-chain={fresh_bal > 0})"
             )
 
-            # ── iter77 fleet clamp: shared wallet, per-engine positions ──────
+            # fleet clamp: shared wallet, per-engine positions
+
             # With multiple engines on one wallet+mint, the on-chain balance
             # is the SUM of every trader's position.  Clamp this trader's
             # sell amount to its proportional claim so it can never sell a
@@ -3553,12 +3390,6 @@ class LiveTrader:
                     # EVERY attempt after the first (cheap single read).  A
                     # partial fill — or a 6024 clamp from the previous attempt
                     # — must be reflected in the next quote.
-                    # 2026-09-28 consolidation: monotonic DECREASE only, on
-                    # CONFIRMED commitment.  A lagging processed read can
-                    # return the PRE-sell full balance after a partial fill
-                    # landed — adopting it re-quotes sold tokens and chains
-                    # another 6024.  Confirmed costs ~0.5s on retries only;
-                    # the first attempt keeps the fast path above.
                     if attempt_group > 1 or inner > 1:
                         try:
                             live_bal = await self._get_token_balance(
@@ -3586,7 +3417,6 @@ class LiveTrader:
                         # Escalating backoff on consecutive Jupiter failures —
                         # re-hitting a slow/rate-limited endpoint every 50ms
                         # extends the outage instead of riding it out
-                        # (2026-08-26 Brezy49c: 7× timeouts → 47s dead air).
                         quote_fail_streak += 1
                         backoff = min(0.25 * (2 ** (quote_fail_streak - 1)), 3.0)
                         detail = "Jupiter quote failed" if not quote else "Swap TX build failed"
@@ -3597,14 +3427,14 @@ class LiveTrader:
                         continue
                     quote_fail_streak = 0
 
-                    # ── Confirm-first broadcast (single unified path) ────────
+                    # Confirm-first broadcast (single unified path)
+
                     # CRITICAL INVARIANT: the trade is closed EXACTLY ONCE, and
                     # only AFTER the sell TX is confirmed on-chain.  We never
                     # call confirm_sell() on broadcast — doing so produced one
                     # phantom "closed trade" per failed attempt.  If the TX
                     # fails, the position stays open and the loop retries
                     # immediately with a fresh quote + fresh balance.
-                    #
                     # Retries force a FRESH blockhash so the retry TX is never
                     # byte-identical to the failed attempt (same cached
                     # blockhash + same amount ⇒ same signature ⇒ same failure).
@@ -3662,7 +3492,6 @@ class LiveTrader:
                         await asyncio.sleep(0.05)
                         continue
 
-                    # ── Success: TX confirmed on-chain — close ONCE ──────────
                     elapsed = time.time() - sell_start
                     # EXACT proceeds, resolved in tiers — a confirmed sell can
                     # NEVER be booked as a −100% loss while its real payout is
@@ -3750,9 +3579,6 @@ class LiveTrader:
                     )
                     return sig
 
-                # ── Group exhausted ──────────────────────────────────────────
-                # Use confirmed commitment + retry: a lagging processed read
-                # here can report the stale pre-sell balance (or vice-versa).
                 bal = 0
                 for _chk in range(3):
                     try:
@@ -3772,7 +3598,7 @@ class LiveTrader:
                     # the phantom "-100% PnL" trades seen in production.
                     # We only declare "verified empty" when a sell is PROVEN:
                     #   0. an EARLIER sig in this window landed while the last
-                    #      broadcast reverted (iter95 JACK-t2 rebroadcast
+                    #      broadcast reverted (JACK-t2 rebroadcast
                     #      class — resolved first, see _resolve_landed_sell_sig),
                     #   1. the last broadcast sig's status shows confirmed, or
                     #   2. the SOL-balance delta measures proceeds > 0.
@@ -3880,9 +3706,10 @@ class LiveTrader:
                         )
                         return "verified_empty"
 
-                    # ── Nothing proves a sale and every read is blind ─────
+                    # Nothing proves a sale and every read is blind
+
                     # NEVER reconcile an open position as a "failed buy" and
-                    # NEVER stop retrying.  The 2026-08-25 21:44/21:55 aborts
+                    # NEVER stop retrying.  The 21:44/21:55 aborts
                     # show RPC-blind windows where balance reads, signature
                     # lookups AND broadcasts fail together while the tokens
                     # sit provably in the wallet — both "failed-buy" bags were
@@ -3955,8 +3782,6 @@ class LiveTrader:
         finally:
             self.slippage_bps = original_slippage
             self._swap_in_flight = False
-            # 2026-09-28 consolidation: always release the fleet sell slot
-            # (idempotent — covers every early return above).
             try:
                 fleet_release_sell(self)
             except Exception:
@@ -3987,8 +3812,6 @@ class LiveTrader:
                 logger.debug("trade status broadcast failed, frontend misses one update",
                              exc_info=True)
 
-    # ── Emergency sell watchdog ───────────────────────────────────────────────
-
     async def _monitor_trade(self):
         """
         Background watchdog — guarantees "if we stop attempting, this coin is
@@ -4010,7 +3833,8 @@ class LiveTrader:
             try:
                 await asyncio.sleep(WATCHDOG_INTERVAL_S)
 
-                # ── Idle no-motion session termination ────────────────────
+                # Idle no-motion session termination
+
                 # Time-driven so it fires even when the trade stream has gone
                 # completely quiet (a dead coin yields no ticks, so the
                 # stream-loop check in main.py would never run).  Same
@@ -4033,7 +3857,8 @@ class LiveTrader:
                     )
                     continue
 
-                # ── Orphaned-bag adoption (backstop) ──────────────────────────
+                # Orphaned-bag adoption (backstop)
+
                 # If the wallet holds tokens but NO trade is tracked and no buy
                 # is pending, a position exists on-chain that the algorithm
                 # cannot see.  Adopt it into a monitored trade so it can be
@@ -4052,8 +3877,6 @@ class LiveTrader:
                     # so the flat-state decision above is stale by the time
                     # tokens appear.  Re-check before adopting — a position the
                     # settle task just confirmed (or still has pending) is not
-                    # an orphan (2026-08-26 MILKERS: confirmed buy force-sold
-                    # as an "orphan" 100 ms after buy_confirmed).
                     if orphan > 0 and (
                         self.current_trade is not None
                         or self._swap_in_flight
@@ -4090,7 +3913,8 @@ class LiveTrader:
                         asyncio.ensure_future(self.execute_sell("watchdog_adopted_orphan"))
                         continue
 
-                # ── Position/engine steady-state resync (2026-09-29 INU) ──
+                # Position/engine steady-state resync (INU)
+
                 # The trader and the engine must agree: trader holding an
                 # OPEN trade ⟺ engine in position.  Latency-mode boundary
                 # hooks keep them aligned candle-by-candle, but a missed hook
@@ -4221,9 +4045,6 @@ class LiveTrader:
                         if _ve_px > 0:
                             _ve_est = self.current_trade.size_tokens * _ve_px
                     if proceeds is None:
-                        # iter95: same rebroadcast-class resolution as the
-                        # verified-empty path — window starts at the last
-                        # exit signal (bounded to the last 10 min).
                         resolved = await self._resolve_landed_sell_sig(
                             max(self._last_exit_signal_ts,
                                 time.time() - 600.0),
@@ -4246,11 +4067,6 @@ class LiveTrader:
                     if not confirmed_sell and (proceeds is None or proceeds <= 0):
                         # NEVER reconcile an open position as a failed buy:
                         # RPC-blind windows make balance AND signature probes
-                        # lie together (both 2026-08-25 aborts had confirmed
-                        # buys sitting in the wallet).  Force another sell
-                        # pass — the sell loop itself now retries forever, so
-                        # the position can only leave this state via a proven
-                        # on-chain sale.
                         logger.warning(
                             f"[WATCHDOG] ⚠  {time_since_exit:.0f}s elapsed "
                             f"since sell signal, no sale provable on-chain "
@@ -4316,7 +4132,8 @@ class LiveTrader:
                 await asyncio.sleep(2.0)
         logger.info("[WATCHDOG] Stopped")
 
-    # ── Market-cap safety floor ───────────────────────────────────────────────
+    # Market-cap safety floor
+
 
     async def update_market_cap(self, market_cap_usd: float) -> bool:
         """
@@ -4350,7 +4167,6 @@ class LiveTrader:
         if market_cap_usd >= self.min_market_cap_usd:
             return False  # All good
 
-        # ── Threshold breached ────────────────────────────────────────────
         logger.warning(
             f"[MCAP STOP] Market cap ${market_cap_usd:,.0f} dropped below "
             f"floor ${self.min_market_cap_usd:,.0f} for {self.token_mint[:8]}…"
@@ -4422,7 +4238,8 @@ class LiveTrader:
         )
         return True
 
-    # ── Intra-candle 4-state expansion (matches ForwardTester exactly) ──────
+    # Intra-candle 4-state expansion (matches ForwardTester exactly)
+
 
     # Engine anchor slippage — the premium applied to the signal-state close
     # to form the engine's entry anchor (notify_trade_opened(price)).  The
@@ -4430,7 +4247,7 @@ class LiveTrader:
     # offside) anchor on that price; using the signal-instant price basis
     # (state close × (1 + 1 %), matching the backtester's default
     # slippage_pct=1.0 under exec_model="instant") keeps every exit decision
-    # on the identical price basis in both pipelines (2026-08-30 signal-
+    # on the identical price basis in both pipelines (signal-
     # instant execution).  The real on-chain fill is recorded separately on
     # the trade at confirmation.
     engine_fill_slippage_pct: float = 1.0
@@ -4443,11 +4260,11 @@ class LiveTrader:
         `via` records which path invoked the executor — "state" (intra-candle
         4-state expansion), "retry" (candle-boundary retry pass in update()),
         or "drain" (post-settle drain with synthetic tuple prices) — purely
-        for the `signal_launch` journal record (2026-09-30 debug audit: the
+        for the `signal_launch` journal record (debug audit: the
         INU booking forensics hinged on drain-vs-state launch timing, which
         was unobservable).
 
-        Since the 2026-08-30 signal-instant change this is primarily the
+        Since the signal-instant change this is primarily the
         RETRY path: _queue_signal_from_state fires newly detected signals
         immediately on their own state, and calls this right after — signals
         that pass the guards execute on the same tick they were generated.
@@ -4465,10 +4282,10 @@ class LiveTrader:
         retries expire after `pending_signal_max_age_seconds`; EXIT retries
         never expire (exits are risk-reducing).
 
-        iter78 adopted cell: a queued BUY is additionally held until
+        adopted cell: a queued BUY is additionally held until
         `_pending_buy_delay_until` (signal ts + the engine's
         `v2_entry_delay_seconds`, default 5.0 s) — the live mirror of the
-        backtest's deferred-entry fill (batch iter78_lat5).  The swap then
+        backtest's deferred-entry fill (adopted cell).  The swap then
         launches at the CURRENT prices, buying the ~5 s micro-dip instead
         of the signal-state close.
         """
@@ -4477,15 +4294,14 @@ class LiveTrader:
 
         now = time.time()
 
-        # iter91 fill-anchor booking: freeze a DEFERRED (armed) exit's book
+        # fill-anchor booking: freeze a DEFERRED (armed) exit's book
         # anchor at its boundary — the backtester prices that fill at
         # path_price_at(sig_t + exit_delay) (frac 0 on the boundary candle ⇒
         # its open; the path lookup reproduces gap-second pricing exactly).
         # Frozen HERE — before the exit launch below can clear _pending_exit —
         # and via the path buffer (not this call's `so`), so drain retries
         # with synthetic tuples cannot misprice it.
-        #
-        # Sparse-tape fix (2026-09-28 koinu audit): thin tapes often have NO
+        # Sparse-tape fix (koinu audit): thin tapes often have NO
         # candle at the exact target second (e.g. signal 1790548994 +20s =
         # 1790549014, but candles only at ...9008, 9016...).  The exact-match
         # condition below then never fires and confirm_sell falls back to
@@ -4495,7 +4311,7 @@ class LiveTrader:
         # `_resolve_latency_fill` instead: resolve at the first state with
         # t > target via `_path_price_at` interpolation (containing candle +
         # successor span), which is defined on sparse tapes.
-        # 2026-09-29 INU audit: two-tier freeze.  The old exact-only rule
+        # INU audit: two-tier freeze.  The old exact-only rule
         # missed sparse targets (koinu +14% model booking); the 09-28 sparse
         # rule froze at launch with an INCOMPLETE buffer (successor missing
         # → span saturates to 1 → wrong intrabar position on wicked
@@ -4537,11 +4353,12 @@ class LiveTrader:
                             1.0 - self.engine_fill_slippage_pct / 100.0)
                         self._pending_exit_anchor_exact = False
 
-        # ── iter90j: engine position-state boundaries (BT latency mirror) ──
+        # engine position-state boundaries (BT latency mirror)
+
         # Latency mode only: runs BEFORE the engine consumes this state —
         # exactly where the backtester's Step-0 fill resolution notifies the
         # engine (its Step 0 precedes Step 2's engine.update on the same
-        # state).  iter101: the BUY branch here is reachable only when the
+        # state).  the BUY branch here is reachable only when the
         # ENTRY delay armed it (`_buy_engine_open_pending`, set under
         # `_bt_entry_latency_mode`); with the production entry_delay=0 the
         # engine is notified at launch instead.  The hook stays gated on the
@@ -4553,7 +4370,7 @@ class LiveTrader:
                 _open_boundary = self._buy_engine_open_boundary_t
                 self._buy_engine_open_pending = False
                 self._buy_engine_open_boundary_t = None
-                # 2026-09-29 INU audit: do NOT consume the frozen anchor /
+                # INU audit: do NOT consume the frozen anchor /
                 # sig second here.  The pending launch below still needs them
                 # (BT books the detection-frozen fill, not the launch-state
                 # price); consuming first made the launch fall back to
@@ -4565,7 +4382,7 @@ class LiveTrader:
                 self.engine.notify_trade_opened(
                     anchor if anchor is not None else self._last_price,
                     Direction.UP)
-                # 2026-09-30 debug audit: journal hook firings — the notify
+                # debug audit: journal hook firings — the notify
                 # layer was invisible, so a missed hook (trader holding while
                 # engine stays flat) could only be inferred, never seen.
                 try:
@@ -4584,7 +4401,6 @@ class LiveTrader:
                 self._exit_engine_close_pending = False
                 self._exit_engine_close_boundary_t = None
                 self.engine.notify_trade_closed()
-                # 2026-09-30 debug audit: see above.
                 try:
                     self._journal_event(
                         "engine_boundary", direction="close",
@@ -4601,12 +4417,12 @@ class LiveTrader:
                     and now >= self._buy_failed_until \
                     and not self.mcap_stop_triggered \
                     and not self.no_motion_stop_triggered:
-                # iter78 adopted cell: hold the queued BUY until the entry
+                # adopted cell: hold the queued BUY until the entry
                 # delay elapses on the CANDLE CLOCK (signal time +
                 # `entry_delay_seconds`).  The swap then launches at the
                 # CURRENT prices — the live mirror of the backtester's
                 # deferred fill at t_signal+5 s on the recorded path (batch
-                # iter78_lat5 — RESEARCH_LOG Iter 78).  Candle-time keying
+                # see RESEARCH_LOG.md).  Candle-time keying
                 # keeps the live-parity replay harnesses deterministic.
                 if t is not None and float(t) < self._pending_buy_delay_until_t:
                     if not self._delay_hold_logged:
@@ -4618,7 +4434,7 @@ class LiveTrader:
                         )
                         self._delay_hold_logged = True
                     return
-                # iter90j: the age-based SIGNAL EXPIRY is removed — the
+                # the age-based SIGNAL EXPIRY is removed — the
                 # backtester NEVER drops a queued signal (it fills at the
                 # signal's target whenever the position frees up, however
                 # long the previous trade's settle/retries take).  Dropping
@@ -4626,7 +4442,7 @@ class LiveTrader:
                 # buy-FAIL re-entry block (_buy_failed_until) above is user
                 # policy and stays.
                 buy_reason = self._pending_buy_reason
-                # iter90j: the engine is NOT notified here.  The
+                # the engine is NOT notified here.  The
                 # backtester's latency model notifies the engine at the
                 # FILL RESOLUTION (first candle-state strictly after the
                 # target second) with the fill price (candle open ×
@@ -4638,7 +4454,7 @@ class LiveTrader:
                     fill = sc * (1.0 + self.engine_fill_slippage_pct / 100.0)
                 entry_t = (self._pending_buy_sig_t
                            if self._pending_buy_sig_t is not None else t)
-                # 2026-09-29 INU audit (corrected 09-30): the launch READS
+                # INU audit (corrected 09-30): the launch READS
                 # but does NOT consume the frozen anchor/sig second — like
                 # the boundary hook above, which also reads without
                 # consuming.  Whichever runs first (hook-first on blocked
@@ -4649,7 +4465,7 @@ class LiveTrader:
                 # launch-consume would break the hook.)  Values are
                 # overwritten wholesale at the next detection and cleared on
                 # fail/close paths.
-                # 2026-09-30 debug audit: journal the launch context — which
+                # debug audit: journal the launch context — which
                 # path launched (state/retry/drain) and whether the fill came
                 # from the frozen anchor or the sc fallback.  The INU booking
                 # forensics hinged on exactly this and it was unobservable.
@@ -4683,7 +4499,7 @@ class LiveTrader:
                 # If the buy later fails on-chain, _fail_buy_flat() rolls
                 # back with notify_trade_closed().
                 if not self._bt_entry_latency_mode:
-                    # iter101: instant ENTRY basis (entry_delay == 0) — notify
+                    # instant ENTRY basis (entry_delay == 0) — notify
                     # the engine at the launch with the signal-state close
                     # anchor, the backtester's exec_model="instant" schedule,
                     # EVEN when the adopted exit delay keeps the trader in
@@ -4709,7 +4525,7 @@ class LiveTrader:
 
         elif self._pending_exit and self.current_trade is not None \
                 and not self._swap_in_flight:
-            # iter80 deferred-exit hold: an armed exit whose delay boundary
+            # deferred-exit hold: an armed exit whose delay boundary
             # has not passed stays pending (exits never expire) until the
             # candle clock reaches signal_ts + exit_delay_seconds.  The
             # notify + swap launch move together — matching the backtester's
@@ -4731,14 +4547,6 @@ class LiveTrader:
             self.current_trade.status = "closing"
             self.current_trade.exit_reason = exit_reason
             self._last_trade_action = "exit"
-            # iter90j: engine flat-flip timing.  A deferred (armed) exit's
-            # engine flip belongs to the boundary hook (the backtester's
-            # latency model closes the trade at the first state strictly
-            # after signal+delay).  An instant (loss-book) exit matches the
-            # backtester's same-state _close_long: notify here.  If the hook
-            # already fired (the boundary passed while the launch was
-            # guard-blocked), the engine is flat already — the idempotent
-            # notify below is a no-op then.
             if not was_deferred or not self._exit_engine_close_pending:
                 self._exit_engine_close_pending = False
                 self._exit_engine_close_boundary_t = None
@@ -4746,10 +4554,6 @@ class LiveTrader:
             self._pending_exit = False
             self._pending_exit_reason = ""
             self._pending_exit_queued_ts = None
-            # 2026-09-30 debug audit: journal the launch context (see buy
-            # launch above).  Anchor state at launch tells whether confirm
-            # will book a frozen (exact/provisional), instant, or fallback
-            # fill — the other half of the INU booking forensics.
             try:
                 self._journal_event(
                     "signal_launch", side="exit", reason=exit_reason,
@@ -4775,11 +4579,6 @@ class LiveTrader:
                 "reason": exit_reason,
                 "price": sc,
             }
-
-    # ── Fill-path pricing ─────────────────────────────────────────────────
-    # Delegates to core.state4 / core.fills, the same implementation the
-    # backtester uses; replay and live price fills identically by
-    # construction.
 
     @staticmethod
     def _intrabar_price(o: float, h: float, l: float, c: float, frac: float) -> float:
@@ -4826,7 +4625,7 @@ class LiveTrader:
                 and not self.engine.in_position and (
                 self.current_trade is None
                 or getattr(self.current_trade, "status", "") == "closing"):
-            # iter90j gate `not engine.in_position`: while the ENGINE still
+            # gate `not engine.in_position`: while the ENGINE still
             # holds a position (an armed exit's fill boundary has not passed),
             # the backtester's latency model has _latency_pending set and
             # DROPS every BUY signal — so live must drop them here too, not
@@ -4848,7 +4647,6 @@ class LiveTrader:
                         f"[BUY BLOCK] BUY signal suppressed — re-entry block "
                         f"active for another {remaining:.0f}s (after failed buy)"
                     )
-                # 2026-09-30 debug audit: journal the drop too (throttled).
                 self._note_suppressed("buy", "buy_fail_block", t)
                 self._pending_buy = False
                 self._pending_buy_reason = ""
@@ -4874,12 +4672,12 @@ class LiveTrader:
                         )
                     except Exception as e:
                         logger.debug(f"[SIGNAL CAPTURE] buy capture failed: {e}")
-                # iter78 adopted cell: defer the entry execution by
+                # adopted cell: defer the entry execution by
                 # `v2_entry_delay_seconds` (engine knob, default 5.0 s since
-                # the 2026-09-02 adoption) — the live mirror of the
+                # the adoption) — the live mirror of the
                 # backtester's entry-latency overlay, which buys the
                 # transient micro-dip ~5 s after the signal instead of the
-                # signal-state close (batch `iter78_lat5`: Δ+1.178 SOL,
+                # signal-state close (adopted cell: Δ+1.178 SOL,
                 # both eras positive, tail 123→104 — RESEARCH_LOG Iter 78).
                 # The delay is enforced in `_execute_pending_signals` (the
                 # launch is gated on `now >= signal_ts + delay`), so it
@@ -4895,7 +4693,7 @@ class LiveTrader:
                 self._pending_buy_delay_until_t = float(t or 0) + self.entry_delay_seconds
                 self._delay_hold_logged = False
                 if self._bt_entry_latency_mode:
-                    # iter90j (latency mode): freeze the engine anchor on the
+                    # (latency mode): freeze the engine anchor on the
                     # SIGNAL SECOND'S CANDLE OPEN × (1 + engine slippage) —
                     # the backtester's latency model resolves the fill at
                     # path_price_at(sig_t) with frac=0 (= the candle open)
@@ -4919,9 +4717,6 @@ class LiveTrader:
                         self._pending_buy_anchor = sc * (1.0 + self.engine_fill_slippage_pct / 100.0)
                 self._pending_exit = False
                 # Instant execution: fire the buy on THIS state's prices —
-                # unless the iter78 entry delay is armed, in which case the
-                # launch happens on the first executor pass at/after the
-                # delay boundary (next state / boundary / settle drain).
                 if self.entry_delay_seconds <= 0.0:
                     self._execute_pending_signals(t, so, sh, sl, sc)
 
@@ -4936,8 +4731,7 @@ class LiveTrader:
             # exit only launched when the condition finally dropped, e.g.
             # session 20260904_221902_PfU7LdzwTo8B: −26.7% vs the BT's
             # signal+20s scratch).
-            #
-            # iter90k: the `status != "closing"` guard closes the same hole
+            # the `status != "closing"` guard closes the same hole
             # on the far side of the launch.  The launch clears
             # `_pending_exit` mid-second; the remaining intra-candle states
             # of THAT second still see the exit condition and re-detect —
@@ -4978,21 +4772,19 @@ class LiveTrader:
                     )
                 except Exception as e:
                     logger.debug(f"[SIGNAL CAPTURE] exit capture failed: {e}")
-            # iter80: arm the deferred-exit hold boundary for armed/harvest
-            # reasons (loss-book reasons launch instantly either way).
             if self.exit_delay_seconds > 0.0 and (
                     not self.exit_delay_armed_only
                     or reason in self._ARMED_EXIT_REASONS):
                 self._pending_exit_delay_until_t = float(t or 0) + self.exit_delay_seconds
                 self._exit_delay_hold_logged = False
-                # iter90j: the ENGINE flips flat at the fill boundary (first
+                # the ENGINE flips flat at the fill boundary (first
                 # state strictly after signal+delay) — the backtester's
                 # latency model closes the trade there, NOT at the launch.
                 self._exit_engine_close_boundary_t = self._pending_exit_delay_until_t
                 self._exit_engine_close_pending = True
             else:
                 self._pending_exit_delay_until_t = 0.0
-            # iter91 fill-anchor booking (see _pending_exit_anchor): an
+            # fill-anchor booking (see _pending_exit_anchor): an
             # instant (loss-book) exit books at the detection state's close ×
             # (1 − slip) — the backtester's same-state _close_long fill.  A
             # deferred (armed) exit books at its BOUNDARY candle's open — the
@@ -5002,7 +4794,7 @@ class LiveTrader:
                 self._pending_exit_anchor_exact = False
                 self._exit_anchor_target_t = self._pending_exit_delay_until_t
             elif so is not None:
-                # iter91: instant (loss-book) exits book at the backtester's
+                # instant (loss-book) exits book at the backtester's
                 # non-deferred _close_long fill — the intrabar path of THIS
                 # state's tuple at _fill_fraction() (NOT the state close).
                 sh_ = sh if sh is not None else so
@@ -5015,11 +4807,6 @@ class LiveTrader:
             self._execute_pending_signals(t, so, sh, sl, sc)
 
         elif detected_signal == Signal.BUY.value:
-            # 2026-09-30 debug audit: a BUY the engine emitted but the queue
-            # dropped (guard below held).  Silent by design — but silence is
-            # what made the INU hold undebuggable, so record WHICH guard
-            # held (throttled 1/60 candle-s per key; every occurrence
-            # counted).  Read-only: the guards themselves are untouched.
             if self._pending_buy:
                 self._note_suppressed("buy", "already_pending", t)
             elif getattr(self.engine, "in_position", False):
@@ -5030,7 +4817,7 @@ class LiveTrader:
                     self._note_suppressed(
                         "buy", f"position_open:{_st or 'open'}", t)
         elif detected_signal == Signal.EXIT.value:
-            # 2026-09-30 debug audit: same for EXIT signals that never became
+            # debug audit: same for EXIT signals that never became
             # pending (no position / already pending / already closing).
             # An engine screaming EXIT into `no_position` while the trader
             # holds a bag would be a desync fingerprint — this makes it one.
@@ -5074,12 +4861,6 @@ class LiveTrader:
                                    sell_vol: float = 0.0,
                                    market_cap_usd: float = 0.0,
                                    pool_sol: float = 0.0) -> dict:
-        # iter90j intake audit: record the EXACT candle the engine is about
-        # to expand into intake_audit.jsonl (separate from trades.jsonl).
-        # Diffing this journal against the recording's final rows is the
-        # zero-divergence intake check — any late-trade rewrite or
-        # aggregation mismatch shows up as a row mismatch instead of a
-        # mysterious decision divergence hours later.
         try:
             if self._intake_audit_fh is None:
                 self._intake_audit_fh = open(
@@ -5101,7 +4882,7 @@ class LiveTrader:
           Step 3  detect any signal the state produced and execute it
                   INSTANTLY (engine notify + swap launch on this same state)
 
-        Since the 2026-08-30 signal-instant execution change, a signal from
+        Since the signal-instant execution change, a signal from
         state k fires its swap at state k — the instant it is generated —
         identical to the backtester's exec_model="instant".  Only signals
         blocked by a guard (swap in flight, re-entry block, stop) fall back
@@ -5153,7 +4934,8 @@ class LiveTrader:
         # _queue_signal_from_state (signal-instant execution) — at state 4's
         # own close price, with no wait for the next candle boundary.
 
-        # ── No-motion tracking ───────────────────────────────────────────
+        # No-motion tracking
+
         # Only a close that DIFFERS from the previously tracked close counts
         # as motion; same-price ticks, flat candles and total silence all age
         # the idle timer.  The termination DECISION itself is made on the
@@ -5166,7 +4948,7 @@ class LiveTrader:
                 self._last_motion_ts = time.time()
 
         self.completed_candle_count += 1
-        # 2026-09-29 INU audit: drain the engine's online-recalibration log
+        # INU audit: drain the engine's online-recalibration log
         # into the journal.  A mid-session coefficient rewrite silently
         # moves the live trajectory off the backtest (which calibrates once
         # at the anchor) — without this record such drift is invisible.
@@ -5184,19 +4966,12 @@ class LiveTrader:
         except Exception:
             logger.debug("percoin recalibration drain failed, engine log unaffected",
                          exc_info=True)
-        # 2026-09-29 INU audit: engine heartbeat.  A position held with no
-        # engine signal for many minutes is undebuggable post-hoc from
-        # signals alone (absence of evidence).  One small record per 15
-        # candle-seconds captures position/entry/peak/counters so the next
-        # silent-hold is diagnosable in one glance (flat vs positioned vs
-        # starved engine).  Period is 15 s, not 60 s, because the INU
-        # decision window (entry to expected exit) was only 39 s.
         try:
             if int(t) - int(getattr(self, "_last_engine_heartbeat", 0) or 0) >= 15:
                 self._last_engine_heartbeat = int(t)
                 _ct = self.current_trade
                 _now = time.time()
-                # 2026-09-30 debug audit: pending ages — a queued-but-never-
+                # debug audit: pending ages — a queued-but-never-
                 # launched signal (stuck swap guard, dead drain) is otherwise
                 # invisible between queue and launch journal records.
                 _buy_age = None
@@ -5207,7 +4982,7 @@ class LiveTrader:
                 _pets = getattr(self, "_pending_exit_queued_ts", None)
                 if self._pending_exit and _pets:
                     _exit_age = round(_now - float(_pets), 1)
-                # 2026-09-30 debug audit: flat-state decision snapshot — the
+                # debug audit: flat-state decision snapshot — the
                 # engine tick log only covers in-position states, so a flat
                 # engine's posture (direction/confidence/decisions) had no
                 # record.  All getattr-guarded (V1-safe); read-only.
@@ -5302,7 +5077,7 @@ class LiveTrader:
         return None
 
     def immediate_holder_flow_exit(self, exit_reason: str):
-        """Fire the holder-flow immediate exit (iter41) as a consumed action.
+        """Fire the holder-flow immediate exit () as a consumed action.
 
         Called by main.py's holder-flow pump when a dev/insider sell is
         discovered while in position.  Marks the trade closing, notifies the
@@ -5325,8 +5100,6 @@ class LiveTrader:
         self._last_trade_action = "exit"
         self.engine.notify_trade_closed()
         asyncio.ensure_future(self.execute_sell(exit_reason))
-
-    # ── Strategy update loop ──────────────────────────────────────────────────
 
     def update_historical_candle(
         self,
@@ -5402,7 +5175,7 @@ class LiveTrader:
         Indicator evolution is IDENTICAL to the backtester:
           - Completed candles are expanded into 4 sub-states.
           - engine.notify_trade_opened/closed() is called at the SIGNAL state
-            (the instant the signal is generated — 2026-08-30 signal-instant
+            (the instant the signal is generated — signal-instant
             execution, matching the backtester's exec_model="instant").
             If a buy fails on-chain, _fail_buy_flat() rolls back with
             notify_trade_closed().
@@ -5417,7 +5190,6 @@ class LiveTrader:
         opened_trade = None
         swap_request = None
 
-        # ── Candle boundary: process the just-completed candle ────────────────
         if is_new and self._current_accumulating is not None:
             prev = self._current_accumulating
 
@@ -5449,7 +5221,6 @@ class LiveTrader:
             self._last_trade_action = None
             self._last_swap_request = None
 
-        # ── Always buffer the current tick ────────────────────────────────────
         self._current_accumulating = {
             "t": time_val, "o": o, "h": h, "l": l, "c": c, "vol": volume,
             "buy_vol": buy_volume, "sell_vol": sell_volume,
@@ -5457,7 +5228,6 @@ class LiveTrader:
             "pool_sol": pool_sol,
         }
 
-        # ── Build output ──────────────────────────────────────────────────────
         result = self._last_engine_result or {}
 
         unrealized_pnl = 0.0
@@ -5489,8 +5259,6 @@ class LiveTrader:
                 "swap_request": swap_request,
             },
         }
-
-    # ── Manual controls ───────────────────────────────────────────────────────
 
     async def force_buy(self) -> Optional[str]:
         """Manually trigger a test buy from the dashboard."""
@@ -5542,8 +5310,6 @@ class LiveTrader:
             self.current_trade.status = "open"
         return sig
 
-    # ── Trade confirmation (called internally after TX confirmed) ─────────────
-
     def confirm_sell(self, tx_hash: str, sol_received: float, actual_price: float):
         if self.current_trade is None:
             return
@@ -5561,9 +5327,6 @@ class LiveTrader:
         basis = trade.size_sol if trade.size_sol > 0 else trade.cost_sol
         trade.cash_pnl_sol = (sol_received - basis) if basis > 0 else sol_received
 
-        # ── backtester-basis booking ─────────────────────────────────────────
-        # Keep the tape/model booking as a diagnostic comparison.  The
-        # authoritative trade PnL is the confirmed on-chain cash result below.
         slip_frac = self.engine_fill_slippage_pct / 100.0
         exit_anchor = self._pending_exit_anchor
         self._pending_exit_anchor = None
@@ -5605,8 +5368,6 @@ class LiveTrader:
 
         self.stats.total_trades += 1
         self.stats.total_pnl_sol += trade.pnl_sol
-        # iter95 display truth: accumulate the wallet-basis cash PnL
-        # alongside the backtest-basis booking so the card can show both.
         self.stats.total_cash_pnl_sol += trade.cash_pnl_sol
         if trade.pnl_sol > 0:
             self.stats.winning_trades += 1
@@ -5616,8 +5377,6 @@ class LiveTrader:
             self.stats.win_rate = self.stats.winning_trades / self.stats.total_trades * 100
 
         self.stats.current_balance += trade.pnl_sol
-        # iter77 fleet: this trader's position is gone — release its token
-        # claim so sibling traders' sell caps unclamp to the real balance.
         fleet_release_claim(self)
         if self.stats.current_balance > self.stats.peak_balance:
             self.stats.peak_balance = self.stats.current_balance
@@ -5635,15 +5394,10 @@ class LiveTrader:
             # re-allow orphan adoption so the next bag is never invisible.
             self._adopted_bag = False
         if self._exit_engine_close_pending:
-            # iter90j: a deferred (armed) exit's engine flat-flip belongs to
-            # the boundary hook (first state strictly after signal+delay —
-            # the backtester's latency-model close).  Notifying here would
-            # flip the engine flat one settle early and let it re-enter a
-            # second before the backtest does.  The hook fires within ~1 s.
             pass
         else:
             self.engine.notify_trade_closed()
-        # iter57 parity: the position is gone — any lingering pending EXIT is
+        # parity: the position is gone — any lingering pending EXIT is
         # consumed (whatever closed the trade replaced it), and a pending BUY
         # (re-entry queued while this sell was settling) retries immediately
         # instead of waiting for the next candle boundary, matching the

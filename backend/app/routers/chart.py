@@ -67,7 +67,6 @@ async def token_info_endpoint(mint: str):
     return JSONResponse(info) if info else JSONResponse({"error": "not found"}, status_code=404)
 
 
-
 ws_router = APIRouter()
 
 

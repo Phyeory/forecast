@@ -78,8 +78,6 @@ def Path_exists_env_gmgn() -> bool:
                 return True  # file present at least
     return False
 
-# ── gmgn-cli invocation ─────────────────────────────────────────────────────
-
 # Pin to a known-good version. `npx -y` auto-installs at this version.
 GMGN_CLI_VERSION = "1.5.2"
 GMGN_BIN = os.environ.get("GMGN_CLI_BIN", f"npx -y gmgn-cli@{GMGN_CLI_VERSION}")
@@ -89,10 +87,8 @@ NPX_BIN  = os.environ.get("NPX_BIN",  "npx")
 GMGN_COMMAND   = os.environ.get("GMGN_CLI_CMD", f"npx -y gmgn-cli@{GMGN_CLI_VERSION}")
 GMGN_RAINDOW   = os.environ.get("GMGN_CLI_RAW",  "--raw")  # always pass --raw
 
-# ── Defaults (tuned for "clean, organic, non-bundled, >15k mcap") ──────────
+# Market-condition auto-tune ()
 
-# ── Market-condition auto-tune (2026-09-05) ──────────────────────────────────
-#
 # The USD gates were static while the market floats:
 #   * pump.fun graduation is a FIXED ~85.005 SOL raised on the bonding curve
 #     (notes/pumpfun_internals_2026-09.md §2) — the graduation mcap in USD is
@@ -104,19 +100,16 @@ GMGN_RAINDOW   = os.environ.get("GMGN_CLI_RAW",  "--raw")  # always pass --raw
 #   * Motion gates ($ volume / swaps / liquidity) calibrated for a normal
 #     PumpSwap tape starve the feed to zero in a cold venue and under-select
 #     in a hot one.
-#
 # Tuned levers (the ONLY values auto-tune may touch):
 #   min_mcap_usd      → max(user floor, grad_mcap_usd × mcap_grad_discount)
 #   min_volume_usd    → user gate × motion_scale
 #   min_swaps         → user gate × motion_scale
 #   min_liquidity_usd → user gate × motion_scale
-#
 #   motion_scale = clamp(venue_ratio × momentum_adj, 0.5, 1.5)
 #     venue_ratio  = PumpSwap latest-day DEX volume / median of the prior 7
 #                    settled days (DeFiLlama /overview/dexs/solana breakdown)
 #     momentum_adj = 1 + 0.3 × clamp(sol_24h_chg / 10%, −1, +1)
 #                    — compensates the ≤24h lag of the daily volume series
-#
 # Everything else — risk ratios, renounced/wash/honeypot gates, holders,
 # smart money, ranking, cooldowns — is NEVER modified: auto-tune adapts
 # QUANTITY to market conditions while QUALITY stays at the user's settings.
@@ -192,8 +185,6 @@ DEFAULT_COOLDOWN_AFTER_FEED_MINUTES = 1.0
 DEFAULT_EXCLUDE_MINTS              = ""   # comma-separated manual exclusion
 
 
-# ── Candidate record ────────────────────────────────────────────────────────
-
 @dataclass
 class Candidate:
     mint:             str
@@ -239,8 +230,6 @@ class Candidate:
         return (time.time() - self.first_seen) / 60.0
 
 
-# ── Settings ────────────────────────────────────────────────────────────────
-
 @dataclass
 class AutofeedConfig:
     enabled:                bool = False
@@ -282,8 +271,6 @@ class AutofeedConfig:
         return asdict(self)
 
 
-# ── AutoFeed Engine ─────────────────────────────────────────────────────────
-
 class AutoFeed(CandidateFeed):
     """
     Polling-only discovery loop.
@@ -324,8 +311,6 @@ class AutoFeed(CandidateFeed):
             f"rug≤{self.config.max_rug_ratio} bundled≤{self.config.max_bundler_rate} "
             f"insider≤{self.config.max_insider_rate} smart≤{self.config.min_smart_degen_count}"
         )
-
-    # ── Market-condition auto-tune ──────────────────────────────────────────
 
     async def _fetch_market_conditions(self) -> Optional[dict]:
         """Pull SOL price/momentum (CoinGecko) + venue volume (DeFiLlama).
@@ -378,7 +363,7 @@ class AutoFeed(CandidateFeed):
     def _parse_llama_breakdown(rows: list, now: float) -> Optional[dict]:
         """(ts, pumpswap_vol) daily rows → venue_ratio inputs.
 
-        DeFiLlama quirks this compensates (measured 2026-09-05, byte-identical
+        DeFiLlama quirks this compensates (measured byte-identical
         duplicate frozen across 3+ polls):
           * The API appends an EXACT DUPLICATE of the previous day's value
             as the newest (today's) row — a copy-forward placeholder carrying
@@ -534,8 +519,6 @@ class AutoFeed(CandidateFeed):
         }
 
 
-    # ── gmgn-cli invocation ──────────────────────────────────────────────────
-
     def _build_cli_args(self) -> list[str]:
         """Build the gmgn-cli `market trending` argv. Run server-side filters.
 
@@ -662,8 +645,6 @@ class AutoFeed(CandidateFeed):
             rank = payload
         return rank or []
 
-    # ── Filter (organic / non-bundled) ──────────────────────────────────────
-
     def _to_candidate(self, raw: dict) -> Optional[Candidate]:
         """Convert raw gmgn row → Candidate. Returns None if hard-fails any non-server gate."""
         mint = (raw.get("address") or raw.get("mint") or raw.get("token_address") or "").strip()
@@ -787,8 +768,6 @@ class AutoFeed(CandidateFeed):
         raw = (self.config.exclude_mints or "").strip()
         return {x.strip().lower() for x in raw.split(",") if x.strip()}
 
-    # ── Polling loop ────────────────────────────────────────────────────────
-
     async def _loop(self):
         logger.info("[AutoFeed] Poll loop entered")
         # Prime conditions once at loop start so the very first poll already
@@ -885,8 +864,6 @@ class AutoFeed(CandidateFeed):
         # Drop stale tracked candidates from `_seen` cache
         if len(self._seen) > 200:
             self._seen = {k: v for k, v in self._seen.items() if v.age_minutes < 60}
-
-    # ── Snapshot (REST/WS UI) ────────────────────────────────────────────────
 
     def _snapshot_head(self) -> dict:
         """Config and auto-tune status keys, in the dashboard's expected order."""

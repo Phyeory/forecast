@@ -46,8 +46,6 @@ from pumpfun_client import NewPairsStream, get_ds_pairs_by_mints
 logger = logging.getLogger("newpairs")
 
 
-# ── Candidate record ──────────────────────────────────────────────────────────
-
 @dataclass
 class NewPairCandidate:
     mint:             str
@@ -70,32 +68,19 @@ class NewPairCandidate:
     def to_dict(self) -> dict:
         return asdict(self)
 
-# ── Settings ─────────────────────────────────────────────────────────────────
-
 @dataclass
 class NewPairsConfig:
     enabled:                       bool = False
-    # ── Feed-side filters (all optional; defaults accept everything) ──────
     min_initial_buy_sol:           float = 0.0   # dev's initial buy ≥ this (SOL); 0 = no floor
     max_initial_buy_sol:           float = 0.0   # upper bound (SOL); 0 = no cap
     min_mcap_usd:                  float = 0.0   # birth market cap ≥ this; 0 = no floor
     max_mcap_usd:                  float = 0.0   # birth market cap ≤ this; 0 = no cap
     require_social:                bool = False  # at least one social link on the token
     exclude_mints:                 str = ""      # comma-separated manual exclusion
-    # ── Global fees-paid qualification gate ────────────────────────────────
-    # A birth only spawns a recording session once the CUMULATIVE trading
-    # fees paid on the token exceed `min_global_fees_sol`.  pump.fun charges
-    # 1% per trade, so fees_paid = fee_rate × lifetime traded volume — a
-    # real-money anti-fake-volume / anti-stillborn gate (0.5 SOL of fees
-    # ≈ 50 SOL of genuine volume).  Newborns start at ~0 fees, so births
-    # queue in a pending pool and the qualification sweeper measures each
-    # token's fees via batched DexScreener volume lookups until it either
-    # qualifies, expires, or the gate is disabled (0 = spawn immediately).
     min_global_fees_sol:           float = 0.5
     pump_fun_fee_rate:             float = 0.01  # pump.fun trading-fee fraction
     qualification_poll_seconds:    float = 15.0  # sweeper cadence
     qualification_timeout_seconds: float = 1800.0  # drop unqualified births after this (s)
-    # ── Session management ─────────────────────────────────────────────────
     max_concurrent_sessions:       int = 20      # cap on parallel recording sessions
     session_timeframe:             str = "1s"    # candle timeframe recorded per token
     # per-mint cooldown before the same mint can spawn another session (s)
@@ -107,8 +92,6 @@ class NewPairsConfig:
     def to_dict(self) -> dict:
         return asdict(self)
 
-
-# ── Feed engine ──────────────────────────────────────────────────────────────
 
 class NewPairsFeed(CandidateFeed):
     """
@@ -143,8 +126,6 @@ class NewPairsFeed(CandidateFeed):
         self.last_sweep_checked: int = 0
         self.total_qualified: int = 0
 
-    # ── lifecycle ────────────────────────────────────────────────────────────
-
     def start(
         self,
         forward_fn: Optional[Callable[[NewPairCandidate], Awaitable[None]]] = None,
@@ -178,8 +159,6 @@ class NewPairsFeed(CandidateFeed):
         self._task = None
         self._qual_task = None
 
-    # ── filter ───────────────────────────────────────────────────────────────
-
     def _to_candidate(self, raw: dict) -> Optional[NewPairCandidate]:
         """Raw PumpPortal new-token event → candidate.  None if filtered out."""
         mint = (raw.get("mint") or "").strip()
@@ -198,7 +177,6 @@ class NewPairsFeed(CandidateFeed):
         # USD via the SOL-side depth if a SOL/USD feed isn't handy.  0 = unknown.
         mcap_usd = mcap_sol * 150.0 if mcap_sol > 0 else 0.0
 
-        # ── Numeric gates ──
         if cf.min_initial_buy_sol > 0 and initial_sol < cf.min_initial_buy_sol:
             return None
         if cf.max_initial_buy_sol > 0 and initial_sol > cf.max_initial_buy_sol:
@@ -208,7 +186,6 @@ class NewPairsFeed(CandidateFeed):
         if cf.max_mcap_usd > 0 and mcap_usd > cf.max_mcap_usd:
             return None
 
-        # ── Boolean gates ──
         if cf.require_social and not (
             raw.get("twitter") or raw.get("telegram") or raw.get("website")
         ):
@@ -227,8 +204,6 @@ class NewPairsFeed(CandidateFeed):
             market_cap_usd=mcap_usd,
             pool_sol=v_sol,
         )
-
-    # ── discovery loop ───────────────────────────────────────────────────────
 
     async def _loop(self):
         logger.info("[NewPairs] Discovery loop entered")
@@ -299,8 +274,6 @@ class NewPairsFeed(CandidateFeed):
         except Exception as e:
             self.last_error = f"forward error: {e}"
             logger.warning(f"[NewPairs] forward_fn error: {e}")
-
-    # ── global fees-paid qualification ───────────────────────────────────────
 
     def _fees_from_pairs(self, pairs: list[dict]) -> Optional[float]:
         """Global fees paid (SOL) for a mint from its DexScreener pairs.
@@ -441,8 +414,6 @@ class NewPairsFeed(CandidateFeed):
     def note_spawned(self, mint: str):
         self._last_fed[mint] = time.time()
         self.total_fed += 1
-
-    # ── snapshot (REST/WS UI) ────────────────────────────────────────────────
 
     def _snapshot_head(self) -> dict:
         """Config and sweep status keys, in the dashboard's expected order."""

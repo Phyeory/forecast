@@ -160,7 +160,8 @@ async def stop_stale_scanner():
         t.cancel()
 
 
-# ── Live trading state ───────────────────────────────────────────────────
+# Live trading state
+
 # Live sessions are SERVER-SIDED: they own the trader, the market stream, the
 # auto-recording and the holder-flow pump, and keep running independently of
 # any browser tab.  Tabs attach as viewers over /ws/live/{mint}; closing a tab
@@ -189,11 +190,6 @@ class _LiveSession:
         self.timeframe = timeframe
         self.trader = trader
         self.token_info = token_info
-        # iter77 multi-engine fleet: `traders[0]` is the primary (back-compat
-        # `self.trader`); extra_traders are sibling engines on the SAME
-        # wallet/stream, each with its own engine + position + journal, sized
-        # buy_size/len(traders).  Shared-wallet token isolation is enforced
-        # by the fleet share registry in live_trader.py.
         self.traders: list[LiveTrader] = [trader] + list(extra_traders or [])
         self.engine_version = engine_version
         self.engine_versions: list[int] = list(
@@ -209,12 +205,8 @@ class _LiveSession:
         self.stop_reason: str = ""
         # LiveTrader pushes trade_update JSON strings here → fanned out to viewers
         trader.broadcast_fn = self.broadcast_text
-        # iter77 fleet: sibling traders broadcast through the same fan-out;
-        # their payloads carry per-engine tags (set in _get_or_create_live_session).
         for _tr in self.traders[1:]:
             _tr.broadcast_fn = self.broadcast_text
-
-    # ── viewer fan-out ────────────────────────────────────────────────────
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=1000)
@@ -259,12 +251,10 @@ class _LiveSession:
             self.stop_reason = reason
             self.cancelled.set()
 
-    # ── session runner ────────────────────────────────────────────────────
-
     async def run(self) -> None:
         real_mint = self.real_mint
         live_trader = self.trader          # primary (back-compat references)
-        traders = self.traders             # iter77: full fleet (≥1 trader)
+        traders = self.traders             # full fleet (≥1 trader)
         timeframe = self.timeframe
         token_info = self.token_info or {}
         rec_id = self.rec_id
@@ -287,14 +277,15 @@ class _LiveSession:
         aggregator = CandleAggregator(timeframe)
         last_sent_price = None
 
-        # ── Holder-flow monitor (live dev/insider sell detection) ────────────
+        # Holder-flow monitor (live dev/insider sell detection)
+
         # Watches the token and persists events to the auto-recording's
         # holder_flow table (so the live session is itself backtestable), and
-        # feeds the events into the strategy engine so the iter36 entry gate /
+        # feeds the events into the strategy engine so the entry gate /
         # exit trigger fire in real time.  Parity: the engine checks the same
         # event list the backtester would later replay from the DB.
         # Shared process-wide monitor — one GMGN poller regardless of how many
-        # sessions are active (iter36 rate-limit fix).  iter66: the monitor
+        # sessions are active (rate-limit fix).  the monitor
         # ALSO runs a realtime on-chain dev-sell watcher per token (PumpPortal
         # trade stream × pool-account coin_creator match — no GMGN, no rate
         # limits, no indexing lag); both sources funnel into the same
@@ -302,7 +293,7 @@ class _LiveSession:
         # delivery stays exclusively via the id-cursor pump below so the
         # backtester replays exactly what the live engine saw.
         holder_monitor = None
-        # Track holder-flow events already pushed into the engine.  iter57
+        # Track holder-flow events already pushed into the engine.  
         # parity fix: delivery is by DB row id (lossless), NOT by counting the
         # monitor's in-memory list.  The monitor trims `recent_events` to a
         # 60 s window, so a count-based diff desynchronises the moment an
@@ -314,7 +305,7 @@ class _LiveSession:
         _hf_pump_task = None
         _hf_stop = asyncio.Event()
         _nm_watch_task = None  # no-motion idle-session terminator
-        # iter57 parity fix: holder-flow delivery cursor is the last DB row id
+        # parity fix: holder-flow delivery cursor is the last DB row id
         # pushed into the engine (lossless, matches backtest replay exactly).
         _hf_last_id = {"id": 0}
 
@@ -331,7 +322,7 @@ class _LiveSession:
                         _new = data_store.get_holder_flow_since(rec_id, _hf_last_id["id"])
                         if _new:
                             _hf_last_id["id"] = _new[-1]["id"]
-                            # iter77 fleet: deliver to EVERY engine — each
+                            # fleet: deliver to EVERY engine — each
                             # trader's engine consumes the same event stream,
                             # exactly as separate backtests would.
                             for _tr in traders:
@@ -372,8 +363,6 @@ class _LiveSession:
         try:
             holder_monitor = get_shared_monitor()
             await holder_monitor.start()
-            # pool_address (iter66) lets the realtime on-chain watcher resolve
-            # the dev wallet from the PumpSwap pool account — no GMGN involved.
             _hf_pool = token_info.get("pair_address") \
                 if live_source == "solana_rpc" else None
             holder_monitor.watch_token(real_mint, recording_id=rec_id,
@@ -398,7 +387,8 @@ class _LiveSession:
             _hf_pump_task = asyncio.ensure_future(_holder_flow_pump())
 
 
-            # ── No-motion idle-session terminator ───────────────────────────
+            # No-motion idle-session terminator
+
             # Companion to the in-stream check in _process_stream below: a
             # coin whose trade feed has gone completely silent never yields
             # another tick, so the stream-loop check would starve exactly
@@ -411,8 +401,6 @@ class _LiveSession:
             async def _no_motion_watch():
                 while not self.cancelled.is_set():
                     await asyncio.sleep(5.0)
-                    # iter77 fleet: ANY trader's no-motion stop ends the
-                    # session (a motionless coin means every engine is idle).
                     for _tr in traders:
                         if _tr.no_motion_stop_triggered:
                             logger.warning(
@@ -424,7 +412,6 @@ class _LiveSession:
 
             _nm_watch_task = asyncio.ensure_future(_no_motion_watch())
 
-            # ── Historical warm-up (seeds the recording + the engine) ────────
             try:
                 async with _resolve_sem:
                     hist = await asyncio.wait_for(
@@ -439,7 +426,7 @@ class _LiveSession:
 
                 strategy_results = []
                 for candle in hist:
-                    # iter77 fleet: every engine warms up on the same tape —
+                    # fleet: every engine warms up on the same tape —
                     # identical to N separate sessions' warmups.
                     for _tr in traders:
                         _tr.update_historical_candle(
@@ -480,9 +467,6 @@ class _LiveSession:
                             is_buy_live = True
                         elif tx_live == "sell":
                             is_buy_live = False
-                        # iter66: realtime holder-flow watcher feed (same as
-                        # the recorder loop — whale sells classified here,
-                        # dev trades via the watcher's ATA subscription).
                         if holder_monitor is not None:
                             holder_monitor.observe_trade(real_mint, trade)
                     candle, is_new = aggregator.process_trade(
@@ -508,7 +492,8 @@ class _LiveSession:
                         candle_dict.get("market_cap_usd", 0.0),
                     )
 
-                    # ── Engine feed (iter57 parity fix) ──────────────────────
+                    # Engine feed (parity fix)
+
                     # live_trader.update() MUST run on EVERY tick, including
                     # same-price ticks.  The update call refreshes the
                     # accumulating-candle buffer (volume / buy / sell split /
@@ -519,7 +504,7 @@ class _LiveSession:
                     # tick) carried the full volume the backtester replays.
                     # Only the *UI broadcast* is throttled to price changes
                     # and candle boundaries.
-                    # iter77 fleet: EVERY trader's engine consumes the tick —
+                    # fleet: EVERY trader's engine consumes the tick —
                     # identical to N single-engine sessions on one stream.
                     fleet_results = []
                     for _tr in traders:
@@ -570,7 +555,8 @@ class _LiveSession:
                         })
                     last_sent_price = current_price
 
-                    # ── Market-cap safety floor check ─────────────────────────
+                    # Market-cap safety floor check
+
                     # update_market_cap() blocks until any emergency sell has
                     # fully settled on-chain (or the MCAP_STOP_SELL_TIMEOUT_SECONDS
                     # backstop fires), so by the time it returns True the wallet
@@ -580,9 +566,6 @@ class _LiveSession:
                     if mcap_usd:
                         _mcap_stop = False
                         for _tr in traders:
-                            # iter77 fleet: every engine sees the same mcap
-                            # floor; the FIRST breach stops the session after
-                            # ALL engines' positions are emergency-sold.
                             if await _tr.update_market_cap(float(mcap_usd)):
                                 _mcap_stop = True
                         if _mcap_stop:
@@ -593,7 +576,8 @@ class _LiveSession:
                             self.stop("mcap_floor")
                             break
 
-                    # ── No-motion stop check ─────────────────────────────────
+                    # No-motion stop check
+
                     # Only fires when idle (no position, no pending signals) —
                     # never interrupts an active position.
                     if any(_tr.no_motion_stop_triggered for _tr in traders):
@@ -665,11 +649,6 @@ class _LiveSession:
                     logger.debug("holder monitor teardown failed, continuing session "
                                  "cleanup", exc_info=True)
 
-            # ── Emergency position cleanup before session teardown ──────────
-            # If a position is still open when the session ends, execute an
-            # emergency sell to avoid leaving positions unattended.
-            # iter77 fleet: cleanup every trader (each may hold its own open
-            # position; sell-amount isolation keeps them independent).
             for _tr in traders:
                 try:
                     await _tr.cleanup(reason=self.stop_reason or "session_ended")
@@ -682,8 +661,6 @@ class _LiveSession:
 
             # Wake up any remaining viewers so their UIs reflect the end
             self.broadcast({"type": "session_ended", "reason": self.stop_reason or "session_ended"})
-            # iter77 fleet: completed-session stats aggregate every engine.
-            # iter95: wallet-truth fields aggregate alongside the model PnL.
             _fleet_stats = {
                 "total_trades": 0, "total_pnl_sol": 0.0,
                 "winning_trades": 0, "losing_trades": 0, "engines": [],
@@ -719,7 +696,8 @@ class _LiveSession:
             )
 
 
-# ── New Pairs state ─────────────────────────────────────────────────────────
+# New Pairs state
+
 # New-pair sessions are SERVER-SIDED pure recorders for newly-born pump.fun
 # tokens (pre-migration / bonding-curve phase).  They mirror _LiveSession's
 # detachable-viewer architecture exactly — sessions survive tab closes, tabs
@@ -736,8 +714,6 @@ class _LiveSession:
 
 # Silence-gated DexScreener fallback: PumpPortal per-mint trades can be
 # IP-throttled for hours while the birth feed keeps flowing (measured
-# 2026-08-30).  When no price change has been seen for this many seconds, the
-# fallback poller (below) takes over at a 5 s cadence until trades return.
 NP_FALLBACK_AFTER_S = 20.0   # PumpPortal silence gate
 NP_FALLBACK_POLL_S = 5.0     # poll cadence once engaged
 
@@ -779,7 +755,8 @@ class _NewPairSession:
         self._last_motion_price: float = 0.0
         self.birth_meta = birth_meta or {}
 
-    # ── viewer fan-out (identical contract to _LiveSession) ────────────────
+    # viewer fan-out (identical contract to _LiveSession)
+
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=1000)
@@ -801,8 +778,6 @@ class _NewPairSession:
             self.stop_reason = reason
             self.cancelled.set()
 
-    # ── session runner ────────────────────────────────────────────────────
-
     async def run(self) -> None:
         real_mint = self.real_mint
         timeframe = self.timeframe
@@ -818,7 +793,8 @@ class _NewPairSession:
         ws_client = PumpFunWSClient(real_mint)
         aggregator = CandleAggregator(timeframe)
 
-        # ── Birth-candle seed ───────────────────────────────────────────────
+        # Birth-candle seed
+
         # The creation event carries the token's first real price and volume
         # (the dev's create-buy).  Emit it as the first candle so every
         # recording starts at birth, even for stillborn tokens that never
@@ -868,7 +844,8 @@ class _NewPairSession:
             })
             logger.info(f"[NEWPAIR] Birth candle seeded at {_b_price:.3e} SOL for {real_mint[:8]}…")
 
-        # ── No-motion stop (the ONLY termination policy) ────────────────────
+        # No-motion stop (the ONLY termination policy)
+
         # Fires when no price change has been observed for
         # no_motion_stop_seconds.  Time-driven (not tick-driven) so a token
         # whose trade stream goes completely silent still terminates — a
@@ -888,13 +865,6 @@ class _NewPairSession:
 
         nm_task = asyncio.ensure_future(_no_motion_watch())
 
-        # ── Silence-gated DexScreener fallback poller ───────────────────────
-        # Newborns appear on DexScreener ~45–70 s after birth.  This poller
-        # only speaks when PumpPortal's trade stream has been silent for
-        # _NP_FALLBACK_AFTER_S seconds, so it adds zero overhead whenever
-        # PumpPortal delivers trades normally — but when the per-mint trade
-        # stream is throttled (measured: births flow while trades deliver
-        # nothing), the recording still captures price action.
         async def _ds_fallback_loop():
             import aiohttp
             async with aiohttp.ClientSession() as http:
@@ -1152,7 +1122,8 @@ async def _get_or_create_live_session(
         if session is not None and not session.cancelled.is_set():
             return session, False
 
-        # ── Attach-only guard — never spawn a new session at defaults ─────
+        # Attach-only guard — never spawn a new session at defaults
+
         # Re-attaching viewers (page reload, tab sleep, /api/live/status
         # re-probe) never pass a private key.  Without this guard, the
         # stored-key fallback below silently CREATED a new session at
@@ -1202,12 +1173,6 @@ async def _get_or_create_live_session(
         token_name = token_name or (token_info or {}).get("name", "")
         token_symbol = token_symbol or (token_info or {}).get("symbol", "")
 
-        # ── iter77 multi-engine fleet construction ─────────────────────────
-        # `engine_versions` (comma-separated or list from the dashboard) runs
-        # N engines together on this token: one LiveTrader per engine, all
-        # sharing the wallet/stream/recording, each sized buy_size/N so the
-        # TOTAL notional matches the dashboard field.  Duplicates collapse;
-        # an empty/invalid list falls back to the single `engine_version`.
         fleet_versions = []
         if engine_versions:
             if isinstance(engine_versions, str):
@@ -1240,7 +1205,8 @@ async def _get_or_create_live_session(
         primary_kwargs = dict(engine_params or {})
         calibration_audit = {}
         if engine_version == 2 or 2 in fleet_versions:
-            # ── iter101 CALIBRATION PARITY: stale-echo strip (live-only) ────
+            # CALIBRATION PARITY: stale-echo strip (live-only)
+
             # See strip_stale_sde_echo (calibration_startup.py): the
             # dashboard mirror echoes the previous session's calibrated SDE
             # coefficients into the launch payload; left in place they win
@@ -1261,10 +1227,11 @@ async def _get_or_create_live_session(
                     {k: round(v, 6) if isinstance(v, float) else v
                      for k, v in _stripped.items()})
         logger.info("[Calibration] %s %s", real_mint[:8], calibration_audit)
-        # ── iter101 DEPLOY GUARD: stale-code visibility at session open ────
+        # DEPLOY GUARD: stale-code visibility at session open
+
         # The journal already stamps code_commit/code_dirty into
         # session_open; this makes a stale/dirty process LOUD at open time
-        # instead of silent (INU Sep-29: a session on dirty pre-iter94 code
+        # instead of silent (INU Sep-29: a session on dirty pre-code
         # traded on the raw-vault price basis).  Deliberately does NOT
         # block — the operator decides; the journal records the truth.
         _open_commit, _open_dirty = _code_commit(), _code_dirty()
@@ -1285,7 +1252,7 @@ async def _get_or_create_live_session(
             engine_kwargs=primary_kwargs,
             skip_simulation=skip_sim,
             engine_version=engine_version,
-            # User policy (2026-08-26): terminate motionless coins to free
+            # User policy (): terminate motionless coins to free
             # hardware.  Fires ONLY while fully idle (no position / pending
             # signal / swap), so teardown never needs an emergency sell; the
             # auto-recording is finalised by the normal session teardown.

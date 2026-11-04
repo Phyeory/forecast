@@ -1,5 +1,5 @@
 """
-Strategy Engine V4 — Post-Nuke Reversion (iter77, build prompt
+Strategy Engine V4 — Post-Nuke Reversion (build prompt
 notes/strategy_prompts/V4_post_nuke_reversion.md).
 
 ENTRY FAMILY never tested in this program: buy the CONFIRMED BOUNCE after
@@ -12,7 +12,7 @@ harvest, structurally disjoint from V2's momentum/Bayesian-escape entry.
     from a fresh ATH is where "every single person is waiting" — and on
     clean tokens it gets bought back ~45%.  The bounce confirmation is the
     load-bearing condition: entering on the falling knife is the
-    documented failure mode AND the repo's own iter07/iter37 lesson.
+    documented failure mode AND the repo's own /lesson.
 
 State machine (per recording, 4-state intra-candle ticks):
 
@@ -25,13 +25,13 @@ State machine (per recording, 4-state intra-candle ticks):
           → IN → mechanical exits: nuke_tp / jeet_scratch / nuke_time_stop
 
 Graveyard constraints (binding, from the build prompt):
-    iter07  hard SL caps truncate drawdown-and-rebound winners → V4's only
+    hard SL caps truncate drawdown-and-rebound winners → V4's only
             loss cut is the SHALLOW jeet scratch, never a deep hard SL.
-    iter10  entry cooldowns block profitable re-entries → NO cooldown; cap
+    entry cooldowns block profitable re-entries → NO cooldown; cap
             entries per recording instead (v4_max_entries).
-    iter37  exit-on-submersion + re-entry churn → V4 is entry-side; exits
+    exit-on-submersion + re-entry churn → V4 is entry-side; exits
             are short and mechanical.
-    iter55  long-horizon stagnation timeouts → V4's time stop is a short
+    long-horizon stagnation timeouts → V4's time stop is a short
             trade-lifecycle cap (minutes), part of the entry family's
             definition, swept not assumed.
 
@@ -57,10 +57,9 @@ from strategy_engine import Regime as _V1Regime, \
                             Direction as _V1Direction
 from core.config import family_defaults
 from engines.adapter_base import AdapterBase
+import logging
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Configuration
-# ─────────────────────────────────────────────────────────────────────────────
+logger = logging.getLogger(__name__)
 
 # Every knob default lives in core.config; this dict preserves the
 # exact keys, values and order the rest of the system consumes.
@@ -78,18 +77,11 @@ def _merge_config(user: Optional[dict]) -> dict:
     return cfg
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Machine states
-# ─────────────────────────────────────────────────────────────────────────────
-
 S_WARMUP      = 0   # peak forming, nothing armed yet
 S_WAIT_BOUNCE = 1   # armed; watching the local low + flow confirmation
 S_WAIT_FLAT   = 2   # armed; watching the consolidation box
 S_IN          = 3   # in position; mechanical exits only
 S_DONE        = 4   # drawdown escaped the band — machine retired
-# NOTE: after a full exit the machine RE-ARMS (no cooldown — iter10); only
-# the drawdown-escape (dd > dd_max) permanently ends it.  Re-arm goes to
-# the mode's wait state with the peak/low memory retained.
 
 
 class StrategyEngineV4Adapter(AdapterBase):
@@ -102,8 +94,6 @@ class StrategyEngineV4Adapter(AdapterBase):
     LiveTrader evolve identical state (AGENTS.md #1).
     """
 
-    # ── Constructor ───────────────────────────────────────────────────
-
     def __init__(self, **engine_kwargs):
         cfg = _merge_config(engine_kwargs)
         if str(cfg["v4_mode"]) not in _V4_MODES:
@@ -114,7 +104,6 @@ class StrategyEngineV4Adapter(AdapterBase):
         # cosmetic for V4 — the machine's gates are all v4_* above).
         self._init_v1_compat(cfg, 2.0, float(cfg["v4_tp_pct"]))
 
-        # ── Machine state ──────────────────────────────────────────────
         self.state = S_WARMUP
         self._start_time: Optional[int] = None
         self._peak_mcap: float = 0.0
@@ -138,15 +127,14 @@ class StrategyEngineV4Adapter(AdapterBase):
         self._market_cap_usd: float = 0.0
         self._pool_sol: float = 0.0
 
-    # ── Holder-flow surface (parity no-op — V4 consumes only the tape) ─
+    # Holder-flow surface (parity no-op — V4 consumes only the tape) ─
+
 
     def set_holder_flow_events(self, events: list[dict]):
         pass
 
     def append_holder_flow_events(self, events: list[dict]):
         pass
-
-    # ── V1 surface helpers ────────────────────────────────────────────
 
     def _passes_engine_version_check(self):
         return 4
@@ -166,8 +154,6 @@ class StrategyEngineV4Adapter(AdapterBase):
         self.position_direction = _V1Direction.NONE
         self._peak_price = 0.0
         self._trade_open_time = None
-        # Re-arm to the mode's wait state (no cooldown — iter10); the
-        # machine ends permanently only via drawdown escape.
         if self.state == S_IN:
             self.state = (S_WAIT_BOUNCE if self.cfg["v4_mode"] == "bounce"
                           else S_WAIT_FLAT)
@@ -183,9 +169,6 @@ class StrategyEngineV4Adapter(AdapterBase):
         if not self.in_position:
             return None
         return self.entry_price * (1.0 - abs(float(self.cfg["v4_jeet_tol"])) / 100.0)
-
-    # ── Indicator maintenance (V1 attrs — the same projection the V2/V3
-    #    adapters keep so chart + capture dicts stay meaningful) ────────
 
     def _maintain_v1_indicators(self, o: float, h: float, l: float, c: float):
         if self._prev_close is None:
@@ -244,8 +227,6 @@ class StrategyEngineV4Adapter(AdapterBase):
         self._pre_entry_stable = self._pre_entry_stable_up = self.is_trending
         self._in_local_chop = False
 
-    # ── Tape observables ──────────────────────────────────────────────
-
     def _mcap(self) -> float:
         """Session market cap — market_cap_usd when the tape carries it,
         else the price proxy (c × 1e9).  Both are proportional to price
@@ -290,15 +271,13 @@ class StrategyEngineV4Adapter(AdapterBase):
         snap = super().snapshot()
         try:
             snap["drawdown"] = self._drawdown()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("V4 snapshot drawdown unavailable: %r", exc)
         try:
             snap["trailing_flow_ratio"] = self._trailing_flow_ratio()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("V4 snapshot flow ratio unavailable: %r", exc)
         return snap
-
-    # ── Main entry point (V1 surface) ──────────────────────────────────
 
     def update(
         self,
@@ -350,7 +329,6 @@ class StrategyEngineV4Adapter(AdapterBase):
         v1_signal: _V1Signal = _V1Signal.NONE
         age_s = int(time) - self._start_time
 
-        # ── Peak formation (WARMUP) ─────────────────────────────────────
         if age_s < int(cfg["v4_warmup_s"]):
             self._peak_mcap = max(self._peak_mcap, self._mcap())
             self.regime = _V1Regime.IDLE
@@ -359,7 +337,6 @@ class StrategyEngineV4Adapter(AdapterBase):
             # drawdown is always measured against the HIGH-WATER mcap.
             self._peak_mcap = max(self._peak_mcap, self._mcap())
 
-        # ── Machine advance (only outside positions; exits below) ──────
         if not self.in_position and self.state != S_DONE:
 
             if self.state == S_WARMUP:
@@ -437,7 +414,6 @@ class StrategyEngineV4Adapter(AdapterBase):
                                 self.exit_signal_reason = ""
                                 self.eligibility["mode_fired"] = True
 
-        # ── In position: mechanical exits on EVERY tick ─────────────────
         if self.in_position:
             self.regime = _V1Regime.CONTINUATION
             entry = self.entry_price
@@ -468,7 +444,6 @@ class StrategyEngineV4Adapter(AdapterBase):
             self.state = S_IN
             self._entries_used += 1
 
-        # ── Result dict (V1 contract) ─────────────────────────────────
         minimal = {
             "time": time,
             "regime": self.regime.value,

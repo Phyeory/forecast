@@ -1,7 +1,7 @@
 """
-Strategy Engine V6 — Insider-Dump Absorption Entry (iter77, build prompt
+Strategy Engine V6 — Insider-Dump Absorption Entry (build prompt
 notes/strategy_prompts/V6_dev_sell_absorption.md, re-specified per the
-iter77 Step Zero finding).
+Step Zero finding).
 
     ── Thesis ──
     A verified-insider dump is a COMPLETION event, not just a warning:
@@ -12,7 +12,7 @@ iter77 Step Zero finding).
     next-10-minute drift is positive.  Absorption is the discriminator:
     cascades are dead, absorbed dumps are clean.
 
-    ── Step Zero re-specification (measured, iter77) ──
+    ── Step Zero re-specification (measured, ) ──
     The prompt assumed the `dev` holder_flow class has full coverage.  The
     DB audit found ZERO `tag='dev'` SELL events in the entire history
     (dev appears only on 22 buys).  V6 keys on the verified-insider SELL
@@ -20,10 +20,10 @@ iter77 Step Zero finding).
     (dev / sniper / bundler / rat_trader), of which `bundler` is the
     dominant sell class (5,555 events, full coverage both eras via the
     GMGN registry tags — never coverage-limited the way anonymous whale
-    classification was pre-iter72).  Anonymous `whale` sells are NOT a
+    classification was pre-).  Anonymous `whale` sells are NOT a
     qualifying class (6.7% coverage artifact pre-08-29).
 
-    Raw forward-drift screen on real events (iter77 pre-registration):
+    Raw forward-drift screen on real events (pre-registration):
     A-hold entries: mean +0.42% OLD / +1.08% DEAD (WR 17.5/22.7% under a
     +25% TP / −2% scratch / 600 s proxy) vs cascade-class −9% — the
     absorption conditional carries genuine both-era edge, STRONGER in the
@@ -59,10 +59,6 @@ from strategy_engine import Regime as _V1Regime, \
                             Direction as _V1Direction
 from core.config import family_defaults
 from engines.adapter_base import AdapterBase
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Configuration
-# ─────────────────────────────────────────────────────────────────────────────
 
 # Every knob default lives in core.config; this dict preserves the
 # exact keys, values and order the rest of the system consumes.
@@ -116,8 +112,6 @@ class StrategyEngineV6Adapter(AdapterBase):
     state (AGENTS.md #1).  Parity-neutral with no qualifying events.
     """
 
-    # ── Constructor ───────────────────────────────────────────────────
-
     def __init__(self, **engine_kwargs):
         cfg = _merge_config(engine_kwargs)
         self.cfg = cfg
@@ -125,11 +119,9 @@ class StrategyEngineV6Adapter(AdapterBase):
         # V1-compat echo surface.
         self._init_v1_compat(cfg, 2.0, float(cfg["v6_tp_pct"]))
 
-        # ── Event stream (indexed by timestamp, V2-adapter semantics) ──
         self._events: list[dict] = []
         self._event_times: list[int] = []
 
-        # ── Machine state ──────────────────────────────────────────────
         self.state = S_IDLE
         self._event_t0: int = 0            # current event's timestamp
         self._event_p0: float = 0.0        # price at event delivery
@@ -148,7 +140,8 @@ class StrategyEngineV6Adapter(AdapterBase):
         # V1 indicator attributes (ForwardTester._capture_entry_params).
         self._init_v1_indicators()
 
-    # ── Holder-flow surface (pipeline parity with the V2/V3 adapters) ──
+    # Holder-flow surface (pipeline parity with the V2/V3 adapters)
+
 
     def set_holder_flow_events(self, events: list[dict]):
         """Load all events for this recording (backtest path)."""
@@ -186,8 +179,6 @@ class StrategyEngineV6Adapter(AdapterBase):
         (p_hat holds the current state's close — matching how V2's
         dev_sell_exit observes events)."""
         return self.p_hat if self.p_hat and self.p_hat > 0 else 0.0
-
-    # ── V1 surface helpers ────────────────────────────────────────────
 
     def _passes_engine_version_check(self):
         return 6
@@ -280,8 +271,6 @@ class StrategyEngineV6Adapter(AdapterBase):
         self._pre_entry_stable = self._pre_entry_stable_up = False
         self._in_local_chop = False
 
-    # ── Event delivery ────────────────────────────────────────────────
-
     def _deliver_events(self, time: int) -> bool:
         """Consume qualifying events whose timestamp ≤ this state's time.
 
@@ -319,8 +308,6 @@ class StrategyEngineV6Adapter(AdapterBase):
                 self.state = S_ABSORB
                 self.eligibility["qualifying_events"] += 1
         return newly
-
-    # ── Main entry point (V1 surface) ──────────────────────────────────
 
     def update(
         self,
@@ -360,7 +347,6 @@ class StrategyEngineV6Adapter(AdapterBase):
         v1_signal: _V1Signal = _V1Signal.NONE
 
         if self.in_position:
-            # ── A delivered event while IN → thesis broken → exit ──────
             if new_event:
                 v1_signal = _V1Signal.EXIT
                 self.exit_signal_reason = "dev_resell_exit"
@@ -369,7 +355,8 @@ class StrategyEngineV6Adapter(AdapterBase):
                 if self.state == S_ABSORB:
                     self._trade_open_time = None
             if v1_signal != _V1Signal.EXIT:
-                # ── Mechanical exits, priority order ───────────────────
+                # Mechanical exits, priority order
+
                 self.regime = _V1Regime.CONTINUATION
                 entry = self.entry_price
                 trade_age = int(time) - (self._trade_open_time or int(time))
@@ -389,7 +376,6 @@ class StrategyEngineV6Adapter(AdapterBase):
                     self._update_peak_price(h, l)
 
         elif not self.in_position:
-            # ── Absorption window monitoring ───────────────────────────
             if self.state == S_ABSORB and self._event_t0:
                 self.regime = _V1Regime.EXHAUSTION
                 if c > 0 and (self._window_low <= 0 or c < self._window_low):
@@ -431,7 +417,6 @@ class StrategyEngineV6Adapter(AdapterBase):
             elif self.state in (S_IDLE, S_DEAD):
                 self.regime = _V1Regime.IDLE
 
-        # ── Result dict (V1 contract) ─────────────────────────────────
         minimal = {
             "time": time,
             "regime": self.regime.value,

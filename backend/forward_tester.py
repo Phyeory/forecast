@@ -9,7 +9,7 @@ Settings:
 
 Execution models (``exec_model``):
 
-  "instant" (DEFAULT — mirrors LiveTrader after the 2026-08-30 signal-instant
+  "instant" (DEFAULT — mirrors LiveTrader after the signal-instant
   execution change):
     - Signals from candle state k are executed IMMEDIATELY at that state's
       close price (the price at the instant the signal was generated).
@@ -23,11 +23,11 @@ Execution models (``exec_model``):
       interpolated at that target (walks the realistic open→extreme→extreme→
       close path of the containing candle).  The engine is notified when the
       fill lands.  Measured live signal→confirm latencies (626-session
-      journal audit, 2026-08-30): buys median 10.0 s (p90 15.7 s — includes
+      journal audit, ): buys median 10.0 s (p90 15.7 s — includes
       RPC confirm lag), sells median 2.3 s (p90 4.5 s); on-chain LANDING is
       earlier than confirm, so treat those as upper bounds.
 
-  "legacy" (pre-2026-08-30 n+1 model — byte-identical to every historical
+  "legacy" (pre-n+1 model — byte-identical to every historical
   baseline batch):
     - Signals from candle N are executed during candle N+1 (1-bar delay).
     - The fill time within candle N+1 is determined by a *fill_fraction*
@@ -70,7 +70,7 @@ from core.fills import fill_fraction
 
 def _v2_entry_snapshot(eng) -> dict:
     """
-    iter17: extract the V2 Kramers/Kelly decision snapshot for per-trade
+    extract the V2 Kramers/Kelly decision snapshot for per-trade
     entry-feature logging (counterfactual entry-gate analysis).
 
     Parity-safe: read-only on the engine, write-only into the trade record.
@@ -157,10 +157,6 @@ class ForwardTester:
     LONG-ONLY: buys tokens and sells them back to SOL.
     """
 
-    # iter80: armed/harvest exit classes eligible for deferred fills under
-    # `exit_latency_armed_only` (the loss book stays instant — its forward
-    # drift after fire is NEGATIVE, E[Δp30] = −0.25%, so deferring it is
-    # poison; see analysis/iter80_PREREGISTRATION.md §2).
     _ARMED_EXIT_REASONS = frozenset({
         "gain_retrace", "rate_split_flip:armed", "tp_v2",
         "breakeven_scratch", "reversal_exit",
@@ -177,16 +173,10 @@ class ForwardTester:
         engine_version: int = 1,
         holder_flow_events: Optional[list[dict]] = None,
         holder_flow_latency_seconds: float = 0.0,
-        # ── iter66: execution-level calibration (additive, default OFF) ────
-        # Live Jupiter-routed fills clear the recorded print stream at a
-        # structurally higher level (measured median +27% on entries, +23%
-        # on exits across the 2026-08-26 divergence audit).  These knobs
-        # shift simulated fill prices to that executable level so backtests
-        # can be made representative of live execution.  0.0 = exact legacy
-        # behaviour (×(1+0/100) is an IEEE-exact identity — bit-for-bit).
         exec_offset_pct_buy: float = 0.0,
         exec_offset_pct_sell: float = 0.0,
-        # ── Execution model (2026-08-30 signal-instant execution) ──────────
+        # Execution model (signal-instant execution)
+
         # "instant": fill at the signal-instant price (state close ± slippage),
         #            no n+1-bar wait — the exact mirror of the live trader.
         # "legacy":  pre-change n+1 mid-bar model, byte-identical to every
@@ -206,21 +196,15 @@ class ForwardTester:
         self.priority_fee = 0.0001   # fixed: 0.0001 SOL per transaction
         self.bribe_fee = 0.0          # fixed: no bribe fee
         self.slippage_pct = slippage_pct
-        # iter66: execution-level calibration offsets (default 0.0 = OFF)
         self.exec_offset_pct_buy = float(exec_offset_pct_buy)
         self.exec_offset_pct_sell = float(exec_offset_pct_sell)
         # Execution model selection: "instant" (default, mirrors live),
         # "latency" (instant + measured-latency path-priced fill), or
-        # "legacy" (pre-2026-08-30 n+1 mid-bar model — byte-identical to
+        # "legacy" (pre-n+1 mid-bar model — byte-identical to
         # every historical baseline batch).
         self.exec_model = str(exec_model)
         self.entry_latency_seconds = max(0.0, float(entry_latency_seconds))
         self.exit_latency_seconds = max(0.0, float(exit_latency_seconds))
-        # iter80: when True, only armed/harvest exit reasons defer; the loss
-        # book (kelly_flat / evr_triage / kramers_down_exit / dev_sell_exit /
-        # recording_ended) fills at the signal instant.  Set by
-        # enable_exit_latency() (engine-keyed injection) — see DEFAULT_CONFIG
-        # `v2_exit_delay_armed_only`.
         self.exit_latency_armed_only = False
         if self.exec_model == "legacy":
             self._exec_mode = "legacy"
@@ -242,13 +226,6 @@ class ForwardTester:
 
         # Holder-flow events for this recording (dev/insider wallet trades).
         # Passed into the engine so the V2 adapter can check them as an
-        # entry gate / exit trigger (iter36).  The pipeline layer (backtester
-        # or live trader) is responsible for loading them from the DB.
-        #
-        # holder_flow_latency_seconds: simulates the GMGN poll delay so the
-        # backtester doesn't see events before the live engine could have.
-        # Each event's time is shifted forward by this many seconds before
-        # indexing, matching the live delivery latency.
         if holder_flow_events:
             if holder_flow_latency_seconds > 0:
                 shifted = []
@@ -283,12 +260,12 @@ class ForwardTester:
         self._stashed_exit_params: dict = {}
 
     def enable_entry_latency(self, seconds: float) -> None:
-        """iter78 adoption hook: switch an instant-mode tester into latency
+        """adoption hook: switch an instant-mode tester into latency
         mode with a deferred-entry fill of `seconds` (the adopted 5 s cell).
 
         Called by backtester.run_backtest AFTER construction, keyed on the
         ENGINE's `v2_entry_delay_seconds` knob (default 5.0 since the
-        2026-09-02 adoption) so bare {} runs the adopted execution model.
+        adoption) so bare {} runs the adopted execution model.
         Never called for the legacy exec model; an explicit positive
         `entry_latency_seconds` constructor argument keeps precedence
         (run_backtest only calls this when its own explicit argument is 0).
@@ -301,7 +278,7 @@ class ForwardTester:
         self._exec_mode = "latency"
 
     def enable_exit_latency(self, seconds: float, armed_only: bool = False) -> None:
-        """iter80 hook: deferred EXIT fills (`seconds` after the exit signal
+        """hook: deferred EXIT fills (`seconds` after the exit signal
         fires, priced on the recorded path), optionally restricted to the
         armed/harvest exit classes (`_ARMED_EXIT_REASONS`) — the sell-side
         mirror of `enable_entry_latency`.  Keyed on the ENGINE's
@@ -334,8 +311,6 @@ class ForwardTester:
         """Price along the intra-candle path at frac; the shared contract
         lives in core.state4."""
         return intrabar_price(o, h, l, c, frac)
-
-    # ── Latency-mode price-path resolution ──────────────────────────────────
 
     def _record_path_candle(self, time: int, o: float, h: float, l: float,
                             c: float) -> None:
@@ -406,7 +381,6 @@ class ForwardTester:
         slip = self.slippage_pct / 100.0
         exec_price = raw_price * (1.0 + slip)
 
-        # iter66: optional execution-level calibration.  0.0 → ×1.0 exact identity.
         if self.exec_offset_pct_buy:
             exec_price *= (1.0 + self.exec_offset_pct_buy / 100.0)
 
@@ -517,10 +491,10 @@ class ForwardTester:
             "effective_takeprofit_pct": round(eng._effective_takeprofit_pct(), 4),
             "global_stoploss_pct":      round(eng._global_stoploss_pct(), 4),
 
-            # ── V2 decision snapshot (iter17; getattr-guarded, V1-safe) ──
+            # V2 decision snapshot (; getattr-guarded, V1-safe)
+
             **_v2_entry_snapshot(eng),
 
-            # ── Config / hyperparameters (all of them) ───────────────────
             "cfg_ema_fast_p":                    eng.ema_fast_p,
             "cfg_ema_slow_p":                    eng.ema_slow_p,
             "cfg_atr_period":                    eng.atr_period,
@@ -655,9 +629,6 @@ class ForwardTester:
             "effective_takeprofit_pct": round(eng._effective_takeprofit_pct(), 4),
             "global_stoploss_pct":      round(eng._global_stoploss_pct(), 4),
 
-            # ── V2 decision snapshot at the exit bar (iter20 diagnostic) ──
-            # Same getattr-guarded extractor used in _capture_entry_params.
-            # Write-only; consumed by iter20 diagnostic & paired-diff analytics.
             **_v2_entry_snapshot(eng),
         }
 
@@ -695,7 +666,6 @@ class ForwardTester:
         slip = self.slippage_pct / 100.0
         exec_price = raw_price * (1.0 - slip)
 
-        # iter66: optional execution-level calibration.  0.0 → ×1.0.
         if self.exec_offset_pct_sell:
             exec_price *= (1.0 - self.exec_offset_pct_sell / 100.0)
 
@@ -788,7 +758,7 @@ class ForwardTester:
           latency: like instant, but the fill is deferred to
             t_signal + entry/exit_latency_seconds and priced on the recorded
             intra-candle path at that target (measured-latency overlay).
-          legacy: the pre-2026-08-30 n+1 model — signals queue and execute at
+          legacy: the pre-n+1 model — signals queue and execute at
             the next state with a fill_fraction mid-bar price.  Byte-identical
             to all historical baseline batches.
 
@@ -801,7 +771,6 @@ class ForwardTester:
         closed_trade = None
         opened_trade = None
 
-        # ── Step 0: record the price path / resolve deferred fills ────────
         self._record_path_candle(time, o, h, l, c)
         if self._latency_pending is not None:
             action, trade = self._resolve_latency_fill(time, o, h, l, c)
@@ -812,7 +781,6 @@ class ForwardTester:
                 closed_trade = trade
                 trade_action = "exit"
 
-        # ── Step 1 (legacy only): Execute pending signal from the previous bar ──
         if self._exec_mode == "legacy":
             if self._pending_buy and self.current_trade is None:
                 opened_trade = self._open_long(o, h, l, c, time, getattr(self, '_pending_buy_reason', 'buy'))
@@ -831,7 +799,6 @@ class ForwardTester:
                 self._pending_exit = False
                 self._pending_exit_reason = ""
 
-        # ── Step 2: Run strategy engine on this full candle ───────────────
         result = self.engine.update(time, o, h, l, c, volume,
                                     buy_volume=buy_volume,
                                     sell_volume=sell_volume,
@@ -841,11 +808,6 @@ class ForwardTester:
         signal = result.get("signal", "none")
         regime = result.get("regime", "idle")
 
-        # ── Step 3: Execute (instant) or queue (legacy / latency) ─────────
-        # Snapshots are captured after engine.update so they reflect the
-        # signal state's engine state.  In instant mode they are consumed by
-        # the same-state fill; in latency/legacy mode they are stashed until
-        # the fill resolves.
         if signal == Signal.BUY.value and self.current_trade is None \
                 and not self._pending_buy and self._latency_pending is None:
             reason = f"buy_{regime}"
@@ -890,8 +852,8 @@ class ForwardTester:
                 closed_trade = self._close_long(o, h, l, c, time, reason)
                 trade_action = "exit"
             elif self._exec_mode == "latency":
-                # iter80: under armed_only, loss-book exits fill at the
-                # signal instant exactly as the pre-iter80 model did.
+                # under armed_only, loss-book exits fill at the
+                # signal instant exactly as the pre-model did.
                 if self.exit_latency_armed_only and reason not in self._ARMED_EXIT_REASONS:
                     self._pending_buy = False
                     self._pending_buy_reason = ""
@@ -911,7 +873,6 @@ class ForwardTester:
                 self._pending_buy = False
                 self._stashed_exit_params = self._capture_exit_params(c)
 
-        # ── Fast path: skip expensive output construction ─────────────────
         if not _build_full_result:
             if trade_action:
                 trade_label = ""
@@ -927,7 +888,6 @@ class ForwardTester:
                 }
             return {}
 
-        # ── Step 4: Unrealized PnL using realistic delayed/slipped prices ───────
         unrealized_pnl = 0.0
         unrealized_pnl_pct = 0.0
         current_trade = self.current_trade
@@ -947,7 +907,6 @@ class ForwardTester:
                     * 100
                 )
 
-        # ── Log executed action ───────────────────────────────────────────
         if trade_action:
             display_price = (
                 opened_trade.entry_price if opened_trade else
@@ -960,7 +919,6 @@ class ForwardTester:
                 "regime": regime,
             })
 
-        # ── Build output ──────────────────────────────────────────────────
         trade_label = ""
         if trade_action == "buy" and opened_trade:
             trade_label = opened_trade.entry_reason

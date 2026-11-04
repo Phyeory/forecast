@@ -12,10 +12,6 @@ from websockets.exceptions import ConnectionClosed
 
 logger = logging.getLogger(__name__)
 
-# ── Global Solana RPC rate limiter ────────────────────────────────────────────
-# All PumpSwapRPCClient instances share this semaphore so that at most
-# _RPC_CONCURRENCY requests hit api.mainnet-beta.solana.com at the same time.
-# This prevents 429 errors when monitoring 5+ coins simultaneously.
 _RPC_CONCURRENCY = 3          # max parallel RPC calls across ALL coins
 _RPC_MIN_INTERVAL = 0.4       # minimum seconds between any two RPC calls
 _rpc_semaphore: Optional[asyncio.Semaphore] = None
@@ -38,8 +34,6 @@ def _get_rpc_lock() -> asyncio.Lock:
 
 PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
 
-# iter94: re-poll cadence for a mint's pumpswap pool while a consumer is
-# still attached and no pool has appeared (mid-session graduation pickup).
 _VQ_POLL_S = 120.0
 PUMP_API_V3   = "https://frontend-api-v3.pump.fun"
 DEXSCREENER   = "https://api.dexscreener.com"
@@ -241,7 +235,7 @@ def _pubkey_str(buf: bytes, offset: int) -> str:
 def _decode_pool_account(data: bytes) -> dict:
     """Decode PumpSwap Pool account fields needed for pricing.
 
-    iter94: current pools carry an appended i128 virtual_quote_reserves at
+    current pools carry an appended i128 virtual_quote_reserves at
     offset 245 (after is_mayhem/is_cashback u8s).  Swap pricing uses
     effective_quote_reserves = vault + virtual, so the price feed must add
     it — pools created before the rollout simply have no appended field (0).
@@ -385,7 +379,7 @@ async def get_ds_pair_by_mint(session: aiohttp.ClientSession, mint: str) -> Opti
     Public one-shot wrapper used by the new-pairs recorder's silence-gated
     fallback poller: newborn bonding-curve tokens appear on DexScreener
     ~45–70 s after birth — the price source of last resort when PumpPortal's
-    per-mint trade stream is throttled (measured 2026-08-30: births keep
+    per-mint trade stream is throttled (measured : births keep
     flowing while per-mint trades deliver nothing for hours).
     """
     return await _ds_token(session, mint)
@@ -478,12 +472,6 @@ async def get_historical_candles(
 
 # ---------- Live-trade WebSocket ---------------------------------------------
 
-# ── Shared PumpPortal hub ─────────────────────────────────────────────────
-# A single persistent WebSocket to pumpportal.fun is shared across ALL token
-# subscriptions.  Each mint gets its own asyncio.Queue; the hub fans incoming
-# messages into the correct queue(s).  This avoids the N-connections-per-IP
-# rate limit that causes connection failures when many tokens run in parallel.
-
 class _SharedPumpPortalHub:
     """Process-global multiplexed PumpPortal WebSocket hub."""
 
@@ -496,13 +484,8 @@ class _SharedPumpPortalHub:
         self._pending_subscribe: set[str] = set()
         # reference to the live websockets connection (to send subscribe msgs)
         self._ws = None
-        # iter94: mint -> resolved PumpSwap pool virtual-quote-reserves info
-        # ({"pool_address", "v_sol", "pair_created_at"}).  None / absent =
-        # no pumpswap pool yet (bonding-curve era) — prices pass through.
         self._vq: dict[str, Optional[dict]] = {}
         self._vq_tasks: dict[str, asyncio.Task] = {}
-
-    # ── Internal helpers ──────────────────────────────────────────────
 
     def _schedule_vq_refresh(self, mint: str, delay: float = 0.0):
         """Resolve (or re-resolve) a mint's pool virtual reserves off the hot
@@ -621,10 +604,6 @@ class _SharedPumpPortalHub:
                         )
                         self._pending_subscribe.clear()
                         logger.info(f"[PumpHub] Subscribed {len(all_mints)} mints on reconnect")
-                        # iter94: migration events flip a mint onto its
-                        # PumpSwap pool — the VQ resolver re-resolves then.
-                        # Best-effort: if PumpPortal ignores the method the
-                        # _VQ_POLL_S re-poll still picks graduations up.
                         try:
                             await ws.send(json.dumps(
                                 {"method": "subscribeMigration", "keys": all_mints}))
@@ -669,8 +648,6 @@ class _SharedPumpPortalHub:
                 self._ws = None
             await asyncio.sleep(backoff)
 
-    # ── Public API ────────────────────────────────────────────────────────
-
     def _ensure_running(self):
         """Start the background hub task if not already running."""
         if self._task is None or self._task.done():
@@ -687,8 +664,6 @@ class _SharedPumpPortalHub:
             q: asyncio.Queue = asyncio.Queue(maxsize=512)
             self._queues[mint].add(q)
             first_for_mint = len(self._queues[mint]) == 1
-        # iter94: resolve the mint's pumpswap virtual quote reserves so
-        # pool-era prints are priced on the executable basis.
         self._schedule_vq_refresh(mint)
         if first_for_mint:
             await self._subscribe(mint)
@@ -751,23 +726,12 @@ class PumpFunWSClient:
     @staticmethod
     def _normalise(msg: dict, vq: Optional[dict] = None) -> Optional[dict]:
         try:
-            # ── Timestamp ───────────────────────────────────────────────────
             ts_raw = msg.get("timestamp") or msg.get("tradeCreatedAt")
             if ts_raw:
                 ts = float(ts_raw) / 1000.0 if float(ts_raw) > 1_000_000_000_000 else float(ts_raw)
             else:
                 ts = time.time()
 
-            # ── Spot price from reserves ──────────────────────────────────
-            # For bonding-curve tokens these fields are the curve's VIRTUAL
-            # reserves (CPMM prices on them directly — correct as-is).  For a
-            # graduated token PumpPortal reuses the same fields for the
-            # PumpSwap pool's RAW VAULT balances, but swap pricing runs on
-            # effective_quote_reserves = vault + virtual_quote_reserves
-            # (iter94: V = 17.5845 SOL protocol constant on current pools).
-            # ``vq`` (resolved per-mint by the hub, graduation-gated via the
-            # pool's pairCreatedAt) lifts pool-era prints to the executable
-            # basis so the tape, engine and fills agree.
             v_sol = float(msg.get("vSolInBondingCurve", 0))
             v_tok = float(msg.get("vTokensInBondingCurve", 0))
             mcap_wedge = 1.0
@@ -808,10 +772,6 @@ class PumpFunWSClient:
                 "trader":         msg.get("traderPublicKey", ""),
                 "tx_hash":        msg.get("signature", ""),
                 "market_cap_sol": mcap_sol,
-                # iter28: pool liquidity depth (SOL in bonding curve / pool
-                # vault) — the live signal that flags dead-coin
-                # liquidity-drain dumps, absent from OHLCV.  0.0 when the
-                # source message does not carry reserves.
                 "pool_sol":       (v_sol / 1e9) if v_sol > 0 else 0.0,
             }
         except Exception:
@@ -908,13 +868,6 @@ class PumpFunPollClient:
                 
                 await asyncio.sleep(self.poll_seconds)
 
-
-
-# ── Shared Solana RPC WebSocket hub ──────────────────────────────────────────
-# A single persistent WebSocket to api.mainnet-beta.solana.com is shared across
-# ALL PumpSwapRPCClient instances.  Each vault account gets one subscription;
-# notifications are fanned out to the correct client queues.
-# This eliminates the N-connections-per-IP 429 that occurs with 5+ coins.
 
 class _SharedSolanaWSHub:
     """Process-global multiplexed Solana RPC WebSocket hub."""
@@ -1085,8 +1038,6 @@ class PumpSwapRPCClient:
         self._pool: Optional[dict] = None
         self._base_amount_raw: Optional[int] = None
         self._quote_amount_raw: Optional[int] = None
-        # iter94: pool's virtual_quote_reserves (SOL).  Vault-balance pricing
-        # without it sits below the executable price by (vault+V)/vault.
         self._vq_sol: float = 0.0
         self._last_emitted: Optional[tuple[int, int]] = None
         self._last_emit_ts = 0.0
@@ -1094,15 +1045,9 @@ class PumpSwapRPCClient:
         self._market_cap_sol = 0.0
         self._sol_usd = 0.0
         self._implied_supply_tokens = 0.0
-        # iter15 recorder-fix: previous raw vault balances for delta extraction.
-        # Persisted across drain batches so we can compute net trade volume and
-        # direction (WSOL inflow = buy, WSOL outflow = sell) on each vault
-        # accountSubscribe notification. None until the first observation is
-        # captured, so the first emitted sample carries zero trade volume
-        # (it is a state snapshot, not a trade).
         self._prev_base_raw: Optional[int] = None
         self._prev_quote_raw: Optional[int] = None
-        # FD-leak fix (2026-09-08): the stream() generator holds its aiohttp
+        # FD-leak fix (): the stream() generator holds its aiohttp
         # ClientSession open across its whole life; when the consumer task
         # stops iterating (session teardown), the generator parks at `yield`
         # and the `async with` NEVER exits — the session's pipes/kqueues leak
@@ -1264,12 +1209,6 @@ class PumpSwapRPCClient:
         if base <= 0 or quote <= 0:
             return None
 
-        # iter94: price on EFFECTIVE reserves — the pool's swap math runs on
-        # quote_vault + virtual_quote_reserves (V, a protocol liquidity
-        # credit on current pools; 0.0 on pre-rollout pools = exact legacy
-        # vault ratio).  Without V every emitted price understates the
-        # executable level by (vault+V)/vault and live fills look
-        # "impossibly" above the tape.
         vq = self._vq_sol if self._pool["quote_mint"] == WSOL_MINT else 0.0
         if self._pool["quote_mint"] == WSOL_MINT:
             price = (quote + vq) / base
@@ -1285,11 +1224,6 @@ class PumpSwapRPCClient:
             market_cap_usd = live_price_usd * self._implied_supply_tokens
             market_cap_sol = market_cap_usd / self._sol_usd
 
-        # iter15 recorder-fix: translate raw vault deltas into trade volume +
-        # direction. PumpSwap CP-AMM swaps move reserves in opposite directions
-        # (one vault up, one vault down); a same-direction move or zero delta
-        # is a deposit/withdraw event (LP add/remove or fee accrual), treated
-        # as a non-trade (`tx_type="update"`, no volume).
         token_amount = abs(delta_base_raw) / (10 ** base_decimals)
         sol_amount = abs(delta_quote_raw) / (10 ** quote_decimals)
         # When quote-mint is WSOL (the typical pump memecoin pairing), WSOL
@@ -1322,9 +1256,6 @@ class PumpSwapRPCClient:
             synthetic = False
 
         self._last_emit_ts = time.time()
-        # iter28: pool liquidity depth.  The SOL-side vault of a PumpSwap pool
-        # holds WSOL, so its current balance IS the pool's SOL depth — the
-        # exact liquidity-drain observable that flags dead-coin dumps.
         sol_vault_raw = (self._quote_amount_raw if quote_is_sol
                          else (self._base_amount_raw if base_is_sol else 0)) or 0
         pool_sol = sol_vault_raw / (10 ** 9)
@@ -1389,11 +1320,6 @@ class PumpSwapRPCClient:
                                 next_mcap_refresh = now + 5.0
 
                             # Drain all pending notifications from shared hub.
-                            # iter15 recorder-fix: accumulate net vault deltas
-                            # across the drain batch so a single swap (which
-                            # typically fires both base and quote
-                            # accountSubscribe notifications within milliseconds)
-                            # is recognised as ONE trade with both legs observed.
                             drained = False
                             delta_base_raw = 0
                             delta_quote_raw = 0
@@ -1544,7 +1470,6 @@ class PumpFunRPCClient:
                 sol_amount = 0.0
                 token_amount = 0.0
 
-                # ── Estimate vol from curve changes ──
                 if hasattr(self, "_prev_v_tok") and self._prev_v_tok:
                     tok_diff = abs(v_tok - self._prev_v_tok) / 1e6
                     sol_diff = abs(v_sol - self._prev_v_sol) / 1e9
@@ -1579,8 +1504,6 @@ class PumpFunRPCClient:
                 }
         finally:
             await _solana_hub.unsubscribe(self._curve_pubkey, queue)
-
-# ── New-Pair Stream (for sniper scanner) ──────────────────────────────────────
 
 class NewPairsStream:
     """

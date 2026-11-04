@@ -113,11 +113,11 @@ def run_backtest_batch(
     last_night: bool = False,
     last_12h: bool = False,
     last_days: float = 0.0,
-    # iter67: replay holder-flow events at the live delivery lag instead of
+    # replay holder-flow events at the live delivery lag instead of
     # their exact on-chain timestamp (0.0 = legacy, byte-identical baselines).
     holder_flow_latency_seconds: float = 0.0,
     persist_results: bool = True,
-    # 2026-08-30 execution model (see ForwardTester docstring):
+    # execution model (see ForwardTester docstring):
     #   exec_model="instant" (default) fills at the signal-instant price —
     #   the exact mirror of the live trader.  "legacy" reproduces the
     #   pre-change n+1 mid-bar model byte-identically (historical baselines).
@@ -127,8 +127,8 @@ def run_backtest_batch(
     exec_model: str = "instant",
     entry_latency_seconds: float = 0.0,
     exit_latency_seconds: float = 0.0,
-    # iter66 execution-level calibration (see run_backtest): shifts the
-    # simulated BUY fill to the live-executable level.  iter101: plumbed
+    # execution-level calibration (see run_backtest): shifts the
+    # simulated BUY fill to the live-executable level.  plumbed
     # through the batch driver so premium-sensitivity cells run with only
     # --params style knobs.  Default 0.0 = byte-identical.
     exec_offset_pct_buy: float = 0.0,
@@ -271,11 +271,11 @@ def run_backtest(
     starting_balance: float = 1.0,
     batch_id: Optional[str] = None,
     engine_version: int = 1,
-    # iter66: execution-level calibration — shifts simulated fill prices to
+    # execution-level calibration — shifts simulated fill prices to
     # the live-executable level (default 0.0 = exact legacy behaviour).
     exec_offset_pct_buy: float = 0.0,
     exec_offset_pct_sell: float = 0.0,
-    # iter67: holder-flow delivery latency.  The backtester indexes every
+    # holder-flow delivery latency.  The backtester indexes every
     # holder_flow row at its exact on-chain timestamp, but live can only act
     # once the GMGN smartmoney poll surfaces the row.  Shifting event times
     # forward by the measured live lag reproduces the live decision stream
@@ -285,7 +285,7 @@ def run_backtest(
     holder_flow_latency_seconds: float = 0.0,
     persist_results: bool = True,
     persist_candles: bool = True,
-    # 2026-08-30 execution model (see ForwardTester docstring): "instant"
+    # execution model (see ForwardTester docstring): "instant"
     # fills at the signal-instant price (live mirror); "legacy" reproduces
     # the pre-change n+1 mid-bar model byte-identically.  Latency overlays
     # defer the fill to t_signal + latency on the recorded price path.
@@ -349,13 +349,13 @@ def run_backtest(
         exit_latency_seconds=exit_latency_seconds,
     )
 
-    # iter78 ADOPTION: 5-second deferred-entry execution cell.  The knob
+    # ADOPTION: 5-second deferred-entry execution cell.  The knob
     # lives on the ENGINE (`v2_entry_delay_seconds`, default 5.0 since the
-    # 2026-09-02 adoption), so bare {} runs the adopted model — the same
-    # engine-keyed injection pattern the iter74d MSM adoption used.  An
+    # adoption), so bare {} runs the adopted model — the same
+    # engine-keyed injection pattern the MSM adoption used.  An
     # EXPLICIT entry_latency_seconds argument (run_iteration
     # --entry-latency-seconds / the batch kwarg) overrides the engine knob;
-    # `{"v2_entry_delay_seconds": 0.0}` restores the pre-iter78
+    # `{"v2_entry_delay_seconds": 0.0}` restores the pre-
     # signal-instant fill byte-exactly.  Only the instant/latency exec
     # models consume it (ForwardTester.__init__ merges it into
     # entry_latency_seconds); "legacy" is never altered.
@@ -364,9 +364,9 @@ def run_backtest(
         if _eng_delay > 0.0:
             ft.enable_entry_latency(_eng_delay)
 
-    # iter80: deferred-exit-fill cell — same engine-keyed injection pattern
+    # deferred-exit-fill cell — same engine-keyed injection pattern
     # as the entry block above.  The knob lives on the ENGINE
-    # (`v2_exit_delay_seconds`, default 0.0 = instant exit fill = pre-iter80
+    # (`v2_exit_delay_seconds`, default 0.0 = instant exit fill = pre-
     # byte parity; `v2_exit_delay_armed_only` restricts deferral to the
     # armed/harvest exit classes).  An EXPLICIT exit_latency_seconds
     # argument overrides the engine knob.  Never applied to "legacy".
@@ -476,7 +476,8 @@ def run_backtest(
             batch_id=batch_id,
         )
 
-    # ── Write per-token JSON trade log (only when trades were placed) ────────
+    # Write per-token JSON trade log (only when trades were placed)
+
     if trades:
         _write_trade_log(
             recording_id=recording_id,
@@ -503,7 +504,8 @@ def run_backtest(
     }
 
 
-# ── JSON trade log writer ───────────────────────────────────────────────────
+# JSON trade log writer
+
 
 def _safe_filename(s: str) -> str:
     """Strip characters that are unsafe in filenames."""

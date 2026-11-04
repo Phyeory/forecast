@@ -16,8 +16,8 @@ markdown report to <repo>/trade_report.md.
 
 Usage:
     cd backend && source .venv/bin/activate
-    python trade_report.py                          # iter31_baseline
-    python trade_report.py --batch iter27_g50
+    python trade_report.py
+    python trade_report.py --batch <batch_id>
     python trade_report.py --sol-usd 150            # override SOL->USD rate
 """
 
@@ -37,7 +37,6 @@ from scipy import stats as sps
 logger = logging.getLogger(__name__)
 
 # SOL->USD conversion. No USD price is persisted in price_data.db, so we use a
-# fixed rate. Recordings span 2026-07-27..2026-08-07; user-confirmed SOL = $70.
 DEFAULT_SOL_USD = 70.0
 
 

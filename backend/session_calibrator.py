@@ -1,4 +1,4 @@
-"""session_calibrator.py — Physics-based SDE coefficient calibration (iter84b).
+"""session_calibrator.py — Physics-based SDE coefficient calibration ().
 
 Estimates all 13 free SDE coefficients from the *observed token population*:
 the last N completed recordings before the current session start.  This is the
@@ -43,16 +43,14 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# ── DB path ──────────────────────────────────────────────────────────────────
 _DB_PATH = os.path.join(os.path.dirname(__file__), "data", "price_data.db")
 
-# ── Number of recent recordings to use as population sample ──────────────────
 N_POPULATION_RECS = 50
 
-# ── Minimum recordings required to output calibrated values ──────────────────
 MIN_RECS_REQUIRED = 10
 
-# ── Always-explicit knobs (invariant 4: prevent pop-fallback drift) ───────────
+# Always-explicit knobs (invariant 4: prevent pop-fallback drift)
+
 _ALWAYS_EXPLICIT: dict = {
     "v2_exit_delay_seconds":     20.0,
     "v2_exit_delay_armed_only":   1.0,
@@ -61,14 +59,6 @@ _ALWAYS_EXPLICIT: dict = {
     "v2_holder_flow_exit_enable": 0.0,
 }
 
-# ── Clipping bounds for each estimated coefficient ────────────────────────────
-# (lo, hi) — derived from the SDE physics: values outside these ranges would
-# make the filter either degenerate (collapse) or useless (pure noise).
-#
-# STABILITY RULE: process-noise floors set to ≥ DEFAULT/2.
-# A floor below DEFAULT/2 causes UKF overconfidence (P too tight → ill-conditioned
-# Cholesky → sigma-point degeneration → catastrophic state collapse).
-# This was empirically verified by binary-search isolation on crash recordings.
 _CLIP: dict[str, tuple[float, float]] = {
     "sigma_mu":   (0.05, 0.50),   # drift shock — floor 0.05 (phi-saturation stability)
     "lambda_mu":  (0.02, 0.80),   # drift OU rate
@@ -85,7 +75,6 @@ _CLIP: dict[str, tuple[float, float]] = {
     "tau_max":    (10, 60),
 }
 
-# ── SQL: fetch last N completed recordings before a timestamp ─────────────────
 _REC_QUERY = """
 SELECT id, started_at, stopped_at
 FROM recordings
@@ -98,7 +87,8 @@ ORDER BY started_at DESC
 LIMIT ?
 """
 
-# ── SQL: get candles for a set of recording IDs ───────────────────────────────
+# SQL: get candles for a set of recording IDs
+
 # Requires only that close > 0 (pool_sol may be 0 for pre-vault-diff recordings;
 # the per-recording estimator handles missing pool data gracefully).
 # Causal guard: only candles with time < before_unix are read, so a recording
@@ -114,15 +104,6 @@ ORDER BY recording_id, rowid
 """
 
 
-# ── iter90d: variance-ratio decision horizon (τ) ─────────────────────────────
-# The legacy tau formula (clamp(1/lambda_mu, 10, min(60, duration/8))) conflates
-# the drift mean-reversion timescale with the DECISION HORIZON and saturates at
-# its floor (tau=10) on ~100% of sessions.  The VR estimator instead measures
-# the horizon H* at which directional variance per unit time peaks — the coin's
-# trend-resolution timescale.  H* differentiates coins bimodally (chop-dominant
-# H*=15 vs trend-dominant H*≥30; measured on 40 snapshot recordings): chop
-# coins should keep the engine conservative (short horizon → high P⁰ mass),
-# trend coins reward commitment (long horizon → decisive P±).
 TAU_VR_LADDER = (15, 30, 60, 120, 240, 480)
 # Default scale mapping H* → tau_max; screened by campaign cells.
 TAU_VR_SCALE = 0.25
@@ -144,8 +125,6 @@ def _tau_vr_from_closes(closes: "np.ndarray") -> Optional[float]:
             best_v, best_h = v, float(H)
     return best_h
 
-
-# ── Per-recording statistics ──────────────────────────────────────────────────
 
 def _safe_lag1_autocorr(arr: np.ndarray) -> float:
     """Lag-1 autocorrelation, returns 0.0 on degenerate input."""
@@ -187,21 +166,12 @@ def _compute_rec_stats(candles: np.ndarray, duration_s: float) -> Optional[dict]
     if len(lr) < 4:
         return None
 
-    # ── sigma_mu: std of second-difference of log-returns ────────────────────
-    # The second difference removes linear drift, isolating the innovation.
-    # For OU: Var(Δ²r) ≈ 2·sigma_mu²·dt at short lags.
     if len(lr) >= 3:
         d2r = np.diff(lr)
         sigma_mu_est = float(np.std(d2r)) / math.sqrt(2.0)
     else:
         sigma_mu_est = float(np.std(lr))
 
-    # ── lambda_mu: drift OU rate ──────────────────────────────────────────────
-    # At 1-second candle resolution, individual log-returns are near-random
-    # (lag-1 autocorr ≈ 0), so the tick-level autocorrelation estimator
-    # collapses to the clip ceiling.  Instead, estimate from the coarser
-    # 10-candle smoothed return series to capture the economically meaningful
-    # drift persistence timescale.
     SMOOTH_W = 10
     if len(closes) >= SMOOTH_W * 2:
         coarse_lr = np.array([
@@ -217,7 +187,8 @@ def _compute_rec_stats(candles: np.ndarray, duration_s: float) -> Optional[dict]
         abs_rho1 = max(abs(rho1_price), 1e-6)
         lambda_mu_est = max(-math.log(abs_rho1), 0.0)
 
-    # ── kappa_mu: order-flow → drift coupling ─────────────────────────────────
+    # kappa_mu: order-flow → drift coupling
+
     # Estimate as cov(Δr, Δφ) / var(Δφ), the regression coeff.
     # φ = normalized buy-sell imbalance
     tot_vol = np.maximum(volumes, 1e-9)
@@ -233,14 +204,16 @@ def _compute_rec_stats(candles: np.ndarray, duration_s: float) -> Optional[dict]
     else:
         kappa_mu_est = 0.05
 
-    # ── sigma_phi: order-flow diffusion coefficient ───────────────────────────
+    # sigma_phi: order-flow diffusion coefficient
+
     # The observed std of φ = stationary std = sigma_phi / sqrt(2*alpha).
     # Invert: sigma_phi_sde = obs_std * sqrt(2*alpha).
     # We compute alpha_est below; for the first pass use a provisional alpha
     # from coarse autocorrelation.  After alpha_est is finalised we recompute.
     obs_phi_std = float(np.std(phi_series)) if len(phi_series) > 1 else 0.15
 
-    # ── alpha: order-flow OU rate ─────────────────────────────────────────────
+    # alpha: order-flow OU rate
+
     # φ is also near-random at tick level; use same coarse-smoothing approach.
     if len(phi_series) >= SMOOTH_W * 2:
         coarse_phi = np.array([
@@ -255,7 +228,8 @@ def _compute_rec_stats(candles: np.ndarray, duration_s: float) -> Optional[dict]
         abs_rho1_phi = max(abs(rho1_phi), 1e-6)
         alpha_est = max(-math.log(abs_rho1_phi), 0.0)
 
-    # ── sigma_phi: phi process noise (unmodeled residual in the OU update) ─────
+    # sigma_phi: phi process noise (unmodeled residual in the OU update)
+
     # In the engine, phi propagates deterministically: phi_{t+1} = phi_t*(1-alpha*dt)
     # + beta*obs_ratio*dt.  sigma_phi is the Q-matrix entry for phi — the
     # filter's uncertainty about how much unmodeled noise phi has each step.
@@ -269,18 +243,11 @@ def _compute_rec_stats(candles: np.ndarray, duration_s: float) -> Optional[dict]
     else:
         sigma_phi_est = 0.15
 
-    # ── beta: volume → flow coupling ─────────────────────────────────────────
-    # The engine feeds beta*(buy-sell)/(vol+eps) into the phi observation step.
-    # We want typical flow inputs to have magnitude ~ obs_phi_std.
-    # imbalance_ratio = (buy-sell)/(vol+eps) is dimensionless ±1.
-    # So beta ≈ obs_phi_std / std(imbalance_ratio); clipped to [0.50, 3.00].
     imbalance_ratio = (buy_vol - sell_vol) / np.maximum(volumes, 1e-9)
     std_ratio = float(np.std(imbalance_ratio)) if len(imbalance_ratio) > 1 else 1.0
     # Use observed phi std (not SDE diffusion coeff) for beta scaling
     beta_est = obs_phi_std / max(std_ratio, 1e-6)
 
-    # ── eta: log-variance OU rate ─────────────────────────────────────────────
-    # Use coarse smoothing for the same reason as lambda_mu.
     lr_sq = lr ** 2
     lr_sq_safe = np.maximum(lr_sq, 1e-20)
     log_r2 = np.log(lr_sq_safe)
@@ -297,12 +264,6 @@ def _compute_rec_stats(candles: np.ndarray, duration_s: float) -> Optional[dict]
         abs_rho1_h = max(abs(rho1_h), 1e-6)
         eta_est = max(-math.log(abs_rho1_h), 0.0)
 
-    # ── sigma_h: vol-of-vol ───────────────────────────────────────────────────
-    # Estimate from EWMA variance series rather than raw log(r²).
-    # Raw log(r²) hits -46 on near-zero-return candles, making Δlog(r²)
-    # enormous and always pushing sigma_h to the clip ceiling → filter blowup.
-    # Instead: compute a 10-tick EWMA of r² (smoothed realised variance),
-    # then take the IQR-normalised std of its log-differences.
     if len(lr) >= 20:
         ewma_var = np.zeros(len(lr))
         a_ewma = 2.0 / (SMOOTH_W + 1)   # span-10 EWMA decay factor
@@ -319,7 +280,6 @@ def _compute_rec_stats(candles: np.ndarray, duration_s: float) -> Optional[dict]
     else:
         sigma_h_est = 0.20
 
-    # ── Liquidity parameters — only from candles with real pool data ──────────
     pool_mask = pool_sol > 0
     pool_valid = pool_sol[pool_mask]
     vol_valid  = volumes[pool_mask]
@@ -376,8 +336,6 @@ def _compute_rec_stats(candles: np.ndarray, duration_s: float) -> Optional[dict]
         "sigma_h":   sigma_h_est,
         "duration_s": duration_s,
     }
-    # iter90d: VR decision-horizon statistic (cheap; the OVERRIDES application
-    # is gated by the caller's tau_vr flag — OFF keeps the legacy formula).
     tau_vr = _tau_vr_from_closes(closes)
     if tau_vr is not None:
         stats["tau_vr"] = tau_vr
@@ -389,8 +347,6 @@ def _compute_rec_stats(candles: np.ndarray, duration_s: float) -> Optional[dict]
         stats["zeta"] = zeta_est
     return stats
 
-
-# ── Population aggregation (median across recordings) ────────────────────────
 
 def _aggregate_population(rec_stats: list[dict]) -> dict:
     """Aggregate per-recording stats into population-level medians."""
@@ -420,8 +376,6 @@ def _aggregate_population(rec_stats: list[dict]) -> dict:
     return result
 
 
-# ── Formula layer: population stats → coefficient overrides ──────────────────
-
 def _population_to_overrides(pop: dict, tau_vr: bool = False,
                              tau_scale: float = TAU_VR_SCALE) -> dict:
     """Apply physics formulas to translate population medians → SDE coefficients.
@@ -429,7 +383,7 @@ def _population_to_overrides(pop: dict, tau_vr: bool = False,
     Each formula inverts or maps an estimator derived from the token population
     to the corresponding engine coefficient, then clips to the physical range.
 
-    iter90d: when `tau_vr` is set and the population carries a `tau_vr` median,
+    when `tau_vr` is set and the population carries a `tau_vr` median,
     tau_max comes from the variance-ratio horizon (scale × H*) instead of the
     legacy lambda_mu inversion (which saturates at its floor on every tape).
     """
@@ -439,63 +393,54 @@ def _population_to_overrides(pop: dict, tau_vr: bool = False,
         lo, hi = _CLIP[key]
         return float(np.clip(val, lo, hi))
 
-    # ── sigma_mu: drift shock std (per √s) ───────────────────────────────────
     if "sigma_mu" in pop:
         overrides["sigma_mu"] = clip("sigma_mu", pop["sigma_mu"])
 
-    # ── lambda_mu: drift OU rate ─────────────────────────────────────────────
     if "lambda_mu" in pop:
         lm = pop["lambda_mu"]
         # Very low autocorr → lambda_mu estimate → ∞; cap at 0.80
         # Very high autocorr → lambda_mu → 0; floor at 0.02
         overrides["lambda_mu"] = clip("lambda_mu", lm)
 
-    # ── kappa_mu: order-flow coupling ────────────────────────────────────────
+    # kappa_mu: order-flow coupling
+
     if "kappa_mu" in pop:
         overrides["kappa_mu"] = clip("kappa_mu", abs(pop["kappa_mu"]))
 
-    # ── sigma_phi: order-flow diffusion ──────────────────────────────────────
+    # sigma_phi: order-flow diffusion
+
     if "sigma_phi" in pop:
         overrides["sigma_phi"] = clip("sigma_phi", pop["sigma_phi"])
 
-    # ── alpha: order-flow OU rate ─────────────────────────────────────────────
+    # alpha: order-flow OU rate
+
     if "alpha" in pop:
         overrides["alpha"] = clip("alpha", pop["alpha"])
 
-    # ── beta: volume → flow coupling ─────────────────────────────────────────
     if "beta" in pop:
         # beta_est = sigma_phi / median_vol; scale so typical flow = sigma_phi
         overrides["beta"] = clip("beta", pop["beta"])
 
-    # ── eta: log-variance OU rate ─────────────────────────────────────────────
     if "eta" in pop:
         overrides["eta"] = clip("eta", pop["eta"])
 
-    # ── sigma_h: vol-of-vol ───────────────────────────────────────────────────
     if "sigma_h" in pop:
         overrides["sigma_h"] = clip("sigma_h", pop["sigma_h"])
 
-    # ── theta: liquidity OU rate ──────────────────────────────────────────────
     if "theta" in pop:
         overrides["theta"] = clip("theta", pop["theta"])
 
-    # ── sigma_ell: liquidity diffusion ────────────────────────────────────────
     if "sigma_ell" in pop:
         overrides["sigma_ell"] = clip("sigma_ell", pop["sigma_ell"])
 
-    # ── zeta: liquidity jump magnitude ────────────────────────────────────────
     if "zeta" in pop:
         overrides["zeta"] = clip("zeta", pop["zeta"])
 
-    # ── lambda_0: KDE decay rate = 1 / median_recording_duration ─────────────
     if "duration_s" in pop and pop["duration_s"] > 0:
         lo, hi = _CLIP["lambda_0"]
         lambda_0_est = 1.0 / max(pop["duration_s"], 1.0)
         overrides["lambda_0"] = float(np.clip(lambda_0_est, lo, hi))
 
-    # ── tau_max: decision horizon ─────────────────────────────────────────────
-    # iter90d VR path: tau_max = clamp(tau_scale × H*, _CLIP) where H* is the
-    # variance-ratio argmax horizon — the coin's trend-resolution timescale.
     if tau_vr and "tau_vr" in pop and pop["tau_vr"]:
         lo, hi = _CLIP["tau_max"]
         tau_raw = float(np.clip(tau_scale * pop["tau_vr"], lo, hi))
@@ -518,13 +463,14 @@ def _population_to_overrides(pop: dict, tau_vr: bool = False,
     return overrides
 
 
-# ── iter90: per-coin harvest-geometry estimation ─────────────────────────────
+# per-coin harvest-geometry estimation
+
 # WHY A SECOND PARAMETER CHANNEL: the 13 SDE-coefficient estimators saturate at
-# their stability floors on ~100% of sessions (init diagnostic 2026-09-18:
+# their stability floors on ~100% of sessions (init diagnostic :
 # sigma_mu/kappa_mu/sigma_h/theta/sigma_ell/zeta/tau_max all floor-pinned,
 # sigma_phi/beta exactly DEFAULT) — after clipping, every session receives the
 # same coefficient vector, so the causal calibration stack carries ~zero
-# per-coin information and flips no decisions (iter89 screen: 0/96).
+# per-coin information and flips no decisions (screen: 0/96).
 # The harvest geometry DOES differentiate coins: median forward-60 s max-up
 # spans 2.7%→17.1% (p10→p90) across recordings — real, honest, per-coin signal
 # read directly by the exit cascade (gain_retrace arms at +ARM% peak gain).
@@ -583,8 +529,6 @@ def estimate_geometry_from_candles(
     return {"gain_retrace_arm_pct": arm, "runup_q50_pct": q50}
 
 
-# ── Core calibration function ─────────────────────────────────────────────────
-
 def calibrate_from_population(
     db_path: str,
     before_unix: float,
@@ -603,9 +547,9 @@ def calibrate_from_population(
     n_recs : int
         Number of recent recordings to include in the population sample.
     tau_vr : bool
-        iter90d: use the variance-ratio horizon for tau_max (default legacy).
+        use the variance-ratio horizon for tau_max (default legacy).
     tau_scale : float
-        iter90d: H* → tau_max mapping scale.
+        H* → tau_max mapping scale.
 
     Returns
     -------
@@ -662,9 +606,6 @@ def calibrate_from_population(
             stats = _compute_rec_stats(arr, dur)
             if stats is not None:
                 rec_stats.append(stats)
-            # iter90: per-recording harvest-geometry estimate (amplitude
-            # percentiles are robust on thin tapes where the SDE
-            # autocorrelation estimators saturate).
             try:
                 geom = estimate_geometry_from_candles(arr[:, 4], arr[:, 2])
             except Exception:
@@ -685,7 +626,6 @@ def calibrate_from_population(
         # 6. Apply physics formulas to get coefficient overrides
         overrides = _population_to_overrides(pop, tau_vr=tau_vr, tau_scale=tau_scale)
 
-        # 6b. iter90: population harvest-geometry override (median arm).
         if geom_arms:
             overrides["gain_retrace_arm_pct"] = float(np.median(geom_arms))
 
@@ -703,8 +643,6 @@ def calibrate_from_population(
         logger.warning(f"[SessionCalibrator] calibrate_from_population error: {e}")
         return dict(_ALWAYS_EXPLICIT)
 
-
-# ── iter86: mint-history calibration (user proposal — full token picture) ───
 
 # Minimum prior same-mint candles required for a mint-history estimate.
 MIN_MINT_CANDLES = 120
@@ -760,7 +698,7 @@ def calibrate_from_mint_history(
         rows = conn.execute(
             _MINT_CANDLE_QUERY, (mint, before, lower, before)
         ).fetchall()
-        # iter86d: union the persisted chain-fetch candles (live sessions on
+        # union the persisted chain-fetch candles (live sessions on
         # mints this platform never recorded).  Same table, same filter —
         # live and backtest read identical rows, so parity holds.
         try:
@@ -805,9 +743,6 @@ def calibrate_from_mint_history(
 
     overrides = _population_to_overrides(stats, tau_vr=tau_vr, tau_scale=tau_scale)
 
-    # iter90: harvest geometry from the same prior tape (the token's own
-    # peak supply at tick 0).  Merged into the same overrides dict so it
-    # rides the same calibration-sourcing / audit path as the coefficients.
     try:
         geom = estimate_geometry_from_candles(
             np.array([r[4] for r in rows], dtype=float),   # close
@@ -834,8 +769,6 @@ def calibrate_from_mint_history(
     return overrides
 
 
-# ── Public backtest path (sync) ───────────────────────────────────────────────
-
 def calibrate_from_history(started_at_unix: float) -> dict:
     """Return override dict for a recording starting at `started_at_unix`.
 
@@ -853,8 +786,6 @@ def calibrate_from_history(started_at_unix: float) -> dict:
     """
     return calibrate_from_population(_DB_PATH, float(started_at_unix))
 
-
-# ── iter85: per-coin online estimation ──────────────────────────────────────
 
 # Minimum candles of THIS coin's own tape before a per-coin estimate is
 # trusted.  Below this the tape is too thin for the autocorrelation/
@@ -878,7 +809,7 @@ def estimate_from_session_arrays(
 ) -> dict:
     """Estimate SDE coefficients from ONE coin's own candle tape.
 
-    iter85 per-coin precision calibration: the "population" is the coin's
+    per-coin precision calibration: the "population" is the coin's
     rolling session window rather than the historical recording population.
     Same physics formulas, same _CLIP stability bounds, deterministic
     (pure numpy, no RNG).
@@ -915,8 +846,6 @@ def estimate_from_session_arrays(
         return {}
     return overrides
 
-
-# ── Public live path (async) ──────────────────────────────────────────────────
 
 _live_cache: dict = {"ts": 0.0, "overrides": None}
 _LIVE_CACHE_TTL = 300.0  # 5 minutes
@@ -957,8 +886,6 @@ async def calibrate_async(force_refresh: bool = False) -> dict:
     _live_cache["overrides"] = overrides
     return dict(overrides)
 
-
-# ── Diagnostic helper ──────────────────────────────────────────────────────────
 
 def summarize_population(before_unix: Optional[float] = None) -> dict:
     """Return raw population statistics (for diagnostics / smoke test).

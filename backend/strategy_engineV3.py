@@ -1,5 +1,5 @@
 """
-Strategy Engine V3 — Newborn-Coin Dump-Bottom Recovery (user spec 2026-08-30).
+Strategy Engine V3 — Newborn-Coin Dump-Bottom Recovery (user spec ).
 
 V2's RBPF / UKF / KDE / Kramers machinery, specialised into a strict
 four-phase LIFECYCLE that models the first minutes of a pump.fun newborn:
@@ -93,10 +93,6 @@ _V2_CORE_KEYS = frozenset({
     "rng_seed",
 })
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Lifecycle phases — integer codes mirrored onto V1 Regime vocabulary
-# ─────────────────────────────────────────────────────────────────────────────
-
 P_LAUNCH = 0   # birth pump: inorganic sniper/bundler flow, price rips up
 P_DUMP    = 1   # supply dump: persistent negative flow, liquidity drains
 P_BOTTOM  = 2   # flow exhausts near the lows; posterior re-localises
@@ -120,10 +116,6 @@ _PHASE_NAMES = {
 }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Configuration
-# ─────────────────────────────────────────────────────────────────────────────
-
 # Every knob default lives in core.config; this dict preserves the
 # exact keys, values and order the rest of the system consumes.
 DEFAULT_CONFIG = family_defaults("v3")
@@ -138,10 +130,6 @@ def _merge_config(user: Optional[dict]) -> dict:
         cfg[k] = v
     return cfg
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# StrategyEngineV3Adapter — the V1-surface engine
-# ─────────────────────────────────────────────────────────────────────────────
 
 class StrategyEngineV3Adapter(AdapterBase):
     """
@@ -163,8 +151,6 @@ class StrategyEngineV3Adapter(AdapterBase):
     organic-recovery trade exists without a dump to recover from).
     """
 
-    # ── Constructor ───────────────────────────────────────────────────
-
     def __init__(self, **engine_kwargs):
         cfg = _merge_config(engine_kwargs)
 
@@ -180,7 +166,6 @@ class StrategyEngineV3Adapter(AdapterBase):
         self._init_v1_compat(cfg, float(cfg["v3_stoploss_pct"]),
                              float(cfg["v3_takeprofit_pct"]))
 
-        # ── Lifecycle state ────────────────────────────────────────────
         self.lifecycle_phase: int = P_LAUNCH
         self._launch_high: float = 0.0
         self._dump_low: float = 0.0
@@ -209,7 +194,8 @@ class StrategyEngineV3Adapter(AdapterBase):
         self._holder_flow_index: dict[int, list[dict]] = {}
         self._holder_flow_timestamps: list[int] = []
 
-    # ── Holder-flow surface (pipeline parity with the V2 adapter) ─────
+    # Holder-flow surface (pipeline parity with the V2 adapter)
+
 
     def set_holder_flow_events(self, events: list[dict]):
         """Load holder-flow events for this recording (called by pipeline)."""
@@ -251,8 +237,6 @@ class StrategyEngineV3Adapter(AdapterBase):
                 if amount >= min_usd:
                     return True
         return False
-
-    # ── V1 surface helpers ────────────────────────────────────────────
 
     def snapshot(self) -> dict:
         """Full decision state as a flat dict, plus the V2-core posterior."""
@@ -309,8 +293,6 @@ class StrategyEngineV3Adapter(AdapterBase):
             return None
         sl = self._effective_stoploss_pct()
         return self.entry_price * (1.0 - abs(sl) / 100.0)
-
-    # ── Indicator maintenance (V1-attrs from the V2 posterior) ─────────
 
     def _maintain_v1_indicators(self, o: float, h: float, l: float, c: float):
         """EMAs / ATR / m_hat / confidence — the same projection the V2
@@ -375,8 +357,6 @@ class StrategyEngineV3Adapter(AdapterBase):
         self._pre_entry_stable = self._pre_entry_stable_up = self.is_trending
         self._in_local_chop = False
 
-    # ── Flow windows ───────────────────────────────────────────────────
-
     def _push_flow(self, time: int, buy_vol: float, sell_vol: float):
         """Record one candle's taker flow into the rolling window (state-4
         ticks carry the candle's full buy/sell split; intermediate states
@@ -414,8 +394,6 @@ class StrategyEngineV3Adapter(AdapterBase):
             return None
         tot_buy, tot_sell = wf
         return tot_buy / (tot_buy + tot_sell + 1e-9)
-
-    # ── Lifecycle state machine ────────────────────────────────────────
 
     def _update_lifecycle(self, h: float, l: float, c: float):
         """
@@ -460,8 +438,6 @@ class StrategyEngineV3Adapter(AdapterBase):
                 self._dump_low = l
                 self.lifecycle_phase = P_BOTTOM
             return
-
-    # ── Entry / exit decisions ────────────────────────────────────────
 
     def _passes_entry_gate(self, c: float, decision: dict) -> bool:
         """ALL four conditions required (user spec: only enter with enough
@@ -558,7 +534,6 @@ class StrategyEngineV3Adapter(AdapterBase):
                 self._kramers_down_streak = 0
 
         # 5. Holder-flow dev/insider sell while in position — the newborn
-        #    dump-resumption event (same observable V2's iter43 gate uses).
         if (float(cfg["v3_holder_flow_enable"]) > 0.0
                 and self._has_recent_dev_sell(
                     self._current_time, int(cfg["v3_holder_flow_window_seconds"]))):
@@ -566,8 +541,6 @@ class StrategyEngineV3Adapter(AdapterBase):
             return _V1Signal.EXIT
 
         return None
-
-    # ── Main entry point (V1 surface) ──────────────────────────────────
 
     def update(
         self,
@@ -595,9 +568,6 @@ class StrategyEngineV3Adapter(AdapterBase):
         _prev_close = self._prev_close
         self._maintain_v1_indicators(o, h, l, c)
 
-        # ── V2 core: one obs bucket per tick (same mapping as the V2
-        # adapter — log_return vs the previous close, taker split as the
-        # signed delta, spread proxy |ln(o/c)|).
         sigma_t = self.core._last_sigma_t
         log_return = 0.0
         if _prev_close and _prev_close > 0 and c > 0:
@@ -619,7 +589,6 @@ class StrategyEngineV3Adapter(AdapterBase):
         if _build_full_result or buy_volume + sell_volume > 0.0:
             self.core.compute_potential_and_barriers()
 
-        # ── Lifecycle advance + V1 regime/direction projection ────────
         self._update_lifecycle(h, l, c)
         self.prev_direction = self.direction
         mu = float(state["mu"])
@@ -637,7 +606,6 @@ class StrategyEngineV3Adapter(AdapterBase):
         decision = self.core.get_decision(horizon=int(self.core.cfg.get("tau_max", 10)))
         self._v2_last_decision = decision
 
-        # ── Signal emission ───────────────────────────────────────────
         v1_signal: _V1Signal = _V1Signal.NONE
         min_warmup = max(int(self.cfg["warmup_bars"]), 16)
 
@@ -660,7 +628,6 @@ class StrategyEngineV3Adapter(AdapterBase):
         if self.in_position and v1_signal != _V1Signal.EXIT:
             self._update_peak_price(h, l)
 
-        # ── Result dict (V1 contract) ─────────────────────────────────
         minimal = {
             "time": time,
             "regime": self.regime.value,

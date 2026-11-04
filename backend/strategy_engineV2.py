@@ -89,10 +89,6 @@ except Exception:  # pragma: no cover
         return np.asarray(peaks, dtype=np.int64), None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1.  State & Observation Definitions
-# ─────────────────────────────────────────────────────────────────────────────
-
 # Discrete regime labels (integer codes used inside the particle filter).
 R_IDLE            = 0
 R_CONSOLIDATION   = 1
@@ -136,10 +132,6 @@ class LatentState:
     regime: int = R_IDLE
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2.  Configuration — 16 free parameters with memecoin-tuned defaults
-# ─────────────────────────────────────────────────────────────────────────────
-
 # Names correspond 1:1 to the equations in strategyV2.md §2.
 # Every knob default lives in core.config; this dict preserves the
 # exact keys, values and order the rest of the system consumes.
@@ -156,25 +148,6 @@ def _merge_config(user: dict) -> dict:
         cfg[k] = v
     return cfg
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 3.  Per-particle Unscented Kalman Filter  (continuous layer)
-# ─────────────────────────────────────────────────────────────────────────────
-#
-# State: y = [x, μ, h, φ, ℓ]^T   (5-D continuous latent state per particle).
-# SDEs (discretised Euler-Maruyama, dt = Δt):
-#   x_k  = x_{k-1} + (μ + φ/L)     Δt + σ_eff        ε_x
-#   μ_k  = μ  (1 - λ_μ Δt)         + κ_μ (φ - φ̄) Δt + σ_μ √Δt ε_μ
-#   h_k  = h  (1 - η Δt) + η h̄ Δt                  + σ_h √Δt ε_h
-#   φ_k  = φ  (1 - α Δt)          + β δ/(v+ε) Δt   + σ_φ √Δt ε_φ
-#   ℓ_k  = ℓ  (1 - θ Δt) + θ ℓ̄ Δt - ζ 1_{jump}     + σ_ℓ √Δt ε_ℓ
-#
-# σ_eff = exp(h/2)  — passed in from the discretized volatility equation.
-#
-# The UKF uses the scaled unscented transform (Merwe & Wan):
-#   λ = α² (L + κ) − L ;  Wm_0 = λ/(L+λ),  Wc_0 = λ/(L+λ) + (1−α²+β),
-#   Wm_i = Wc_i = 1/(2(L+λ))   for i>0
-# Sigma points: χ_i = μ ± (√((L+λ) P))_i
 
 _STATE_DIM = 5
 
@@ -230,10 +203,6 @@ def _ukf_predict_step(
     Wc0 = lam / denom_w + (1.0 - alpha * alpha + beta)
     Wi = 1.0 / (2.0 * denom_w)
 
-    # ── Generate 2L+1 = 11 sigma points ──────────────────────────────────
-    # sqrt_P is the lower-triangular Cholesky factor of P_prev, shape (L, L).
-    # Sigma point i (for i in 1..L) = mu + scale · sqrt_P[:, i-1]
-    #                i (for i in L+1..2L) = mu - scale · sqrt_P[:, i-L-1]
     SP = np.empty((2 * L + 1, L))
     for d in range(L):
         SP[0, d] = mu_prev[d]
@@ -246,8 +215,6 @@ def _ukf_predict_step(
             SP[1 + j, r]     = mu_prev[r] + col_val
             SP[1 + L + j, r] = mu_prev[r] - col_val
 
-    # ── Propagate each sigma point through the SDE ─────────────────────
-    # Extract params
     lam_mu   = cfg[0]
     kappa_mu = cfg[1]
     sig_mu   = cfg[2] * sqrt_dt
@@ -270,7 +237,7 @@ def _ukf_predict_step(
         # Liquidity L = exp(ℓ) ; clamp to avoid blow-ups.
         L_t = math.exp(ell) if ell < 15.0 else math.exp(15.0)
         if L_t <= 1e-3:
-            L_t = 1e-3   # iter04 — defensive floor that bounds |phi/L_t| ≤ 50/1e-3 = 5e4
+            L_t = 1e-3   # — defensive floor that bounds |phi/L_t| ≤ 50/1e-3 = 5e4
 
         # x update
         x_new = x + (mu + phi / L_t) * dt + sigma_eff * 0.0  # ε_x sampled below
@@ -510,19 +477,6 @@ def _ukf_update_step(
 
     return mu_post, P_post, Pzz, z_pred
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 4.  Volume-Weighted KDE  (ρ(x, t))
-# ─────────────────────────────────────────────────────────────────────────────
-#
-# ρ(x, t) = Σ_i w_i(t) · K_h(x - x_i)
-#
-#   w_i(t) = exp(-λ_d · (t - t_i))   (λ_d = 1/T_w)
-#   K_h(u) = exp(-u² / (2 h²))       (Gaussian kernel; normalisation folded out
-#                                     by the caller since we operate on ratios).
-#
-# Silverman's rule adapted for volume weights:
-#   h = 0.9 · σ_x · n^{-1/5}        — here σ_x is a rolling weighted std.
 
 @njit(cache=True)
 def _kde_eval_kernel(
@@ -811,8 +765,6 @@ def _barrier_find_kernel(U_grid, x_idx):
             U_grid[x_idx], U_grid[idx_up_peak], U_grid[idx_down_peak])
 
 
-
-
 @njit(cache=True)
 def _kramers_geometry_kernel(grid, U, rho, x_t):
     """Extract barrier geometry and curvatures without allocating d²U/dx²."""
@@ -863,17 +815,6 @@ def _kramers_geometry_kernel(grid, U, rho, x_t):
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 5.  Rao-Blackwellised Particle Filter (RBPF)
-# ─────────────────────────────────────────────────────────────────────────────
-#
-# Discrete layer: each particle carries a regime label `r_i` and an instance
-# of a 5-D UKF state (mu_i ∈ R^5, P_i ∈ R^{5×5}).  Between observations
-# each particle first *predicts* via its UKF (continuous propagation), then
-# the measurement log-likelihood is computed, the particle weight is
-# updated, and finally the standard multinomial resampling step runs when
-# ESS falls below N_p / 2.
-
 # A 1-D float array with the 17 kernel scalars in a fixed canonical order.
 # Indices:
 #   0:λ_μ 1:κ_μ 2:σ_μ 3:η 4:σ_h 5:α 6:β 7:σ_φ 8:θ 9:σ_ℓ 10:ζ
@@ -918,14 +859,12 @@ def _chol_lower_5x5(P):
     return L
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Batched RBPF kernels (iter16 perf).  These replace the three Python
+# Batched RBPF kernels (perf).  These replace the three Python
 # per-particle loops in `RaoBlackwellisedParticleFilter.step()` with one
 # tight njit loop over stacked (N,5)/(N,5,5) arrays.  Numerically byte-
 # equivalent to the prior `_step_particle`/`_posterior_mean`/`derive_regime_
 # topological` Python paths — same predict math, same Gaussian likelihood,
 # same Mehra R update, same topological regime decision tree.
-# ─────────────────────────────────────────────────────────────────────────────
 
 @njit(cache=True)
 def _rbpf_step_batched(
@@ -1020,14 +959,6 @@ def _rbpf_step_batched(
     return resid_mean_sq, pzz_mean
 
 
-
-
-
-
-
-
-
-
 @njit(cache=True)
 def _posterior_mean_batched(mu_arr, weights):
     """
@@ -1066,7 +997,7 @@ def _posterior_var_batched(mu_arr, weights, mean):
     given the posterior mean 5-vector.  Returns the 5-vector of second
     central moments (var_x, var_mu, var_h, var_phi, var_ell).
 
-    iter16j: the Kelly horizon-variance σ²_τ needs the posterior variance
+    the Kelly horizon-variance σ²_τ needs the posterior variance
     of the flow state φ — Var(∫₀^τ φ ds) ≈ Var(φ)·τ².  The legacy code
     plugged in E[φ]² instead, which by the variance identity
     E[φ]² = Var(φ) + E[φ]² systematically overstates the second moment
@@ -1210,7 +1141,7 @@ class RaoBlackwellisedParticleFilter:
     def __init__(self, n_particles: int, x0: float, rng_seed=None):
         N = int(n_particles)
         self.N = N
-        # Deterministic per-filter RNG for the systematic resampler (iter51
+        # Deterministic per-filter RNG for the systematic resampler (
         # parity fix).  When a seed is supplied the resample offset is fully
         # reproducible across runs and across machines (PCG64 is stable for a
         # fixed seed across numpy versions); when None we fall back to the
@@ -1222,13 +1153,6 @@ class RaoBlackwellisedParticleFilter:
         # Initial covariance (mild inflation so the first step has spread).
         P0 = np.eye(5) * 0.01
         sqrt0 = _chol_lower_5x5(P0)
-        # ── Batched state (iter16 perf) ─────────────────────────────────
-        # All per-particle state is held in stacked numpy arrays so the
-        # njit kernels in `_rbpf_step_batched` / `_posterior_mean_batched`
-        # / `_derive_regimes_batched` can iterate the whole population in
-        # one tight loop, eliminating ~600 Python-level dispatch ops per
-        # state update.  Public attributes (`.particles`, `.bar_ell`, etc.)
-        # remain externally observable so call-sites stay unchanged.
         regimes_all = [R_IDLE, R_CONSOLIDATION, R_TREND, R_CONTINUATION,
                        R_EXHAUSTION, R_TRANSITION, R_REVERSAL]
         mu_arr = np.zeros((N, 5), dtype=np.float64)
@@ -1253,15 +1177,15 @@ class RaoBlackwellisedParticleFilter:
 
 
         # Global EMAs (recursive): bar_φ, bar_h, bar_ℓ.
-        # ── OBSERVABLE-ANCHORED ANCHORS (iter02) ───────────────────────────────
+        # OBSERVABLE-ANCHORED ANCHORS ()
+
         # The spec §2 says "recursive EMAs for φ̄_t and h̄_t must be updated
         # globally using the posterior mean estimates".  The original
         # implementation anchored h̄ to EMA(h_posterior) — but a self-
         # reference of an OU target to its own posterior mean has no
         # observable signal: the only stable point is the per-state clamp,
         # so h collapses to -15 catastrophically (see
-        # backend/analysis/iter01_baseline_failure_modes.md §A).
-        #
+        # see RESEARCH_LOG.md).
         # The Bayesian/SV literature standard (cf. Barndorff-Nielsen 1967,
         # Harvey 2016, Heston 1993) anchors the log-variance OU to the
         # *observable realised log-variance* of the return stream,
@@ -1271,11 +1195,9 @@ class RaoBlackwellisedParticleFilter:
         # the OU mean-reversion level is now fed from an observable
         # quantity — i.e. it is exactly the recursive "target" implied
         # by the spec.
-        #
         # h̄_obs = log(EWMA(r²) + ε)                       (anchor for h OU)
         # φ̄_obs = EWMA(δ/(v+ε))                            (anchor for φ OU)
         # ℓ̄ is unchanged (no observable analogue — private L2 not streaming)
-        #
         # The same EMA smoothing coefficient (0.05) is reused; ε is the
         # already-configured `eps_div`, σ_floor² guards log(0).
         self.bar_phi = 0.0
@@ -1295,24 +1217,17 @@ class RaoBlackwellisedParticleFilter:
         self.bar_obs_r2 = 1e-8        # Warm start at var ~ 10^{-8}
         self.bar_obs_dr = 0.0
 
-        # Adaptive innovation-based R estimator (iter02).
-        # Standard Mehra 1970 / Bayesian adaptive Kalman: estimate R
-        # recursively from EWMA(innovation²).  Anchored to the true
-        # measurement-noise process instead of the quoted-spread heuristic
-        # — gives the filter a meaningful residual magnitude even when the
-        # L2 spread is degenerate or the latent σ has stabilised.
-        # Same smoothing coefficient (0.05).
         self.R_ema = 1e-6
 
         self._step_count = 0
 
-    # ── Backwards-compatible `.particles` materialiser (iter16 perf) ─────
+    # Backwards-compatible `.particles` materialiser (perf)
+
     # External code (offline introspection / pytest) may read `.particles`.
     # The batched state is now held in stacked arrays, so we materialise a
     # list of `_Particle` views on demand.  Hot paths must not call this —
     # they should read the stacked arrays directly.
 
-    # ── individual-particle predict / update ─────────────────────────────
     def _step_particle(
         self,
         p: _Particle,
@@ -1335,7 +1250,7 @@ class RaoBlackwellisedParticleFilter:
             Innovation residual (obs_log_return - z_pred).
         Pzz     : float
             Innovation variance.  Together with `resid` these are used by
-            `step()` to update the adaptive R estimate (iter02 fix for
+            `step()` to update the adaptive R estimate (fix for
             failure mode B).
         """
         sigma_eff = math.exp(0.5 * p.mu[2]) if p.mu[2] < 15.0 else math.exp(7.5)
@@ -1391,7 +1306,8 @@ class RaoBlackwellisedParticleFilter:
         """
         self._step_count += 1
 
-        # ── Observable-anchored OU targets (iter02 fix for failure A) ────
+        # Observable-anchored OU targets (fix for failure A)
+
         # Update bar_obs_r2 = EWMA(obs_log_return²) and bar_obs_dr = EWMA(δ-ratio)
         # BEFORE stepping particles, so the OU anchor h̄ used in each
         # particle's predict reflects the latest observable variance.
@@ -1436,7 +1352,7 @@ class RaoBlackwellisedParticleFilter:
         self.bar_h = bar_h_obs
         self.bar_phi = phi_obs
 
-        # 1. Step every particle (batched njit — iter16 perf).
+        # 1. Step every particle (batched njit — perf).
         # In-place predict+update+chol+likelihood on the stacked arrays.
         # `_rbpf_step_batched` returns the residual² / Pzz means used by
         # the Mehra R-ema update below.  All per-particle maths is byte-
@@ -1448,12 +1364,6 @@ class RaoBlackwellisedParticleFilter:
             self.bar_phi, self.bar_h, self.bar_ell,
         )
 
-        # ── Adaptive measurement variance R (iter02 fix for failure B) ──
-        # Standard Mehra 1970 "innovation covariance estimate" — EWMA of
-        # (residual²) per step.  This is no new free parameter: the
-        # smoothing coefficient `a` is the same EMA bandwidth already used
-        # by every other recursive estimator in this class, and the update
-        # is in standard form R_ema ← (1-a) R_ema + a r².
         if math.isfinite(resid_mean_sq) and resid_mean_sq > 0:
             new_R = (1.0 - a) * self.R_ema + a * resid_mean_sq
             if new_R > 0 and math.isfinite(new_R):
@@ -1499,12 +1409,12 @@ class RaoBlackwellisedParticleFilter:
         x_post, mu_post, h_post, phi_post, ell_post = (float(pm[0]), float(pm[1]),
                                                        float(pm[2]), float(pm[3]),
                                                        float(pm[4]))
-        # iter16j: posterior second central moments (needed for the Kelly
+        # posterior second central moments (needed for the Kelly
         # horizon-variance σ²_τ's flow term — see _kramers_escape_and_decision).
         # NB: bar_phi and bar_h are now observable-anchored (above) — they
         # are NOT re-EMA'd against the latent posterior mean, fixing the
         # self-referential positive feedback that catastrophically
-        # collapsed every particle onto the -15 clamp in iter01.
+        # collapsed every particle onto the -15 clamp in 
         self.bar_ell = (1.0 - self._ema_alpha) * self.bar_ell + self._ema_alpha * ell_post
 
         # μ̇ for topological regime derivation — needs a one-step finite
@@ -1517,13 +1427,13 @@ class RaoBlackwellisedParticleFilter:
         self._mu_prev_for_dot = mu_post
         self.mu_dot_post = mu_dot_post
 
-        # ── Per-particle topological regime re-derivation (iter02 fix for
+        # Per-particle topological regime re-derivation (fix for
+
         # failure D).  The spec §4 says regime is a *function* of the
         # continuous posterior phase vector, sampled deterministically.
         # Originally particle regime labels were frozen at initialisation,
         # so the regime posterior distribution stayed near-uniform forever
         # → entropy → confidence ≈ 0 → entry gate never opens.
-        #
         # We re-derive each particle's regime label per step from its own
         # continuous posterior state, exactly as spec §4 mandates.  The
         # population distribution over particle regimes then becomes the
@@ -1563,7 +1473,6 @@ class RaoBlackwellisedParticleFilter:
             "regime_dist": regime_dist,
         }
 
-    # ── helpers ───────────────────────────────────────────────────────────
     def _posterior_mean(self) -> tuple[float, float, float, float, float]:
         """Weighted mean of particle state vectors (NaN-safe) — legacy shim
         over the batched kernel; kept for any external caller."""
@@ -1602,17 +1511,12 @@ class RaoBlackwellisedParticleFilter:
         self._weights   = new_weights
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # 6.  Topological Regime Derivation  (§4 of strategyV2.md)
-# ─────────────────────────────────────────────────────────────────────────────
-#
 # Regime is determined ONLY by sign-patterns of the phase vector
 #     p_t = (μ_t, μ̇_t, φ_t, h_t, ℓ_t, d_t)
-#
 # relative to the dynamically derived noise floors
 #     μ* = σ_t / √τ         (drift noise floor)
 #     φ* = σ_φ / √α         (order-flow noise floor)
-#
 # No fixed numeric thresholds.
 
 def derive_regime_topological(
@@ -1636,16 +1540,12 @@ def derive_regime_topological(
     abs_mu  = abs(mu)
     abs_phi = abs(phi)
 
-    # ── Idle: everything below the noise floor ──────────────────────
     if abs_mu <= mu_star and abs_phi <= phi_star:
         return R_IDLE
 
-    # ── Consolidation: drift below floor but flow is pressuring hard ─
-    #   (low-volatility environment, accumulators at work).
     if abs_mu <= mu_star and abs_phi > phi_star:
         return R_CONSOLIDATION
 
-    # ── Trend: drift above floor and accelerating, flow aligned ─────
     mu_aligned = (mu > 0 and mu_dot >= 0.0) or (mu < 0 and mu_dot <= 0.0)
     if abs_mu > mu_star and mu_aligned:
         # Strong flow / weak exhaustion → trend.  If flow direction has
@@ -1655,7 +1555,6 @@ def derive_regime_topological(
             return R_TREND
         return R_TRANSITION
 
-    # ── Exhaustion: drift above floor but decelerating ──────────────
     mu_decelerating = (mu > 0 and mu_dot < 0) or (mu < 0 and mu_dot > 0)
     if abs_mu > mu_star and mu_decelerating:
         # Strong opposing flow → reversal pending, otherwise mild exhaustion.
@@ -1664,16 +1563,7 @@ def derive_regime_topological(
             return R_REVERSAL
         return R_EXHAUSTION
 
-    # ── Continuation: drift aligned with flow, weak deceleration ────
-    # (post-exhaustion re-launch in the same direction).
     return R_CONTINUATION
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 7.  Market Potential  (§3 of strategyV2.md)
-# ─────────────────────────────────────────────────────────────────────────────
-#
-# U(x, t) = - T_t · log ρ(x, t) + V_liq(x, t)     with  T_t = exp(h_t) / 2
 
 
 class MarketPotential:
@@ -1777,10 +1667,6 @@ class MarketPotential:
         return grid, U, U_up, U_down, T_t, rho
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 8.  Modified Kramers Escape & Decision Logic  (§5 + §6 of strategyV2.md)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _kramers_escape_and_decision(
     cfg: dict,
     potential: MarketPotential,
@@ -1812,33 +1698,17 @@ def _kramers_escape_and_decision(
          grid, U, potential.last_rho, x_t,
      )
 
-    # Barrier energies — KDE-native (iter16e):
-    #   ΔU±_t = U(x±_t) - U(x_t)  =  -T_t · [ln ρ(x±) - ln ρ(x_t)]
-    #
-    # Spec §4.1 eq. 12 replaces the Boltzmann factor with the empirical
-    # density ratio; the drift-work term of §3.4 is therefore subsumed in
-    # the escape exponent and the posterior drift enters the DECISION
-    # through the Kelly moments instead — μ̂_τ = P⁺d⁺ − P⁻d⁻ (§7.5
-    # eq. 34) and the latency cost C = f + s₀ + |μ_t|Δ_lat (§7.1).
-    # This is also a scale necessity: at the 1 s memecoin scale
-    # ½μΔx/T ~ 10–100, so any drift-inclusive exponent swamps the
-    # density geometry with tick-level μ noise (iter16d smoke: 1421
-    # trades / 8 recordings, 15.7% WR — the exponent reduced to a
-    # e^{±μΔx/2T} drift-sign detector again).
-    # With ΔU±/T = Δlnρ ~ O(0.1–5) the Boltzmann factor IS the density
-    # ratio, and the vol-of-vol correction ½(ΔU±/T)²·Var(h) is finite
-    # and unsaturated for the first time on any dataset.
     mu_t = float(state["mu"])
-    # iter21 hypothesis B (REJECTED at smoke test): restoring a fraction of
-    # the iter16d-removed drift-work term `±½·μ_t·Δx_±` in `du_±` causes
+    # hypothesis B (REJECTED at smoke test): restoring a fraction of
+    # the -removed drift-work term `±½·μ_t·Δx_±` in `du_±` causes
     # immediate sign-flip churn on rec70 (NO counter-trade):
-    #   f=0.0 (iter19): 2 trades @ +0.0096 SOL
-    #   f=0.1:         10 trades @ -0.0248 SOL (20% WR — iter09-style churn)
+    #   f=0.0 (): 2 trades @ +0.0096 SOL
+    #   f=0.1:         10 trades @ -0.0248 SOL (20% WR — -style churn)
     #   f=0.5:         27 trades @ -0.0425 SOL (22% WR)
     # The drift-work term couples the OU-process μ_t (which oscillates
     # tick-to-tick) directly to the barrier energy, so each μ sign-flip
-    # now flips k_up/k_down ordering — replicating iter09's pathology even
-    # at small f.  Kept as cfg knob with default 0.0 = iter21_k60_offs40
+    # now flips k_up/k_down ordering — replicating 's pathology even
+    # at small f.  Kept as cfg knob, default 0.0 (the adopted cell).
     # production parity.
     f_drift = float(cfg.get("v2_drift_work_fraction", 0.0))
     if f_drift > 0.0 and idx_up is not None and idx_down is not None:
@@ -1850,28 +1720,14 @@ def _kramers_escape_and_decision(
         du_up   = U_up   - U_basin
         du_down = U_down - U_basin
 
-    # Volatility correction: DISABLED (iter16f).
-    # Spec §4.2 eq. 13 averages the Boltzmann factor over the volatility
-    # posterior:  ⟨e^{-ΔU/T}⟩ ≈ e^{-ΔU/T_t} · exp[½(ΔU/T_t)²·Var(h)].
-    # That Gaussian-moment (lognormal-mgf) expansion is only valid for
-    # |ΔU/T|·√Var(h) ≪ 1.  On fresh 1 s data |ΔU/T| ~ 5–30 and the
-    # correction ANTI-INVERTS the physics: because exp[½(ΔU/T)²Var(h)]
-    # grows faster than e^{-ΔU/T} decays, FARTHER barriers receive
-    # HIGHER escape rates (rec205 trace: du_up/T ≈ 31 → Boltzmann 1e-14
-    # but vol_corr = e^50 clamp → k_up = 8e6 ≫ k_down → P_up ≡ 1.00 on
-    # 690/1352 bars — constant buy pressure, 33 churn trades).
-    # Moreover Var(h) was the hard-coded OU stationary variance
-    # σ_h²/(2η) = 0.2, not a posterior estimate.  The §4.1 eq. 12 exact
-    # density ratio already incorporates the finite-temperature escape
-    # statistics, so the moment correction is dropped entirely.
     var_h = (cfg["sigma_h"] ** 2) / (2.0 * max(cfg["eta"], 1e-6))
     vol_corr_up = 1.0
     vol_corr_down = 1.0
 
-    # ── Modified Kramers escape rates ──────────────────────────────────
+    # Modified Kramers escape rates
+
     # k± = (√(ω₀²·ω_b±²) / (2π γ)) · exp(-ΔU±/T) · vol_corr±
-    #
-    # With the KDE-native potential (iter16d), the Boltzmann factor
+    # With the KDE-native potential (), the Boltzmann factor
     #   exp(-ΔU±/T) = [ρ(x±)/ρ(x_t)] · exp(±½μΔx/T)
     # already IS the §4.1 eq. 12 empirical density ratio (times the
     # drift-work Boltzmann factor of §3.4), so the legacy separate
@@ -1892,9 +1748,6 @@ def _kramers_escape_and_decision(
     k_down = (math.sqrt(omega0_sq * omega_b_down) / (2.0 * math.pi * gamma)) \
              * math.exp(arg_rate_down) * vol_corr_down
 
-    # ── Transition probabilities over horizon τ  (slow-variation approx) ──
-    #   P±(τ) = (k± / k_total) · (1 - exp(-k_total · τ))
-    #   P0(τ) = exp(-k_total · τ)
     k_total = k_up + k_down
     if k_total <= 0 or not math.isfinite(k_total):
         k_total = 1e-9
@@ -1903,19 +1756,10 @@ def _kramers_escape_and_decision(
     P_down = (k_down / k_total) * (1.0 - exp_term)
     P_zero = exp_term
 
-    # ── Kelly sizing n* ─────────────────────────────────────────────────────
-    # μ̂_τ per spec §7.5 eq. 34: the posterior expected log-return over the
-    # horizon is the probability-weighted distance to the barriers,
-    #   μ̂_τ = P⁺(τ)·d⁺ − P⁻(τ)·d⁻,
-    # with d± = |x± − x_t|.  BOUNDED by the barrier geometry, unlike the
-    # legacy extrapolation μ̂_τ = μ_t·τ + (φ_t/α)·τ which projected the
-    # instantaneous 1 s drift 30 s forward (μ̂_τ ~ 1.5–150 log units at
-    # entries → E_star ≈ +12 always → the Kelly gate was vacuous).
-    # σ²_τ keeps the existing posterior variance proxy.
     d_up_dist = abs(float(grid[idx_up]) - x_t) if idx_up is not None else 0.0
     d_down_dist = abs(x_t - float(grid[idx_down])) if idx_down is not None else 0.0
     mu_hat_tau = P_up * d_up_dist - P_down * d_down_dist
-    # iter16j: σ²_τ = posterior variance of the log-return over horizon τ.
+    # σ²_τ = posterior variance of the log-return over horizon τ.
     #   diffusion term:      σ_t²·τ           (random-walk variance ∝ τ)
     #   flow-uncertainty:    Var_RBPF(φ)·τ²   (variance of ∫φ ds)
     # The legacy plug-in used E[φ]² for the flow term — the squared
@@ -1950,23 +1794,6 @@ def _kramers_escape_and_decision(
         n_star = cap
     if n_star < 0:
         n_star = 0.0
-    # ── DIRECTION DETERMINATION (iter03 — spec §5 correct interpretation) ──
-    # The spec §6 says "Determine direction z* ∈ {-1, 0, 1}" and §5 makes
-    # the Bayesian transition probabilities P^+, P^-, P^0 explicit
-    # outputs of the engine.  The mathematically correct determination
-    # (and the form that maximises expected utility over the Bayesian
-    # mixture of upward/downward/zero escape) is the comparison:
-    #     z* = +1  iff  P^+ > P^-   and   P^+ > P^0
-    #     z* = -1  iff  P^- > P^+   and   P^- > P^0
-    #     z* = 0   otherwise.
-    # The original implementation instead used sign(mu_hat_τ) — but
-    # mu_hat_τ is a stochastic point estimate dominated by instantaneous
-    # filter noise (see backend/analysis/iter01_baseline_failure_modes.md
-    # §E, recorded during iter02 testing).  Particles already integrate
-    # the whole posterior over U(x,t), barrier heights, curvatures, and
-    # drift work terms — so P^± are far smoother and more meaningful than
-    # sign(mu_hat_τ).  Using P^± as the decision basis is the spec-
-    # mandated Bayesian form of the decision output.
     direction = 0
     # ≥ (not >) so a degenerate tie `P^+ = P^0` resolves to "no trade"
     if P_up > P_down and P_up > P_zero:
@@ -2008,11 +1835,6 @@ def _kramers_escape_and_decision(
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 9.  The Primary Engine  —  `MemecoinStrategyEngine`
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 class MemecoinStrategyEngine:
     """
     Core mathematical engine as specified in `strategyV2.md`.
@@ -2035,7 +1857,6 @@ class MemecoinStrategyEngine:
         self._alpha_regime = float(self.cfg["alpha"])
         self._tau_default = float(self.cfg["tau_max"])
 
-        # ── State ─────────────────────────────────────────────────────
         self._rbpf = RaoBlackwellisedParticleFilter(
             n_particles=int(self.cfg["n_particles"]),
             x0=0.0,
@@ -2047,24 +1868,13 @@ class MemecoinStrategyEngine:
             lambda_decay=float(self.cfg["lambda_0"]),
         )
 
-        # ── Recursive state holders ───────────────────────────────────
         self._x_prev:       float = 0.0
         self._mu_prev:      float = 0.0
         self._mu_dot:       float = 0.0
         self._bar_count:    int = 0
-        # ── iter05: sustained-posterior-decay tracker (early-exit gate). ──
-        # On each state update the EMA filter checks the one-step posterior
-        # momentum derivative `mu_dot_post`.  We EMA-smooth it (α=0.1) for
-        # noise rejection and count consecutive state-updates for which the
-        # smoothed derivative is negative (i.e. the posterior drift is
-        # rolling toward the down-barrier).  When persist exceeds the
-        # `iter05_decay_persist_bars` threshold AND the trade is deeper
-        # underwater than `iter05_decay_offside_pct`, exit early — before
-        # the kramers P_down ≥ 0.5 flip happens.  Mathematical motivation
-        # in RESEARCH_LOG.md (iter05 hypothesis).
         self._mu_dot_post_ema: float = 0.0
         self._mu_dot_post_decline_persist: int = 0
-        # iter05 fix: tick-level persistence counter (sp) resets to 0 the
+        # fix: tick-level persistence counter (sp) resets to 0 the
         # instant sma turns positive, so on a catastrophic-coin dump the
         # engine fires BUY exactly on a one-tick upward bounce — passing
         # the entry gate even though the prior 50 ticks were all decaying.
@@ -2087,10 +1897,11 @@ class MemecoinStrategyEngine:
         self._last_sigma_t:  float = sigma_t_init
         self._last_sigma_phi: float = self.cfg["sigma_phi"]
 
-        # ── iter85: per-coin online recalibration state ────────────────────
+        # per-coin online recalibration state
+
         # Which cfg keys the initial config explicitly set — per-coin
         # recalibration NEVER overrides an explicit user choice.
-        # iter86: when the constructor kwargs were produced by a CALIBRATION
+        # when the constructor kwargs were produced by a CALIBRATION
         # layer (population / mint-history — pipelines mark them with the
         # `_calibration_sourced` sentinel), the 13 SDE coefficients are NOT
         # "user-explicit": the online recalibration may refine them (the
@@ -2106,7 +1917,6 @@ class MemecoinStrategyEngine:
         )
         self._recal_count: int = 0
 
-    # ── iter85: per-coin recalibration ──────────────────────────────────
     def recalibrate(self, overrides: dict) -> int:
         """Apply per-coin SDE coefficient overrides mid-session.
 
@@ -2142,7 +1952,6 @@ class MemecoinStrategyEngine:
             self._recal_count += 1
         return changed
 
-    # ── Spec method 1: update_state ────────────────────────────────────
     def update_state(self, obs: dict) -> dict:
         """
         Ingest a 1-second bucket of market observations.
@@ -2175,10 +1984,10 @@ class MemecoinStrategyEngine:
         eps_div = self.cfg["eps_div"]
         delta_ratio = o.signed_delta / (o.volume + eps_div)
 
-        # Measurement variance R (iter02 — failure B fix).
+        # Measurement variance R (— failure B fix).
         # Originally a pointwise `max(spread², sigma_floor²)`.  When the
         # latent σ was killed by failure A, R collapsed and Kalman gains
-        # saturated — see backend/analysis/iter01_baseline_failure_modes.md.
+        # saturated (see RESEARCH_LOG.md).
         # The Adaptive Kalman literature (Mehra 1970) estimates R
         # recursively from the innovation sequence directly.  The RBPF
         # updates `self._rbpf.R_ema` from the previous step's residual²
@@ -2197,7 +2006,6 @@ class MemecoinStrategyEngine:
         vol_ref = max(L_t, 1e-6)
         jump_indicator = 1.0 if o.volume > 3.0 * vol_ref else 0.0
 
-        # ── 1. Run one RBPF step (continuous predict/update) ────────
         state = self._rbpf.step(
             cfg=self.cfg,
             cfg_arr=self._cfg_arr,
@@ -2208,7 +2016,6 @@ class MemecoinStrategyEngine:
             R_meas=R_meas,
         )
 
-        # ── 2. Update derived quantities (μ̇_t, σ_t, σ_φ) ─────────────
         self._mu_dot = (state["mu"] - self._mu_prev) / max(o.dt, 1e-6)
         self._mu_prev = state["mu"]
         # σ_t² = exp(h_t)
@@ -2218,11 +2025,6 @@ class MemecoinStrategyEngine:
         # σ_φ approximation: OU stationary std = σ_φ_param / √(2 α)
         self._last_sigma_phi = self.cfg["sigma_phi"] / math.sqrt(2.0 * max(self.cfg["alpha"], 1e-6))
 
-        # ── iter05: EMA-smoothed posterior momentum derivative + sustained-
-        # decline counter.  Used by the adapter's leading-decline exit gate.
-        # The raw one-step mu_dot_post is too noisy; an EMA on α=0.1 gives a
-        # 10-step ~ 1-half-life-of-30-seconds signal that nevertheless
-        # precedes the Kramers escape-rate integral by a few seconds.
         mu_dot_post_raw = getattr(self._rbpf, "mu_dot_post", 0.0)
         a_ema = 0.1
         self._mu_dot_post_ema = (1.0 - a_ema) * self._mu_dot_post_ema + a_ema * mu_dot_post_raw
@@ -2230,12 +2032,6 @@ class MemecoinStrategyEngine:
             self._mu_dot_post_decline_persist += 1
         else:
             self._mu_dot_post_decline_persist = 0
-        # iter05 fix: sliding-window decay prevalence.  Push the current
-        # tick's sign to a maxlen-N deque; maintain a rolling count of
-        # negative-sign ticks.  When the deque is full and ≥
-        # `iter05_decay_window_thresh` of the last N ticks had sma<0, we
-        # consider the trajectory "locked downward" and the entry-side
-        # block is eligible to fire.
         sign_neg = self._mu_dot_post_ema < 0.0
         # The deque auto-discards the oldest when at maxlen; we replay
         # the evicted value into the neg_count below.
@@ -2250,9 +2046,6 @@ class MemecoinStrategyEngine:
         L_t_now = math.exp(state["ell"]) if state["ell"] < 15 else math.exp(15)
         self._last_L_t = float(L_t_now)
 
-        # ── 3. Add this bucket to the trade-KDE buffer ─────────────────
-        # Convert the log-return to an absolute log-price for storage.
-        # We use the running predicted x as the bucket's representative price.
         abs_log_price = state["x"]
         # Only add if the volume is non-trivial (avoid cluttering buffer).
         if o.volume > 0:
@@ -2260,7 +2053,6 @@ class MemecoinStrategyEngine:
             now_t = float(self._bar_count)
             self.potential.add_trade(abs_log_price, o.volume, now_t)
 
-        # ── 4. Topological regime derivation ──────────────────────────
         regime = derive_regime_topological(
             mu=state["mu"], mu_dot=self._mu_dot,
             phi=state["phi"], h=state["h"], ell=state["ell"],
@@ -2278,7 +2070,6 @@ class MemecoinStrategyEngine:
 
         return state
 
-    # ── Spec method 2: compute_potential_and_barriers ─────────────────
     def compute_potential_and_barriers(self) -> dict:
         if self._last_state is None:
             return {}
@@ -2302,7 +2093,6 @@ class MemecoinStrategyEngine:
         }
         return self._last_potential
 
-    # ── Spec method 3: get_decision ───────────────────────────────────
     def get_decision(self, horizon: int = 30) -> dict:
         if self._bar_count < int(self.cfg["warmup_bars"]):
             return {
@@ -2346,27 +2136,15 @@ class MemecoinStrategyEngine:
         return best
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 10.  Convenience exports
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # 11.  V1-compatible Adapter
-# ─────────────────────────────────────────────────────────────────────────────
-#
 # The production pipelines (ForwardTester, Backtester, LiveTrader, main.py)
 # speak V1's `update(time, o, h, l, c, ...)` / `{regime, signal, ...}` API.
 # `StrategyEngineV2Adapter` exposes that exact surface while internally
 # running V2's `MemecoinStrategyEngine`.
-#
 # The mapping:
-#
 #   V1 OHLCV bar  →  V2 1-second bucket `obs`  (log_return = ln(c/prev_c), etc.)
 #   V2 regime    →  V1 Regime enum  (some V2 codes project onto the same name)
 #   V2 decision  (direction, E_star, n_star) →  V1 Signal enum
-#
 # The adapter also mirrors every attribute the pipeline layers read on the
 # engine object (m_hat, ema_fast_val, trend_confidence, etc.).  They are
 # recomputed from the V2 latent state so the backtester / ForwardTester /
@@ -2404,18 +2182,12 @@ class StrategyEngineV2Adapter(AdapterBase):
         entry) carried over from V1 if configured.
     """
 
-    # ── List of V1 Regime / Signal / Direction members used as enums ──
-    # We assign instances of V1 enums so adapter.regime.value matches V1.
-
     def __init__(self, **engine_kwargs):
         # Pull V1 TPSL params if provided (passed through engine_kwargs).
         self._v1_takeprofit_low  = float(engine_kwargs.pop("takeprofit_pct_low", v2_default("takeprofit_pct_low")))
         self._v1_takeprofit_high = float(engine_kwargs.pop("takeprofit_pct_high", v2_default("takeprofit_pct_high")))
         self._v1_stoploss_low    = float(engine_kwargs.pop("stoploss_pct_low", v2_default("stoploss_pct_low")))
         self._v1_stoploss_high   = float(engine_kwargs.pop("stoploss_pct_high", v2_default("stoploss_pct_high")))
-        # Hard-stop removed (iter18b): stoploss_pct=0 disables all price-floor
-        # exits.  The engine relies exclusively on Bayesian posterior exits
-        # (Kramers P_down, reversal regime, gain-retrace, mu_drift_down_exit).
         self.stoploss_pct         = float(engine_kwargs.pop("stoploss_pct", v2_default("stoploss_pct")))
         self.takeprofit_pct       = float(engine_kwargs.pop("takeprofit_pct", v2_default("takeprofit_pct")))
         # warmup counts engine update() intakes (bars).  100 full candles = 400 sub-states.
@@ -2441,10 +2213,6 @@ class StrategyEngineV2Adapter(AdapterBase):
         # Re-inject needed control knobs that don't crash V2.
         if self._warmup_bars:
             v2_cfg.setdefault("warmup_bars", self._warmup_bars)
-        # iter86b: forward the calibration-sourced sentinel (not a DEFAULT_CONFIG
-        # key, so the filter above would strip it) — it tells the core which
-        # SDE coefficients came from a calibration layer and may be refined
-        # by the per-coin online recalibration.
         if "_calibration_sourced" in engine_kwargs:
             v2_cfg["_calibration_sourced"] = engine_kwargs["_calibration_sourced"]
 
@@ -2458,30 +2226,18 @@ class StrategyEngineV2Adapter(AdapterBase):
         self.prev_direction: _V1Direction = _V1Direction.NONE
         self.trend_before_exhaustion: _V1Direction = _V1Direction.NONE
 
-        # ── Position state tracked by V1 hooks ──
         self.in_position = False
         self.entry_price = 0.0
         self._peak_price = 0.0
-        self._pool_sol = 0.0   # iter28: latest pool liquidity depth (SOL in curve)
-        self._be_armed = False  # iter17 breakeven-scratch arming flag
+        self._pool_sol = 0.0   # latest pool liquidity depth (SOL in curve)
+        self._be_armed = False  # breakeven-scratch arming flag
         self.entry_bar_count = 0
         self.exit_signal_reason = ""
-        # iter18a: post-entry EMA-smoothed mu for noise rejection
-        # (alpha=0.1, ~10s half-life).  The raw posterior mu oscillates
-        # every tick at 1s scale; EMA smoothing is the same noise-
-        # rejection technique used in iter05 mu_dot_post_ema.  Used to
-        # populate _mu_post_neg_window below (which iter21 hypothesis K
-        # reads via _check_exit_v2's kelly_flat guard).
         self._mu_post_ema: float = 0.0
-        # iter18a: sliding window fraction tracker (deque of bool flags).
-        # Fraction of last N ticks with smoothed mu_t < 0, maintained
-        # identically to _mu_dot_post_sign_window in iter05.  Read by the
-        # iter21 kelly_flat μ-guard (hypothesis K, default OFF).
         import collections as _col18
         self._mu_post_neg_window: _col18.deque = _col18.deque(maxlen=60)
         self._mu_post_neg_count: int = 0
 
-        # ── "Indicator" attributes the V1 capture reads ──
         self.m_hat = 0.0
         self.prev_m_hat = 0.0
         self.p_hat = 0.0
@@ -2532,26 +2288,10 @@ class StrategyEngineV2Adapter(AdapterBase):
         self._prev_close: Optional[float] = None
         self._v1_trend_confidence = 0.0
 
-        # ── iter85: per-coin online recalibration ─────────────────────────
-        # Rolling candle tape of THIS coin (completed candles only — volume
-        # lands on the 4th intra-candle state).  Mirrors the
-        # _candle_volume_history dedupe pattern above.
-        # iter86b adoption: defaults source from DEFAULT_CONFIG (the knobs are
-        # adopted production config, single source of truth — the adapter's
-        # old hardcoded 0.0 fallback silently disabled the layer for bare-{}
-        # engine_params).
         self._v2_percoin_enable = float(
             engine_kwargs.get("v2_percoin_cal_enable",
                                DEFAULT_CONFIG["v2_percoin_cal_enable"])
         ) > 0.0
-        # iter86c: when v2_percoin_requires_mintcal is set, the online layer
-        # additionally requires the mint-history layer to have supplied the
-        # session's coefficients (the _calibration_sourced sentinel — set by
-        # the pipelines only for mint-layer sessions).  On thin-mint/popcal
-        # sessions the online estimates are tape-noise (true full-DB burn
-        # evidence: train/holdout imbalance ±1.3 SOL).  An EXPLICIT
-        # v2_percoin_cal_enable in the caller's kwargs bypasses the gate
-        # (explicit beats implicit — surgical control stays possible).
         _percoin_explicit = "v2_percoin_cal_enable" in engine_kwargs
         _requires_mint = float(
             engine_kwargs.get("v2_percoin_requires_mintcal",
@@ -2588,13 +2328,6 @@ class StrategyEngineV2Adapter(AdapterBase):
         self._percoin_next_t: float = -math.inf
         self._percoin_log: list[dict] = []        # causal evidence: per-attempt bounds
 
-        # ── iter90: per-coin harvest-geometry recalibration ────────────────
-        # The SDE-coefficient estimators saturate at the stability floors on
-        # ~100% of sessions (constant output → decision-neutral), while the
-        # harvest arm tracks a statistic that genuinely differentiates coins
-        # (median forward-60s run-up, p10→p90 ≈ 2.7%→17.1%).  The geometry
-        # layer estimates `gain_retrace_arm_pct` at tick 0 (init layers) and
-        # refines it on the same causal schedule as the SDE layer.
         self._v2_harvestcal_enable = float(
             engine_kwargs.get("v2_harvestcal_enable",
                               DEFAULT_CONFIG["v2_harvestcal_enable"])) > 0.0
@@ -2624,7 +2357,8 @@ class StrategyEngineV2Adapter(AdapterBase):
             and (_geo_sourced or _geo_explicit)
             and (not _geo_requires_mint or _mint_sourced or _geo_explicit))
 
-        # ── iter90d: VR decision-horizon flag for the per-coin layer ───────
+        # VR decision-horizon flag for the per-coin layer
+
         # Threaded into estimate_from_session_arrays so the online refinement
         # re-estimates tau from the same VR statistic the init layers used
         # (OFF = legacy lambda_mu inversion, byte-parity).
@@ -2635,22 +2369,17 @@ class StrategyEngineV2Adapter(AdapterBase):
             engine_kwargs.get("v2_tau_vr_scale",
                               DEFAULT_CONFIG["v2_tau_vr_scale"]))
 
-        # ── V1 config knobs the capture enumerates (cfg_*) ──
-        # We echo them onto `eng` so the ForwardTester's _capture_entry_params
-        # dictionary doesn't AttributeError.  All defaults, mirroring V1.
         self.confidence_high = float(engine_kwargs.pop("confidence_high", v2_default("confidence_high")))
         self.confidence_low = float(engine_kwargs.pop("confidence_low", v2_default("confidence_low")))
         self.entry_confidence_high = float(engine_kwargs.pop("entry_confidence_high", v2_default("entry_confidence_high")))
         self.entry_confidence_low = float(engine_kwargs.pop("entry_confidence_low", v2_default("entry_confidence_low")))
         self.confidence_very_high = float(engine_kwargs.pop("confidence_very_high", v2_default("confidence_very_high")))
-        # V2 Bayesian entry floor on P_up — iter17a counterfactual-validated
-        # (404-trade logged-batch replay) — 0.62 raised WR & PnL ~7× vs 0.35.
         self._v2_p_up_min = float(engine_kwargs.pop("v2_p_up_min", v2_default("v2_p_up_min")))
-        # iter17: counterfactual-validated entry/exit overlays (see
-        # RESEARCH_LOG.md iter17 — 404-trade logged-batch replay).
-        # Defaults below = the iter17a validated config (the
-        # `iter17a.json` params file merely re-states them; the default
-        # path now reproduces iter17a exactly on a full batch).  All
+        # counterfactual-validated entry/exit overlays (see
+        # RESEARCH_LOG.md — 404-trade logged-batch replay).
+        # Defaults below = the validated config (the
+        # `json` params file merely re-states them; the default
+        # path now reproduces exactly on a full batch).  All
         # knobs remain overridable via engine_kwargs for sweeps:
         #   v2_sigma_t_min:        entry gate on posterior σ_t (vol floor)
         #   gain_retrace_arm_pct:  arm profit-lock at +A% peak gain
@@ -2658,66 +2387,25 @@ class StrategyEngineV2Adapter(AdapterBase):
         #   breakeven_arm_dd_pct:  arm scratch exit after -X% drawdown
         #   breakeven_buffer_pct:  scratch exit level (entry*(1+buf))
         self._v2_sigma_t_min       = float(engine_kwargs.pop("v2_sigma_t_min", v2_default("v2_sigma_t_min")))
-        # iter18b_opt optimized exit parameters
         self._gain_retrace_arm_pct  = float(engine_kwargs.pop("gain_retrace_arm_pct", v2_default("gain_retrace_arm_pct")))
-        # iter27: give_frac default 0.4 → 0.5.  Post-exit regret analysis on the
-        # 606-recording fresh dataset showed gain_retrace exited far too early
-        # (median winner ran a further +48.7% after exit).  Full-batch sweep:
-        #   g=0.4 (legacy):  407 trades, 77.6% WR, +0.818 SOL, PF 1.31
-        #   g=0.5 (accept):  403 trades, 75.9% WR, +1.077 SOL, PF 1.41  (+31.7% PnL)
-        #   g=0.6:           400 trades, 73.5% WR, +1.015 SOL, PF 1.37
-        # g=0.5 is the Pareto-optimal give-back: captures runner upside via
-        # later kramers/tp_v2 exits while limiting the modest-winner→scratch
-        # conversion that erodes win rate at looser trails.
         self._gain_retrace_give_frac = float(engine_kwargs.pop("gain_retrace_give_frac", v2_default("gain_retrace_give_frac")))
-        # iter63 diagnostic — write-only per-tick posterior capture.  When set
-        # to a file path, every in-position tick appends one JSON line with
-        # the Kramers geometry (k_up/k_down), escape probabilities, and the
-        # decision snapshot.  Used ONLY by offline analysis harnesses
-        # (analysis/iter63_capture.py).  Default "" = OFF → zero state/flow
-        # change → byte-identical production behaviour (parity-proven).
+        # Write-only per-tick posterior capture for offline harnesses.
+        # Default "" = OFF: zero state or flow change.
         self._v2_debug_tick_log = str(engine_kwargs.pop("v2_debug_tick_log", v2_default("v2_debug_tick_log")) or "")
         self._breakeven_arm_dd_pct  = float(engine_kwargs.pop("breakeven_arm_dd_pct", v2_default("breakeven_arm_dd_pct")))
         self._breakeven_buffer_pct  = float(engine_kwargs.pop("breakeven_buffer_pct", v2_default("breakeven_buffer_pct")))
-        # iter18b: reversal-regime persistence guard.  Number of consecutive
-        # REVERSAL-regime bars required before the reversal_exit fires.
-        # Default 2 (optimized in iter18b_opt): requires 2s of sustained
-        # REVERSAL posterior majority to distinguish trend reversal from noise.
         self._reversal_exit_bars    = int(engine_kwargs.pop("reversal_exit_bars", v2_default("reversal_exit_bars")))
-        # ── iter21: sustained-no-long-Kelly exit ("kelly_flat" / exit #7). ──
-        # Bayesian decision-theoretic theorem: a long position ceases to be
-        # optimal when the engine's own per-tick Kelly utility for "stay long"
-        # goes non-positive.  Entry gate is `direction == +1 AND E_star > 0`;
-        # the exit-side mirror is "engine says not-long for C_K consecutive
-        # ticks AND the trade is offside".  Static-mask analysis
-        # (backend/analysis/iter20_static_mask_v2.py) on iter19 rec-data:
-        #   K=80 ticks, offside=-20%: losers saved +0.385 / winners lost
-        #   -0.120 ⇒ net +0.265 over 36-recording cohort.
-        # Offside guard prevents chopping trades near breakeven that then
-        # recover into winners (winners chop at ≥+3% in the no-guard mask).
-        # _no_long_exit_bars counts consecutive ticks where direction != +1
-        # AND E_star <= 0 (engine wants flat).  PRODUCTION DEFAULTS (iter21
-        # acceptance vs iter16_baseline_full): no_long_exit_bars=60,
-        # no_long_offside_pct=40 (full batch: 259 trades, 77.2% WR, +0.884
-        # SOL, PF 1.55, exp +0.00341 — all 5 paired-diff gates cleared vs
-        # iter16_baseline_full; +62% PnL vs iter19_clean). The K=60 + offs=40
-        # tuning minimises W→L regressions (4) at the cost of catching fewer
-        # losers than K=20 — this is the optimal trade per static-mask
-        # analysis (winner cut at offs=-40% drops to ~1 from ~10).
-        # _no_long_offside_pct: the trade must be at least X% underwater
-        # before this exit can fire (guards against the natural consolidation
-        # E_long-neg phases that healthy winners pass through).
+        # sustained-no-long-Kelly exit ("kelly_flat" / exit #7).
+
+        # kelly_flat mirrors the entry gate: entry demands direction +1 and
+        # E_star > 0; the exit fires after no_long_exit_bars not-long ticks
+        # once the trade is no_long_offside_pct under water (the offside
+        # floor spares healthy winners' consolidation dips).
         self._no_long_exit_bars     = int(engine_kwargs.pop("no_long_exit_bars", v2_default("no_long_exit_bars")))
         self._no_long_offside_pct   = float(engine_kwargs.pop("no_long_offside_pct", v2_default("no_long_offside_pct")))
-        # iter21 hypothesis K (μ-persistence guard): require that
-        # fraction of trailing 60 ticks with negative EMA-smoothed μ_t is
-        # at least this high.  REJECTED at full batch (iter21k_mu75 vs
-        # iter21_k60_offs40: Δ=-0.072 SOL, 3/14 breadth) — recoverable
-        # pullbacks and continuation slides are NOT statistically
-        # distinguishable from OU drift (rec70 W→L regression had
-        # mu_neg_frac=1.00, highest possible).  Default 0.0 = OFF
-        # (preserves iter21_k60_offs40 production parity).
-        # 0.75 means 75% of last 60 ticks had EMA-mu < 0.
+        # mu-persistence variant of kelly_flat, default OFF: genuine
+        # continuation slides and recovery dips are not separable from the
+        # OU drift posterior at the decision moment.
         self._no_long_mu_neg_frac   = float(engine_kwargs.pop("no_long_mu_neg_frac", v2_default("no_long_mu_neg_frac")))
         self._no_long_streak        = 0
         self._entry_E_star = 0.0
@@ -2773,30 +2461,11 @@ class StrategyEngineV2Adapter(AdapterBase):
         self.forbidden_bc_hi       = int(engine_kwargs.pop("forbidden_bc_hi", v2_default("forbidden_bc_hi")))
         self.trail_floor_pct       = float(engine_kwargs.pop("trail_floor_pct", v2_default("trail_floor_pct")))
         self.reversal_exit_bars_max = int(engine_kwargs.pop("reversal_exit_bars_max", v2_default("reversal_exit_bars_max")))
-        # `iter05_decay_window` (default 60): sliding-window size for the
-        # decay prevalence counter — the(rbish)rolling-fraction signal.
-        # 60 ticks ≈ 15 candles under 4-state expansion.  Empirically the
-        # catastrophic-coin dumps (BREAD, WEN, CHAIRSEM) lose -40% to -70%
-        # within ~10-15 minutes of state-time, so a 60-tick window captures
-        # the prolonged decay preceding a re-entry purchase.
         self.iter05_decay_window       = int(engine_kwargs.pop("iter05_decay_window", v2_default("iter05_decay_window")))
         # `iter05_decay_window_thresh` (default 0.8): fraction of the
         # window for which sma must be negative to declare the trajectory
         # "locked downward" and gate new entries.
         self.iter05_decay_window_thresh = float(engine_kwargs.pop("iter05_decay_window_thresh", v2_default("iter05_decay_window_thresh")))
-        # `iter05_decay_entry_block` (default 1.0 = ON): toggle the
-        # entry-side decay BLOCK.  When ≥ `iter05_decay_window_thresh`
-        # of the last `iter05_decay_window` state-updates had sma<0,
-        # refuse new BUY entries.  Mathematical motivation: a sustained
-        # negative μ̇_post EMA means the SDE's deterministic drift
-        # -λ_μ μ_t + κ_μ (φ_t - φ̄_t) is integrated negative over the
-        # KDE memory window — the basin geometry is actively drifting
-        # downward regardless of the posterior-direction (P_up > P_down)
-        # derived from the barrier topology, which is a lagging
-        # observable.  Empirical evidence: 18 of the 30 worst iter04-full
-        # losses are follow-up trades that immediately re-enter after a
-        # `kramers_down_exit` on a token whose μ̇ has been continuously
-        # declining.
         self.iter05_decay_entry_block  = float(engine_kwargs.pop("iter05_decay_entry_block", v2_default("iter05_decay_entry_block")))
         # V2 only — used by ForwardTester when it generates the cfg dict
         # via the V1 attr names; defaults = spec defaults
@@ -2819,29 +2488,30 @@ class StrategyEngineV2Adapter(AdapterBase):
         self._n_particles = int(self.cfg["n_particles"])
         self._n_grid = int(self.cfg["n_grid"])
 
-        # ── Holder-flow knobs (iter36: dev/insider sell detection) ────────
-        # `v2_holder_flow_entry_block` (default 1.0 = ON as of iter43): when
+        # Holder-flow knobs (dev/insider sell detection)
+
+        # `v2_holder_flow_entry_block` (default 1.0 = ON as of ): when
         #   > 0, block BUY entries if a dev/insider sell (amount_usd ≥ threshold)
         #   occurred within `v2_holder_flow_entry_window_seconds` before the bar.
-        # `v2_holder_flow_exit_enable` (default 1.0 = ON as of iter43): when
+        # `v2_holder_flow_exit_enable` (default 1.0 = ON as of ): when
         #   > 0, fire an immediate `dev_sell_exit` if a dev/insider sell occurs
         #   while in position (checked on every bar close).
         # `v2_holder_flow_min_usd` (default 100.0): minimum sell amount (USD)
         #   to consider significant — filters dust.
-        # `v2_holder_flow_require_tag` (default 0.0 = OFF as of iter43): when
+        # `v2_holder_flow_require_tag` (default 0.0 = OFF as of ): when
         #   > 0, only events with a non-empty provenance `tag`
         #   (dev/sniper/bundler/rat_trader) count as a "dev sell".  When 0,
-        #   any large sell (tag or not) counts — the iter43 validated
-        #   behaviour.  iter43 proved gate 1.0 (require_tag=0) reduces
+        #   any large sell (tag or not) counts — the validated
+        #   behaviour.  proved gate 1.0 (require_tag=0) reduces
         #   kelly_flat losses by 52% (25→12) and lifts PnL by +163%
         #   (+0.273→+0.719 SOL) on 262 holder_flow recordings
         #   (Wilcoxon p=0.0095, CI [0.0014, 0.0101]).  Gate 2.0
         #   (require_tag=1) only catches 12/44 dev_sell_exits due to sparse
         #   wallet-registry tag coverage and was REJECTED (p=0.077).
-        # NOTE (iter43): the entry gate and exit trigger are DEFAULT-ON.
+        # NOTE (): the entry gate and exit trigger are DEFAULT-ON.
         #   When no holder_flow events are loaded, `_has_recent_dev_sell`
         #   always returns False, so behaviour is byte-identical to the
-        #   pre-iter36 engine (parity-safe on recordings without holder_flow).
+        #   pre-engine (parity-safe on recordings without holder_flow).
         self._v2_holder_flow_entry_block = float(engine_kwargs.pop("v2_holder_flow_entry_block", v2_default("v2_holder_flow_entry_block")))
         self._v2_holder_flow_exit_enable = float(engine_kwargs.pop("v2_holder_flow_exit_enable", v2_default("v2_holder_flow_exit_enable")))
         self._v2_holder_flow_require_tag = float(engine_kwargs.pop("v2_holder_flow_require_tag", v2_default("v2_holder_flow_require_tag")))
@@ -2849,15 +2519,16 @@ class StrategyEngineV2Adapter(AdapterBase):
         self._v2_holder_flow_entry_window_seconds = int(engine_kwargs.pop("v2_holder_flow_entry_window_seconds", v2_default("v2_holder_flow_entry_window_seconds")))
         self._v2_holder_flow_exit_window_seconds  = int(engine_kwargs.pop("v2_holder_flow_exit_window_seconds", v2_default("v2_holder_flow_exit_window_seconds")))
         self._candle_volume_history: list[dict] = []
-        # ── Entry-Validation Response triage exit (iter48) ──────────────────
+        # Entry-Validation Response triage exit ()
+
         # Post-entry evidence channel: the market's taker-flow RESPONSE to the
-        # engine's own entry.  Autopsy on iter46_baseline: pre-entry flow has
+        # engine's own entry.  Pre-entry flow autopsy: 
         # zero separation (brpre AUC 0.49) but post-entry flow does (buy-ratio
         # over [0,40]s: catastrophic median 0.40 vs winner 0.61); catastrophes
         # never confirm +10% MFE (0/85) while winners confirm fast (69% within
         # 20 s).  EVR exits an UNCONFIRMED, flow-INVALIDATED, offside position
         # once `eval_delay` seconds have elapsed since entry.  Default 1.0 =
-        # ON (evr9 production config, full-cohort validated iter48).
+        # ON (evr9 production config, full-cohort validated ).
         self._v2_evr_enable        = float(engine_kwargs.pop("v2_evr_enable", v2_default("v2_evr_enable")))
         self._v2_evr_confirm_pct   = float(engine_kwargs.pop("v2_evr_confirm_pct", v2_default("v2_evr_confirm_pct")))
         self._v2_evr_eval_delay    = int(engine_kwargs.pop("v2_evr_eval_delay", v2_default("v2_evr_eval_delay")))
@@ -2867,24 +2538,25 @@ class StrategyEngineV2Adapter(AdapterBase):
         self._v2_evr_volume_min_sol = float(engine_kwargs.pop("v2_evr_volume_min_sol", v2_default("v2_evr_volume_min_sol")))
         self._v2_evr_require_offside = float(engine_kwargs.pop("v2_evr_require_offside", v2_default("v2_evr_require_offside")))
         self._v2_evr_offside_min_pct = float(engine_kwargs.pop("v2_evr_offside_min_pct", v2_default("v2_evr_offside_min_pct")))
-        # iter50: EVR sell-concentration veto (see DEFAULT_CONFIG note).
         self._v2_evr_skip_sell_conc_min = float(engine_kwargs.pop("v2_evr_skip_sell_conc_min", v2_default("v2_evr_skip_sell_conc_min")))
         self._v2_evr_skip_conc_window   = int(engine_kwargs.pop("v2_evr_skip_conc_window", v2_default("v2_evr_skip_conc_window")))
         self._evr_entry_time: int = 0
-        # ── iter78 ADOPTION: 5-second deferred-entry execution cell ─────────
+        # ADOPTION: 5-second deferred-entry execution cell
+
         # Popped here so every pipeline can read the adopted default off the
         # engine object (the backtester keys its ForwardTester
         # entry_latency_seconds on the ENGINE's knob — not on explicit
-        # engine_params — the exact injection pattern the iter74d MSM
+        # engine_params — the exact injection pattern the MSM
         # adoption used).  The engine itself never consumes this value: it is
         # pure execution timing, applied by ForwardTester (backtest) and
         # LiveTrader (live).  0.0 restores the signal-instant fill.
         self.v2_entry_delay_seconds = float(engine_kwargs.pop("v2_entry_delay_seconds", v2_default("v2_entry_delay_seconds")))
-        # ── iter80 ADOPTED: deferred exit-fill execution (armed-only 20s) ──
+        # ADOPTED: deferred exit-fill execution (armed-only 20s)
+
         # Popped here so every pipeline can read the knobs off the engine
         # object (the backtester keys its ForwardTester
         # exit_latency_seconds on the ENGINE's knobs — same injection
-        # pattern as the iter78 entry-delay adoption).  The engine itself
+        # pattern as the entry-delay adoption).  The engine itself
         # never consumes this value: it is pure execution timing, applied
         # by ForwardTester (backtest) and LiveTrader (live).  Measured
         # ground truth (RESEARCH_LOG.md Iter 80): after ARMED exit fires
@@ -2892,8 +2564,8 @@ class StrategyEngineV2Adapter(AdapterBase):
         # the give-back harvest fires at the bottom of its own micro-dip;
         # UNARMED exits average −0.25%/30s so deferral must be asymmetric
         # (armed_only=1.0).  The ADOPTED xa20 cell was 20.0 (user decision
-        # 2026-09-03); 2026-09-11 the user set the production default to
-        # 0.0 = instant exit fill (the pre-iter80 model, byte-exact); >0
+        # ); the user set the production default to
+        # 0.0 = instant exit fill (the pre-model, byte-exact); >0
         # re-enables the armed deferral.
         self.v2_exit_delay_seconds = float(engine_kwargs.pop("v2_exit_delay_seconds", v2_default("v2_exit_delay_seconds")))
         # 1.0: defer only the armed/harvest exit classes (gain_retrace,
@@ -2901,7 +2573,8 @@ class StrategyEngineV2Adapter(AdapterBase):
         # the loss book (kelly_flat, evr_triage, kramers_down_exit,
         # dev_sell_exit, recording_ended) fills at the signal instant.
         self.v2_exit_delay_armed_only = float(engine_kwargs.pop("v2_exit_delay_armed_only", v2_default("v2_exit_delay_armed_only")))
-        # ── iter63/64: stationary Kramers rate-split early exit ─────────
+        # /64: stationary Kramers rate-split early exit
+
         # ("rate_split_flip").  The production kramers_down_exit (#5) asks
         #   P_down(τ) = (k_d/k)(1−e^{−kτ}) ≥ 0.5
         # at the E_star-maximising horizon τ ∈ [tau_min, tau_max] — a
@@ -2913,31 +2586,21 @@ class StrategyEngineV2Adapter(AdapterBase):
         # no overlay — the same barrier geometry read at its long-horizon
         # limit).  Require s ≥ θ for K consecutive 4-state ticks as the
         # temporal-coherence guard against single-tick KDE noise (the
-        # iter12 intra-candle vacillation pathology).
+        # intra-candle vacillation pathology).
         # Scopes (independent, OR-ed):
         #   arm_pct  — armed winners only: peak ≥ entry·(1+A/100)  (0=off)
         #   offside  — deep-offside only: c ≤ entry·(1−X/100)      (0=off)
-        # Default enable=1.0 = ON (production, post-iter64 adoption).
+        # Default enable=1.0 = ON (production, post-adoption).
         self._v2_rate_split_enable      = float(engine_kwargs.pop("v2_rate_split_enable", v2_default("v2_rate_split_enable")))
         self._v2_rate_split_arm_pct     = float(engine_kwargs.pop("v2_rate_split_arm_pct", v2_default("v2_rate_split_arm_pct")))
         self._v2_rate_split_offside_pct = float(engine_kwargs.pop("v2_rate_split_offside_pct", v2_default("v2_rate_split_offside_pct")))
         self._v2_rate_split_theta       = float(engine_kwargs.pop("v2_rate_split_theta", v2_default("v2_rate_split_theta")))
         self._v2_rate_split_persist     = int(engine_kwargs.pop("v2_rate_split_persist", v2_default("v2_rate_split_persist")))
-        # iter63 runner-immunity veto (REJECTED — see RESEARCH_LOG Iter63 §6):
-        # during ACTIVE price discovery the stationary split saturates
-        # (s → 1) on every breather — price is above all KDE mass so the
-        # down-barrier trivially dominates (rec952 trace: s pinned 1.000
-        # through a +169% run).  The veto requires the tracked peak to be
-        # ≥N ticks stale; screened net-negative (UB −0.18..−0.10, screen
-        # Δ+0.115/−0.070 vs unfiltered +0.284).  0 = no veto (default).
         self._v2_rate_split_min_peak_age_ticks = int(engine_kwargs.pop(
             "v2_rate_split_min_peak_age_ticks", v2_default("v2_rate_split_min_peak_age_ticks")))
         self._rate_split_streak = 0
         self._last_peak_tick = 0
 
-        # ── Market-cap bound trade block ────────────────────────────────────
-        # Block all BUY entries when the USD market cap is below mcap_low_usd
-        # or above mcap_high_usd.  Both default to 0 = deactivated.
         self._mcap_low_usd  = float(engine_kwargs.pop("mcap_low_usd", v2_default("mcap_low_usd")))
         self._mcap_high_usd = float(engine_kwargs.pop("mcap_high_usd", v2_default("mcap_high_usd")))
         self._market_cap_usd: float = 0.0
@@ -2948,8 +2611,6 @@ class StrategyEngineV2Adapter(AdapterBase):
         self._holder_flow_index: dict[int, list[dict]] = {}
         self._holder_flow_timestamps: list[int] = []
 
-    # ── iter85: per-coin online recalibration ──────────────────────────────
-
     def _percoin_recalibrate(self) -> None:
         """Estimate from completed rows strictly before the current candle.
 
@@ -2957,7 +2618,7 @@ class StrategyEngineV2Adapter(AdapterBase):
         remain protected. Log every attempt, including empty/no-change ones,
         and re-anchor the elapsed-time deadline without catch-up bursts.
 
-        iter90: also refines the harvest geometry (gain_retrace_arm_pct)
+        also refines the harvest geometry (gain_retrace_arm_pct)
         from the same causal window — governed by its own enable knob so it
         fires on ALL sessions, not only mint-sourced ones.
         """
@@ -2991,7 +2652,6 @@ class StrategyEngineV2Adapter(AdapterBase):
             overrides[k] = min(hi, max(lo, value))
         changed = self.core.recalibrate(overrides)
 
-        # ── iter90: geometry refinement (same causal window) ───────────────
         geom_raw: dict = {}
         geom_applied: dict = {}
         geom_changed = 0
@@ -3079,8 +2739,6 @@ class StrategyEngineV2Adapter(AdapterBase):
             pass
         return snap
 
-    # ── Holder-flow helpers ───────────────────────────────────────────────
-
     def set_holder_flow_events(self, events: list[dict]):
         """Load holder-flow events for this recording (called by pipeline)."""
         self._holder_flow_events = events
@@ -3103,7 +2761,7 @@ class StrategyEngineV2Adapter(AdapterBase):
             self._holder_flow_index[t].append(event)
 
     # Verified dev/insider provenance tags (must match holder_flow._TRACKED_TAGS).
-    # The iter38 "whale" fallback tag is deliberately EXCLUDED — it marks a large
+    # The "whale" fallback tag is deliberately EXCLUDED — it marks a large
     # sell with no verified insider provenance, so it must not satisfy a
     # require_tag gate.
     _DEV_TAGS = frozenset({"dev", "sniper", "bundler", "rat_trader"})
@@ -3113,8 +2771,8 @@ class StrategyEngineV2Adapter(AdapterBase):
 
         When `v2_holder_flow_require_tag` > 0 the event must carry a verified
         provenance tag in `_DEV_TAGS` (dev/sniper/bundler/rat_trader); the
-        iter38 "whale" fallback and untagged events do NOT qualify.  When
-        `require_tag` is 0, any large sell qualifies (legacy iter36/38
+        "whale" fallback and untagged events do NOT qualify.  When
+        `require_tag` is 0, any large sell qualifies (legacy /38
         behaviour — the "big-seller circuit breaker").
         """
         if event.get("side") != "sell":
@@ -3154,9 +2812,9 @@ class StrategyEngineV2Adapter(AdapterBase):
         return None
 
     def _evr_trailing_buy_ratio(self):
-        """iter48 EVR: trailing taker buy-ratio over the last `_v2_evr_flow_window`
+        """EVR: trailing taker buy-ratio over the last `_v2_evr_flow_window`
         seconds, or None when the window carries less than `_v2_evr_volume_min_sol`
-        of volume (no-data ⇒ no triage; parity with the iter45 gate convention)."""
+        of volume (no-data ⇒ no triage; parity with the gate convention)."""
         if not self._candle_volume_history:
             return None
         cutoff = int(getattr(self, "_current_time", 0)) - self._v2_evr_flow_window
@@ -3173,7 +2831,7 @@ class StrategyEngineV2Adapter(AdapterBase):
         return tot_buy / (tot_vol + 1e-9)
 
     def _evr_maxsec_sell_share(self):
-        """iter50: largest single-second sell volume / total sell volume over
+        """largest single-second sell volume / total sell volume over
         the last `_v2_evr_skip_conc_window` seconds — a whale-sweep vs
         distributed-bleed discriminator.  None when the window carries less
         than `_v2_evr_volume_min_sol` of sell volume (no-data ⇒ no veto)."""
@@ -3193,7 +2851,7 @@ class StrategyEngineV2Adapter(AdapterBase):
         return max_sec / (tot_sell + 1e-9)
 
     def _check_evr_triage_exit(self, c: float, entry: float) -> bool:
-        """iter48 EVR branch condition: the entry has gone UNCONFIRMED (peak
+        """EVR branch condition: the entry has gone UNCONFIRMED (peak
         price since entry never reached entry*(1+confirm_pct/100)), the trailing
         taker flow has NOT validated the entry (buy-ratio below max), the trade
         is offside, and at least `eval_delay` seconds have passed since the
@@ -3207,7 +2865,7 @@ class StrategyEngineV2Adapter(AdapterBase):
         if _age < self._v2_evr_eval_delay:
             return False
         # Grace window (default 0 = continuous evaluation, the behaviour the
-        # iter48 A/B configs tested): when > 0, the triage is one-shot-faithful
+        # A/B configs tested): when > 0, the triage is one-shot-faithful
         # to the static counterfactual — it may only fire inside
         # [delay, delay+grace).  Past the window the position is never EVR-cut.
         if self._v2_evr_grace_seconds > 0 and _age >= self._v2_evr_eval_delay + self._v2_evr_grace_seconds:
@@ -3225,11 +2883,6 @@ class StrategyEngineV2Adapter(AdapterBase):
         br = self._evr_trailing_buy_ratio()
         if br is None or br >= self._v2_evr_buy_ratio_max:
             return False
-        # iter50 concentration veto: at the FIRST qualifying tick, if the
-        # trailing sell flow is dominated by a single second (whale-sweep
-        # print → historically mean-reverting), veto EVR for the remainder
-        # of this trade (once-only decision, matches the iter50 static
-        # screen semantics).  Default 0.0 skips this block entirely.
         if self._v2_evr_skip_sell_conc_min > 0.0:
             if self._evr_conc_vetoed:
                 return False
@@ -3239,7 +2892,6 @@ class StrategyEngineV2Adapter(AdapterBase):
                 return False
         return True
 
-    # ── V1 surface ────────────────────────────────────────────────────
     def _passes_engine_version_check(self):
         # Pass through.  No-op standalone — the symbol is there in case
         # `main.py` introspects it.
@@ -3251,13 +2903,11 @@ class StrategyEngineV2Adapter(AdapterBase):
         self.position_direction = direction
         self._peak_price = float(entry_price)
         self.entry_bar_count = self.bar_count
-        self._be_armed = False  # iter17 breakeven-scratch arming flag
-        # iter48: EVR entry clock — anchored at the fill tick's timestamp.
+        self._be_armed = False  # breakeven-scratch arming flag
         self._evr_entry_time = int(getattr(self, "_current_time", 0))
-        # iter50: per-trade EVR concentration veto latch reset.
         self._evr_conc_vetoed = False
-        self._rate_split_streak = 0  # iter63: fresh evidence per trade
-        self._last_peak_tick = self.bar_count  # iter63: entry is the initial peak
+        self._rate_split_streak = 0  # fresh evidence per trade
+        self._last_peak_tick = self.bar_count  # entry is the initial peak
         # Seed EMA from the current posterior mu so the window starts calibrated.
         _cur_mu = getattr(self, '_mu_post_ema', 0.0)  # keep current EMA value
         self._mu_post_neg_window.clear()
@@ -3271,8 +2921,8 @@ class StrategyEngineV2Adapter(AdapterBase):
         self._be_armed = False
         self._mu_post_neg_window.clear()
         self._mu_post_neg_count = 0
-        self._no_long_streak = 0  # iter21: reset on close
-        self._rate_split_streak = 0  # iter63: reset on close
+        self._no_long_streak = 0  # reset on close
+        self._rate_split_streak = 0  # reset on close
 
     def _update_peak_price(self, h: float, l: float):
         if not self.in_position:
@@ -3280,7 +2930,7 @@ class StrategyEngineV2Adapter(AdapterBase):
         if self.position_direction == _V1Direction.UP:
             if h > self._peak_price:
                 if h > self._peak_price + 1e-12:
-                    self._last_peak_tick = self.bar_count  # iter63 veto clock
+                    self._last_peak_tick = self.bar_count  # veto clock
                 self._peak_price = h
         elif self.position_direction == _V1Direction.DOWN:
             if l < self._peak_price or self._peak_price == 0.0:
@@ -3325,7 +2975,6 @@ class StrategyEngineV2Adapter(AdapterBase):
     def _global_stoploss_pct(self) -> float:
         return self.stoploss_pct
 
-    # ── Intra-bar indicator maintenance (cheap, mirrors V1 closely) ────
     def _maintain_v1_indicators(self, o: float, h: float, l: float, c: float,
                                  volume: float):
         """Update EMAs / ATR / m_hat / p_hat / pseudo-confidence.
@@ -3388,9 +3037,6 @@ class StrategyEngineV2Adapter(AdapterBase):
             self.signal_strength = 0.0
         self.s_effective = self.signal_strength   # V2 already accounts for barriers
 
-        # ── Fake confidence from the V2 regime distribution entropy ────
-        # Higher posterior certainty (lower entropy) → higher confidence.
-        # We scale so confidence ∈ [0, 1] for the V1 gate / TP-SL lerp.
         regime_dist = st.get("regime_dist", None)
         if regime_dist is not None:
             ps = np.asarray(regime_dist, dtype=np.float64)
@@ -3434,7 +3080,6 @@ class StrategyEngineV2Adapter(AdapterBase):
         self._pre_entry_stable = self._pre_entry_stable_up
         self._in_local_chop = False   # V2's internal chop handling covers this
 
-    # ── Main entry point ────────────────────────────────────────────
     def update(
         self,
         time: int,
@@ -3447,9 +3092,7 @@ class StrategyEngineV2Adapter(AdapterBase):
         _build_full_result: bool = True,
     ) -> dict:
         self.bar_count += 1
-        self._current_time = int(time)  # iter36: store for holder-flow checks
-        # iter28: real pool liquidity depth (SOL in bonding curve), 0.0 when the
-        # feed does not carry reserves.  Tracks the latest non-zero observation.
+        self._current_time = int(time)  # store for holder-flow checks
         if pool_sol > 0.0:
             self._pool_sol = pool_sol
         if market_cap_usd > 0.0:
@@ -3466,7 +3109,8 @@ class StrategyEngineV2Adapter(AdapterBase):
                 if len(self._candle_volume_history) > 300:
                     self._candle_volume_history.pop(0)
 
-        # ── per-coin tape buffer + causal periodic online recalibration ──
+        # per-coin tape buffer + causal periodic online recalibration
+
         # A candle row fills across its 4 intra-candle states (same time
         # value); the 4th state carries the completed volume split.  When a
         # NEW candle's timestamp arrives, the previous row is complete.
@@ -3529,7 +3173,6 @@ class StrategyEngineV2Adapter(AdapterBase):
         # Maintain V1 indicator attrs in lockstep with the OHLCV.
         self._maintain_v1_indicators(o, h, l, c, volume)
 
-        # ── Convert V1 OHLCV → V2 obs bucket ──────────────────────────
         sigma_t = self.core._last_sigma_t
         log_return = 0.0
         if _prev_close_for_v2 and _prev_close_for_v2 > 0:
@@ -3553,17 +3196,9 @@ class StrategyEngineV2Adapter(AdapterBase):
         }
         state = self.core.update_state(obs)
 
-        # ── Compute the V2 market potential when it can change ───────────
-        # The first three replay sub-states carry no taker volume, so their
-        # KDE buffer is unchanged.  Reusing the prior landscape removes three
-        # redundant 200-point KDE builds per candle while preserving the
-        # full-volume close-state decision where new flow enters the model.
-        # Live calls that request the dashboard payload still recompute so the
-        # displayed potential remains current for every supplied observation.
         if _build_full_result or buy_volume + sell_volume > 0.0:
             self.core.compute_potential_and_barriers()
 
-        # ── Map V2 regime → V1 Regime instance ────────────────────────
         v2_regime = int(state["regime"])
         v1_regime = _V2_TO_V1_REGIME.get(v2_regime, _V1Regime.IDLE)
         self.prev_direction = self.direction
@@ -3599,15 +3234,10 @@ class StrategyEngineV2Adapter(AdapterBase):
         else:
             self.direction = _V1Direction.NONE
 
-        # ── Compute the V2 trading decision → V1 Signal ────────────
-        # (iter16i: horizon wired to cfg["tau_max"] so the existing
-        # tau_min/tau_max/tau_step parameters actually control the sweep —
-        # previously hardcoded to 30 engine-s = 7.5 physical s, 4× below
-        # the spec's own 5–30 s horizon range at the 4-state cadence.)
         decision = self.core.get_decision(horizon=int(self.core.cfg.get("tau_max", 30)))
         v1_signal: _V1Signal = _V1Signal.NONE
 
-        # iter17: parity-safe logging stash — the latest V2 decision snapshot,
+        # parity-safe logging stash — the latest V2 decision snapshot,
         # consumed by ForwardTester._capture_entry_params for per-trade entry
         # feature logging (counterfactual analysis).  Write-only; no effect on
         # signal/exit logic.  Reflects the most recent update() call, so at a
@@ -3615,11 +3245,6 @@ class StrategyEngineV2Adapter(AdapterBase):
         # consistent with the rest of the entry_params snapshot semantics.
         self._v2_last_decision = decision
 
-        # iter21: update the "no-long-Kelly-persistence" streak counter.
-        # When `direction != +1 AND E_star <= 0` (the engine either wants
-        # flat or wants short with no Kelly-positive counter-trade), the
-        # current long position has no Bayesian justification to be held.
-        # Reset on any long-viable tick.  Used in _check_exit_v2.
         _dec_dir = int(decision.get("direction", 0) or 0)
         _dec_E = float(decision.get("E_star", -1e3) or -1e3)
         if _dec_dir == 1 and _dec_E > 0:
@@ -3627,13 +3252,13 @@ class StrategyEngineV2Adapter(AdapterBase):
         else:
             self._no_long_streak += 1
 
-        # iter18a: update the post-entry posterior-drift persistence counter.
+        # update the post-entry posterior-drift persistence counter.
         # mu_t is the UKF posterior latent drift (OU process); when it is
         # persistently negative, the OU model expects continued downward
         # price movement: E[x_{t+s}|x_t,mu_t] ≈ x_t + mu_t/lambda_mu*(1-e^{-λs}).
         # Use an EMA-smoothed mu (α=0.1, ~10-tick half-life) to reject
         # tick-level OU oscillation, then track the windowed fraction of
-        # negative-EMA-mu ticks (identical bookkeeping to iter05's
+        # negative-EMA-mu ticks (identical bookkeeping to 's
         # _mu_dot_post_sign_window).  Updated always; used only in
         # _check_exit_v2 when in position (the gate is offside-guarded).
         _mu_raw = float(state["mu"])
@@ -3656,18 +3281,12 @@ class StrategyEngineV2Adapter(AdapterBase):
             self.exit_signal_reason = ""
         elif self.in_position:
             # When in position, check Bayesian exits (defined in
-            # `_check_exit_v2`).  iter04 consolidated all exit logic
-            # there; no additional flip handling is needed here.
             exit_signal = self._check_exit_v2(c, l=l, h=h, decision=decision)
             if exit_signal is not None:
                 v1_signal = exit_signal
         else:
             # Open new positions based on V2 decision.
             if decision.get("direction") == 1 and decision.get("E_star", -1.0) > 0:
-                # ── Market-cap bound trade block ───────────────────────────────
-                # Block all BUY entries when the USD market cap is below
-                # mcap_low_usd or above mcap_high_usd.  Both default to 0
-                # = deactivated.
                 _mcap = self._market_cap_usd
                 _mcap_blocked = False
                 if _mcap > 0.0:
@@ -3675,11 +3294,8 @@ class StrategyEngineV2Adapter(AdapterBase):
                         _mcap_blocked = True
                     if self._mcap_high_usd > 0.0 and _mcap > self._mcap_high_usd:
                         _mcap_blocked = True
-                # (iter61 regime participation floor REMOVED 2026-08-24 by
-                # explicit user decision — RESEARCH_LOG.md Iter 61/64.)
                 if _mcap_blocked:
                     self.exit_signal_reason = "mcap_bound_block"
-                # ── Holder-flow entry gate (iter36): block entry on recent dev sell ──
                 elif self._v2_holder_flow_entry_block > 0.0 and self._has_recent_dev_sell(
                     getattr(self, "_current_time", 0), self._v2_holder_flow_entry_window_seconds, self._v2_holder_flow_min_usd
                 ):
@@ -3693,14 +3309,9 @@ class StrategyEngineV2Adapter(AdapterBase):
                     self.exit_signal_reason = ""
                     self._no_long_streak = 0
 
-        # ── Update peak price AFTER exit checks (matches V1) ────────
         if self.in_position and v1_signal != _V1Signal.EXIT:
             self._update_peak_price(h, l)
 
-        # ── iter63 diagnostic capture (write-only; default OFF) ─────
-        # Appends one JSON line per in-position tick for offline
-        # exit-timing counterfactual analysis.  No state mutation; the
-        # `decision` dict already carries k_up/k_down/P± — we only READ.
         if self._v2_debug_tick_log and self.in_position and decision is not None:
             try:
                 _dku = float(decision.get("k_up", 0.0))
@@ -3725,7 +3336,6 @@ class StrategyEngineV2Adapter(AdapterBase):
             except Exception:
                 pass  # diagnostics must never perturb trading behaviour
 
-        # ── Build the result dict ───────────────────────────────────
         minimal = {
             "time": time,
             "regime": self.regime.value,
@@ -3793,25 +3403,24 @@ class StrategyEngineV2Adapter(AdapterBase):
         else:
             return self.entry_price * (1.0 - abs(sl) / 100.0)
 
-    # ── Risk-management exit checks ──────────────────────────────────
     def _check_exit_v2(self, c: float, l: float = 0.0, h: float = 0.0,
                        decision: Optional[dict] = None) -> Optional[_V1Signal]:
         """
-        Trigger Bayesian exit logic per spec §6.  iter04 consolidated all
-        exit logic around the mathematical posterior; iter18b removes the
+        Trigger Bayesian exit logic per spec §6.  consolidated all
+        exit logic around the mathematical posterior; removes the
         hard-stop floor entirely so the engine relies exclusively on:
 
           1. TP  — `c ≥ entry·(1 + tp/100)` (spec-mandated harvest).
-          2b. Gain-retrace profit lock (iter17): arm at +A% peak gain, exit
+          2b. Gain-retrace profit lock (): arm at +A% peak gain, exit
               when gain retraces to peak_gain*(1-g).  Tail-preserving.
-          2c. Breakeven scratch (iter17): arm after -X% drawdown, exit when
+          2c. Breakeven scratch (): arm after -X% drawdown, exit when
               price recovers to entry+buf%.
           3. Reversal regime (spec §4 reversal label).
-          4. Leading-decay exit (iter05, disabled by default).
+          4. Leading-decay exit (disabled by default).
           5. Kramers down exit: P_down ≥ P_up and P_down ≥ P_zero and ≥ 0.5.
           6. Bayesian flip: direction != +1 AND E_star > 0.
 
-        No hard-stop floor (iter18b): stoploss_pct=0 disables all price-floor
+        No hard-stop floor (): stoploss_pct=0 disables all price-floor
         exits.  Memecoin pullbacks of 15–30% are normal intra-trend noise;
         a hard floor at -25% terminates 0%-WR trades that the Bayesian exits
         (Kramers P_down, reversal) would handle once enough KDE evidence
@@ -3833,31 +3442,13 @@ class StrategyEngineV2Adapter(AdapterBase):
             if entry > 0 and tp_pct > 0 and c >= entry * (1.0 + tp_pct / 100.0):
                 self.exit_signal_reason = "tp_v2"
                 return _V1Signal.EXIT
-            # 2b. iter17 gain-retrace profit lock (tail-preserving trail).
-            #     Counterfactual on the 404-trade logged batch: converts
-            #     give-back-all-the-way losers into locked wins WITHOUT
-            #     capping the right tail (a +60% peak with g=0.6 exits at
-            #     +24%, not +6%).  Arm at +A% peak gain; exit when the
-            #     current gain retraces to peak_gain*(1-g).  Justification:
-            #     path-dependent trailing Kramers barrier — recapture of
-            #     the trailing level = escape from the profit region; same
-            #     execution-risk family as the spec-listed hard_stop.
-            #     Peak tracked from state highs via _update_peak_price.
             if self._gain_retrace_arm_pct > 0.0 and entry > 0:
                 peak_gain = self._peak_price / entry - 1.0
                 if peak_gain * 100.0 >= self._gain_retrace_arm_pct:
-                    # iter64: iter57/58 regime give-back adaptation REMOVED
-                    # (user decision 2026-08-24) — flat base give-trac eback.
                     floor_gain = peak_gain * (1.0 - self._gain_retrace_give_frac)
                     if c <= entry * (1.0 + floor_gain):
                         self.exit_signal_reason = "gain_retrace"
                         return _V1Signal.EXIT
-            # 2c. iter17 breakeven scratch.  Arm once the trade has been
-            #     ≥X% offside (low touches entry*(1-X/100)); if price then
-            #     recovers to entry*(1+buf), exit at a cost-covering
-            #     scratch instead of riding the second leg down.  Winner
-            #     intra-MAE p5=-30% on the fresh dataset, so X=20 arms
-            #     only on genuinely-distressed trades.
             if self._breakeven_arm_dd_pct > 0.0 and entry > 0:
                 if (not self._be_armed and l > 0.0
                         and l <= entry * (1.0 - self._breakeven_arm_dd_pct / 100.0)):
@@ -3865,11 +3456,6 @@ class StrategyEngineV2Adapter(AdapterBase):
                 if self._be_armed and c >= entry * (1.0 + self._breakeven_buffer_pct / 100.0):
                     self.exit_signal_reason = "breakeven_scratch"
                     return _V1Signal.EXIT
-            # 2d. iter63/64 stationary Kramers rate-split early exit.
-            #     iter64: the regime Q-gate was measured NET-NEGATIVE and
-            #     removed with the Q machinery (2026-09-02 cleanup); the
-            #     flip is ungated (production semantics since iter64's
-            #     default-off gate).
             if (self._v2_rate_split_enable > 0.0 and entry > 0):
                 _ku = float(decision.get("k_up", 0.0) or 0.0)
                 _kd = float(decision.get("k_down", 0.0) or 0.0)
@@ -3912,8 +3498,6 @@ class StrategyEngineV2Adapter(AdapterBase):
                 self.exit_signal_reason = "reversal_exit"
                 return _V1Signal.EXIT
             # 5. Bayesian exit B: posterior downward escape majority.
-            #    iter03 evidence: 23 trades, WR=69.6%, +0.317 SOL on a 30-token
-            #    sample — the Bayesian escape-rate exit is the engine's crown logic.
             p_up   = float(decision.get("P_up",   0.0))
             p_down = float(decision.get("P_down", 0.0))
             p_zero = float(decision.get("P_zero", 0.0))
@@ -3925,46 +3509,15 @@ class StrategyEngineV2Adapter(AdapterBase):
             if decision.get("direction", 0) != 1 and decision.get("E_star", -1.0) > 0:
                 self.exit_signal_reason = "bayesian_flip"
                 return _V1Signal.EXIT
-            # 7. iter21 sustained-no-long-Kelly exit ("kelly_flat").
+            # 7. sustained-no-long-Kelly exit ("kelly_flat").
             #    Bayesian decision theory: while in position, the engine's
             #    own per-tick Kelly utility for "continue holding long" is
             #    E_star when direction == +1.  If direction has devolved to
             #    ≤ 0 (engine-wants-flat or engine-wants-short WITHOUT a
             #    Kelly-positive counter-trade) AND this condition has held
-            #    for self._no_long_exit_bars consecutive ticks AND the trade
-            #    is below self._no_long_offside_pct under water, holding
-            #    cannot be rational — the engine itself asserts the long
-            #    has no positive expected log-wealth increment.  The static
-            #    -mask analysis (iter20_static_mask_v2) on the 36-recording
-            #    worst-loser cohort at K=20-candles (= 80 ticks) and -20%
-            #    offside showed +0.385 SOL saved on losers vs -0.120 SOL
-            #    lost on winners; the production tuning K=60 + offs=-40%
-            #    (iter21_k60_offs40 batch: 259 trades @ 77.2% WR, +0.884
-            #    SOL, PF 1.55) cleared all 5 paired-diff gates vs
-            #    iter16_baseline_full (+1.682 SOL Δ, Wilcoxon p=0.004) at
-            #    the cost of 4 W→L regression cuts during exogenous
-            #    recoveries (rec70, rec527, rec21, rec555).
-            #    Distinct from exit #5 (Bayesian down-flip) which requires
-            #    the engine's POSTERIOR P_down to dominate; this exit is
-            #    the entry-gate's mirror image: entry requires direction=1
-            #    AND E_star > 0; exit when direction !=1  AND E_star <= 0
-            #    sustained.
-            # iter21 hypothesis K (μ-persistence guard): require also that
-            # the post-entry EMA-smoothed UKF drift (μ_t) has been negative
-            # for the majority of the trailing 60-tick window.  Intended to
-            # distinguish genuine slides (drift falling → OU continued-slide
-            # forecast) from winning-trade pullback dips (drift rising → OU
-            # recovery forecast).  REJECTED at full batch:
-            #   iter21k_mu75 vs iter21_k60_offs40 REJECTED (Δ=-0.072 SOL,
-            #   3 improved / 11 regressed) — the rec70/rec21 W→L regressions
-            #   had mu_neg_frac=1.00 at the cut (HIGHEST possible; cannot be
-            #   filtered by any `<=1.0` threshold), while several L→W
-            #   improvements (rec828 mu=0.00, rec346 mu=0.25, rec657 mu=0.18,
-            #   rec635 mu=0.27) had mu_neg_frac < 0.75 and were BLOCKED by
-            #   the guard.  Genuine slides and recovery-pullback dips are
-            #   NOT statistically distinguishable from the OU drift posterior
-            #   at the kelly_flat decision moment — recovery is exogenous.
-            # Default 0.0 = OFF (preserves iter21_k60_offs40 parity).
+            # kelly_flat mirrors the entry gate (see __init__):
+            # holding is irrational once the engine itself asserts not-long
+            # for no_long_exit_bars ticks while offside past the floor.
             _mu_neg_frac = (self._mu_post_neg_count /
                             self._mu_post_neg_window.maxlen
                             if self._mu_post_neg_window.maxlen else 0.0)
@@ -3975,9 +3528,9 @@ class StrategyEngineV2Adapter(AdapterBase):
                     and entry > 0 and c <= entry * (1.0 - self._no_long_offside_pct / 100.0)):
                 self.exit_signal_reason = "kelly_flat"
                 return _V1Signal.EXIT
-            # 7b. iter48 Entry-Validation Response (EVR) triage exit.
+            # 7b. Entry-Validation Response (EVR) triage exit.
             #     The engine's exits above are PRICE-posterior driven; EVR adds
-            #     the entry-anchored evidence axis measured in the iter48
+            #     the entry-anchored evidence axis measured in the 
             #     autopsy: a memecoin entry is a self-validating event — the
             #     herd either follows within seconds (confirmation + taker buy
             #     flow, winner profile: MFE@+10% on 86-88% of winners, never on
@@ -3987,13 +3540,6 @@ class StrategyEngineV2Adapter(AdapterBase):
             if self._check_evr_triage_exit(c, entry):
                 self.exit_signal_reason = "evr_triage"
                 return _V1Signal.EXIT
-            # 8. iter36 holder-flow exit: dev/insider sell while in position.
-            #    A dev/insider sell is an exogenous adverse event that the
-            #    engine's internal state cannot see — the KDE posterior has
-            #    not yet accumulated enough down-crossings to flip P_down,
-            #    but the on-chain evidence is unambiguous.  Default OFF
-            #    (v2_holder_flow_exit_enable = 0.0) — requires holder_flow
-            #    events to be loaded via set_holder_flow_events().
             if (self._v2_holder_flow_exit_enable > 0.0
                     and self._has_recent_dev_sell(
                         getattr(self, "_current_time", 0),
@@ -4009,37 +3555,30 @@ class StrategyEngineV2Adapter(AdapterBase):
                 return _V1Signal.EXIT
         return None
 
-    # ── V2 entry gate (uses V2 confidence + V1-style secondary gates) ──
     def _v2_passes_entry_gate(self, c: float, decision: dict) -> bool:
         # Need both confidence above threshold and Kramers upward prob.
         if self.trend_confidence < self.entry_confidence_high:
             return False
         if decision.get("P_up", 0.0) < self._v2_p_up_min:
             return False
-        # iter17: posterior-vol floor — counterfactual showed σ_t ≥ 0.021
+        # posterior-vol floor — counterfactual showed σ_t ≥ 0.021
         # entries carry the PnL (removes break-even churn, PF 1.57→1.87).
         if self._v2_sigma_t_min > 0.0:
             if float(getattr(self.core, "_last_sigma_t", 0.0) or 0.0) < self._v2_sigma_t_min:
                 return False
-        # iter17b: require momentum_past_peak — on the 404-trade logged
+        # require momentum_past_peak — on the 404-trade logged
         # batch, entries made WHILE momentum is past peak carried the win
         # rate and 96% of the PnL on just 34% of the trades (the past-peak
         # flag marks a parabolic breakout/continuation rather than a knife
         # catch); past_peak=False entries were 28% hard-stop crashes vs 9%.
-        # (iter17b require-past-peak gate REJECTED — removed in the
-        # 2026-09-02 dead-code cleanup; the flag stays informational.)
+        # (require-past-peak gate REJECTED — removed in the
+        # dead-code cleanup; the flag stays informational.)
         # Long-only: drift must be positive.
         if float(decision.get("direction", 0)) != 1:
             return False
         # Macro trend gate (V1 contract).
         if self.ema_macro_val is not None and c < self.ema_macro_val:
             return False
-        # iter05 leading-decay ENTRY BLOCK (toggleable).
-        # Refuse new BUY entries while the EMA-smoothed posterior μ̇ has
-        # been negative for ≥ `iter05_decay_window_thresh` of the last
-        # `iter05_decay_window` state-updates.  This is the principled
-        # "posterior trajectory is locked downward" gate — see the
-        # docstring of `iter05_decay_entry_block`.
         if float(getattr(self, "iter05_decay_entry_block", 1.0)) > 0.0:
             window = int(getattr(self, "iter05_decay_window", 60))
             thresh = float(getattr(self, "iter05_decay_window_thresh", 0.8))

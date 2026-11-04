@@ -69,8 +69,6 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
-# ── Enums ──────────────────────────────────────────────────────────────────────
-
 class Regime(Enum):
     IDLE        = "idle"
     TREND       = "trend"
@@ -89,8 +87,6 @@ class Signal(Enum):
     SELL = "sell"
     EXIT = "exit"
 
-
-# ── Volume Profile ────────────────────────────────────────────────────────────
 
 @dataclass
 class VolumeBin:
@@ -243,14 +239,10 @@ class VolumeProfile:
         }
 
 
-# ── Helper: EMA calculation ──────────────────────────────────────────────────
-
 def ema_step(prev: float, value: float, period: int) -> float:
     k = 2.0 / (period + 1)
     return value * k + prev * (1 - k)
 
-
-# ── Kalman Filter for Momentum Estimation ────────────────────────────────────
 
 class KalmanFilterMomentum:
     """
@@ -348,8 +340,6 @@ class KalmanFilterMomentum:
         self._price_buf.clear()
 
 
-# ── Strategy Engine ──────────────────────────────────────────────────────────
-
 class StrategyEngine:
     """
     Full physics-based regime detection engine.
@@ -385,14 +375,6 @@ class StrategyEngine:
         # FIX-B: raised from 0.60 → 0.62 to tighten consolidation gate
         confidence_high: float = 0.79,
         confidence_low: float = 0.19,
-        # ── Entry-side confidence gates (independent of exit thresholds) ────
-        # entry_confidence_high: minimum confidence required to open a new
-        #   position (used in _passes_entry_gate).  Kept separate so you can
-        #   tighten entries without affecting exit / TP-SL scaling.
-        # entry_confidence_low:  lower bound used symmetrically if you want
-        #   an entry-side lerp in future; currently acts as a hard floor
-        #   (entry blocked when confidence < entry_confidence_low).
-        #   Defaults to confidence_low so behaviour is unchanged unless set.
         entry_confidence_high: float = 0.79,
         entry_confidence_low: float = 0.19,
         confidence_w1: float = 0.3,
@@ -410,7 +392,6 @@ class StrategyEngine:
         stability_bars: int = 5,
         spike_atr_multiplier: float = 1.2,
         spike_lookback_bars: int = 9,
-        # ── FIX-A: new top-blast parameters ──────────────────────────
         body_baseline_bars: int = 160,
         # ^ Long window for body average — anchors comparison to calm bars,
         #   not the recent pump bars.  Must be >> spike_lookback_bars.
@@ -422,38 +403,23 @@ class StrategyEngine:
         momentum_peak_bars: int = 1,  # tuned
         # ^ If |m_hat| has been declining for this many consecutive bars,
         #   we are past the momentum peak → block BUY regardless of S.
-        # ── FIX-B: consolidation range gate parameter ─────────────────
         consolidation_range_pct: float = 25.0,
         # ^ If N-bar range < this % of price AND price is in mid 35–65%
         #   of that range, it's a box / consolidation → block entry.
-        # ── FIX-C: high-confidence stability relaxation ────────────────
         confidence_very_high: float = 0.86,
         # ^ When confidence exceeds this, reduce effective stability_bars to 1.
-        # ── Macro trend gate ─────────────────────────────────────────────
         ema_macro_period: int = 7,
         # ^ Slow EMA lookback used to define the macro trend.  Only BUY when
         #   close >= ema_macro.  Set to 0 to disable.
-        # ── Stoploss ─────────────────────────────────────────────────────
         stoploss_pct: float = 0.0,
         # ^ Stop loss control (sign-encoded):
         #   0.0        → disabled
         #   negative   → hard stop loss  (e.g. -10.0 = exit if price drops 10% from entry)
         #   positive   → trailing stop   (e.g.  10.0 = exit if price falls 10% from peak)
-        # ── Take Profit ──────────────────────────────────────────────────
         takeprofit_pct: float = 0.0,
         # ^ Take profit control:
         #   0.0        → disabled
         #   positive   → exit if price exceeds entry by this percentage
-        # ── Confidence-scaled TP / SL ────────────────────────────────────
-        # When in position, TP and SL are linearly interpolated between their
-        # low-confidence and high-confidence extremes based on trend_confidence.
-        #
-        # takeprofit_pct_low  = TP used when confidence ≤ confidence_low
-        # takeprofit_pct_high = TP used when confidence ≥ confidence_high
-        # stoploss_pct_low    = SL (magnitude) used when confidence ≤ confidence_low
-        # stoploss_pct_high   = SL (magnitude) used when confidence ≥ confidence_high
-        #
-        # Set all four to 0.0 to disable scaling (uses static stoploss_pct / takeprofit_pct).
         takeprofit_pct_low: float = 20.0,
         takeprofit_pct_high: float = 300.0,
         stoploss_pct_low: float = 12.0,
@@ -461,10 +427,6 @@ class StrategyEngine:
         # trailing stop from 25 → 20 captured ~+0.05 SOL on the full batch
         # (1374 backtests): beats baseline (+1.7191 → +1.9619 SOL).
         stoploss_pct_high: float = 20.0,
-        # ── FIX-D: early underwater exit ────────────────────────────────────
-        # If the position is losing more than this % AND momentum is rolling
-        # over, exit before the regime state machine takes 5+ bars to confirm
-        # a REVERSAL.  Set to a large value (e.g. 100) to effectively disable.
         early_exit_loss_pct: float = 10.0,
         # FIX-D: bars (engine states) after entry during which the
         # early underwater exit is active.  30 ≈ 7-8 candles on a 4-state
@@ -482,7 +444,8 @@ class StrategyEngine:
         # (true pump-and-dumps).  A trade that already ran +15% lets the
         # trailing-stop mechanism handle its downside.
         early_peak_floor_pct: float = 5.0,
-        # ── Trailing-stop arm buffer (was hardcoded 5%) ────────────────────
+        # Trailing-stop arm buffer (was hardcoded 5%)
+
         # Percentage buffer above the activation price that must be reached
         # before the trailing stop arm engages.  5 = original behaviour.
         # 0 = arm exactly at activation (1+pct above entry), tighter.
@@ -528,30 +491,17 @@ class StrategyEngine:
         # pure-underwater eligibility: any state-bar in TREND with c < entry
         # × (1 - bleed_underwater_pct/100) counts toward persistence.
         bleed_drop_from_peak_pct: float = 0.0,
-        # ── FIX-D: max bars REVERSAL regime waits for S collapse before exit
-        # If reversal_bar_count has grown past this and we are still in
-        # position, exit regardless of signal strength.
         reversal_exit_bars_max: int = 20,
-        # ── Late-recording entry gate: refuse BUY entries when bar_count > this.
-        # Backtest analysis showed entries later than ~8000 state-bars (>~2000 1s
-        # candles) have winrate ~51% and near-zero PnL contribution per trade,
-        # while still generating big losses.  Default 0 disables the gate.
         max_entry_bar_count: int = 5700,
-        # ── Bar-count FORBIDDEN band: refuse BUY entries when bar_count is in [lo, hi].
-        # Both bounds default to 0 = no forbidden band.  Backtest analysis on the
-        # 1374-recording corpus showed the bc=2000-3500 bucket has 41.5% WR and
-        # -0.20 SOL contribution.  Skipping this band cuts ~70 trades but
-        # simultaneously removes 7 big losses (~-0.40 SOL) while preserving ~93% of
-        # the +1.30 SOL take-profit winners, lifting overall WR/PnL/big-loss counts.
         forbidden_bc_lo: int = 2000,
         forbidden_bc_hi: int = 3000,
-        # ── LANGEVIN drift discriminator (price-level escape detector) ───────
+        # LANGEVIN drift discriminator (price-level escape detector)
+
         # Mathematical motivation: Under the engine's Langevin regime model
         #   dp = m·dt + σ·dW , dm = -γ·m·dt + F·dt + σ·dW'
         # the Kalman-smoothed position estimate `p_hat` is the *most stable*
         # observable of the latent price level.  Three regimes are visible
         # in p_hat over a rolling window of size `langevin_drift_window`:
-        #
         #   (i)  Price mean-reverting         → p_hat drifts around entry.
         #   (ii) V-shaped recovery            → p_hat dips briefly then climbs
         #                                        back above entry; the rolling
@@ -562,14 +512,12 @@ class StrategyEngine:
         #                                        entry × (1 − 10%).  Rolling
         #                                        MIN(p_hat/entry) keeps
         #                                        drifting down window by window.
-        #
         # The discriminator `D(t)` checks: for `langevin_drift_stay`
         # consecutive state-updates, has ``p_hat < entry × (1 −
         # langevin_drift_pct/100)`` been sustained?  In case (iii) the
         # answer is yes — p_hat is *trapped* below entry for the whole
         # window.  In case (ii) the dip is too short to qualify.  In case
         # (i) p_hat never crosses the threshold.
-        #
         # Combined with the requirement that we are in a long position
         # while in the ambiguous confidence zone (regime=TREND but
         # confidence < confidence_high, where the natural TREND → REVERSAL
@@ -579,9 +527,6 @@ class StrategyEngine:
         langevin_drift_window: int = 28,
         langevin_drift_pct: float = 8.0,
         langevin_drift_stay: int = 94,
-        # ── Market-cap bound trade block ────────────────────────────────────
-        # Block all BUY entries when the USD market cap is below mcap_low_usd
-        # or above mcap_high_usd.  Both default to 0 = deactivated.
         mcap_low_usd: float = 0.0,
         mcap_high_usd: float = 0.0,
     ):
@@ -656,7 +601,8 @@ class StrategyEngine:
         self.trend_max_hold_bars = trend_max_hold_bars
         self.early_peak_floor_pct = early_peak_floor_pct
 
-        # ── Trailing-stop arm buffer (was hardcoded 5%) ────────────────────
+        # Trailing-stop arm buffer (was hardcoded 5%)
+
         # When the trailing stop has positive `stoploss_pct`, the trail
         # doesn't arm until the peak has moved `activation + buffer %` above
         # entry.  Set to 0 to arm exactly at the activation level.  Lower
@@ -796,8 +742,6 @@ class StrategyEngine:
 
         self.no_motion_count: int = 0
 
-    # ── Indicators ────────────────────────────────────────────────────────────
-
     def _update_indicators(self, o: float, h: float, l: float, c: float, vol: float):
         self.close_history.append(c)
         self.high_history.append(h)
@@ -894,11 +838,6 @@ class StrategyEngine:
         if len(self._ema_spread_history) > N * 2:
             self._ema_spread_history = self._ema_spread_history[-(N * 2):]
 
-        # ── Dead code: legacy LANGEVIN buffers (kept for backward compat
-        # since external callers may mutate these).  The active LANGEVIN
-        # discriminator uses the `_p_hat_vs_entry_history` rolling buffer
-        # populated just below.  Computing `neg_mhat` here is costless
-        # and keeps the buffer symbols alive for any future re-tuning.
         neg_mhat = max(0.0, -self.m_hat)
         self._neg_m_hat_history.append(neg_mhat)
         if len(self._neg_m_hat_history) > N * 4:
@@ -911,12 +850,6 @@ class StrategyEngine:
         if len(self._neg_m_hat_atr_ratio_history) > N * 4:
             self._neg_m_hat_atr_ratio_history = self._neg_m_hat_atr_ratio_history[-(N * 4):]
 
-        # ── LANGEVIN drift discriminator (price level escape detector):
-        # Track the ratio p_hat / entry_price over a rolling window.
-        # Whenever the ratio drops below (1 − p_hat_drift_pct/100), increment
-        # a consecutive counter.  When the counter reaches stay_floor it
-        # indicates that p_hat has been persistently below entry for the
-        # last `stay_floor` state-bars — escape has happened.
         if self.entry_price > 0:
             p_vs_entry_ratio = self.p_hat / self.entry_price
             self._p_hat_vs_entry_history.append(p_vs_entry_ratio)
@@ -933,8 +866,6 @@ class StrategyEngine:
         self._update_ema_cross_validation(c)
         self._update_local_chop(c)
         self._update_pre_entry_stability()
-
-    # ── FIX-A: Momentum-peak helper ───────────────────────────────────────────
 
     def _momentum_past_peak(self) -> bool:
         """Returns True when |m_hat| has been declining for momentum_peak_bars
@@ -1028,8 +959,6 @@ class StrategyEngine:
 
         return False
 
-    # ── §1–§3: Global Regime Filter + Trend Confidence ───────────────────────
-
     def _update_regime_filter(self, c: float):
         N = self.regime_lookback
 
@@ -1116,8 +1045,6 @@ class StrategyEngine:
 
         self.trend_confidence = max(0.0, min(1.0, self.trend_confidence))
 
-    # ── §5: EMA Cross Validation ──────────────────────────────────────────────
-
     def _update_ema_cross_validation(self, c: float):
         if c <= 0:
             self._ema_cross_valid = False
@@ -1139,8 +1066,6 @@ class StrategyEngine:
             self._ema_cross_persist_count >= self.ema_cross_persist_bars
         )
 
-    # ── §8: Local Range Anti-Chop Filter ─────────────────────────────────────
-
     def _update_local_chop(self, c: float):
         N = self.local_range_bars
         if len(self.close_history) < N or c <= 0:
@@ -1159,8 +1084,6 @@ class StrategyEngine:
                 sign_flips += 1
 
         self._in_local_chop = range_small and sign_flips >= self.sign_flip_threshold
-
-    # ── §9: Pre-Entry Stability Check ────────────────────────────────────────
 
     def _update_pre_entry_stability(self):
         """FIX-C: When confidence is very high (> confidence_very_high), reduce
@@ -1196,14 +1119,9 @@ class StrategyEngine:
         self._pre_entry_stable_down = False  # shorts removed
         self._pre_entry_stable = self._pre_entry_stable_up
 
-    # ── §7 + §10: Unified Entry Gate ─────────────────────────────────────────
-
     def _passes_entry_gate(self, c: float, direction: Direction) -> bool:
         """FIX-A + FIX-B + macro-trend gate applied here in addition to existing checks."""
 
-        # ── Market-cap bound trade block: block all BUY entries when the
-        # latest USD market cap is below mcap_low_usd or above mcap_high_usd.
-        # Both default to 0 = deactivated.
         if direction == Direction.UP:
             mcap = self._market_cap_usd
             if mcap > 0.0:
@@ -1212,23 +1130,13 @@ class StrategyEngine:
                 if self.mcap_high_usd > 0.0 and mcap > self.mcap_high_usd:
                     return False
 
-        # ── Late-recording entry gate: avoid trading tokens whose recording is
-        # already mature (high bar_count).  Late-record trades have a higher
-        # big-loss density and lower per-trade PnL contribution.  Default 0
-        # disables this gate.
         if self.max_entry_bar_count > 0 and self.bar_count > self.max_entry_bar_count:
             return False
 
-        # ── Forbidden-band entry gate: refuse BUY entries whose bar_count
-        # falls inside [lo, hi].  Empirically the bc=2000-3500 bucket is the
-        # weakest: 41.5% WR with +0.20 SOL bleeding on top.  Excluding this
-        # band lifts WR/PnL/loss counts simultaneously.  Both bounds default
-        # to 0 = no forbidden band.
         if (self.forbidden_bc_lo > 0 and self.forbidden_bc_hi > 0
                 and self.forbidden_bc_lo <= self.bar_count <= self.forbidden_bc_hi):
             return False
 
-        # ── Macro trend gate: block BUY when price is below the slow EMA ──
         if direction == Direction.UP:
             if self.ema_macro_val is not None and c < self.ema_macro_val:
                 return False
@@ -1245,7 +1153,6 @@ class StrategyEngine:
         if direction == Direction.UP and not self._pre_entry_stable_up:
             return False
 
-        # ── FIX-A: Top-blast guards ───────────────────────────────────
         if direction == Direction.UP:
             # 1. Price overextended above Kalman estimate — only block when
             #    signal is ALSO strong (i.e. blow-off: fast price + strong S).
@@ -1269,9 +1176,6 @@ class StrategyEngine:
             if self.trend_bar_count >= spike_context_min and self._spike_on_long_baseline(c):
                 return False
 
-        # ── FIX-B: Consolidation box detection ───────────────────────
-        # If the recent N-bar range is tiny (box) AND price is in the
-        # middle 35–65% of that box, we are inside dead range action.
         if len(self.close_history) >= self.local_range_bars:
             recent_prices = self.close_history[-self.local_range_bars:]
             recent_high = max(recent_prices)
@@ -1292,8 +1196,6 @@ class StrategyEngine:
                         return False
 
 
-        # ── Original spike filter (short window, kept as secondary) ──
-        # FIX-A replaces this as primary, but we keep it as a backstop.
         if self.atr_val and self.atr_val > 0 and len(self.open_history) >= 2:
             lookback = min(self.spike_lookback_bars, len(self.open_history))
             recent_bodies = [
@@ -1426,7 +1328,6 @@ class StrategyEngine:
             elif direction == Direction.DOWN and cum_delta < 0:
                 delta_aligned = True
 
-        # ── §1/§3: GLOBAL REGIME FILTER ──────────────────────────────────────
         if self.trend_confidence < self.confidence_low:
             if self.regime not in (Regime.EXHAUSTION,):
                 if self.in_position:
@@ -1442,7 +1343,8 @@ class StrategyEngine:
             return self.regime, None
 
         if self.trend_confidence < self.confidence_high:
-            # ── FIX-D: bleed-out guard ───────────────────────────────────────
+            # FIX-D: bleed-out guard
+
             # The ambiguous-zone guard was leaking a serious bug: when an open
             # position's trend started decaying (confidence drops below
             # confidence_high) the state machine got stuck in TREND because
@@ -1450,7 +1352,6 @@ class StrategyEngine:
             # only runs when confidence ≥ confidence_high.  Traces of all 31
             # big-loss backtest trades show 5-10 minutes of regime="trend"
             # while price bled from peak to -25%.
-            #
             # Two exits exist for stuck positions: exhaust_exit and reversal.
             # To unblock them, demote TREND → EXHAUSTION only when:
             #   * the position is in money (in_position)
@@ -1474,7 +1375,6 @@ class StrategyEngine:
             #     not a winning pullback but a real bleed: the price rolled
             #     over AND is now below our entry.  This gate means we do
             #     NOT demote on winning pullbacks; only genuine losers.
-            #
             # Without this gate, the demote fires on any winning uptrend's
             # brief confidence dip and exits +9% winners prematurely.
             underwater = (
@@ -1486,9 +1386,7 @@ class StrategyEngine:
             # threshold AND price below entry for at least `bleed_persist_bars`
             # state-updates.  This filters transient pullbacks inside an
             # otherwise healthy TREND.
-            #
             # Two eligibility modes:
-            #
             #  — Price-action mode (preferred when `bleed_drop_from_peak_pct` > 0
             #    AND a peak above entry exists): eligible when TREND + LONG AND
             #    price is materially below entry AND has fallen at least
@@ -1498,7 +1396,6 @@ class StrategyEngine:
             #    `trend_confidence` in the 0.45-0.75 range for many seconds while
             #    price falls -5% to -20%, but the relative drop from peak is
             #    monotonic.
-            #
             #  — Legacy mode (default, when `bleed_drop_from_peak_pct` == 0):
             #    Confidence+signal-gated eligibility: requires conf <
             #    `bleed_demote_threshold` AND S < `bleed_signal_threshold` AND
@@ -1568,22 +1465,6 @@ class StrategyEngine:
                 # we cut it.
                 return self.regime, None
 
-            # ── LANGEVIN drift discriminator (price-level escape detector)
-            # Two routes to ENFORCE the demote:
-            #   (A) direct executive in `_check_exit` → `langevin_drift_exit`
-            #   (B) demote TREND → REVERSAL here, then existing reversal_exit
-            #       fires via line ~2030.  Having both gives the strategy a
-            #       robust two-track routing: the executive Bypasses the
-            #       regime state machine entirely if the executive was
-            #       somehow disabled, and the demote route preserves the
-            #       natural mid-trade state transitions for diagnostics.
-            # Set `langevin_drift_stay` very large (>1e6) to fully disable
-            # both routes.
-            # Use the EFFECTIVE adverse excursion: max(p_hat_drop, c_drop).
-            # In slow bleeds the kalman-smoothed p_hat trails the close so we use
-            # `c`; in fast dumps `p_hat` lags behind so we use both.  This makes
-            # the discriminator responsive to both regimes — mode (a) and (b) in
-            # `_langevin_escape_score` at line ~940.
             if self.in_position and self.position_direction == Direction.UP and self.entry_price > 0 and self.langevin_drift_stay > 0:
                 tripwire = self.entry_price * (1.0 - self.langevin_drift_pct / 100.0)
                 effective_low = min(self.p_hat, c) if c > 0 else self.p_hat
@@ -1608,10 +1489,8 @@ class StrategyEngine:
                 self._p_hat_below_entry_count = 0
                 return self.regime, None
 
-            # ── FIX-B: Ambiguous zone — hard return with no signal ────────────
             return self.regime, None
 
-        # ─── A. TREND → EXHAUSTION ────────────────────────────────────────────
         if self.regime == Regime.TREND:
             self.trend_bar_count += 1
 
@@ -1684,7 +1563,6 @@ class StrategyEngine:
             else:
                 self.trend_reversal_confirm_count = 0
 
-        # ─── B/C. EXHAUSTION → CONTINUATION / REVERSAL ───────────────────────
         elif self.regime == Regime.EXHAUSTION:
             self.exhaustion_bar_count += 1
 
@@ -1732,12 +1610,6 @@ class StrategyEngine:
                         )
                         if persist_ok:
                             if not self.in_position and S > self.S_weak and self.m_hat > 0:
-                                # ── FIX-D: top-of-spike guard ───────────────
-                                # The 29/31 worst losses all entered here with
-                                # momentum_past_peak=True, pre_entry_stable=False
-                                # and spread_expanding=False. We are buying the
-                                # last gasp of a spike that already crested →
-                                # reject the BUY.
                                 if self._momentum_past_peak() and not self.spread_expanding:
                                     signal = None
                                 else:
@@ -1801,7 +1673,6 @@ class StrategyEngine:
                 if self.in_position:
                     signal = Signal.EXIT
 
-        # ─── D. REVERSAL → CONTINUATION / back to EXHAUSTION ─────────────────
         elif self.regime == Regime.REVERSAL:
             self.reversal_bar_count += 1
             new_dir = self._detect_direction()
@@ -1856,12 +1727,6 @@ class StrategyEngine:
                 self._exhaustion_phase_high = 0.0
                 return self.regime, None
 
-        # ─── E. CONTINUATION → TREND ──────────────────────────────────────────
-        # Promote to TREND only when the move has confluence: confidence is
-        # already ABOVE the entry threshold AND the EMA spread is expanding.
-        # This prevents the blind 1-bar promotion that historically let weak
-        # continuation flips ride straight into TREND with no validation,
-        # forcing exits through the same loose reversal flag.
         elif self.regime == Regime.CONTINUATION:
             if self.trend_confidence >= self.entry_confidence_high and self.spread_expanding:
                 self.regime = Regime.TREND
@@ -1952,49 +1817,17 @@ class StrategyEngine:
         # so it evaluates trailing stops against the peak established from 
         # previous bars. This prevents phantom intra-bar stop-outs.
 
-        # ── LANGEVIN drift EXECUTIVE — directly exit when p_hat has been
-        # trapped below entry for too long.  This is an advanced physical
-        # discriminator: the Kalman-smoothed position `p_hat` is the most
-        # stable estimator of the latent price level.  When it has been
-        # continuously below `entry × (1 − langevin_drift_pct/100)` for at
-        # least `langevin_drift_stay` consecutive state-bars, the realisation
-        # has been ESCAPING its basin (Ortstein-Uhlenbeck picture) for too
-        # long.  Bypasses the slower regime-state machine which needs S > 4
-        # to flip to REVERSAL.
-        # ── (Currently DISABLED in favour of the demote-and-reversal_exit
-        #     path through `_detect_regime`.  See iteration log: the direct
-        #     executive produced slightly worse PnL by exiting during
-        #     the regime's natural resolution window — the demote-then-
-        #     reversal_exit flow gives the regime an opportunity to
-        #     re-evaluate once before committing.  Re-enable by removing
-        #     these comments if profiling results in the future change.) ──
-        # if self.position_direction == Direction.UP and self.entry_price > 0 and self.langevin_drift_stay > 0:
-        #     tripwire = self.entry_price * (1.0 - self.langevin_drift_pct / 100.0)
-        #     if self.p_hat < tripwire:
-        #         self._check_exit_p_hat_below += 1
-        #         if self._check_exit_p_hat_below >= self.langevin_drift_stay:
-        #             self.exit_signal_reason = "langevin_drift_exit"
-        #             self._check_exit_p_hat_below = 0
-        #             return Signal.EXIT
-        #     else:
-        #         self._check_exit_p_hat_below = 0
-        # Reset space for the lazy-init attribute above — Reset to 0 once
-        # the trade closes
-        # (handled in notify_trade_closed via reset)
-
-        # ── Confidence-scaled stop loss (stoploss_pct_low / stoploss_pct_high) ─
         eff_sl = self._effective_stoploss_pct()
         if eff_sl != 0.0:
             pct = abs(eff_sl)
             if eff_sl < 0:
-                # ── Hard stop loss (long only) ──────────────────────────────
-                # Use intra-bar low so a wick through the stop always triggers.
                 check_price = l if l > 0 else c
                 if check_price <= self.entry_price * (1.0 - pct / 100.0):
                     self.exit_signal_reason = "hard_stop"
                     return Signal.EXIT
             else:
-                # ── Trailing stop loss (long only) ──────────────────────────
+                # Trailing stop loss (long only)
+
                 # Dormant until price has moved at least pct% above entry.
                 # An optional `trailing_stop_arm_buffer_pct` (default 5%) is
                 # added on top of activation to prevent the trail from arming
@@ -2018,21 +1851,15 @@ class StrategyEngine:
                         self.exit_signal_reason = "trailing_stop"
                         return Signal.EXIT
 
-        # ── Global (static) stop loss — runs simultaneously with scaled stop ─
         gsl = self._global_stoploss_pct()
         if gsl != 0.0:
             pct = abs(gsl)
             if gsl < 0:
-                # ── Hard stop loss (long only) ──────────────────────────────
                 check_price = l if l > 0 else c
                 if check_price <= self.entry_price * (1.0 - pct / 100.0):
                     self.exit_signal_reason = "hard_stop"
                     return Signal.EXIT
             else:
-                # ── Trailing stop loss (long only) ──────────────────────────
-                # Dormant until price has moved at least pct% above entry,
-                # PLUS an additional 5% buffer past that activation price
-                # (see note in the scaled-SL branch above).
                 activation_price = self.entry_price * (1.0 + pct / 100.0)
                 arm_price = activation_price * (1.0 + self.trailing_stop_arm_buffer_pct / 100.0)
                 if self._peak_price >= arm_price:
@@ -2047,7 +1874,6 @@ class StrategyEngine:
                         self.exit_signal_reason = "trailing_stop"
                         return Signal.EXIT
 
-        # ── Confidence-scaled (or static) take profit ─────────────────────
         eff_tp = self._effective_takeprofit_pct()
         if eff_tp > 0.0:
             if self.position_direction == Direction.UP:
@@ -2083,18 +1909,6 @@ class StrategyEngine:
         # position's trend starts decaying, allowing the existing
         # `exhaustion_exit` mechanism to fire instead of adding a second
         # parallel trend-exit path that was proving too noisy.
-
-        # ── FIX-D: Early underwater exit ────────────────────────────────────
-        # Pump-and-dump tokens drawdown -15% to -70% in the first ~30-60
-        # seconds after the BUY.  The regime state machine takes that long
-        # just to flip to REVERSAL, so the position rides the slide all the
-        # way to the bottom.  This guard exits early when:
-        #   1. the trade is in its initial `early_protection_bars` engine-bar
-        #      window (default 30 ≈ 7-8 candles),
-        #   2. the unrealised loss ≥ `early_exit_loss_pct` %,
-        # (The early-underwater exit path has been removed — the
-        # stuck-in-TREND exit above replaced it with a simpler/more
-        # targeted trigger that fires only when actually stuck in TREND.)
 
         if self.no_motion_count >= 60:
             self.exit_signal_reason = "stale_exit"
