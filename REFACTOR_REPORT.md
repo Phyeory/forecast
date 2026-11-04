@@ -196,7 +196,44 @@ package is `backend/stores/` instead.
 
 ### Seam 6: router split
 
-(pending)
+All 51 REST routes + 4 WS moved verbatim from `main.py` (3,316→1,494 lines)
+into `app/routers/{chart,recordings,backtests,live,autofeed,newpairs}.py`
+plus `app/deps.py` for shared process state. The recordings routes use ONE
+`recordings_router(prefix, store, default_min_candles)` factory for the
+price and newpairs groups; the duplicate-verb aliases (POST+DELETE on
+`finish_stale`/`cleanup`) all survive. Proofs: route inventory (method,
+path, handler) identical including ORDER; **`/openapi.json` byte-identical**
+(the factory mirrors the original bottom-up dual-verb registration);
+`on_startup`/`on_shutdown` lists identical; 13 read-only TestClient probes
++ WS close codes identical before/after in one process; moved function
+bodies AST-identical except 6 intended late-import lines and
+`app.state`→`request.app.state`. Commit `f88b57a`, cherry-picked as
+`d52630a`.
+
+### Seam 8: engines expose snapshot(), signal_capture formats it
+
+`AdapterBase.snapshot()` (plus V1/V2/V3/V4 overrides where their state
+genuinely differs) returns the full decision state as a flat dict;
+`signal_capture.py` reads it (with a byte-exact getattr fallback per field)
+and formats the same journal records. The warmup-floor magic `400` now lives
+in the engine's own snapshot where the gate lives. Equivalence probe: 5
+engines × 10 capture points (incl. a full exit cascade and warmup-knob
+variants) — journal output byte-identical (`cmp` clean).
+`test_signal_capture` 11/11. `forward_tester._capture_entry_params/_exit`
+left untouched (different key names/rounding — not trivially equivalent;
+noted). +502/−284. Commit `5caf3c5`, cherry-picked as `981e62e`.
+
+### Seam 9: every swallowed exception states itself
+
+47 `except Exception: pass` sites + 33 extra silent swallows = 80 sites
+across 12 files now carry a `logger.debug` (3 get `logger.warning` at the
+DB-write / wallet-journal / sidecar-poisoning sites), or a why-comment where
+logging is meaningless. Zero control-flow change: no narrowing (it would
+change the error path), no retries, no new fallbacks; `except Exception`
+stays at task/loop boundaries. Gate grep: 0 remaining in scope. 14 lifecycle
+idioms (`asyncio.TimeoutError`/`CancelledError`/`WebSocketDisconnect`)
+left as the exception type IS the end state. Commit `d2da729`, cherry-picked
+as `b770327`.
 
 ### Seam 7: one candidate-feed base, two feeds
 
@@ -236,17 +273,74 @@ Logged during the work; none touched, per the brief.
    trip. (Seam 7 agent.)
 6. **`autofeed.py` imports `Iterable` unused**; `AutoFeed` remains a
    600+-line class. (Seam 7 agent.)
+7. **`prewarm_mints` poisons its own sidecar on transient failures** — a
+   DexScreener batch failure writes every mint in the chunk as a
+   `batch-negative` row that later reads as resolved; a getMultipleAccounts
+   failure writes `pair_created_at` with `v_sol=0`, silently disabling the
+   effective-basis correction for that mint. (Seam 9 agent.)
+8. **`_sidecar_load` has no TTL on negative rows**, so a poisoned row
+   persists indefinitely. (Seam 9 agent.)
+9. **V6 `_compute_trail_stop_price` omits the `abs()`** every other engine
+   applies — equal only while `v6_scratch_tol >= 0`; a negative tolerance
+   would RAISE the trail stop. (Seam 4 agent.)
+10. **V4/V6 `_maintain_v1_indicators` freeze different attribute subsets**
+    on a non-positive close (V4 gates `p_hat` behind `c > 0`, V6 does not).
+    (Seam 4 agent.)
+11. **V6 never initialises `_market_cap_usd`/`_pool_sol`** though its
+    `update()` accepts them (it ignores them). (Seam 4 agent.)
+12. **V2 `_merge_config` docstring claims case-insensitivity** but performs
+    none (brief §5.8 confirmed). (Seam 4 agent.)
+13. **AOE journal fields (`aoe_*`) are dead** — `_v2_aoe_*` exists on no
+    engine; the capture block is kept for fallback parity. (Seam 8 agent.)
+14. **V1/V3 journal warmup floor omits the `max(..., 400)` clamp** the
+    engine itself applies, so a dashboard `warmup<100` reports a floor
+    lower than enforced. (Seam 8 agent.)
+15. **V3 `_has_recent_dev_sell` takes 2 args**; the capture's 3-arg call
+    always falls into its except and would record "no_recent_dev_sell" if
+    the V3 HF gate were ever enabled. (Seam 8 agent.)
+16. **`GET /static/js/{filename}` is dead code** — the `/static` Mount
+    shadows it, so JS is served without the route's intended no-cache
+    headers. (Seam 6 agent.)
+17. **`GET /api/token/{mint}` has no resolver timeout** unlike every other
+    `resolve_input` call site — a hung resolver blocks the request
+    indefinitely. (Seam 6 agent.)
+18. **The dead `key_str` fallback in `_get_or_create_live_session`**
+    (brief §6: `if not private_key: return` guarantees the fallback chain
+    cannot fall through). (Seam 6 agent.)
+19. **`main.py:363` swallows poll-loop errors with only a sleep**, and
+    **live_trader had a dead `finally: pass`** after an
+    `except Exception: return`. (Seam 9 agent.)
+20. **`DEFAULT_SOL_USD = 70.0` vs `_SOL_USD_FALLBACK = 200.0`** remain
+    contradictory (brief §6 item; the unified `core/prices.py` cache is
+    planned but not yet landed). (Seam 9 agent.)
 
 ## Deliberately left alone
 
-* The 51→49 pre-existing pytest failures (triaged against a pristine
-  worktree by the repo's own 2026-10-23 audit; separate project).
+* The pre-existing pytest failures (49 in the standard run; triaged against
+  a pristine worktree by the repo's own 2026-10-23 audit; separate
+  project). The only sanctioned deltas: `test_autofeed_tune.py` (+24
+  passing) moved into `analysis/`, and 2 regressions introduced and fixed
+  during this refactor (see the regression section).
 * Engine numerics, RNG order, dict key order, exit-reason strings, DB
   schemas, HTTP shapes.
 * `warmup` pop default (100) vs `DEFAULT_CONFIG["warmup_bars"]` (400): both
   preserved exactly as they behave today; unifying them is a behaviour
   change and belongs to the research pipeline, not this refactor.
-
-## Acceptance gates
-
-(pending: run at the end of the seam series)
+* The 12 oversized functions/classes (`execute_sell` 725 lines,
+  `StrategyEngineV2Adapter.__init__` 540, `build_report` 555,
+  `_detect_regime` 505, `_LiveSession.run` 451, `_monitor_trade` 325,
+  `_queue_signal_from_state` 243; `LiveTrader` 5,096-line class,
+  `ForwardTester` 832-line class, `HolderFlowMonitor` 814,
+  `AutoFeed` 659, `StrategyEngineV4Adapter` 411) and the
+  module-size violations (`strategy_engine.py` 2,279, `trade_report.py`
+  1,580, `session_calibrator.py` 1,009, `forward_tester.py` 986,
+  `holder_flow.py` 1,157, `autofeed.py` 946). `tools/check_gates.py`
+  enumerates them mechanically. Splitting these is real engineering on the
+  hottest live-path code in the repo and deserves its own reviewed seams,
+  not tail-end work under a deadline.
+* The 15 `global` statements in production modules (the `_price_store`
+  rebind is a deliberate runtime-repoint contract; the fleet/session
+  registries want an explicit `AppState` object — same seam as the class
+  splits).
+* `paper/`, `notes/`, `audit_report/` (documents, not code — the brief
+  says ask before deleting; pending the user's call).
