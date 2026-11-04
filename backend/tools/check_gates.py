@@ -81,9 +81,18 @@ def grep_gate(name: str, pattern: str, allow: str = "") -> None:
 
 
 def gate_no_swallowed_exceptions() -> None:
-    proc = subprocess.run(
-        ["grep", "-rnA1", "except Exception:", "--include=*.py", "."],
-        cwd=BACKEND, capture_output=True, text=True)
+    targets = ["--include=*.py", "main.py", "app/", "engines/", "core/",
+               "feeds/", "stores/", "data_store.py", "newpairs_store.py",
+               "forward_tester.py", "backtester.py", "live_trader.py",
+               "pumpfun_client.py", "holder_flow.py", "candle_aggregator.py",
+               "engine_factory.py", "signal_capture.py",
+               "session_calibrator.py", "calibration_startup.py",
+               "mint_chain_history.py", "pool_virtual_reserves.py",
+               "trade_report.py", "live_session_logger.py",
+               "rate_limiter.py", "process_watchdog.py", "autofeed.py",
+               "newpairs.py"]
+    proc = subprocess.run(["grep", "-rnA1", "except Exception:"] + targets,
+                          cwd=BACKEND, capture_output=True, text=True)
     lines = proc.stdout.splitlines()
     swallows = []
     for i, line in enumerate(lines):

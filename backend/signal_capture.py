@@ -63,6 +63,10 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 
 def _f(obj, attr, default=None):
@@ -229,8 +233,8 @@ def collect_coefficients(eng, snap=None) -> dict:
             try:
                 if isinstance(v, (int, float, bool, str)) or v is None:
                     out.setdefault(f"cfg.{k}", _r(v) if isinstance(v, (int, float)) else v)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("cfg knob %r not representable: %r", k, exc)
 
     # V1-style cfg_* plain attributes: the exhaustive list the backtester's
     # _capture_entry_params enumerates.  V1 and the adapters echo them for
@@ -286,8 +290,8 @@ def collect_coefficients(eng, snap=None) -> dict:
             if callable(v) or isinstance(v, (dict, list, tuple, frozenset, set)):
                 continue
             out[name] = _r(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("attribute sweep incomplete: %r", exc)
 
     # V1-family leading-underscore threshold knobs (strategy_engine).
     for attr in ("_max_entry_bar_count", "_forbidden_bc_lo", "_forbidden_bc_hi"):
