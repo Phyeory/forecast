@@ -4,9 +4,9 @@
  "buffer_pct": 0.005,
  "state": {
   "phase": 0,
-  "day": "2026-11-02",
-  "day_start_equity": 100000.0,
-  "equity": 100000.0,
+  "day": "2026-11-03",
+  "day_start_equity": 99712.76,
+  "equity": 99698.99,
   "peak_equity": 100000.0,
   "start_equity": 100000.0,
   "total_profit": 0.0,
