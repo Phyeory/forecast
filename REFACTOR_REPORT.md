@@ -344,3 +344,68 @@ Logged during the work; none touched, per the brief.
   splits).
 * `paper/`, `notes/`, `audit_report/` (documents, not code — the brief
   says ask before deleting; pending the user's call).
+
+### Seam 10: comments state invariants, not history
+
+Roughly 760 changelog markers, box-drawing banners, and date/incident
+comments removed or converted to short present-tense invariants across
+main.py, the routers, engines, feeds, stores, and the big support modules
+(net -1,281 lines of changelog rot). The fleet-share registry and
+ContextVar journaling explanations moved to `docs/architecture.md`.
+Guarantee: AST identity proof (comments, docstrings, and standalone dead
+string expressions nulled) over all 36 touched files; runtime-string edits
+made by the mechanical strip were caught by the proof and reverted
+byte-exact. Golden corpus 183/183 PASS; pytest set exactly the pre-existing
+49. Commits `66db9eb` (support files, agent worktree) + `0bc4bce` +
+`a4127f1`.
+
+Documented gate exceptions (functional data, not documentation): the
+`iter05_decay_*` config-key identifiers and their attribute/registry uses
+(external config contract), trade_report's historical batch-name lookup
+strings and `--batch` default (functional keys into `v2_results/`), and the
+V2 journal cell-name strings (`iter78/80 deferred-* cell` labels).
+
+### Seam 11: frontend split
+
+Not started: the delegated agent died on its quota limit before making any
+frontend edit, and the worktree was discarded. `app.js` (4,068 lines) is
+unchanged. Remaining-work item below.
+
+## Acceptance gates (final record)
+
+`tools/check_gates.py` (gates 3-10 programmatically):
+
+| Gate | State |
+|---|---|
+| 1. golden_verify full corpus | PASS - 183/183 (all engines, all exec models) |
+| 2. restart-path byte-identity | PASS - proven per-seam via golden fixtures + openapi.json byte-identity for the HTTP surface |
+| 3. engines importable without fastapi/aiohttp/solders | PASS |
+| 4. main.py < 400 lines, no business logic | FAIL - 1,472 lines: routes moved (seam 6) but `_LiveSession`/`_NewPairSession` and the fleet registry remain |
+| 5. no function > 60 lines / module > 800 | FAIL - the 7.1 monsters remain (see remaining work) |
+| 6. no iterNN markers | PASS-with-exceptions - 17 documented functional-identifier hits |
+| 7. no ISO dates | PASS |
+| 8. no swallowed exceptions | PASS (production modules) |
+| 9. no globals | FAIL - 15 (fleet/session registries; the `_price_store` rebind is a deliberate contract) |
+| 10. every default stated once | PASS (core/config.py; exceptions above) |
+| 11/12. human walkthrough / live paper session | not run - need a funded wallet and a human |
+
+## Remaining work
+
+1. **Seam 11: frontend split** (`app.js` -> ES modules; agent quota-died
+   with zero edits made; the brief's section 9 is a ready-made brief).
+2. **7.1 size splits**: `execute_sell` (725 lines, nesting 7) -> a
+   `SellExecutor` collaborator; `StrategyEngineV2Adapter.__init__` (540);
+   `trade_report.build_report` (555); `strategy_engine._detect_regime`
+   (505); `_LiveSession.run` (451); `_monitor_trade` (325);
+   `_queue_signal_from_state` (243). These are the hottest live-path
+   functions in the repo and deserve individually reviewed seams.
+3. **main.py < 400**: extract `_LiveSession`/`_NewPairSession` and the
+   fleet registry into `app/` modules (pure moves; the routers already
+   late-import these from main).
+4. **Globals -> explicit state objects** (15 sites; AppState/registries).
+5. **Seam 12 mechanical layout**: moving `forward_tester`/`backtester`/
+   `live_trader` into packages is NOT a pure `git mv` (every import names
+   them at the backend root; pool workers, pytest, and tools import them
+   by that path) - budget a dedicated seam for the import rewrite.
+6. **5.7 SOL/USD dual cache** (`core/prices.py`) - holder_flow and
+   trade_report still carry two contradictory fallbacks (see bug 20).
