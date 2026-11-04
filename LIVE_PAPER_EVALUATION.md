@@ -72,6 +72,15 @@ Nov-2 double failure); a skipped sync self-heals next session since `warm_sync` 
 every prepare. Convergence is now: evening run submits → broker executes at next open →
 next evening run books the fills at venue prices.
 
+**🎯 FIRST REAL FILLS — 2026-11-03 15:17–15:45 ET.** With the market open, the venue pass
+found the overnight `opg` orders stale, canceled them, and the resubmitted `day` orders
+executed at market immediately — the exact conversion path this fix was built for. 7
+positions opened and topped up to target over Nov 3–4 sessions. Broker truth (Nov 4
+20:54 UTC): equity **$101,946.45 (+$1,946 / +1.95%)**, cash $47,046, all 7 positions green,
+**realized PnL $0.00** (no exits yet). Entry prices are close-of-day prints (fills landed
+15:17–15:45 ET), not the backtest's next-open — the first entry-price wedge the parity
+tracking should note.
+
 **⚠️ Open defect (2026-10-30) — signal→order pipeline stalls. FIXED same day, see below.**
 Sessions log `desired_position=1` with `pending={}` and no `orders.jsonl` entries, while the
 earlier session's pre-open `next_open_fill` booking (07:42 UTC, before the auction) suggests
