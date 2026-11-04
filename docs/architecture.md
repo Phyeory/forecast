@@ -8,31 +8,35 @@ engine identically; that parity is the system's core invariant.
 
 Ops commands live in `AGENTS.md`. Research history lives in `RESEARCH_LOG.md`.
 
-## Module map (current tree)
+## Module map (refactor in progress)
+
+The behaviour-preserving refactor (see `REFACTOR_REPORT.md`) is extracting
+the logical units in place; the table below reflects the landed structure.
 
 | Layer | Module | Role |
 |---|---|---|
-| app | `backend/main.py` | FastAPI assembly, 51 routes (47 REST + 4 WS), server-side `_LiveSession` / `_NewPairSession` run loops, fleet registry, startup/shutdown |
-| feeds | `backend/pumpfun_client.py` | Mint/pool resolution + trade streaming (PumpPortal WS, pump.fun REST, RPC vault subscription, DexScreener); per-mint PumpSwap virtual-reserve resolution |
-| feeds | `backend/holder_flow.py` | Insider/whale sell watcher (stream, >=100 USD) + GMGN poll fallback; SOL/USD cache |
-| feeds | `backend/autofeed.py`, `backend/newpairs.py` | Candidate-feed state machines: discover, gate, spawn session, status snapshot |
-| data | `backend/data_store.py` | SQLite stores: `price_data.db` (recordings, candles, holder_flow, mint history) and `backtest_data.db` (backtests, trades, candle series) |
-| data | `backend/newpairs_store.py` | Same recording schema, separate `newpairs_data.db` |
-| data | `backend/pool_virtual_reserves.py` | PumpSwap virtual quote reserve (V) resolver; sidecar cache; load-time candle correction to the executable basis |
-| engines | `backend/strategy_engine.py` | V1: Langevin/Kalman regime detector (Signal/Direction/Regime enums live here) |
-| engines | `backend/strategy_engineV2.py` | V2: latent-state SDE + RBPF/UKF/KDE; `DEFAULT_CONFIG` (76 knobs) |
-| engines | `backend/strategy_engineV3.py`, `V4`, `V6` | Archetype engines (dump-bottom, post-nuke reversion, absorption); non-default |
-| engines | `backend/engine_factory.py` | `create_engine(version, **kwargs)` dispatch |
-| execution | `backend/forward_tester.py` | THE fill contract: `Trade`, stats, exec models (`instant`/`legacy`/`latency`), intra-candle price path, fill fraction, slippage |
-| execution | `backend/backtester.py` | `run_backtest` (replay driver), batch pool (`guard_parent`), persistence, per-run trade JSON logs |
-| execution | `backend/live_trader.py` | Live driver: Jupiter swaps, session journals, fill-path buffer, deferred exits, boundary anchors, fleet sell mutex, watchdogs |
-| support | `backend/candle_aggregator.py` | Trades to OHLCV `Candle` objects per timeframe |
-| support | `backend/signal_capture.py` | Per-decision value capture for live sessions |
-| support | `backend/session_calibrator.py`, `backend/calibration_startup.py` | SDE coefficient estimation (population / mint history) and causal init for live + backtest |
-| support | `backend/mint_chain_history.py` | Bounded chain-candle fetch when local calibration history is missing |
-| support | `backend/trade_report.py` | Session/trade report rendering |
-| support | `backend/live_session_logger.py`, `backend/rate_limiter.py`, `backend/process_watchdog.py` | Journal files, RPC rate limiting, orphan-worker guard |
-| ui | `frontend/js/app.js` | Vanilla-JS dashboard (single IIFE) |
+| app | `backend/main.py` | FastAPI assembly, lifespan/startup-shutdown, server-side `_LiveSession` / `_NewPairSession` run loops, fleet registry; routes moved to `app/routers/` |
+| app | `backend/app/deps.py` | Process-wide state shared by routers (registries, locks, helpers) |
+| app | `backend/app/routers/{chart,recordings,backtests,live,autofeed,newpairs}.py` | All 51 REST routes + 4 WebSockets; recordings uses one router factory for the price and newpairs groups |
+| core | `backend/core/state4.py` | THE 4-state intra-candle expansion, `intrabar_price`, `path_price_at`, `record_path_candle` — every pipeline delegates |
+| core | `backend/core/fills.py` | Legacy fill fraction + the reference fee/size constants |
+| core | `backend/core/config.py` | Single source for every engine knob default (per-family tables; `DEFAULT_CONFIG` derived) |
+| engines | `backend/engine_factory.py` | `create_engine(version, **kwargs)` via one `_ADAPTER_PATHS` table |
+| engines | `backend/engines/adapter_base.py` | Shared V1-compat init surface + the byte-identical helpers |
+| engines | `backend/strategy_engine.py` (V1), `strategy_engineV2.py`, `V3`, `V4`, `V6` | The engines; V2 holds `DEFAULT_CONFIG` (derived from core.config) and the production adapter |
+| pipelines | `backend/forward_tester.py` | THE fill contract: `Trade`, stats, exec models, latency overlay |
+| pipelines | `backend/backtester.py` | `run_backtest` replay driver, batch pool, persistence, trade JSON logs |
+| pipelines | `backend/live_trader.py` | Live driver: Jupiter swaps, journals, deferred exits, boundary anchors, fleet mutex, watchdogs |
+| data | `backend/stores/recordings.py` | One `RecordingStore(db_path, schema)`; `data_store.py` / `newpairs_store.py` are facades |
+| data | `backend/data_store.py` | Facade + holder-flow functions + the whole backtest-DB section |
+| data | `backend/pool_virtual_reserves.py` | PumpSwap virtual quote reserve (V) resolver, sidecar, executable-basis correction |
+| feeds | `backend/pumpfun_client.py` | Trade streaming + mint/pool resolution (PumpPortal WS, REST, RPC, DexScreener) |
+| feeds | `backend/feeds/feed_base.py` | Shared candidate-feed lifecycle; `autofeed.py` / `newpairs.py` subclass it |
+| feeds | `backend/holder_flow.py` | Insider/whale sell watcher + GMGN fallback |
+| support | `backend/signal_capture.py` | Per-decision value capture for live journals |
+| support | `backend/session_calibrator.py`, `backend/calibration_startup.py` | SDE estimation (population / mint history) + causal init |
+| support | `backend/trade_report.py`, `backend/live_session_logger.py`, `backend/rate_limiter.py`, `backend/process_watchdog.py` | Reports, journals, rate limiting, orphan-worker guard |
+| ui | `frontend/js/app.js` | Vanilla-JS dashboard (single IIFE, not yet split) |
 
 ## Dependency rules (target)
 
