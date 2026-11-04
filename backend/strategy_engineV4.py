@@ -285,6 +285,19 @@ class StrategyEngineV4Adapter(AdapterBase):
             return math.inf if b > 0 else None
         return b / s
 
+    def snapshot(self) -> dict:
+        """Full decision state as a flat dict, plus the drawdown measures."""
+        snap = super().snapshot()
+        try:
+            snap["drawdown"] = self._drawdown()
+        except Exception:
+            pass
+        try:
+            snap["trailing_flow_ratio"] = self._trailing_flow_ratio()
+        except Exception:
+            pass
+        return snap
+
     # ── Main entry point (V1 surface) ──────────────────────────────────
 
     def update(

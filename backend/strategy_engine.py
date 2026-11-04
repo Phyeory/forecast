@@ -2160,6 +2160,32 @@ class StrategyEngine:
         self._p_hat_below_entry_count = 0
         self._check_exit_p_hat_below = 0
 
+    # Scalar types a snapshot entry may hold; other values are left to the
+    # reader's own attribute access.
+    _SNAPSHOT_SCALARS = (bool, int, float, str)
+
+    def snapshot(self) -> dict:
+        """Full decision state as a flat dict of scalar attribute values.
+
+        The signal journal reads this instead of re-deriving gate values;
+        keys are the engine's own attribute names, values are live and
+        unrounded.
+        """
+        snap: dict = {}
+        for name in dir(self):
+            if name.startswith("__"):
+                continue
+            try:
+                v = getattr(self, name)
+            except Exception:
+                continue
+            if v is None or isinstance(v, self._SNAPSHOT_SCALARS):
+                snap[name] = v
+        snap["regime"] = self.regime
+        w = int(getattr(self, "warmup", 100) or 100)
+        snap["warmup_floor"] = w * 4 if w <= 100 else w
+        return snap
+
     def update(
         self,
         time: int,

@@ -3035,6 +3035,50 @@ class StrategyEngineV2Adapter(AdapterBase):
         self._percoin_next_at = self._percoin_completed + self._v2_percoin_every
         self._percoin_next_t = float(cutoff) + self._v2_percoin_interval
 
+    def snapshot(self) -> dict:
+        """Full decision state as a flat dict for the signal journal.
+
+        Extends the shared adapter surface with the V2 posterior decision,
+        core observables, the gate thresholds the journal audits, and the
+        computed flow/dev-sell quantities the exit cascade reads.
+        """
+        snap = super().snapshot()
+        # The adapter warmup rule: warmup_bars intakes, floored at 400.
+        snap["warmup_floor"] = max(int(self._warmup_bars), 400)
+        dec = getattr(self, "_v2_last_decision", None)
+        if dec is not None:
+            snap["_v2_last_decision"] = dec
+        core = getattr(self, "core", None)
+        if core is not None:
+            for key, attr in (("v2_sigma_t", "_last_sigma_t"),
+                              ("v2_mu_dot", "_mu_dot"),
+                              ("v2_L_t", "_last_L_t")):
+                v = getattr(core, attr, None)
+                if v is not None:
+                    snap[key] = v
+            snap["mu_dot_post_sign_neg_count"] = getattr(
+                core, "_mu_dot_post_sign_neg_count", 0)
+        win = getattr(self, "_mu_post_neg_window", None)
+        if win is not None and win.maxlen:
+            snap["mu_post_neg_window_maxlen"] = win.maxlen
+        try:
+            snap["evr_trailing_buy_ratio"] = self._evr_trailing_buy_ratio()
+        except Exception:
+            pass
+        try:
+            snap["evr_maxsec_sell_share"] = self._evr_maxsec_sell_share()
+        except Exception:
+            pass
+        try:
+            snap["holder_flow_recent_dev_sell"] = self._has_recent_dev_sell(
+                int(getattr(self, "_current_time", 0)),
+                int(getattr(self, "_v2_holder_flow_entry_window_seconds", 30) or 30),
+                float(getattr(self, "_v2_holder_flow_min_usd", 100) or 100),
+            )
+        except Exception:
+            pass
+        return snap
+
     # ── Holder-flow helpers ───────────────────────────────────────────────
 
     def set_holder_flow_events(self, events: list[dict]):

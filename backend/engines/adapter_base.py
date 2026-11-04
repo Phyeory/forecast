@@ -143,6 +143,34 @@ class AdapterBase:
         if self.in_position and h > self._peak_price:
             self._peak_price = h
 
+    # Scalar types a snapshot entry may hold; anything else (enums, dicts,
+    # windows, the core object) is added explicitly or left to the reader.
+    _SNAPSHOT_SCALARS = (bool, int, float, str)
+
+    def snapshot(self) -> dict:
+        """Full decision state as a flat dict of scalar attribute values.
+
+        The signal journal reads this instead of re-deriving gate values;
+        keys are the engine's own attribute names, values are live and
+        unrounded.  Computed quantities (warmup floor, take-profit rate)
+        and non-scalar state are appended by this method or by overrides.
+        """
+        snap: dict = {}
+        for name in dir(self):
+            if name.startswith("__"):
+                continue
+            try:
+                v = getattr(self, name)
+            except Exception:
+                continue
+            if v is None or isinstance(v, self._SNAPSHOT_SCALARS):
+                snap[name] = v
+        snap["regime"] = self.regime
+        w = int(getattr(self, "warmup", 100) or 100)
+        snap["warmup_floor"] = w * 4 if w <= 100 else w
+        snap["effective_takeprofit_pct"] = self._effective_takeprofit_pct()
+        return snap
+
     def _price_overextended(self, c: float) -> bool:
         if not self.p_hat:
             return False

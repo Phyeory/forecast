@@ -254,6 +254,25 @@ class StrategyEngineV3Adapter(AdapterBase):
 
     # ── V1 surface helpers ────────────────────────────────────────────
 
+    def snapshot(self) -> dict:
+        """Full decision state as a flat dict, plus the V2-core posterior."""
+        snap = super().snapshot()
+        dec = getattr(self, "_v2_last_decision", None)
+        if dec is not None:
+            snap["_v2_last_decision"] = dec
+        core = getattr(self, "core", None)
+        if core is not None:
+            for key, attr in (("v2_sigma_t", "_last_sigma_t"),
+                              ("v2_mu_dot", "_mu_dot"),
+                              ("v2_L_t", "_last_L_t")):
+                v = getattr(core, attr, None)
+                if v is not None:
+                    snap[key] = v
+            neg = getattr(core, "_mu_dot_post_sign_neg_count", None)
+            if neg is not None:
+                snap["mu_dot_post_sign_neg_count"] = neg
+        return snap
+
     def _passes_engine_version_check(self):
         return 3
 
