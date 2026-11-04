@@ -81,6 +81,32 @@ positions opened and topped up to target over Nov 3–4 sessions. Broker truth (
 15:17–15:45 ET), not the backtest's next-open — the first entry-price wedge the parity
 tracking should note.
 
+### Fill-quality audit (2026-11-04)
+
+| Mechanism | Fills | Price vs 5-minute tape | Verdict |
+|---|---|---|---|
+| `day` market orders, filled seconds after submission (15:17 ET) | ADBE 10@246.56, HD 8@331.72, IBM 27@249.32, META 12@618.73, NKE 70@38.18 | **±0.05%** | realistic |
+| `day` resubmit (MSTR 57@135.03, ~15:20 ET) | booked at venue avg price | −0.29% vs the 15:35 bar — executed minutes earlier | realistic |
+| Top-ups (15:31 ET Nov 4) | ADBE 2@249.52, HD 1@355.05, IBM 1@255.41, NKE 3@40.38 | **±0.03%** | realistic |
+| Overnight `opg` partial fills (expired with fq>0) | LOW 34@217.49, HD ~14, NKE ~126 | LOW printed **+0.8% above the 215.80 open**; HD/NKE ≈ the open | **LOW is the one unrealistic print** — paper opg partially fills off-auction at prices the auction never printed; real opg orders of this size fill fully at the auction price |
+
+Two audit findings, both fixed (`8005f94`):
+
+1. **41% of fill notional ($21.9k of $53k) was missing from the journal** — auction partial
+   fills (expired/canceled with `filled_qty>0`) went straight to resubmit without being
+   booked, and a partially-filled day order consumed its pending so the remainder never
+   reconciled. The broker account was always correct (venue truth); the journal — the
+   publication data source — under-reported. Fix: `booked_qty` per pending, cumulative
+   `filled_qty` booked as deltas (never re-booked — that would double-count); expired/canceled
+   orders book their fills first, then resubmit only the unfilled remainder.
+2. **Partial auction fills are paper-simulator artifacts** (HD 14/22, NKE ~126/193, LOW 34/35
+   filled; ADBE/IBM/META/MSTR zero). Real opening auctions fill retail-size orders fully at
+   the auction price. Expect the live-vs-backtest entry-price distribution to carry this
+   noise until the account is on a real venue; magnitude is small at 0.1 sizing.
+
+For the publication record: treat `orders.jsonl` (post-`8005f94`) as the decision+fill
+forensics source and the Alpaca account statements as the PnL truth.
+
 **⚠️ Open defect (2026-10-30) — signal→order pipeline stalls. FIXED same day, see below.**
 Sessions log `desired_position=1` with `pending={}` and no `orders.jsonl` entries, while the
 earlier session's pre-open `next_open_fill` booking (07:42 UTC, before the auction) suggests
