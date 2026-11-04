@@ -1,45 +1,24 @@
 """
-Backtester — Run the ForwardTester on saved price recordings.
+Backtester: run the ForwardTester on saved price recordings.
 
 Takes a recording_id, fetches candles from the price DB, runs them through
 ForwardTester, and saves the full results (candles + signals + regimes +
 trades) to the backtest DB.
 
-Signal model — identical to ForwardTester / LiveTrader:
-  Each stored OHLCV candle is expanded into four accumulated-candle states
-  that are fed into ft.update() one at a time, exactly replicating what
-  main.py does via the live CandleAggregator.
+Signal model, identical to ForwardTester / LiveTrader: each stored OHLCV
+candle is expanded into the four accumulated intra-candle states (see
+core/state4.py) and fed to ft.update() one at a time, exactly replicating
+the live CandleAggregator, so every rolling buffer evolves identically and
+signals fire at the same intra-candle moment as live trading.
 
-  For each completed candle the CandleAggregator would have emitted these
-  four intermediate states (one per intra-candle trade tick):
+Execution models (ForwardTester exec_model): "instant" (default) fills at
+the signal state's close price +- slippage, the mirror of live signal-instant
+execution; "legacy" fills a candle-queued order at mid-bar of the next
+candle, byte-identical to the retired model so old baselines stay
+reproducible.  Latency overlays defer fills to t_signal + latency.
 
-    State 1  →  o=open, h=open,  l=open,  c=open,  vol=0
-    State 2  →  o=open, h=H/L,   l=L/H,   c=mid1,  vol=0
-    State 3  →  o=open, h=high,  l=low,   c=mid2,  vol=0
-    State 4  →  o=open, h=high,  l=low,   c=close, vol=full
-
-  mid1/mid2 follow the standard high-before-low heuristic for bull bars and
-  low-before-high for bear bars (matches _candle_to_ticks ordering).
-
-  Because ft.update() is called with the same sequence of accumulated intra-
-  candle states that the live engine sees, all rolling buffers (Kalman filter,
-  EMA, ATR, trend confidence, etc.) evolve identically — signals fire at the
-  same intra-candle moment as live trading.
-
-  Execution models (ForwardTester exec_model):
-    "instant" (default): a signal from state k fills at THAT state's close
-      price ± slippage — the exact mirror of the live trader's signal-instant
-      execution (2026-08-30).  entry/exit_latency_seconds>0 defer the fill to
-      t_signal + latency, priced on the recorded intra-candle path.
-    "legacy": the historical n+1 model — a pending BUY/EXIT queued during
-      candle N executed at State 1 of candle N+1 with a fill_fraction
-      mid-bar price.  Kept byte-identical so every pre-change baseline
-      batch remains reproducible.
-
-Performance optimisation:
-  Intra-candle states are generated inline (no list allocation) and the
-  ForwardTester skips building the full result dict for intermediate states
-  via the `_build_full_result=False` fast path.
+Intra-candle states are generated inline and intermediate states use the
+`_build_full_result=False` fast path.
 """
 
 from __future__ import annotations
@@ -69,10 +48,8 @@ import multiprocessing
 
 from process_watchdog import guard_parent
 
-# Directory where per-token JSON trade logs are written.
-# Allow override via env var so V2 iteration runs can persist to a safe location
-# (e.g. backend/v2_results/) that is NOT wiped by external V1 param-sweep scripts
-# that do `rm -rf backend/backtest_results`.
+# Per-token JSON trade logs.  Env override so iteration runs can persist to
+# a location (e.g. backend/v2_results/) not wiped by external sweep scripts.
 _RESULTS_DIR = os.environ.get(
     "BACKTEST_RESULTS_DIR",
     os.path.join(os.path.dirname(__file__), "backtest_results"),
@@ -209,10 +186,9 @@ def run_backtest_batch(
     if engine_params is None:
         engine_params = {}
 
-    # iter94: pre-resolve PumpSwap virtual quote reserves for every distinct
-    # mint in the batch (DexScreener 30-mint batches + RPC getMultipleAccounts)
-    # so pool workers replay corrected recordings without touching the
-    # network.  Cached sidecar rows make this a no-op after the first burn.
+    # Pre-resolve PumpSwap virtual quote reserves for every distinct mint in
+    # the batch so pool workers replay corrected recordings without touching
+    # the network; cached sidecar rows make this a no-op after first use.
     try:
         from pool_virtual_reserves import prewarm_mints, vr_fix_enabled
         if vr_fix_enabled():
@@ -245,8 +221,6 @@ def run_backtest_batch(
     # Scheduling only (per-recording computation is identical either way):
     # sequential for single-recording runs or when the caller didn't ask
     # for parallelism; parallel pool whenever max_workers > 1 is requested.
-    # (Previously batches of ≤20 were forced sequential regardless of
-    # max_workers, which made 8-rec smoke sweeps crawl on one core.)
     if len(completed) == 1 or not max_workers or max_workers <= 1:
         results = []
         for rec in completed:

@@ -58,8 +58,10 @@ async def newpairs_status():
 
 @router.post("/api/newpairs/config")
 async def newpairs_config(body: dict = Body(...)):
-    """Hot-update any NewPairs config keys. `enabled` is NOT honored here —
-    use /api/newpairs/start + /stop for that gate."""
+    """Hot-update any NewPairs config keys.
+
+    `enabled` is NOT honored here: use /api/newpairs/start + /stop for that gate.
+    """
     safe = {k: v for k, v in body.items() if k != "enabled"}
     changed = _newpairs_feed.set_config(safe)
     return JSONResponse({"status": "updated", "changed": changed, "snapshot": _newpairs_feed.snapshot()})
@@ -67,8 +69,11 @@ async def newpairs_config(body: dict = Body(...)):
 
 @router.post("/api/newpairs/start")
 async def newpairs_start(body: dict = Body(default={})):
-    """Turn ON the new-pairs discovery feed.  No wallet key is required —
-    this tab never trades, it only records newborn price action."""
+    """Turn ON the new-pairs discovery feed.
+
+    No wallet key is required: this tab never trades, it only records
+    newborn price action.
+    """
     if body:
         _newpairs_feed.set_config({k: v for k, v in body.items() if k != "enabled"})
     _newpairs_feed.config.enabled = True
@@ -195,10 +200,12 @@ async def newpairs_session_ws(
     mint: str,
     timeframe: str = Query(default="1s"),
 ):
-    """Viewer socket for a new-pair recording session — the exact
-    /ws/live/{mint} viewer contract minus trading: attach to the running
-    session (creating one if none exists; no key, no buy size — nothing to
-    trade), then replay recorded candles + stream live ones."""
+    """Viewer socket for a new-pair recording session.
+
+    The /ws/live/{mint} viewer contract minus trading: attach to the running
+    session (creating one if none exists; no key, no buy size, nothing to
+    trade), then replay recorded candles and stream live ones.
+    """
     if mint == "feed":
         await newpairs_feed_ws(websocket)
         return
@@ -324,7 +331,7 @@ async def newpairs_session_ws(
     except (WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
         pass
     finally:
-        # Detach only — never terminates the session.
+        # Detach only: never terminates the session.
         session.unsubscribe(q)
         logger.info(
             f"[NEWPAIR] Detach viewer  mint={session.real_mint[:8]}…  "

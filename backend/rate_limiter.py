@@ -1,15 +1,13 @@
 """
 Process-wide rate-limit coordination for external APIs.
 
-Currently coordinates:
-  * GMGN (openapi.gmgn.ai + gmgn-cli) — shared ban state so holder_flow and
-    autofeed don't independently re-trigger bans.
-  * Solana public RPC (api.mainnet-beta.solana.com) — shared rate budget so
-    live_trader background loops don't starve pumpfun_client's gated reads.
+Coordinates: GMGN (openapi.gmgn.ai + gmgn-cli) shared ban state, so
+holder_flow and autofeed do not independently re-trigger bans; and a
+shared Solana public-RPC rate budget, so live_trader background loops
+cannot starve pumpfun_client's gated reads.
 
-Design: simple module-level singletons, no class hierarchy.  All components
-``import rate_limiter as rl`` and call ``rl.gmgn_banned()`` /
-``rl.note_gmgn_429(reset_unix)`` etc.
+Design: module-level singletons, no class hierarchy.  Components
+``import rate_limiter as rl`` and call ``rl.gmgn_banned()`` etc.
 """
 
 from __future__ import annotations
@@ -19,8 +17,6 @@ import re
 import time
 
 logger = logging.getLogger(__name__)
-
-# ── GMGN shared ban state ────────────────────────────────────────────────────
 
 _gmgn_banned_until: float = 0.0
 _ggn_ban_logged: bool = False
@@ -66,12 +62,8 @@ def gmgn_ban_remaining() -> float:
 def parse_gmgn_reset_time(message: str) -> float | None:
     """Extract the unix reset time from a GMGN rate-limit error message.
 
-    Handles multiple formats:
-      * "Rate limit resets at 2026-08-08 00:00:49 GMT+01:00 (~27s remaining)"
-      * "resets at 2026-08-08 00:00:49 GM"
-      * Any "resets at YYYY-MM-DD HH:MM:SS" pattern
-
-    Returns UTC unix timestamp or None.
+    Handles "resets at YYYY-MM-DD HH:MM:SS" (optionally with a GMT offset
+    or a trailing "(~Ns remaining)").  Returns a UTC unix timestamp or None.
     """
     if not message:
         return None
@@ -118,22 +110,8 @@ def parse_gmgn_remaining_seconds(message: str) -> float | None:
     return None
 
 
-# ── Solana RPC shared rate budget ────────────────────────────────────────────
-
-# Public mainnet-beta is the most restrictive free RPC.  We share a simple
-# min-interval gate between ALL components that target it, so live_trader's
-# background loops can't starve pumpfun_client's gated reads.
-#
-# Note: live_trader uses multiple RPCs (publicnode, ankr) and only falls back
-# to mainnet-beta.  The primary fix is to make mainnet-beta NOT the primary
-# read RPC — but this budget gate prevents starvation when it IS used.
-
+# Public mainnet-beta is the most restrictive free RPC: one min-interval gate
+# is shared by every component that targets it, so background loops cannot
+# starve the gated reads.  The primary RPC ordering lives in live_trader.
 _solana_last_call_ts: float = 0.0
 _solana_min_interval: float = 0.35  # ~2.8 req/s budget for mainnet-beta
-
-# The module intentionally keeps the Solana budget gate minimal — the primary
-# fix for RPC 429 storms is reordering live_trader.py's SOLANA_RPCS so that
-# api.mainnet-beta.solana.com is NOT the primary read endpoint (it's the most
-# rate-limited free RPC).  The shared GMGN ban state above is the more
-# impactful coordination: it stops holder_flow and autofeed from independently
-# re-triggering bans.

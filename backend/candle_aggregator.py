@@ -26,7 +26,7 @@ class Candle:
     confirmed: bool = False   # True once a real (non-synthetic) trade lands
     buy_volume: float = 0.0   # sum of sol_amount for buy trades
     sell_volume: float = 0.0  # sum of sol_amount for sell trades
-    pool_sol: float = 0.0     # iter28: last trade's pool liquidity depth (SOL in curve)
+    pool_sol: float = 0.0     # last trade's pool liquidity depth (SOL in curve)
     market_cap_usd: float = 0.0  # last trade's USD market cap
 
     def to_dict(self) -> dict:
@@ -57,21 +57,13 @@ class CandleAggregator:
         timestamp: float,
         synthetic: bool = False,
         is_buy: Optional[bool] = None,   # True=buy, False=sell, None=unknown
-        pool_sol: float = 0.0,           # iter28: pool liquidity depth (SOL in curve)
+        pool_sol: float = 0.0,           # pool liquidity depth (SOL in curve)
         market_cap_usd: float = 0.0,     # USD market cap from the trade feed
     ):
         bucket = self._bucket(timestamp)
 
-        # iter90j: OUT-OF-ORDER (late) trade guard.  A trade whose on-chain
-        # timestamp is older than the current candle's second (RPC latency,
-        # stream reorder) must NEVER reopen an old second: reopening
-        # (a) replaced the recorded candle row for that second (losing the
-        # original trades) and (b) fed the engine a duplicate, partially-
-        # populated candle — the live engine's input stream then diverged
-        # from the recording the backtester replays (rec5343, 2026-09-20:
-        # a 428 s re-entry miss).  Clamp late trades into the CURRENT
-        # candle so the engine and the recording always see the same
-        # candle sequence.  Forward buckets keep the normal close/open path.
+        # Late trades never reopen an old second: that replaces the recorded
+        # row and diverges live from replay.  Clamp to the current candle.
         if self.current_candle is not None and bucket < self.current_candle.time:
             bucket = self.current_candle.time
 

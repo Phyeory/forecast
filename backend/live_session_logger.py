@@ -4,15 +4,13 @@ Per-session persistent logging for LiveTrader.
 Every live-trader session gets its own directory under ``backend/data/live_logs/``
 containing two physical files:
 
-  * ``console.log``  — every line the ``live-trader`` logger emits for THIS
-    session (i.e. everything that would otherwise only appear on the console),
-    timestamped, including tracebacks.
-  * ``trades.jsonl`` — a structured JSON-lines trade ledger.  One record per
-    trade event: entry attempt, broadcast, on-chain confirmation, failure,
+  * ``console.log``: every line the ``live-trader`` logger emits for THIS
+    session, timestamped, including tracebacks.
+  * ``trades.jsonl``: a structured JSON-lines trade ledger, one record per
+    trade event (entry attempt, broadcast, on-chain confirmation, failure,
     exit attempt, exit confirmation, partial fills, adopted bags, manual
-    overrides, emergency cleanup, session start/end.  Each record carries
-    timestamps (unix + ISO-8601), tx hashes, amounts, reasons and a snapshot
-    of the trade object.
+    overrides, emergency cleanup, session start/end).  Each record carries
+    timestamps, tx hashes, amounts, reasons and a snapshot of the trade.
 
 Usage: LiveTrader creates the journal in __init__ and closes it in close().
 """
@@ -46,9 +44,9 @@ _code_dirty_cache: Optional[bool] = None
 def _code_commit() -> str:
     """Short git commit of the running tree (best-effort, cached per process).
 
-    2026-09-29 INU audit: a session whose booked fills don't match the
-    backtester is undebuggable without knowing EXACTLY which code ran
-    (restart-after-deploy is manual).  Stamped into every session_open.
+    A session whose booked fills do not match the backtester is undebuggable
+    without knowing exactly which code ran (restart-after-deploy is manual).
+    Stamped into every session_open.
     """
     global _code_commit_cache
     if _code_commit_cache is None:
@@ -93,10 +91,9 @@ class SessionJournal:
         self.console_path = self.dir / "console.log"
         self.trades_path = self.dir / "trades.jsonl"
 
-        # ── Mirror this session's console output into console.log ─────────
-        # Attach a per-session handler to the shared "live-trader" logger and
-        # filter so only records created by THIS trader instance land in the
-        # file (live_trader.py stamps every LogRecord with _sid, see below).
+        # Console mirror: a per-session handler on the shared "live-trader"
+        # logger, filtered so only this trader instance's records land in
+        # the file (live_trader.py stamps every LogRecord with _sid).
         self._handler = logging.FileHandler(self.console_path, encoding="utf-8")
         self._handler.setLevel(logging.DEBUG)
         self._handler.setFormatter(logging.Formatter(
@@ -107,7 +104,7 @@ class SessionJournal:
         self._logger = logging.getLogger("live-trader")
         self._logger.addHandler(self._handler)
 
-        # ── Structured trade ledger ────────────────────────────────────────
+        # Structured trade ledger.
         self._lock = threading.Lock()
         self._ledger = open(self.trades_path, "a", encoding="utf-8", buffering=1)
         self.event("session_open", {
@@ -118,14 +115,14 @@ class SessionJournal:
             **(meta or {}),
         })
 
-    # ── Console mirroring ─────────────────────────────────────────────────
+    # Console mirroring.
 
     def _only_this_session(self, record: logging.LogRecord) -> bool:
         # Records emitted before __init__ finishes (or from non-session code)
-        # have no _sid — exclude them from the per-session file.
+        # have no _sid; exclude them from the per-session file.
         return getattr(record, "_sid", None) is self
 
-    # ── Structured trade ledger ───────────────────────────────────────────
+    # Structured trade ledger.
 
     def event(self, kind: str, data: Optional[dict] = None) -> None:
         """Append one JSON record to trades.jsonl (fsync'd immediately)."""
@@ -147,7 +144,7 @@ class SessionJournal:
             logger.debug("ledger write failed, event dropped from trades.jsonl",
                          exc_info=True)
 
-    # ── Lifecycle ─────────────────────────────────────────────────────────
+    # Lifecycle.
 
     def close(self, summary: Optional[dict] = None) -> None:
         try:

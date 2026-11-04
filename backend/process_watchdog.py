@@ -1,22 +1,15 @@
 """
-process_watchdog -- self-terminating guard for pool worker processes.
+process_watchdog: self-terminating guard for pool worker processes.
 
-ProcessPoolExecutor / multiprocessing.Pool workers become ORPHANED
-(reparented to launchd, PID 1) when the parent Python process dies
-unexpectedly (SIGKILL, crash, closed terminal).  They then keep burning
-CPU forever -- e.g. the stale 17-hour-old backtest pools observed on
-2026-08-16, all sitting at ~25% CPU with PPID=1.
-
-This module gives every pool worker a daemon thread that polls
+ProcessPoolExecutor / multiprocessing.Pool workers are reparented to
+launchd/init when the parent Python process dies, and then keep burning
+CPU forever.  Every pool worker starts a daemon thread that polls
 ``os.getppid()`` and hard-exits the worker the instant the parent is
-gone, so a killed/crashed batch run can never leak workers.
+gone, so a killed or crashed batch run can never leak workers.
 
-Guarantees:
-  * Pure safety net: a live parent is never affected; backtest results
-    are byte-identical with or without the guard.
-  * Idempotent: only the first call in a process starts the watcher.
-  * No-op in the MainProcess, so it can be called unconditionally from
-    worker entry points or passed as the pool ``initializer``.
+Guarantees: a live parent is never affected (results are byte-identical
+with or without the guard); idempotent; a no-op in the MainProcess, so
+it can be called unconditionally or passed as the pool ``initializer``.
 """
 
 from __future__ import annotations

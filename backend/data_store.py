@@ -373,7 +373,6 @@ def create_backtest(recording_id: int, mint: str, token_name: str, token_symbol:
     )
     bt_id = cur.lastrowid
 
-    # Insert candle results
     conn.executemany(
         """INSERT INTO backtest_candles
            (backtest_id, time, open, high, low, close, volume,
@@ -395,7 +394,6 @@ def create_backtest(recording_id: int, mint: str, token_name: str, token_symbol:
         ],
     )
 
-    # Insert trades
     conn.executemany(
         """INSERT INTO backtest_trades
            (backtest_id, entry_time, entry_price, exit_time, exit_price,

@@ -158,7 +158,7 @@ def load_chain_candles(mint: str, before_unix: float,
         conn.close()
 
 
-# ── RPC plumbing ─────────────────────────────────────────────────────────────
+# RPC plumbing.
 
 class _EndpointPool:
     """Round-robin over the endpoint list with per-endpoint spacing."""
@@ -270,7 +270,7 @@ def _parse_pool_swap_tx(tx: dict, token_mint: str) -> Optional[dict]:
         if token_mint not in pre or token_mint not in post:
             return None
         if _WSOL_MINT not in pre or _WSOL_MINT not in post:
-            return None  # USDC-quoted or exotic pair — skip
+            return None  # USDC-quoted or exotic pair: skip
 
         def amt(entry):
             return float(entry["uiTokenAmount"]["amount"]) / (

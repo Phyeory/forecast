@@ -1,28 +1,17 @@
 """
 Engine factory: builds the strategy engine for a requested `engine_version`.
 
-The three execution pipelines (Backtester, ForwardTester, LiveTrader) plus
-`main.py` all build a strategy engine via `create_engine(engine_version,
-**engine_kwargs)`.  This is the single indirection point between the pipelines
-and the engines.
+The single indirection point between the execution pipelines and the engines:
 
-    Contract:
-        eng = create_engine(engine_version=1, **kwargs)   # → V1 StrategyEngine
-        eng = create_engine(engine_version=2, **kwargs)   # → V2 StrategyEngineV2Adapter
-        eng = create_engine(engine_version=3, **kwargs)   # → V3 StrategyEngineV3Adapter
-            (V3 = newborn-coin dump-bottom engine on the V2 mathematical core)
-        eng = create_engine(engine_version=4, **kwargs)   # → V4 StrategyEngineV4Adapter
-            (V4 = post-nuke reversion: bounce-confirmed flush harvest)
-        eng = create_engine(engine_version=6, **kwargs)   # → V6 StrategyEngineV6Adapter
-            (V6 = insider-dump absorption entry)
+    create_engine(engine_version=1, **kwargs)   # -> V1 StrategyEngine
+    create_engine(engine_version=2, **kwargs)   # -> V2 StrategyEngineV2Adapter
+    create_engine(engine_version=3, **kwargs)   # -> V3 (dump-bottom on the V2 core)
+    create_engine(engine_version=4, **kwargs)   # -> V4 (post-nuke reversion)
+    create_engine(engine_version=6, **kwargs)   # -> V6 (insider-dump absorption)
 
-Every engine exposes the EXACT same call surface used by the pipelines:
-    eng.update(time, o, h, l, c, volume, buy_volume, sell_volume, ...)
-    eng.notify_trade_opened(entry_price, direction)
-    eng.notify_trade_closed()
-All V1 indicator attributes (`m_hat`, `ema_fast_val`, `trend_confidence`, ...)
-are present on every adapter.  See `engines/adapter_base.py` for the shared
-surface and the per-engine docstrings for the full mapping.
+Every engine exposes the same call surface used by the pipelines:
+update(), notify_trade_opened(), notify_trade_closed(), plus the V1
+indicator attributes.  See `engines/adapter_base.py` for the shared surface.
 """
 
 from __future__ import annotations

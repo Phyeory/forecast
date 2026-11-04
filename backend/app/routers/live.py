@@ -46,7 +46,7 @@ async def live_status():
     winning_trades = 0
     losing_trades = 0
     total_trades = 0
-    # iter95 display truth: wallet-basis aggregates alongside the model PnL.
+    # Wallet-basis aggregates ride alongside the model PnL.
     total_cash_pnl = 0.0
     total_fees = 0.0
     total_rent = 0.0
@@ -112,11 +112,9 @@ async def live_status():
             "total_trades": total_trades,
             "win_rate": round(win_rate, 2),
             "tokens_traded": len(seen_mints),
-            # iter95 display truth: wallet-basis aggregates.  total_pnl_sol
-            # is the backtest-basis model PnL; wallet_delta_sol is the
-            # all-in wallet change (cash − fees − net rent); the ex-rent
-            # form (display surface, user directive 2026-10-03) drops the
-            # stranded ATA rent the user reclaims manually.
+            # Display truth: model PnL (backtest basis) vs wallet delta; see
+            # docs/architecture.md "Display truth".  Ex-rent form drops ATA
+            # rent the user reclaims manually.
             "total_cash_pnl_sol": round(total_cash_pnl, 6),
             "total_fees_sol": round(total_fees, 6),
             "total_rent_sol": round(total_rent, 6),
@@ -139,14 +137,13 @@ async def portfolio_status(request: Request):
     """Aggregated portfolio state for the Portfolio tab.
 
     One call returns everything the page renders:
-      wallet        — pubkey + on-chain SOL balance (cached when sessions run)
-      positions     — open positions across active live sessions
-      trades        — durable closed-trade history (session ledgers + this
-                      run's confirmed events, deduped by sell tx signature)
-      summary       — realized / unrealized / total PnL, win rate, counts
-      equity_curve  — cumulative realized PnL over time for the PnL chart
+      wallet: pubkey + on-chain SOL balance (cached when sessions run)
+      positions: open positions across active live sessions
+      trades: durable closed-trade history (session ledgers plus this run's
+        confirmed events, deduped by sell tx signature)
+      summary: realized / unrealized / total PnL, win rate, counts
+      equity_curve: cumulative realized PnL over time for the PnL chart
     """
-    # ── Wallet ────────────────────────────────────────────────────────────
     pubkey = ""
     sol_balance: Optional[float] = None
     active = [s for s in _active_live_traders.values() if not s.cancelled.is_set()]
@@ -165,7 +162,7 @@ async def portfolio_status(request: Request):
             except Exception:
                 pubkey = ""
 
-    # ── Open positions across active sessions ─────────────────────────────
+    # Open positions across active sessions.
     positions = []
     unrealized_pnl = 0.0
     seen_mints = set()
@@ -195,7 +192,7 @@ async def portfolio_status(request: Request):
             "entry_reason": ct.entry_reason,
         })
 
-    # ── Closed-trade history: ledger (durable) + this run's events ────────
+    # Closed-trade history: durable ledger plus this run's events.
     closed: list[dict] = []
     seen_sigs: set[str] = set()
 
@@ -232,8 +229,8 @@ async def portfolio_status(request: Request):
                 "exit_price": t.get("exit_price"),
                 "pnl_sol": t.get("pnl_sol", 0.0),
                 "pnl_pct": t.get("pnl_pct", 0.0),
-                # iter95: wallet-basis cash PnL (ledgers pre-iter91b lack
-                # the field — fall back to the booked figure).
+                # Wallet-basis cash PnL; older ledgers lack the field, so
+                # fall back to the booked figure.
                 "cash_pnl_sol": t.get("cash_pnl_sol", t.get("pnl_sol", 0.0)),
                 "exit_reason": t.get("exit_reason", ""),
                 "tx_hash": t.get("tx_hash_sell") or "",
@@ -268,7 +265,7 @@ async def portfolio_status(request: Request):
             "realized_pnl_sol": round(realized_pnl, 6),
             "unrealized_pnl_sol": round(unrealized_pnl, 6),
             "total_pnl_sol": round(realized_pnl + unrealized_pnl, 6),
-            # iter95 display truth: wallet-basis realized cash PnL.
+            # Wallet-basis realized cash PnL, alongside the model figure.
             "realized_cash_pnl_sol": round(realized_cash_pnl, 6),
             "winning_trades": winning,
             "losing_trades": losing,
@@ -415,8 +412,8 @@ async def live_trading_ws(
     """Viewer/control socket for a live session.
 
     If no session exists for the token, one is created (private_key required)
-    and this socket becomes its first viewer.  If a session already exists —
-    same tab re-opened, second tab, autofeed re-feed — this socket simply
+    and this socket becomes its first viewer.  If a session already exists
+    (same tab re-opened, second tab, autofeed re-feed) this socket simply
     attaches to it; no private key is needed to view/control an existing
     session because the trader's keypair already lives server-side.  Closing
     the socket only detaches this viewer; the session keeps trading until it
@@ -426,14 +423,8 @@ async def live_trading_ws(
         await websocket.close(code=4000, reason="Unknown timeframe")
         return
 
-    # Resolve the mint first so we can find an existing session regardless of
-    # whether the caller passed a mint / pair address / symbol.
-    # Fast path: re-attach to an existing session by its exact registry key
-    # WITHOUT hitting external resolvers.  The frontend always sends the key
-    # from /api/live/status on attach.  Without this, the handshake queued
-    # behind _resolve_sem (held by other sessions' warmups for up to 15s each)
-    # and could stall for minutes, leaving the UI stuck at
-    # "Re-attaching to running session…" with no data.
+    # Fast path: re-attach by exact registry key without external resolvers;
+    # the semaphore path can stall minutes behind other sessions' warmups.
     existing = _active_live_traders.get(mint)
     if existing is not None and not existing.cancelled.is_set():
         real_mint, token_info = existing.real_mint, existing.token_info
@@ -447,10 +438,8 @@ async def live_trading_ws(
             logger.warning(f"[LIVE] resolve_input timed out for {mint[:8]} — using raw mint")
             real_mint, token_info = mint, None
         except Exception as e:
-            # A flaky resolver (rate limit, network blip) must never kill the
-            # socket — that sent the frontend into an infinite re-attach loop
-            # ("Re-attaching to running session…" with no live data).  Fall back
-            # to the raw mint so an existing session keyed under it still attaches.
+            # A flaky resolver must never kill the socket (the frontend then
+            # loops re-attaching); fall back to the raw mint.
             logger.warning(f"[LIVE] resolve_input failed for {mint[:8]} ({e}) — using raw mint")
             real_mint, token_info = mint, None
 
@@ -486,7 +475,7 @@ async def live_trading_ws(
         )
         return
 
-    # ── Attach as a viewer ─────────────────────────────────────────────────
+    # Attach as a viewer.
     await websocket.accept()
     logger.info(
         f"[LIVE] {'Start' if created else 'Attach'} viewer  mint={real_mint[:8]}…  "
@@ -524,7 +513,7 @@ async def live_trading_ws(
             "created": created,
         })
 
-        # ── Historical candles for the chart ─────────────────────────────
+        # Historical candles for the chart.
         if created:
             # The runner is warming up; wait so this viewer gets the same
             # warmup strategy results the old single-tab flow provided.
@@ -589,7 +578,7 @@ async def live_trading_ws(
                             session.trader.buy_size_sol = v
                     if "slippage_bps" in msg:
                         session.trader.slippage_bps = int(msg["slippage_bps"])
-                    # priority_fee is fixed at 100_000 micro-lamports (0.0001 SOL) — ignored
+                    # priority_fee is fixed at 100_000 micro-lamports (0.0001 SOL), ignored.
                 elif msg_type == "manual_trade":
                     action = msg.get("action")
                     if action == "buy":

@@ -23,16 +23,12 @@ def calibration_window(started_at: float, params: dict) -> tuple[float, float]:
 def _strip_default_sde(explicit: dict, DEFAULT_CONFIG: dict) -> None:
     """Drop SDE clip keys whose value equals the engine default, in place.
 
-    The UI mirror (frontend engineParamsV2) transmits every knob including
-    the 13 SDE coefficients AT THEIR DEFAULT VALUES.  Treating those as user
-    intent made `{**base, **explicit}` overwrite the calibrator's
-    coefficients with defaults AND killed the `_calibration_sourced`
-    sentinel (any _CLIP key in explicit kills it) — so every UI-driven
-    backtest and UI-launched live session ran uncalibrated physics, found
-    2026-09-19 via the user's 7-day batch rows in backtest_data.db.  Only a
-    value that DEVIATES from DEFAULT_CONFIG is genuine intent (surgical
-    overrides keep working).  Tolerant compare: the mirror rounds lambda_0
-    (6.94444e-05 vs 6.9444444...e-05).
+    The UI mirror transmits every knob including the SDE coefficients at
+    their default values; treating those as user intent would let
+    ``{**base, **explicit}`` overwrite the calibrator's coefficients with
+    defaults and kill the ``_calibration_sourced`` sentinel.  Only a value
+    that deviates from DEFAULT_CONFIG is genuine intent, so surgical
+    overrides keep working.  Tolerant compare: the mirror rounds lambda_0.
     """
     for key in list(_CLIP):
         if key not in explicit:
@@ -47,24 +43,19 @@ def _strip_default_sde(explicit: dict, DEFAULT_CONFIG: dict) -> None:
 
 
 def strip_stale_sde_echo(params: dict) -> tuple[dict, dict]:
-    """iter101 (2026-10-23): remove non-default calibration-owned SDE keys
-    from live launch params before calibration.  Returns (params, stripped).
+    """Remove non-default calibration-owned SDE keys from live launch
+    params before calibration.  Returns (params, stripped).
 
-    The dashboard mirror echoes the PREVIOUS session's calibrated
-    coefficients back into the launch payload (observed Sep-29: live
-    tau_max=60 vs the BT's fresh 20 on the SAME recording — 8/13
-    coefficients diverged, −0.21 SOL over 134 paired trades, 10× the
-    measured execution drag).  `_strip_default_sde` already removes
-    DEFAULT-valued echoes inside initialize_calibration; a stale
-    CALIBRATED value deviates from default and used to win the
-    `{**base, **explicit}` merge as false "user intent" (that merge
-    semantic is pinned by test_calibration_startup).  Production
-    backtests calibrate from `{}`: the live call site strips every
-    non-default `_CLIP` key and journals it, so the fresh population /
-    mint-history calibration wins the merge exactly like run_backtest.
+    The dashboard mirror echoes the previous session's calibrated
+    coefficients back into the launch payload.  A stale calibrated value
+    deviates from default and would win the ``{**base, **explicit}`` merge
+    as false user intent (that merge semantic is pinned by
+    test_calibration_startup); the live call site strips every non-default
+    ``_CLIP`` key and journals it, so fresh population / mint-history
+    calibration wins the merge exactly like run_backtest, which calibrates
+    from ``{}``.
 
-    Policy knobs — delays, gates, geometry (`gain_retrace_arm_pct`, e.g.
-    the g16 arm-16 policy) — pass through untouched.
+    Policy knobs (delays, gates, geometry) pass through untouched.
     """
     from strategy_engineV2 import DEFAULT_CONFIG
 
@@ -97,7 +88,7 @@ async def initialize_calibration(mint: str, started_at: float, params: dict | No
              'chain_attempted': False, 'chain_inserted': 0}
     if not enabled:
         explicit.setdefault('v2_percoin_cal_enable', 0.0)
-        # iter90: the NONCAL hatch kills the geometry layer too.
+        # The NONCAL hatch kills the geometry layer too.
         explicit.setdefault('v2_harvestcal_enable', 0.0)
         explicit.setdefault('v2_percoin_geo_enable', 0.0)
         return explicit, audit
@@ -106,8 +97,8 @@ async def initialize_calibration(mint: str, started_at: float, params: dict | No
                                    DEFAULT_CONFIG['v2_harvestcal_enable']))
     _geom_user_explicit = any(key in explicit for key in GEOMETRY_KEYS)
 
-    # iter90d: variance-ratio decision horizon (τ) — flag + scale threaded
-    # through every estimation layer (OFF = legacy lambda_mu inversion).
+    # Variance-ratio decision horizon: flag + scale threaded through every
+    # estimation layer (OFF = legacy lambda_mu inversion).
     tau_vr = bool(explicit.get('v2_tau_vr_enable',
                                DEFAULT_CONFIG['v2_tau_vr_enable']))
     tau_scale = float(explicit.get('v2_tau_vr_scale',

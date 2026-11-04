@@ -1,36 +1,25 @@
-"""PumpSwap virtual-quote-reserves basis fix (iter94, 2026-09-26).
+"""PumpSwap virtual-quote-reserve basis: resolve V and correct phantom tapes.
 
 Post-graduation PumpSwap pools price swaps on
 
     effective_quote_reserves = quote_vault + virtual_quote_reserves
 
 where ``virtual_quote_reserves`` (V) is a protocol-level virtual liquidity
-credit carried on current pools (measured constant V = 17.5845 SOL across all
-2026-09 pools; stored as an appended i128 at pool-account offset 245).
-PumpPortal's pumpswap trade events (``vSolInBondingCurve`` /
-``vTokensInBondingCurve``) and PumpSwapRPCClient's vault-diff feed both report
-the RAW VAULT ratio, so every tape price for a graduated token sat below the
-executable price by (vault + V)/vault — the entire "live fill premium" of
-iter91/iter93 with ZERO true slippage: on-chain, every live fill landed at
-tape × wedge × fee (fee ≈ 1.25%/side) plus a one-time WSOL/token ATA rent on
-a session's first buy (forensics: analysis/iter94_wedge_study.py — 94 fills,
-sells median residual 0.9877 = fee, buys 1.0126 = fee).
+credit carried on the pool account (measured constant V = 17.5845 SOL;
+appended i128 at pool-account offset 245).  PumpPortal's pumpswap trade
+events and PumpSwapRPCClient's vault-diff feed both report the RAW VAULT
+ratio, so every tape price for a graduated token sits below the executable
+price by (vault + V) / vault.  This module resolves V per mint (DexScreener
+pair -> pool account decode, cached in-process and in a price_data.db
+sidecar for determinism across backtest pool workers) and feeds three
+consumers on the effective basis: the live PumpPortal feed, the vault-diff
+feed, and load-time replay of recordings stored before
+PUMPSWAP_VR_FIX_EPOCH (see docs/architecture.md "Effective-basis tape").
 
-This module resolves V per mint (DexScreener pumpswap pair → pool account
-decode, cached in-process AND in a price_data.db sidecar table for
-determinism across backtest pool workers) and is consumed by:
-
-  - pumpfun_client.PumpFunWSClient._normalise / _SharedPumpPortalHub — live
-    PumpPortal feed priced on the effective basis;
-  - pumpfun_client.PumpSwapRPCClient._current_trade — vault-diff feed priced
-    on the effective basis;
-  - data_store.get_recording_candles — recordings started BEFORE
-    PUMPSWAP_VR_FIX_EPOCH (recorded on the phantom vault basis) are
-    corrected at load time using their stored per-candle vault depth
-    (pool_sol), graduation-aware via the pool's pairCreatedAt.
-
-Kill-switch: PUMPCHART_DISABLE_VR_FIX=1 disables every correction (stream,
-vault-diff and loader) and restores the pre-iter94 phantom basis.
+Never reintroduce raw-vault pricing: every price the engine, chart,
+recorder and backtester see for a graduated token must be on the
+executable basis.  Kill-switch: PUMPCHART_DISABLE_VR_FIX=1 disables every
+correction and restores the raw-vault basis.
 """
 
 from __future__ import annotations
@@ -50,11 +39,10 @@ logger = logging.getLogger(__name__)
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 PRICE_DB_PATH = os.path.join(BACKEND_DIR, "data", "price_data.db")
 
-# Deploy moment of the effective-basis feed (2026-09-26, set between the
-# newest pre-fix recording and the first post-fix deploy).  Recordings
-# started before this were stored on the phantom vault basis and are
-# corrected at load time; recordings started after it were recorded on
-# the effective basis already (stream fix live) and are never re-corrected.
+# Deploy moment of the effective-basis feed, set between the newest pre-fix
+# recording and the first post-fix deploy.  Recordings started before this
+# were stored on the phantom vault basis and are corrected at load time;
+# later recordings were captured on the effective basis and pass through.
 PUMPSWAP_VR_FIX_EPOCH = 1790395000.0
 
 # Measured protocol constant for current pools (sanity band for decodes).
@@ -82,7 +70,7 @@ def vr_fix_enabled() -> bool:
     return not _DISABLE
 
 
-# ── Pool account decode ─────────────────────────────────────────────────────
+# Pool account decode.
 
 def decode_virtual_quote_lamports(pool_data: bytes) -> int:
     """Return the pool's virtual_quote_reserves in lamports (0 when absent).
@@ -110,7 +98,7 @@ def _pool_base_mint(pool_data: bytes) -> Optional[str]:
         return None
 
 
-# ── Resolution (DexScreener pair → pool account → V) ─────────────────────────
+# Resolution: DexScreener pair, then pool account, then V.
 
 _cache: dict[str, Optional[dict]] = {}
 _resolve_ts: dict[str, float] = {}
@@ -286,7 +274,7 @@ async def resolve_mint_pool_async(mint: str, session=None,
     return await loop.run_in_executor(None, resolve_mint_pool, mint, force)
 
 
-# ── Batch pre-warm (backtest batches: resolve before pool workers spawn) ────
+# Batch pre-warm: resolve before backtest pool workers spawn.
 
 DEXSCREENER_TOKENS = "https://api.dexscreener.com/tokens/v1/solana/{mints}"
 
@@ -304,11 +292,9 @@ def prewarm_mints(mints, chunk: int = 30) -> int:
     """
     if not vr_fix_enabled():
         return 0
-    # Fresh process (every run_iteration cell) starts with an empty _cache —
-    # consult the sidecar DB too, else every batch re-resolves its whole
-    # cohort and rewrites rows with luck-dependent values (DexScreener/RPC
-    # failures poison rows v_sol=0 WITH pair_created_at → raw replay), so
-    # per-recording basis silently differs across batch cells.
+    # A fresh process starts with an empty _cache: consult the sidecar too,
+    # else each batch re-resolves its cohort with luck-dependent values and
+    # the per-recording basis silently differs across batch cells.
     fresh = sorted({m for m in mints if m and m not in _cache
                     and _sidecar_load(m) is None})
     if not fresh:
@@ -359,9 +345,8 @@ def prewarm_mints(mints, chunk: int = 30) -> int:
                     "source": "batch",
                 }
             else:
-                # negative cache: no pumpswap pool at resolve time (dead /
-                # never-graduated mint) — v_sol 0 makes every later
-                # correction a fast sidecar no-op.
+                # Negative cache: no pumpswap pool at resolve time.  v_sol 0
+                # makes every later correction a fast sidecar no-op.
                 info = {"pool_address": "", "v_sol": 0.0,
                         "pair_created_at": None,
                         "source": "batch-negative"}
@@ -373,7 +358,7 @@ def prewarm_mints(mints, chunk: int = 30) -> int:
     return stored
 
 
-# ── Corrections ─────────────────────────────────────────────────────────────
+# Corrections.
 
 def wedge_factor(vault_sol: float, v_sol: float) -> float:
     """Multiplicative tape→executable correction for one vault depth."""

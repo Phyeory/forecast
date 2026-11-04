@@ -23,8 +23,10 @@ async def autofeed_status(request: Request):
 
 @router.post("/api/autofeed/config")
 async def autofeed_config(body: dict = Body(...)):
-    """Hot-update any config keys (e.g. poll_seconds, min_mcap_usd, gmgn_timeframe).
-    Does NOT honor `enabled` here — use /api/autofeed/start + /stop for that gate."""
+    """Hot-update config keys (e.g. poll_seconds, min_mcap_usd, gmgn_timeframe).
+
+    Ignores `enabled`: that gate belongs to /api/autofeed/start and /stop.
+    """
     safe = {k: v for k, v in body.items() if k != "enabled"}
     changed = _autofeed.set_config(safe)
     return JSONResponse({"status": "updated", "changed": changed, "snapshot": _autofeed.snapshot()})
@@ -61,7 +63,9 @@ async def autofeed_stop():
 
 @router.post("/api/autofeed/tune_now")
 async def autofeed_tune_now():
-    """Force an immediate market-conditions refresh + gate recompute.
-    Works while running or idle — the effective gates apply on the next poll."""
+    """Force an immediate market-conditions refresh and gate recompute.
+
+    Works while running or idle; the effective gates apply on the next poll.
+    """
     result = await _autofeed.tune_now()
     return JSONResponse({"status": "ok", **result})

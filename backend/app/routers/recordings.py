@@ -31,11 +31,8 @@ logger = logging.getLogger("pump-chart")
 router = APIRouter()
 
 
-# ── Active recorder state ────────────────────────────────────────────────────
-
 _active_recorders: dict[int, dict] = {}
 
-# ── Recording API ────────────────────────────────────────────────────────────
 
 @router.post("/api/recorder/start")
 async def recorder_start(body: dict = Body(...)):
@@ -82,13 +79,12 @@ async def recorder_start(body: dict = Body(...)):
         aggregator = CandleAggregator(timeframe)
         last_candle_time = None
 
-        # ── Holder-flow monitor (records dev/insider wallet sells) ────────
-        # Shared process-wide monitor — one GMGN poller regardless of how many
-        # recordings/sessions are active (iter36 rate-limit fix).
+        # Shared process-wide monitor: one poller however many recordings are
+        # active (per-process rate limits).
         holder_monitor = get_shared_monitor()
         await holder_monitor.start()
-        # pool_address (iter66) lets the realtime on-chain watcher resolve the
-        # dev wallet from the PumpSwap pool account — no GMGN involved.
+        # pool_address lets the realtime on-chain watcher resolve the dev
+        # wallet from the PumpSwap pool account, no GMGN involved.
         _hf_pool = (token_info or {}).get("pair_address") \
             if live_source == "solana_rpc" else None
         holder_monitor.watch_token(real_mint, recording_id=rec_id,
@@ -140,11 +136,9 @@ async def recorder_start(body: dict = Body(...)):
                         is_buy_rec = True
                     elif tx_rec == "sell":
                         is_buy_rec = False
-                    # iter66: feed the realtime on-chain holder-flow watcher.
-                    # Whale-class sells are classified straight off this
-                    # stream; dev trades come from the watcher's own ATA
-                    # subscription. observe_trade never blocks and is a no-op
-                    # for unwatched mints.
+                    # Feed the realtime holder-flow watcher: whale sells are
+                    # classified off this stream, dev trades via its ATA
+                    # subscription; observe_trade never blocks.
                     if holder_monitor is not None:
                         holder_monitor.observe_trade(real_mint, trade)
                 candle, is_new = aggregator.process_trade(
@@ -263,7 +257,7 @@ async def finish_stale_recordings(stale_seconds: int = 60):
         try:
             candles = data_store.get_recording_candles(rid)
             if not candles:
-                # No candles at all — treat as stale
+                # No candles at all: treat as stale
                 data_store.stop_recording(rid)
                 fixed.append(rid)
                 continue
@@ -276,8 +270,6 @@ async def finish_stale_recordings(stale_seconds: int = 60):
 
     return JSONResponse({"fixed": fixed, "checked": checked, "stale_seconds": stale_seconds})
 
-
-# ── Recordings API ───────────────────────────────────────────────────────────
 
 _PRICE_HANDLER_NAMES = {
     "list": "list_recordings_endpoint",

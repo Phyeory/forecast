@@ -81,11 +81,8 @@ async def chart_ws(
     slippage_pct: float = Query(default=1.0),
     engine_version: int = Query(default=1),
 ):
-    # Guard: reject reserved path segments that have dedicated routes.
-    # FastAPI matches /ws/{mint} before /ws/live because the wildcard is
-    # declared first. Must accept() before close() to avoid a 403.
-    # For "autofeed", delegate directly — FastAPI WS routing doesn't fall
-    # through, so the dedicated /ws/autofeed endpoint is unreachable.
+    # Reserved segments have dedicated routes the wildcard shadows, and WS
+    # routing does not fall through; accept() before close() avoids a 403.
     if mint == "autofeed":
         from main import _autofeed_ws_handler  # late import: defined in main.py
         await _autofeed_ws_handler(websocket)
@@ -131,7 +128,7 @@ async def chart_ws(
         ws_client = PumpFunWSClient(real_mint)
     aggregator = CandleAggregator(timeframe)
     cancelled  = asyncio.Event()
-    last_sent_price = None  # Track to skip unchanged price updates
+    last_sent_price = None  # unchanged-price ticks are not re-sent
 
     try:
         engine_params = json.loads(params)
@@ -139,7 +136,6 @@ async def chart_ws(
         logger.error(f"Failed to parse engine params: {e}")
         engine_params = {}
 
-    # Initialize forward tester
     forward_tester = ForwardTester(
         starting_balance=1.0,
         buy_size_sol=buy_size,
@@ -278,9 +274,8 @@ async def chart_ws(
     async def stream_live():
         got = await _process_stream(ws_client)
 
-        # If the primary client stopped without producing any trades, it likely
-        # means the token is non-migrated (no PumpSwap pool). Fall back to
-        # PumpPortal WebSocket which handles bonding-curve tokens.
+        # Zero primary trades usually means a non-migrated token (no PumpSwap
+        # pool): fall back to the PumpPortal bonding-curve client.
         if not got and not cancelled.is_set() and not isinstance(ws_client, PumpFunWSClient):
             logger.warning(
                 f"Primary client yielded no trades — falling back to PumpPortal for {real_mint[:8]}…"
