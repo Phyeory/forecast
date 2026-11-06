@@ -1,9 +1,9 @@
 {
- "saved_at": 1793911713.6108618,
+ "saved_at": 1793928511.6074362,
  "book": {
-  "equity": 100673.47,
+  "equity": 100509.61,
   "cash": 64024.5,
-  "buying_power": 346111.18,
+  "buying_power": 345662.1,
   "positions": [
    {
     "asset_id": "2ac633b5-b3a7-4ba6-975d-f0f1e12dd1e4",
@@ -15,15 +15,15 @@
     "qty_available": "31",
     "avg_entry_price": "246.750968",
     "side": "long",
-    "market_value": "7585.08",
+    "market_value": "7573.3",
     "cost_basis": "7649.280008",
-    "unrealized_pl": "-64.200008",
-    "unrealized_plpc": "-0.00839",
-    "unrealized_intraday_pl": "-117.8",
-    "unrealized_intraday_plpc": "-0.01529",
-    "current_price": "244.68",
+    "unrealized_pl": "-75.980008",
+    "unrealized_plpc": "-0.00993",
+    "unrealized_intraday_pl": "-129.58",
+    "unrealized_intraday_plpc": "-0.01682",
+    "current_price": "244.3",
     "lastday_price": "248.48",
-    "change_today": "-0.01529"
+    "change_today": "-0.01682"
    },
    {
     "asset_id": "21d40833-6d13-4031-9af3-02f6a516d791",
@@ -35,15 +35,15 @@
     "qty_available": "30",
     "avg_entry_price": "249.523",
     "side": "long",
-    "market_value": "7424.25",
+    "market_value": "7380",
     "cost_basis": "7485.69",
-    "unrealized_pl": "-61.44",
-    "unrealized_plpc": "-0.00821",
-    "unrealized_intraday_pl": "-205.35",
-    "unrealized_intraday_plpc": "-0.02691",
-    "current_price": "247.475",
+    "unrealized_pl": "-105.69",
+    "unrealized_plpc": "-0.01412",
+    "unrealized_intraday_pl": "-249.6",
+    "unrealized_intraday_plpc": "-0.03271",
+    "current_price": "246",
     "lastday_price": "254.32",
-    "change_today": "-0.02691"
+    "change_today": "-0.03271"
    },
    {
     "asset_id": "fc6a5dcd-4a70-4b8d-b64f-d83a6dae9ba4",
@@ -55,15 +55,15 @@
     "qty_available": "12",
     "avg_entry_price": "618.73",
     "side": "long",
-    "market_value": "7242.54",
+    "market_value": "7247.64",
     "cost_basis": "7424.76",
-    "unrealized_pl": "-182.22",
-    "unrealized_plpc": "-0.02454",
-    "unrealized_intraday_pl": "-317.46",
-    "unrealized_intraday_plpc": "-0.04199",
-    "current_price": "603.545",
+    "unrealized_pl": "-177.12",
+    "unrealized_plpc": "-0.02386",
+    "unrealized_intraday_pl": "-312.36",
+    "unrealized_intraday_plpc": "-0.04132",
+    "current_price": "603.97",
     "lastday_price": "630",
-    "change_today": "-0.04199"
+    "change_today": "-0.04132"
    },
    {
     "asset_id": "a9be5ee1-9ac7-4dbc-a09e-bb4ba98a3a19",
@@ -72,18 +72,18 @@
     "asset_class": "us_equity",
     "asset_marginable": true,
     "qty": "54",
-    "qty_available": "54",
+    "qty_available": "53",
     "avg_entry_price": "135.028596",
     "side": "long",
-    "market_value": "7003.53",
+    "market_value": "6996.78",
     "cost_basis": "7291.544184",
-    "unrealized_pl": "-288.014184",
-    "unrealized_plpc": "-0.0395",
-    "unrealized_intraday_pl": "-693.63",
-    "unrealized_intraday_plpc": "-0.09012",
-    "current_price": "129.695",
+    "unrealized_pl": "-294.764184",
+    "unrealized_plpc": "-0.04043",
+    "unrealized_intraday_pl": "-700.38",
+    "unrealized_intraday_plpc": "-0.09099",
+    "current_price": "129.57",
     "lastday_price": "142.54",
-    "change_today": "-0.09012"
+    "change_today": "-0.09099"
    },
    {
     "asset_id": "db00f7c3-19bb-42b6-9beb-79e92487f99e",
@@ -95,15 +95,15 @@
     "qty_available": "187",
     "avg_entry_price": "38.590704",
     "side": "long",
-    "market_value": "7394.915",
+    "market_value": "7287.39",
     "cost_basis": "7216.461648",
-    "unrealized_pl": "178.453352",
-    "unrealized_plpc": "0.02473",
-    "unrealized_intraday_pl": "-176.715",
-    "unrealized_intraday_plpc": "-0.02334",
-    "current_price": "39.545",
+    "unrealized_pl": "70.928352",
+    "unrealized_plpc": "0.00983",
+    "unrealized_intraday_pl": "-284.24",
+    "unrealized_intraday_plpc": "-0.03754",
+    "current_price": "38.97",
     "lastday_price": "40.49",
-    "change_today": "-0.02334"
+    "change_today": "-0.03754"
    }
   ],
   "paper": true
@@ -251,10 +251,9 @@
    "desired": 1,
    "reason": "state_sync",
    "submitted": true,
-   "order_id": "2a6afa5d-509e-4a9f-b685-85c13b49b909",
-   "target_qty": 53.01699192699194,
-   "late": false,
-   "booked_qty": 3.0
+   "order_id": "98f6d608-733f-49b8-90aa-9c0a897974a8",
+   "target_qty": 52.918362583362594,
+   "late": false
   },
   "NKE": {
    "desired": 1,
@@ -263,7 +262,7 @@
    "order_id": "89ffe8b4-a5ec-4581-9c25-bc091333565a",
    "target_qty": 186.5218695974315,
    "late": false,
-   "booked_qty": 6.0
+   "booked_qty": 12.0
   }
  }
 }
