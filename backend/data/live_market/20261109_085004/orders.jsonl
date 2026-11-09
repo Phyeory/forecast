@@ -1,0 +1,3 @@
+{"t": 1794214215.8727918, "ts": "2026-11-09T08:50:15Z", "event": "order_status", "symbol": "IBM", "order_id": "fd26ddd9-708c-4445-98a9-308f382a43bc", "status": "accepted", "filled_qty": 0.0, "avg_price": 244.985, "reason": "signal_1793941200"}
+{"t": 1794214216.0055313, "ts": "2026-11-09T08:50:16Z", "event": "order_status", "symbol": "MSTR", "order_id": "aafd89c5-c9cb-4347-8933-7cbacc6a0ad9", "status": "accepted", "filled_qty": 0.0, "avg_price": 128.97, "reason": "state_sync"}
+{"t": 1794214216.0674999, "ts": "2026-11-09T08:50:16Z", "event": "order_status", "symbol": "NKE", "order_id": "76e54464-970d-449b-bfbc-6183ecf1eaf1", "status": "accepted", "filled_qty": 0.0, "avg_price": 38.59, "reason": "state_sync"}
