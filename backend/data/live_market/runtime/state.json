@@ -1,9 +1,9 @@
 {
- "saved_at": 1794214224.7193055,
+ "saved_at": 1794265735.889896,
  "book": {
-  "equity": 100249.86,
-  "cash": 64151.92,
-  "buying_power": 345090.26,
+  "equity": 100736.36,
+  "cash": 70777.52,
+  "buying_power": 353620.79,
   "positions": [
    {
     "asset_id": "2ac633b5-b3a7-4ba6-975d-f0f1e12dd1e4",
@@ -15,35 +15,15 @@
     "qty_available": "31",
     "avg_entry_price": "246.750968",
     "side": "long",
-    "market_value": "7470.69",
+    "market_value": "7354.44",
     "cost_basis": "7649.280008",
-    "unrealized_pl": "-178.590008",
-    "unrealized_plpc": "-0.02335",
-    "unrealized_intraday_pl": "52.39",
-    "unrealized_intraday_plpc": "0.00706",
-    "current_price": "240.99",
+    "unrealized_pl": "-294.840008",
+    "unrealized_plpc": "-0.03854",
+    "unrealized_intraday_pl": "-63.86",
+    "unrealized_intraday_plpc": "-0.00861",
+    "current_price": "237.24",
     "lastday_price": "239.3",
-    "change_today": "0.00706"
-   },
-   {
-    "asset_id": "21d40833-6d13-4031-9af3-02f6a516d791",
-    "symbol": "IBM",
-    "exchange": "NYSE",
-    "asset_class": "us_equity",
-    "asset_marginable": true,
-    "qty": "30",
-    "qty_available": "0",
-    "avg_entry_price": "249.523",
-    "side": "long",
-    "market_value": "7420.5",
-    "cost_basis": "7485.69",
-    "unrealized_pl": "-65.19",
-    "unrealized_plpc": "-0.00871",
-    "unrealized_intraday_pl": "70.5",
-    "unrealized_intraday_plpc": "0.00959",
-    "current_price": "247.35",
-    "lastday_price": "245",
-    "change_today": "0.00959"
+    "change_today": "-0.00861"
    },
    {
     "asset_id": "fc6a5dcd-4a70-4b8d-b64f-d83a6dae9ba4",
@@ -55,15 +35,15 @@
     "qty_available": "12",
     "avg_entry_price": "618.73",
     "side": "long",
-    "market_value": "7369.8",
+    "market_value": "7730.4",
     "cost_basis": "7424.76",
-    "unrealized_pl": "-54.96",
-    "unrealized_plpc": "-0.0074",
-    "unrealized_intraday_pl": "48",
-    "unrealized_intraday_plpc": "0.00656",
-    "current_price": "614.15",
+    "unrealized_pl": "305.64",
+    "unrealized_plpc": "0.04116",
+    "unrealized_intraday_pl": "408.6",
+    "unrealized_intraday_plpc": "0.05581",
+    "current_price": "644.2",
     "lastday_price": "610.15",
-    "change_today": "0.00656"
+    "change_today": "0.05581"
    },
    {
     "asset_id": "a9be5ee1-9ac7-4dbc-a09e-bb4ba98a3a19",
@@ -71,19 +51,19 @@
     "exchange": "NASDAQ",
     "asset_class": "us_equity",
     "asset_marginable": true,
-    "qty": "53",
-    "qty_available": "53",
-    "avg_entry_price": "135.029245",
+    "qty": "58",
+    "qty_available": "58",
+    "avg_entry_price": "134.103621",
     "side": "long",
-    "market_value": "6572",
-    "cost_basis": "7156.549985",
-    "unrealized_pl": "-584.549985",
-    "unrealized_plpc": "-0.08168",
-    "unrealized_intraday_pl": "-261.29",
-    "unrealized_intraday_plpc": "-0.03824",
-    "current_price": "124",
+    "market_value": "7319.6",
+    "cost_basis": "7778.010018",
+    "unrealized_pl": "-458.410018",
+    "unrealized_plpc": "-0.05894",
+    "unrealized_intraday_pl": "-158.34",
+    "unrealized_intraday_plpc": "-0.02117",
+    "current_price": "126.2",
     "lastday_price": "128.93",
-    "change_today": "-0.03824"
+    "change_today": "-0.02117"
    },
    {
     "asset_id": "db00f7c3-19bb-42b6-9beb-79e92487f99e",
@@ -91,19 +71,19 @@
     "exchange": "NYSE",
     "asset_class": "us_equity",
     "asset_marginable": true,
-    "qty": "187",
-    "qty_available": "187",
-    "avg_entry_price": "38.583048",
+    "qty": "190",
+    "qty_available": "190",
+    "avg_entry_price": "38.586106",
     "side": "long",
-    "market_value": "7264.95",
-    "cost_basis": "7215.029976",
-    "unrealized_pl": "49.920024",
-    "unrealized_plpc": "0.00692",
-    "unrealized_intraday_pl": "48.62",
-    "unrealized_intraday_plpc": "0.00674",
-    "current_price": "38.85",
+    "market_value": "7554.4",
+    "cost_basis": "7331.36014",
+    "unrealized_pl": "223.03986",
+    "unrealized_plpc": "0.03042",
+    "unrealized_intraday_pl": "222.3",
+    "unrealized_intraday_plpc": "0.03032",
+    "current_price": "39.76",
     "lastday_price": "38.59",
-    "change_today": "0.00674"
+    "change_today": "0.03032"
    }
   ],
   "paper": true
@@ -247,31 +227,21 @@
   "XOM": 0
  },
  "pending": {
-  "IBM": {
-   "desired": 0,
-   "reason": "signal_1793941200",
-   "signal_close": 244.985,
-   "late": false,
-   "submitted": true,
-   "order_id": "fd26ddd9-708c-4445-98a9-308f382a43bc",
-   "target_qty": 0.0,
-   "stroke_price": 244.985,
-   "stroke_qty": 30.0
-  },
   "MSTR": {
    "desired": 1,
    "reason": "state_sync",
    "submitted": true,
    "order_id": "aafd89c5-c9cb-4347-8933-7cbacc6a0ad9",
    "target_qty": 58.098917072040784,
-   "late": false
+   "late": false,
+   "booked_qty": 5.0
   },
   "NKE": {
    "desired": 1,
    "reason": "state_sync",
    "submitted": true,
-   "order_id": "76e54464-970d-449b-bfbc-6183ecf1eaf1",
-   "target_qty": 190.20199064711832,
+   "order_id": "4449d1cf-110d-4134-a9f1-6062466ce9e9",
+   "target_qty": 195.78199015288936,
    "late": false
   }
  }
