@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -e
+# macOS launchd default soft fd limit is 256 — live sessions (WS + RPC subs +
+# per-insert SQLite conns) exhaust it under feed bursts, surfacing as
+# sqlite3.OperationalError: unable to open database file (2026-11-06 20:35).
+ulimit -n 65536
 cd "$(dirname "$0")/backend"
 if [ ! -d ".venv" ]; then
   echo "Creating virtual environment…"
