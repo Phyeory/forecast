@@ -1,0 +1,4 @@
+{"t": 1794473810.581287, "ts": "2026-11-12T08:56:50Z", "event": "order_status", "symbol": "MSTR", "order_id": "5f481c60-7199-4f56-bfe9-bce47e624a5c", "status": "accepted", "filled_qty": 0.0, "avg_price": 121.02, "reason": "state_sync"}
+{"t": 1794473810.720838, "ts": "2026-11-12T08:56:50Z", "event": "order_status", "symbol": "NKE", "order_id": "5fa55739-cd19-4939-9350-cc5c57b4c9ee", "status": "accepted", "filled_qty": 0.0, "avg_price": 38.66, "reason": "state_sync"}
+{"t": 1794473832.4534264, "ts": "2026-11-12T08:57:12Z", "event": "order_status", "symbol": "MSTR", "order_id": "5f481c60-7199-4f56-bfe9-bce47e624a5c", "status": "accepted", "filled_qty": 0.0, "avg_price": 120.505, "reason": "state_sync"}
+{"t": 1794473834.5737336, "ts": "2026-11-12T08:57:14Z", "event": "order_status", "symbol": "NKE", "order_id": "5fa55739-cd19-4939-9350-cc5c57b4c9ee", "status": "accepted", "filled_qty": 0.0, "avg_price": 38.17, "reason": "state_sync"}
