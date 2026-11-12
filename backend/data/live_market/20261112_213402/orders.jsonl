@@ -1,0 +1,3 @@
+{"t": 1794519257.5488212, "ts": "2026-11-12T21:34:17Z", "symbol": "MSTR", "side": "sell", "qty": 1.0, "price": 122.33, "notional": 122.33, "fee": 0.0, "time": 1794519257.5487945, "order_id": "8c2cb2fd-7c3c-4869-a65e-ad06b5e5b5ba", "reason": "state_sync", "synthetic": false, "event": "sync_submit"}
+{"t": 1794519260.6627483, "ts": "2026-11-12T21:34:20Z", "event": "order_status", "symbol": "MSTR", "order_id": "8c2cb2fd-7c3c-4869-a65e-ad06b5e5b5ba", "status": "accepted", "filled_qty": 0.0, "avg_price": 122.33, "reason": "state_sync"}
+{"t": 1794519260.8875253, "ts": "2026-11-12T21:34:20Z", "event": "order_status", "symbol": "NKE", "order_id": "5fa55739-cd19-4939-9350-cc5c57b4c9ee", "status": "filled", "filled_qty": 5.0, "avg_price": 38.242, "reason": "state_sync"}
