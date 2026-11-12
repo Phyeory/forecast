@@ -1,9 +1,9 @@
 {
- "saved_at": 1794473844.8160064,
+ "saved_at": 1794517460.3857057,
  "book": {
-  "equity": 99719.59,
-  "cash": 70693.25,
-  "buying_power": 351037.13,
+  "equity": 99480.83,
+  "cash": 70160.17,
+  "buying_power": 349968.14,
   "positions": [
    {
     "asset_id": "2ac633b5-b3a7-4ba6-975d-f0f1e12dd1e4",
@@ -15,15 +15,15 @@
     "qty_available": "31",
     "avg_entry_price": "246.750968",
     "side": "long",
-    "market_value": "7346.69",
+    "market_value": "7404.04",
     "cost_basis": "7649.280008",
-    "unrealized_pl": "-302.590008",
-    "unrealized_plpc": "-0.03956",
-    "unrealized_intraday_pl": "-18.91",
-    "unrealized_intraday_plpc": "-0.00257",
-    "current_price": "236.99",
+    "unrealized_pl": "-245.240008",
+    "unrealized_plpc": "-0.03206",
+    "unrealized_intraday_pl": "38.44",
+    "unrealized_intraday_plpc": "0.00522",
+    "current_price": "238.84",
     "lastday_price": "237.6",
-    "change_today": "-0.00257"
+    "change_today": "0.00522"
    },
    {
     "asset_id": "fc6a5dcd-4a70-4b8d-b64f-d83a6dae9ba4",
@@ -35,15 +35,15 @@
     "qty_available": "12",
     "avg_entry_price": "618.73",
     "side": "long",
-    "market_value": "7518.36",
+    "market_value": "7496.52",
     "cost_basis": "7424.76",
-    "unrealized_pl": "93.6",
-    "unrealized_plpc": "0.01261",
-    "unrealized_intraday_pl": "-26.88",
-    "unrealized_intraday_plpc": "-0.00356",
-    "current_price": "626.53",
+    "unrealized_pl": "71.76",
+    "unrealized_plpc": "0.00966",
+    "unrealized_intraday_pl": "-48.72",
+    "unrealized_intraday_plpc": "-0.00646",
+    "current_price": "624.71",
     "lastday_price": "628.77",
-    "change_today": "-0.00356"
+    "change_today": "-0.00646"
    },
    {
     "asset_id": "a9be5ee1-9ac7-4dbc-a09e-bb4ba98a3a19",
@@ -51,19 +51,19 @@
     "exchange": "NASDAQ",
     "asset_class": "us_equity",
     "asset_marginable": true,
-    "qty": "59",
-    "qty_available": "59",
-    "avg_entry_price": "133.873898",
+    "qty": "62",
+    "qty_available": "62",
+    "avg_entry_price": "132.910161",
     "side": "long",
-    "market_value": "6920.7",
-    "cost_basis": "7898.559982",
-    "unrealized_pl": "-977.859982",
-    "unrealized_plpc": "-0.1238",
-    "unrealized_intraday_pl": "-297.95",
-    "unrealized_intraday_plpc": "-0.04128",
-    "current_price": "117.3",
+    "market_value": "7094.66",
+    "cost_basis": "8240.429982",
+    "unrealized_pl": "-1145.769982",
+    "unrealized_plpc": "-0.13904",
+    "unrealized_intraday_pl": "-491.04",
+    "unrealized_intraday_plpc": "-0.06473",
+    "current_price": "114.43",
     "lastday_price": "122.35",
-    "change_today": "-0.04128"
+    "change_today": "-0.06473"
    },
    {
     "asset_id": "db00f7c3-19bb-42b6-9beb-79e92487f99e",
@@ -71,19 +71,19 @@
     "exchange": "NYSE",
     "asset_class": "us_equity",
     "asset_marginable": true,
-    "qty": "189",
-    "qty_available": "189",
-    "avg_entry_price": "38.599206",
+    "qty": "194",
+    "qty_available": "194",
+    "avg_entry_price": "38.589999",
     "side": "long",
-    "market_value": "7240.59",
-    "cost_basis": "7295.249934",
-    "unrealized_pl": "-54.659934",
-    "unrealized_plpc": "-0.00749",
-    "unrealized_intraday_pl": "-1.89",
-    "unrealized_intraday_plpc": "-0.00026",
-    "current_price": "38.31",
+    "market_value": "7325.44",
+    "cost_basis": "7486.459806",
+    "unrealized_pl": "-161.019806",
+    "unrealized_plpc": "-0.02151",
+    "unrealized_intraday_pl": "-108.64",
+    "unrealized_intraday_plpc": "-0.01461",
+    "current_price": "37.76",
     "lastday_price": "38.32",
-    "change_today": "-0.00026"
+    "change_today": "-0.01461"
    }
   ],
   "paper": true
@@ -233,7 +233,8 @@
    "submitted": true,
    "order_id": "5f481c60-7199-4f56-bfe9-bce47e624a5c",
    "target_qty": 62.04887828458108,
-   "late": false
+   "late": false,
+   "booked_qty": 3.0
   },
   "NKE": {
    "desired": 1,
@@ -241,7 +242,8 @@
    "submitted": true,
    "order_id": "5fa55739-cd19-4939-9350-cc5c57b4c9ee",
    "target_qty": 194.23577987584073,
-   "late": false
+   "late": false,
+   "booked_qty": 5.0
   }
  }
 }
