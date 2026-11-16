@@ -1,9 +1,9 @@
 {
- "saved_at": 1794818706.9065895,
+ "saved_at": 1794870034.6759322,
  "book": {
-  "equity": 99156.36,
-  "cash": 69709.95,
-  "buying_power": 349050.65,
+  "equity": 99115.3,
+  "cash": 69644.8,
+  "buying_power": 348800.82,
   "positions": [
    {
     "asset_id": "2ac633b5-b3a7-4ba6-975d-f0f1e12dd1e4",
@@ -15,15 +15,15 @@
     "qty_available": "31",
     "avg_entry_price": "246.750968",
     "side": "long",
-    "market_value": "7564",
+    "market_value": "7638.71",
     "cost_basis": "7649.280008",
-    "unrealized_pl": "-85.280008",
-    "unrealized_plpc": "-0.01115",
-    "unrealized_intraday_pl": "28.52",
-    "unrealized_intraday_plpc": "0.00378",
-    "current_price": "244",
+    "unrealized_pl": "-10.570008",
+    "unrealized_plpc": "-0.00138",
+    "unrealized_intraday_pl": "103.23",
+    "unrealized_intraday_plpc": "0.0137",
+    "current_price": "246.41",
     "lastday_price": "243.08",
-    "change_today": "0.00378"
+    "change_today": "0.0137"
    },
    {
     "asset_id": "fc6a5dcd-4a70-4b8d-b64f-d83a6dae9ba4",
@@ -35,15 +35,15 @@
     "qty_available": "12",
     "avg_entry_price": "618.73",
     "side": "long",
-    "market_value": "7622.4",
+    "market_value": "7501.8",
     "cost_basis": "7424.76",
-    "unrealized_pl": "197.64",
-    "unrealized_plpc": "0.02662",
-    "unrealized_intraday_pl": "-77.88",
-    "unrealized_intraday_plpc": "-0.01011",
-    "current_price": "635.2",
+    "unrealized_pl": "77.04",
+    "unrealized_plpc": "0.01038",
+    "unrealized_intraday_pl": "-198.48",
+    "unrealized_intraday_plpc": "-0.02578",
+    "current_price": "625.15",
     "lastday_price": "641.69",
-    "change_today": "-0.01011"
+    "change_today": "-0.02578"
    },
    {
     "asset_id": "a9be5ee1-9ac7-4dbc-a09e-bb4ba98a3a19",
@@ -51,19 +51,19 @@
     "exchange": "NASDAQ",
     "asset_class": "us_equity",
     "asset_marginable": true,
-    "qty": "65",
-    "qty_available": "65",
-    "avg_entry_price": "131.586308",
+    "qty": "66",
+    "qty_available": "66",
+    "avg_entry_price": "131.160455",
     "side": "long",
-    "market_value": "6738.55",
-    "cost_basis": "8553.11002",
-    "unrealized_pl": "-1814.56002",
-    "unrealized_plpc": "-0.21215",
-    "unrealized_intraday_pl": "-516.75",
-    "unrealized_intraday_plpc": "-0.07122",
-    "current_price": "103.67",
+    "market_value": "6830.9934",
+    "cost_basis": "8656.59003",
+    "unrealized_pl": "-1825.59663",
+    "unrealized_plpc": "-0.21089",
+    "unrealized_intraday_pl": "-535.9266",
+    "unrealized_intraday_plpc": "-0.07275",
+    "current_price": "103.4999",
     "lastday_price": "111.62",
-    "change_today": "-0.07122"
+    "change_today": "-0.07275"
    },
    {
     "asset_id": "db00f7c3-19bb-42b6-9beb-79e92487f99e",
@@ -71,19 +71,19 @@
     "exchange": "NYSE",
     "asset_class": "us_equity",
     "asset_marginable": true,
-    "qty": "197",
+    "qty": "196",
     "qty_available": "196",
     "avg_entry_price": "38.580406",
     "side": "long",
-    "market_value": "7521.46",
-    "cost_basis": "7600.339982",
-    "unrealized_pl": "-78.879982",
-    "unrealized_plpc": "-0.01038",
-    "unrealized_intraday_pl": "37.43",
-    "unrealized_intraday_plpc": "0.005",
-    "current_price": "38.18",
+    "market_value": "7498.9992",
+    "cost_basis": "7561.759576",
+    "unrealized_pl": "-62.760376",
+    "unrealized_plpc": "-0.0083",
+    "unrealized_intraday_pl": "52.9592",
+    "unrealized_intraday_plpc": "0.00711",
+    "current_price": "38.2602",
     "lastday_price": "37.99",
-    "change_today": "0.005"
+    "change_today": "0.00711"
    }
   ],
   "paper": true
@@ -233,7 +233,8 @@
    "submitted": true,
    "order_id": "5de77604-55a2-475f-81e8-ef5e42fb9132",
    "target_qty": 66.66123162423808,
-   "late": false
+   "late": false,
+   "booked_qty": 1.0
   },
   "NKE": {
    "desired": 1,
@@ -241,7 +242,8 @@
    "submitted": true,
    "order_id": "63727590-d37b-4686-b345-c3199d29d32d",
    "target_qty": 195.75485654119507,
-   "late": false
+   "late": false,
+   "booked_qty": 1.0
   }
  }
 }
