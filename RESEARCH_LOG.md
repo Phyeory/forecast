@@ -833,3 +833,28 @@ Rollback: `POST /api/autofeed/config {"feed_source": "gmgn"}`.
 probed — `top_10_holder_rate` matches trending exactly ⇒ launch-time-stable fields
 (bundler_rate, insider-rate retired, renounced, taxes) can be backfilled for old recordings
 WITHOUT look-ahead; dynamic fields (holders/volume/mcap/wash NOW) excluded. Results TDB.
+
+### iter102 final verdict — causal re-filter (2026-11-16 ~22:00)
+
+Backfill completed: 662/663 eligible mints profiled (`/v1/token/info`, 0 failures after
+retry; `creator_created_count` absent from stat/dev on this API build ⇒ extended cohort
+degenerates). Cohorts on 817 eligible recordings: **strict pass 805 / fail 12** (11
+`top_bundler_trader_percentage > 0.30` + 1 no-profile). Only **1.6%** of the corpus exceeds
+the 0.30 bundler gate (p50 0.005, p90 0.141).
+
+**Cohort slicing of baseline batch `iter102_base_full_1794851604`** (842 replays, 439
+trades, 63.6% trade-WR, −0.1334 SOL total): pass mean −0.00022 SOL/rec vs fail mean
++0.00465 SOL/rec; Mann-Whitney p=0.96 — **NULL RESULT**. The entire fail-cohort "advantage"
+is ONE trade pair (MIDNIGHT +0.0507, Marvin −0.0135; 4 trades over 8 recordings). Verdict:
+**the launch-window bundler gate does NOT measurably improve the corpus cohort** — and the
+fail-side n (8 recs / 4 trades) carries no power either way. The bundler metric as a
+*corpus re-filter* is dead on this tape; its live value (if any) must come from the
+fail-closed vetting stack instead: REAL RPC top-10/20 concentration at feed time (which
+CANNOT be reconstructed historically — current-holder snapshots are look-ahead) + authority
+checks + RugCheck, with `feed_outcomes` now accruing the per-fed-mint tape-health data the
+future gate fitter will need.
+
+Ops notes: run_iteration under the SYSTEM python3 (numpy 2.2.6) ran ~50× slower than the
+venv (numpy 2.4.3) with zero completions in 75 min — always launch batches with
+`backend/.venv/bin/python`. holder_flow `_POLL_INTERVAL` was TEMP 60 s for the backfill —
+reverted to 15 s.
