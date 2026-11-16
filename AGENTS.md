@@ -50,7 +50,21 @@ per-trade logs from `backend/v2_results/`.
 6. **Determinism** across backtest/paper/live.
 7. **Engine factory only** — `engine_factory.create_engine(version=1|2|3|4|6)`. V2
    `StrategyEngineV2Adapter` mirrors V1's interface. V3/V4/V6 non-default.
-8. **DB isolation** — real data in `backend/data/*.db`; never write `backend/candles.db`.
+8. **DB isolation / two-corpus selector** — two recording corpora, selected per run
+   (`recordings_db` = `unseen` | `original`; aliases `new`/`live`/`active` → unseen,
+   `main`/`paper`/`archive` → original):
+   - `backend/data/unseen_database.db` — **default**. Live sessions write here and every
+     backtest (single, Run All, last night / last 12H / last 7 days) replays it unless
+     `original` is selected.
+   - `backend/data/price_data.db` — **exactly the 3,567-tape paper cohort** (manifest:
+     `backend/analysis/audit_v2/results/rand_s1_full_summary.json`, `per_rec`; ids
+     2–6717). Nothing else may be written into it; new recordings go to unseen.
+   `data_store.normalize_recordings_db()` / `recordings_db_path()` resolve the selector and
+   thread the path into replay + causal calibration (`initialize_calibration_sync(db_path=…)`);
+   results are tagged per row via `backtests.recordings_db` (`main` = legacy pre-selector
+   rows). `PUMPCHART_PRICE_DB` / `PUMPCHART_ORIGINAL_DB` relocate the two corpora for the
+   whole stack (`data_store`, `session_calibrator`, `mint_chain_history`,
+   `pool_virtual_reserves`). Never write `backend/candles.db`.
 9. **Result dirs** — `BACKTEST_RESULTS_DIR=backend/v2_results` for all V2 sweeps; do not prune.
 10. **No orphaned pool workers** — every worker calls `guard_parent()`
     (`backend/process_watchdog.py`).
@@ -80,7 +94,10 @@ graph TD
 ```
 
 - **`main.py`** — REST (`/api/token/*`, `/api/recorder/*`, `/api/backtest*`, `/api/live/*`),
-  WS (`/ws/{mint}`, `/ws/live/{mint}`, `/ws/autofeed`). Server-side live sessions (trader,
+  WS (`/ws/{mint}`, `/ws/live/{mint}`, `/ws/autofeed`). `/api/recordings*` and
+  `/api/backtest*` take `recordings_db` (`unseen` default | `original`) so the UI corpus
+  switch applies to the dropdown, single runs and every window (Run All / night / 12h / 7d).
+  Server-side live sessions (trader,
   stream, auto-recording, 1 s holder-flow pump + immediate exit dispatch, multi-engine fleet
   registry) survive tab closure. Backend restart does NOT auto-resume autofeed. `live_status`
   / portfolio aggregate cash/fees/rent/wallet-Δ alongside model PnL (iter95, GLM-FIX).
@@ -92,7 +109,11 @@ graph TD
   sidecar cache (`pool_virtual_resolves` in price_data.db), `prewarm_mints()` for batch
   workers (hooked in `run_backtest_batch`).
 - **`candle_aggregator.py`** — trades → OHLCV with 4-state expansion.
-- **`data_store.py`** — SQLite recordings + holder-flow persistence (`get_holder_flow_since`).
+- **`data_store.py`** — SQLite recordings + holder-flow persistence (`get_holder_flow_since`);
+  corpus resolver `normalize_recordings_db()` / `recordings_db_path()` (`unseen` default,
+  `original` = 3,567-tape paper cohort, `PUMPCHART_PRICE_DB` / `PUMPCHART_ORIGINAL_DB`
+  overrides); every read takes `recordings_db`, backtest rows tagged in
+  `backtests.recordings_db` (results stay in `backtest_data.db`).
 - **`holder_flow.py`** — insider/whale sells: realtime watcher (≥$100 stream sells tick-time +
   dev ATA subscribe) + legacy GMGN poll (fallback). CoinGecko SOL cached, off hot paths.
 - **`forward_tester.py`** — shared execution simulator (slippage, `exec_model`, latency,
@@ -138,6 +159,9 @@ graph TD
   newborn recorder (separate DB, default OFF), orphan protection.
 - **`analysis/`** — paired_diff, aggregate_results, test suite, per-iteration artifacts.
 - **`frontend/`** — vanilla JS + LightweightCharts; `app.js::engineParamsV2` mirrors all knobs.
+  Backtester has a **Recordings DB** selector (`#bt-recordings-db`, persisted in
+  `localStorage` as `bt_recordings_db`, default `unseen`); every button sends
+  `recordings_db` and saved cards are badged `unseen` / `paper` / `legacy`.
   Session/trader cards + portfolio show **Model PnL vs Wallet Δ** side by side, labelled
   (iter95, GLM-FIX); trade rows carry a Cash PnL column.
 
