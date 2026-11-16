@@ -858,3 +858,39 @@ Ops notes: run_iteration under the SYSTEM python3 (numpy 2.2.6) ran ~50× slower
 venv (numpy 2.4.3) with zero completions in 75 min — always launch batches with
 `backend/.venv/bin/python`. holder_flow `_POLL_INTERVAL` was TEMP 60 s for the backfill —
 reverted to 15 s.
+
+### iter102b — organic-corpus tape cleanup + rerun (2026-11-16 ~23:20)
+
+User directive: review every unseen-corpus tape's price dynamics, delete the obviously
+inorganic ones (bundlers/rugpulls), re-run the backtest. Signatures per the rug-pull /
+pump.fun-manipulation literature (volume-spike→collapse, steep post-pump dump, collapse
+speed, coordinated sells, echo padding — arXiv 2608.20271, 2609.10246; Bitquery bundle
+forensics). Tool: `analysis/iter102_tape_autopsy.py` on 1s candles:
+
+- rug_collapse: final <12% of peak AND peak→collapse ≤600 s (SPEED is the discriminator —
+  a plain final/peak <12% catches 25% of the corpus because organic bleed also ends −90%)
+- nuke_dump: single 1s candle closing ≤−65% (coordinated dump / liquidity nuke)
+- bundle_early_dump: first-300 s drawdown ≤−70% with sell ≥2.5× buy and ≥15 SOL traded (0 hits —
+  bundlers dump at/before migration; post-migration tapes rarely show it)
+- dead_tape: ≥85% zero-volume candles and <5% range
+- stillborn (<100 candles) + stale empty rows (>2 h, no candles)
+- wash_echo: only when RHYTHMIC (≥10 spike-and-fade events; 4-9 echoes kept as borderline —
+  top-5%-candle volume share ~0.35 is not hard bot padding)
+
+Deleted **226/905 tapes** (183 replayed in the baseline batch): 62 fast-rug + 30 rug+nuke +
+20 nuke-only + 29 stillborn + 36 stale-empty + ~69 rhythmic-echo; 24 marginal echo tapes
+kept. Audit: `analysis/audit_v2/iter102/deleted_tapes.json`; DB backup
+`data/backups/unseen_pre-organic-clean-20261116.db` (full restore possible).
+
+**Rerun `iter102_organic_full_1794869969` (venv python): 669 replays, 403 trades,
+66.5% trade-WR, +0.6913 SOL, PF 1.20, expectancy +0.00171, 0 errors** vs baseline
+`iter102_base_full_1794851604`: 439 trades, 63.6% WR, −0.1334 SOL, PF 0.97.
+Decomposition: removed tapes carried −0.2167 SOL in the baseline (mechanical removal →
+kept-subset +0.0832 under OLD calibration); the population-calibration re-fit on the
+cleaned corpus added ~+0.61 more — the 50-newest calibration sample had been fitting
+engine coefficients against rug/nuke-polluted dynamics.
+
+**CAVEAT (look-ahead):** this is CORPUS HYGIENE using full-tape information — it measures
+the strategy on organic tapes and a cleanly-calibrated engine; it is NOT a real-time feed
+claim (no filter could know these were rugs at entry time) and must not be cited as one.
+Reverse: restore `unseen_pre-organic-clean-20261116.db`.
