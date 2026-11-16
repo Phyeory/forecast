@@ -2688,9 +2688,14 @@ function afHandleStatus(snap) {
   // Ppopulate form fields from backend (only when local fields untouched -> just always)
   afPopulateForm(snap);
 
-  // CLI configuration status
-  if (snap.cli_configured) {
-    afCliStatus.textContent = "gmgn-cli: ✅ configured";
+  // Source badge + CLI configuration status
+  const srcBadge = $("af-source-badge");
+  if (srcBadge && snap.feed_source) srcBadge.textContent = snap.feed_source;
+  if (snap.feed_source === "gecko") {
+    afCliStatus.textContent = "source: gecko · GT + RPC + RugCheck (fail-closed)";
+    afCliStatus.style.color = "var(--green, #26a69a)";
+  } else if (snap.cli_configured) {
+    afCliStatus.textContent = "gmgn-cli: ✅ configured (fallback source)";
     afCliStatus.style.color = "var(--green, #26a69a)";
   } else {
     afCliStatus.textContent = "gmgn-cli: ⚠ no API key";
@@ -2785,6 +2790,7 @@ function afRenderRowHTML(c) {
     return `$${n.toFixed(0)}`;
   };
   const fmtPct = (n) => (n != null && n > 0) ? (n * 100).toFixed(1) + "%" : "—";
+  const fmtRisk = (n) => (n != null && n > 0) ? n.toFixed(1) : "0";
   const fmtBool = (b, okWhenFalse = true) => {
     const cls = (b === false) ? (okWhenFalse ? "af-flag-ok" : "af-flag-bad") : "af-flag-bad";
     const lbl = (b === false) ? "✓" : "✗";
@@ -2803,12 +2809,17 @@ function afRenderRowHTML(c) {
         <div class="af-sub">Liq: ${fmtUsd(c.liquidity)}</div>
       </div>
       <div>
-        <div class="af-sub">Smart / Holders</div>
-        <div class="af-metric">${c.smart_degen_count || 0} / ${c.holders || 0}</div>
+        <div class="af-sub">${c.source === "gecko" ? "Top10 / Top20 (RPC)" : "Smart / Holders"}</div>
+        <div class="af-metric">${c.source === "gecko"
+          ? `${fmtPct(c.top10_pct)} / ${fmtPct(c.top20_pct)}`
+          : `${c.smart_degen_count || 0} / ${c.holders || 0}`}</div>
       </div>
       <div>
-        <div class="af-sub">Rug / Bund</div>
-        <div class="af-metric">${fmtPct(c.rug_ratio)} / ${fmtPct(c.bundler_rate)}</div>
+        <div class="af-sub">${c.source === "gecko" ? "RC score / Risk" : "Rug / Bund"}</div>
+        <div class="af-metric">${c.source === "gecko"
+          ? `${c.rugcheck_score != null ? Math.round(c.rugcheck_score) : "—"} / ${fmtRisk(c.risk_score)}`
+          : `${fmtPct(c.rug_ratio)} / ${fmtPct(c.bundler_rate)}`}</div>
+        ${c.source === "gecko" ? `<div class="af-sub">Buyers/Sellers: ${c.buyers_h1 || 0} / ${c.sellers_h1 || 0} · vol/buyer ${fmtUsd(c.wash_proxy_usd)}</div>` : ""}
       </div>
       <div>
         <div class="af-sub">Motion (vol / swaps)</div>
@@ -2935,6 +2946,14 @@ const AF_FIELD_MAP = [
   ["af-rej-wash", "reject_wash_trading", "bool"],
   ["af-rej-honeypot", "reject_honeypot", "bool"],
   ["af-req-social", "require_has_social", "bool"],
+  // new-feed source & vetting (2026-11-16)
+  ["af-source", "feed_source", "str"],
+  ["af-min-pool-age", "min_pool_age_minutes", "float"],
+  ["af-min-buyers", "min_buyers_h1", "int"],
+  ["af-max-top20", "max_top20_holder_rate", "float"],
+  ["af-max-rugcheck", "max_rugcheck_score", "float"],
+  ["af-vet-fail-policy", "vetting_fail_policy", "str"],
+  ["af-vet-cap", "vet_candidates_per_tick", "int"],
 ];
 
 function afPopulateForm(snap) {

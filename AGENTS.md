@@ -157,6 +157,18 @@ graph TD
 - **`signal_capture.py` / `autofeed.py` / `newpairs*.py` / `process_watchdog.py`** — live
   signal capture (`data/live_logs/<session>/signals.jsonl`), server-side session auto-open,
   newborn recorder (separate DB, default OFF), orphan protection.
+- **`feed_sources.py` / `feed_store.py` (new-feed, iter102 2026-11-16)** — AutoFeed discovery
+  is source-agnostic: `feed_source="gecko"` (default) = GT `trending_pools?duration=1h` UNION
+  `new_pools` → DexScreener batch enrichment → motion gates (h1 vol/swaps/unique-buyers/
+  wash-proxy) → RPC vetting (mint/freeze authority + `getTokenLargestAccounts` REAL top-10/20
+  concentration, endpoint fanout publicnode→mainnet-beta→tatum) + RugCheck (free, slot-paced
+  6 s, 10-min cache) → composite risk score. **FAIL-CLOSED everywhere**: missing/unparseable
+  required field or unavailable required vector ⇒ REJECT (`vetting_fail_policy="allow"`
+  escape hatch); never reintroduce fail-open parsing — `insider_rate` retirement silently
+  deaded its gate for weeks. `"gmgn"` = repaired gmgn-cli path (fallback/rollback). Candidates
+  + rejects + outcomes persist to `backend/data/feed_data.db` (`feed_events`/`feed_outcomes`/
+  `feed_calibration_audit`) — the feed-gate auto-calibration prerequisite (NOT engine-SDE
+  recalibration, graveyard).
 - **`analysis/`** — paired_diff, aggregate_results, test suite, per-iteration artifacts.
 - **`frontend/`** — vanilla JS + LightweightCharts; `app.js::engineParamsV2` mirrors all knobs.
   Backtester has a **Recordings DB** selector (`#bt-recordings-db`, persisted in

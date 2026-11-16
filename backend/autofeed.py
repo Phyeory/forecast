@@ -58,6 +58,9 @@ from pathlib import Path
 from typing import Optional, Callable, Awaitable, Iterable
 
 import rate_limiter as rl
+import feed_sources as fs
+import feed_store
+from pumpfun_client import get_ds_pairs_by_mints
 
 logger = logging.getLogger("autofeed")
 
@@ -254,6 +257,18 @@ class Candidate:
     twitter:               str = ""
     telegram:              str = ""
     website:               str = ""
+    # ── new-feed (2026-11-16): multi-source vetting vector ─────────────────
+    source:            str = "gmgn"     # "gmgn" | "gecko"
+    top20_pct:         float = 0.0      # REAL RPC-measured top-20 supply share
+    buyers_h1:         int = 0          # unique h1 buyers (GT)
+    sellers_h1:        int = 0
+    wash_proxy_usd:    float = 0.0      # vol per unique buyer
+    renounced_onchain: Optional[bool] = None  # RPC authority check (exact)
+    rugcheck_score:    Optional[float] = None  # score_normalised 0-100
+    rugcheck_rugged:   bool = False
+    rugcheck_risks:    list = field(default_factory=list)
+    risk_score:        float = 0.0      # composite (feed_sources.composite_risk_score)
+    vetting_detail:    dict = field(default_factory=dict)
     reason:                str = "gmgn_organic"
     first_seen:            float = field(default_factory=time.time)
 
@@ -311,6 +326,25 @@ class AutofeedConfig:
     auto_tune_enabled:       bool = DEFAULT_AUTO_TUNE_ENABLED
     auto_tune_refresh_seconds: float = DEFAULT_AUTO_TUNE_REFRESH_SECONDS
     auto_tune_mcap_grad_discount: float = DEFAULT_AUTO_TUNE_MCAP_GRAD_DISCOUNT
+    # ── Discovery source (new-feed 2026-11-16) ──────────────────────────────
+    # "gecko" = GeckoTerminal new_pools + DexScreener enrichment + RPC/RugCheck
+    # vetting (keyless, fail-closed).  "gmgn" = the repaired gmgn-cli trending
+    # path (fallback / rollback).
+    feed_source:             str = "gecko"
+    gecko_pages:             int = 2
+    gecko_pages_trending:    int = 2    # trending 1h pages (mature movers)
+    gecko_pages_new:         int = 1    # new_pools pages (fresh migrations)
+    gecko_duration:          str = "1h" # trending window: 5m/1h/6h/24h
+    gecko_dex_allowlist:     str = "pumpswap"
+    min_pool_age_minutes:    float = 10.0   # fresh pools lack motion data; 0 = no floor
+    max_pool_age_minutes:    float = 0.0    # 0 = no cap
+    min_buyers_h1:           int = 10       # unique-maker sanity
+    max_volume_per_buyer_usd: float = 0.0   # 0 = disabled (wash proxy ceiling)
+    vet_candidates_per_tick: int = 12      # cap RPC/RugCheck work per tick
+    # Vet gates (fail-closed; RPC unavailable ⇒ reject unless policy="allow")
+    vetting_fail_policy:     str = "reject"  # reject | allow
+    max_top20_holder_rate:   float = 0.70    # REAL RPC concentration ceiling
+    max_rugcheck_score:      Optional[float] = 75.0  # score_normalised ceiling
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -358,6 +392,8 @@ class AutoFeed:
         self._shape_report: dict = {}
         self._shape_totals: dict = {"raw_rows": 0, "rows_missing_required": 0}
         self._reject_tally_total: dict = {}
+        # new-feed: GeckoTerminal/RPC/RugCheck vetting client (gecko source)
+        self._vetting: fs.VettingClient = fs.VettingClient()
 
     # -- lifecycle ────────────────────────────────────────────────────────────
     def start(self, forward_fn=None, active_count_fn=None):
@@ -1055,10 +1091,188 @@ class AutoFeed:
 
     async def _tick(self):
         self.last_poll_at = time.time()
+        if self.config.feed_source == "gecko":
+            await self._tick_gecko()
+            return
         rows = await self._fetch_candidates()
         if not rows:
             return
         await self._process_rows(rows)
+
+    # ── gecko source (new-feed): GT discovery + vetting + fail-closed gates ──
+
+    async def _fetch_gecko_candidates(self, tally: dict) -> tuple[list[Candidate], int]:
+        """GeckoTerminal new_pools → motion gates → DexScreener enrichment →
+        RPC/RugCheck vetting → quality gates → Candidates.  Fail-closed: a
+        candidate whose required vector is unavailable is REJECTED (never
+        passed silently) and persisted with its reason."""
+        cf = self.config
+        eff = self.effective_gates()
+        pools = await self._vetting.poll_universe(
+            pages_new=max(1, int(cf.gecko_pages_new or 1)),
+            pages_trending=max(1, int(cf.gecko_pages_trending or 1)),
+            duration=cf.gecko_duration or "1h",
+        )
+        raw_count = len(pools)
+
+        dex_allow = {s.strip().lower() for s in (cf.gecko_dex_allowlist or "").split(",") if s.strip()}
+        passing, _rejected = fs.filter_gecko_motion(
+            pools,
+            dex_allowlist=dex_allow,
+            min_age_s=max(0.0, float(cf.min_pool_age_minutes or 0)) * 60.0,
+            max_age_s=max(0.0, float(cf.max_pool_age_minutes or 0)) * 60.0,
+            min_liquidity_usd=eff["min_liquidity_usd"],
+            min_volume_usd=eff["min_volume_usd"],
+            min_swaps=int(eff["min_swaps"]),
+            min_buyers_h1=max(0, int(cf.min_buyers_h1 or 0)),
+            max_volume_per_buyer_usd=max(0.0, float(cf.max_volume_per_buyer_usd or 0)),
+            reject_tally=tally,
+        )
+
+        # Cap vetting work — strongest motion first (h1 volume).
+        passing.sort(key=lambda p: -p.vol_h1)
+        cap = max(1, int(cf.vet_candidates_per_tick or 1))
+        vet_batch = passing[:cap]
+        for _p in passing[cap:]:
+            tally["_overflow_not_vetted"] = tally.get("_overflow_not_vetted", 0) + 1
+        if not vet_batch:
+            return [], raw_count
+
+        # Dedup before spending RPC/RugCheck budget.
+        vet_batch = [p for p in vet_batch if not (
+            (self._seen.get(p.mint) is not None)
+            and self._seen[p.mint].age_minutes < max(1.0, cf.cooldown_after_feed_minutes)
+        )]
+        if not vet_batch:
+            tally["_dedup"] = tally.get("_dedup", 0) + 1
+            return [], raw_count
+
+        # DexScreener enrichment — GT leaves fdv/mcap null on fresh PumpSwap
+        # pools; the batch also carries pairCreatedAt (migration age).
+        try:
+            ds = await get_ds_pairs_by_mints([p.mint for p in vet_batch])
+        except Exception as e:
+            logger.warning(f"[AutoFeed] gecko DS enrichment failed: {e}")
+            ds = {}
+
+        def _rej(pool, mcap, reason: str) -> None:
+            feed_store.record_event(
+                pool.mint, "gecko", "rejected", reason=reason,
+                symbol=pool.name, market_cap=mcap or 0.0,
+                vector={"dex": pool.dex, "reserve_in_usd": pool.reserve_in_usd,
+                        "vol_h1": pool.vol_h1, "buyers_h1": pool.txns_h1_buyers,
+                        "sellers_h1": pool.txns_h1_sells, "age_s": pool.age_seconds,
+                        "wash_proxy_usd": pool.wash_proxy_usd})
+
+        # Phase A (serial, cheap): DS-enriched mcap/liquidity gates.
+        phase_a: list[tuple[object, object]] = []
+        for p in vet_batch:
+            enr = fs.ds_enrich_mint(ds.get(p.mint))
+            mcap = p.mcap_usd if p.mcap_usd is not None else enr["mcap_usd"]
+            liq = enr["liquidity_usd"] if enr["liquidity_usd"] else p.reserve_in_usd
+            if mcap is None or mcap <= 0:
+                tally["mcap_unknown"] = tally.get("mcap_unknown", 0) + 1
+                _rej(p, mcap, "mcap_unknown"); continue
+            if mcap < eff["min_mcap_usd"] or mcap > cf.max_mcap_usd:
+                tally["mcap_window"] = tally.get("mcap_window", 0) + 1
+                _rej(p, mcap, "mcap_window"); continue
+            if liq < eff["min_liquidity_usd"]:
+                tally["min_liquidity_usd"] = tally.get("min_liquidity_usd", 0) + 1
+                _rej(p, mcap, "min_liquidity_usd"); continue
+            phase_a.append((p, {"mcap": mcap, "liq": liq}))
+
+        if not phase_a:
+            return [], raw_count
+
+        # Phase B (concurrent): RPC/RugCheck vetting with slot-based pacing
+        # so a full batch completes inside the poll cadence.
+        vet_sem = asyncio.Semaphore(4)
+
+        async def _vet_one(mint: str):
+            async with vet_sem:
+                return await self._vetting.vet(mint)
+
+        vets = await asyncio.gather(*[_vet_one(p.mint) for p, _e in phase_a])
+
+        survivors: list[tuple[object, object, dict]] = []
+        for (p, enr), vet in zip(phase_a, vets):
+            reason = fs.apply_gecko_quality_gates(
+                p, vet,
+                require_renounced_mint=cf.require_renounced_mint,
+                require_renounced_freeze=cf.require_renounced_freeze,
+                max_top20_holder_rate=cf.max_top20_holder_rate,
+                max_rugcheck_score=cf.max_rugcheck_score,
+                vetting_fail_policy=cf.vetting_fail_policy,
+                reject_tally=tally,
+            )
+            if reason is not None:
+                _rej(p, enr["mcap"], reason)
+                continue
+            survivors.append((p, vet, enr))
+
+        now = time.time()
+        cands: list[Candidate] = []
+        for p, vet, enr in survivors:
+            cand = Candidate(
+                mint=p.mint,
+                name=p.name.split(" / ")[0].strip(),
+                symbol=(p.name.split(" / ")[0].strip() or p.mint[:6]).upper(),
+                market_cap=enr["mcap"], liquidity=enr["liq"],
+                holders=0,  # GT pools carry no holder count; concentration is the bundle gate
+                swaps=p.txns_h1_buys + p.txns_h1_sells, volume=p.vol_h1,
+                price_change_1h=p.price_change_h1,
+                top10_pct=vet.top10_share or 0.0,
+                top20_pct=vet.top20_share or 0.0,
+                buyers_h1=p.txns_h1_buyers, sellers_h1=p.txns_h1_sellers,
+                wash_proxy_usd=round(p.wash_proxy_usd, 2),
+                renounced_onchain=vet.renounced_mint,
+                rugcheck_score=vet.rugcheck_score, rugcheck_rugged=vet.rugcheck_rugged,
+                rugcheck_risks=vet.rugcheck_risks[:6],
+                risk_score=vet.detail.get("score", 0.0),
+                exchange=p.dex, launchpad_platform="Pump.fun",
+                creation_timestamp=p.created_at_unix, open_timestamp=p.created_at_unix,
+                source="gecko",
+                reason="gecko_organic",
+                first_seen=now,
+                vetting_detail={
+                    "renounced_freeze_onchain": vet.renounced_freeze,
+                    "supply": vet.supply,
+                    "insider_graphs": vet.insider_graphs,
+                    "creator_token_count": vet.creator_token_count,
+                    "pool_created_at_unix": p.created_at_unix,
+                    "pool_age_s": round(p.age_seconds, 1),
+                    "txns_h1_unique": p.txns_h1_unique,
+                },
+            )
+            self._seen[cand.mint] = cand
+            self.total_seen += 1
+            cands.append(cand)
+        return cands, raw_count
+
+    async def _tick_gecko(self):
+        tally: dict[str, int] = {}
+        cands, raw_count = await self._fetch_gecko_candidates(tally)
+        reasons = {k: v for k, v in tally.items() if not k.startswith("_")}
+        report = {
+            "ts": time.time(),
+            "source": "gecko",
+            "raw_rows": raw_count,
+            "rows_rejected": sum(reasons.values()),
+            "rows_missing_required": 0,   # gecko path rejects by gate, not shape
+            "field_missing_counts": {},
+            "reject_reasons": reasons,
+            "fetched": len(cands),
+        }
+        self._shape_report = report
+        self._shape_totals["raw_rows"] += raw_count
+        for k, v in reasons.items():
+            self._reject_tally_total[k] = self._reject_tally_total.get(k, 0) + v
+        logger.info(
+            f"[AutoFeed] gecko tick: pools={raw_count} passed={len(cands)} "
+            f"rejected={report['rows_rejected']} reasons={reasons}"
+        )
+        if cands:
+            await self._forward_candidates(cands)
 
     async def _process_rows(self, rows: list[dict]):
         """Parse + shape-report + dedup + rank + forward one batch of raw rows.
@@ -1122,11 +1336,27 @@ class AutoFeed:
 
         if not new_cands:
             return
+        await self._forward_candidates(new_cands)
+
+    async def _forward_candidates(self, new_cands: list[Candidate]) -> None:
+        """Shared forward path (both sources): cooldown, backpressure, motion
+        ranking, forward, persistence (feed_store) and stale-cache drop.
+
+        Every candidate reaching this point passed its source's gates; its
+        forward decision is persisted so outcomes can be joined back to the
+        gate vector (feed-gate auto-calibration prerequisite)."""
+        def _record(cand: Candidate, decision: str, reason: str = "") -> None:
+            feed_store.record_event(
+                cand.mint, cand.source, decision, reason=reason,
+                symbol=cand.symbol, market_cap=cand.market_cap,
+                risk_score=cand.risk_score, vector=cand.to_dict())
 
         # Cooldown — don't feed during the configured gap
         if self._last_fed_at > 0:
             ago_min = (time.time() - self._last_fed_at) / 60.0
             if ago_min < self.config.cooldown_after_feed_minutes:
+                for c in new_cands:
+                    _record(c, "skipped_cooldown")
                 return
 
         # Backpressure — `active_count_fn` is async (returns count of live traders).
@@ -1144,18 +1374,22 @@ class AutoFeed:
 
         for cand in new_cands:
             if active >= self.config.max_concurrent_feed:
+                _record(cand, "skipped_backpressure")
                 break
             if self._forward_fn is None:
+                _record(cand, "skipped_no_forward")
                 continue
             try:
                 await self._forward_fn(cand)
                 self.total_fed += 1
                 self._last_fed_at = time.time()
+                _record(cand, "fed")
                 logger.info(
                     f"[AutoFeed] FED  ${cand.symbol}  mint={cand.mint[:8]}… "
                     f"mcap=${cand.market_cap:.0f} liq=${cand.liquidity:.0f} "
-                    f"smart={cand.smart_degen_count} rug={cand.rug_ratio:.2f} "
-                    f"bundler={cand.bundler_rate:.2f} insider={cand.insider_rate:.2f}"
+                    f"risk={cand.risk_score:.2f} top10={cand.top10_pct:.2f} "
+                    f"top20={cand.top20_pct:.2f} buyers={cand.buyers_h1} "
+                    f"(src={cand.source})"
                 )
                 active += 1
             except Exception as e:
@@ -1171,6 +1405,22 @@ class AutoFeed:
         return {
             "enabled":   self.config.enabled,
             "is_running": self.is_running(),
+            # new-feed: discovery source + gecko knobs
+            "feed_source": self.config.feed_source,
+            "gecko_pages": self.config.gecko_pages,
+            "gecko_pages_trending": self.config.gecko_pages_trending,
+            "gecko_pages_new": self.config.gecko_pages_new,
+            "gecko_duration": self.config.gecko_duration,
+            "gecko_dex_allowlist": [s.strip() for s in (self.config.gecko_dex_allowlist or "").split(",") if s.strip()],
+            "min_pool_age_minutes": self.config.min_pool_age_minutes,
+            "max_pool_age_minutes": self.config.max_pool_age_minutes,
+            "min_buyers_h1": self.config.min_buyers_h1,
+            "max_volume_per_buyer_usd": self.config.max_volume_per_buyer_usd,
+            "vet_candidates_per_tick": self.config.vet_candidates_per_tick,
+            "vetting_fail_policy": self.config.vetting_fail_policy,
+            "max_top20_holder_rate": self.config.max_top20_holder_rate,
+            "max_rugcheck_score": self.config.max_rugcheck_score,
+            "feed_store": feed_store.stats(),
             "cli_version": GMGN_CLI_VERSION,
             "cli_command": GMGN_COMMAND,
             "cli_configured": bool(os.environ.get("GMGN_API_KEY")) or

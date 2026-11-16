@@ -776,3 +776,60 @@ json` INVALID (model-anchor vs real-fill comparison).
 raw vault ratio, understated by (vault+17.58)/vault vs executable). Re-baseline on the
 effective basis before any future comparison — graduated-token PnL/WR shift with the
 wedge's covariance with hold windows (rec-4320 goldens moved 4/−0.0746 → 6/−0.0240).
+
+## iter102 — AutoFeed degradation root causes + new-feed source swap (2026-11-16)
+
+**Investigation (user report: "autofeed isn't filtering bundled/manipulated coins as well as it was").**
+Four converging causes, all verified empirically:
+
+1. **Fail-open gates** — `_to_candidate` coerced missing GMGN fields to 0.0 and gated with
+   `if 0 < x > limit` ⇒ a missing/renamed field PASSED silently. Confirmed live: `insider_rate`
+   was RETIRED upstream (absent 5/5 probed rows of `gmgn-cli@1.5.2 --raw trending`) and its gate
+   died unnoticed.
+2. **GMGN quota starvation** — with the root-`.env` key loaded (main.py:12-18 loads root first),
+   holder_flow's 5 s smartmoney poll + 3.5 s registry pacing burned the shared per-key quota; the
+   autofeed CLI spent 9 of its first 9 minutes in 429 bans (shared `rate_limiter` ban state).
+   Fix: `_POLL_INTERVAL` 5.0 → 15.0 (the deliberate ca89f98 setting, test_iter67 ≤15; HF gates
+   OFF so the poll no longer gates delivery latency). Post-fix: consecutive clean ticks.
+3. **Static quality gates vs adaptive manipulators** — only 4 quantity levers auto-tune; no
+   candidate persistence ⇒ no outcome→gate feedback. Bundlers split across wallets to defeat
+   `bundler_rate ≤ 0.30` (GMGN's launch-time proxy).
+4. **Era evidence** — live WR 62.8% → 41.8% (Sep 29 → Oct 15), ≤−40% losses 4.7% → 12.1%,
+   enter-then-dump 2.3% → 10.6% (signature: 99.67% sell-side tick 1 s after entry).
+
+**Verdict: feed-gate auto-calibration IS needed** (not engine-SDE recalibration — graveyard).
+Prerequisite shipped: `feed_store.py` + `backend/data/feed_data.db` (`feed_events` with full
+vector JSON for every accepted AND rejected candidate, `feed_outcomes` = causal tape-health
+metrics from the recording's own first 30 min — max drawdown / worst 1-s dump / price-death /
+forward return — joined via recording_id, `feed_calibration_audit` for gate-change events).
+The fitter itself is a later iteration once events accrue; it can also learn retroactively from
+existing November recordings.
+
+**Repairs shipped on main (1b19f90):** fail-closed `_to_candidate` (missing/unparseable
+required field ⇒ `shape_missing` reject; present-and-0 still passes), per-tick shape report +
+>50% missing-row WARNING (GMGN drift is now loud), supplementary risk vector wired
+(sniper_count, top70_sniper_hold_rate, dev_team_hold_rate, cto_flag, twitter serial-launch
+counts, dup flags, taxes) with optional config gates default OFF, `total_seen` counter fixed.
+
+**new-feed branch: source swap (gecko default, gmgn fallback).**
+`feed_sources.py`: GeckoTerminal discovery = `trending_pools?duration=1h` UNION `new_pools`
+(new_pools ALONE starves — its newest-first list ages PumpSwap pools out before the 10-min
+min-age gate admits them; trending = the GMGN-trending analog, 13-17 pumpswap pools/page)
+→ DexScreener batch enrichment (GT leaves fdv/mcap null on fresh PumpSwap pools) → motion
+gates (h1 volume/swaps/unique buyers/wash-proxy) → vetting: Solana RPC mint+freeze authority
+(exact renounced) + `getTokenLargestAccounts` ⇒ REAL top-10/20 supply concentration (the direct
+bundling measure) + RugCheck report (free, keyless, best-effort, slot-paced 6 s + 10-min cache)
+→ fail-closed quality gates (RPC unavailable ⇒ reject; `vetting_fail_policy="allow"` escape
+hatch) + composite risk score. RPC endpoint fanout (publicnode → mainnet-beta → tatum) because
+publicnode 429s `getTokenLargestAccounts` under the shared IP budget. Concurrent vetting
+(slot pacing + semaphore 4) — serial pacing made a 12-candidate tick exceed the 60 s poll.
+
+Live verified 2026-11-16: ticks complete on cadence, candidates fed with full vectors
+(HELLO top20 50%/RC 1/risk 1.2, JENSEN top20 26.8%/RC 1/risk 0), sessions auto-open,
+rejections tallied per reason, `feed_events` accumulating. gmgn fallback toggle verified.
+Rollback: `POST /api/autofeed/config {"feed_source": "gmgn"}`.
+
+**Causal re-filter of the corpus (this session, pending):** GMGN `token security` endpoint
+probed — `top_10_holder_rate` matches trending exactly ⇒ launch-time-stable fields
+(bundler_rate, insider-rate retired, renounced, taxes) can be backfilled for old recordings
+WITHOUT look-ahead; dynamic fields (holders/volume/mcap/wash NOW) excluded. Results TDB.

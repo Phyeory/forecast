@@ -36,6 +36,7 @@ from autofeed import AutoFeed, AutofeedConfig, Candidate
 from newpairs import NewPairsFeed, NewPairsConfig, NewPairCandidate
 import data_store
 import newpairs_store
+import feed_store
 from backtester import run_backtest, run_backtest_batch
 from holder_flow import HolderFlowMonitor, get_shared_monitor
 from session_calibrator import calibrate_async
@@ -2542,6 +2543,30 @@ async def _autofeed_forward(cand: Candidate):
             logger.error(f"[AutoFeed] Error auto-starting session for {cand.mint[:8]}…: {e}")
 
 
+# ── new-feed (2026-11-16): feed-outcome reaper ───────────────────────────────
+# Joins fed candidates to their recordings and computes tape-health outcomes
+# (drawdown / dump velocity / price death / forward return) so the feed gates
+# can be calibrated from realized tape behavior.  Runs while the autofeed is
+# active; failures are logged, never fatal.
+
+_feed_reaper_task: Optional[asyncio.Task] = None
+
+
+def _ensure_feed_outcome_reaper():
+    global _feed_reaper_task
+    if _feed_reaper_task is not None and not _feed_reaper_task.done():
+        return
+    async def _reaper_loop():
+        logger.info("[FeedStore] outcome reaper started")
+        while True:
+            try:
+                feed_store.run_outcome_reaper()
+            except Exception as e:
+                logger.warning(f"[FeedStore] reaper error: {e}")
+            await asyncio.sleep(60.0)
+    _feed_reaper_task = asyncio.ensure_future(_reaper_loop())
+
+
 @app.get("/api/autofeed/status")
 async def autofeed_status():
     snap = _autofeed.snapshot()
@@ -2576,6 +2601,7 @@ async def autofeed_start(body: dict = Body(default={})):
         _autofeed.set_config({k: v for k, v in body.items() if k != "enabled"})
     _autofeed.config.enabled = True
     _autofeed.start(forward_fn=_autofeed_forward, active_count_fn=_autofeed_active_count)
+    _ensure_feed_outcome_reaper()
     return JSONResponse({"status": "started", "snapshot": _autofeed.snapshot()})
 
 
