@@ -134,7 +134,17 @@ def _extract_holder_list(data) -> Optional[list]:
 # Rate-limit safety comes from the 429 ban backoff in `_ban_active()`, not
 # from a slow nominal interval, and the monitor is a process-wide singleton
 # so this is one request per interval regardless of session count.
-_POLL_INTERVAL = 5.0
+#
+# Rate-limit reality check (2026-11-16): at 5.0 s the keyed GMGN poll burns
+# the shared per-key quota so aggressively that the autofeed's discovery CLI
+# spent 9 of its first 9 minutes inside 429 bans (one successful tick, then
+# a permanent ban cycle — `rate_limiter` couples both consumers to one ban
+# state).  15.0 s is the deliberate ca89f98 production setting, re-asserted
+# by test_iter67_holder_flow_latency (≤15): the on-chain watcher is the
+# primary event source and the HF gates are OFF (iter62 policy), so the poll
+# no longer gates delivery latency — but its cadence DOES gate the autofeed's
+# discovery freshness, and 5 s was starving it.
+_POLL_INTERVAL = 15.0
 
 # Poll interval while nothing is watched — no session can consume the events,
 # so idle polling would only burn API quota.

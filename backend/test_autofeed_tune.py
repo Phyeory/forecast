@@ -197,7 +197,9 @@ def _row(**over):
         "exchange": "pump_amm", "top_10_holder_rate": 0.3, "rug_ratio": 0.1,
         "bundler_rate": 0.1, "insider_rate": 0.1, "rat_trader_amount_rate": 0.1,
         "entrapment_ratio": 0.1, "bot_degen_rate": 0.2,
+        "is_wash_trading": False, "is_honeypot": False,
         "renounced_mint": True, "renounced_freeze_account": True,
+        "creation_timestamp": 1794834523,
     }
     base.update(over)
     return base

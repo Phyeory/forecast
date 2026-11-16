@@ -29,6 +29,19 @@ GMGN rate limits (per `docs/cli-usage.md`):
     market trenches:   weight=3 →  ~6 req/s burst capacity 6.
 Default poll cadence (60s) is well inside trending's safety band.
 
+Shape probe 2026-11-16 (gmgn-cli@1.5.2 + GMGN_API_KEY from the repo-root .env,
+loaded by main.py:12-18): `market trending --raw` returns 95 fields and the
+keyed CLI works (exit 0, code 0).  `insider_rate` was RETIRED upstream
+(absent in 5/5 probed rows) — its old gate silently no-op'd under fail-open
+parsing (`0 < x > limit` never fires for a field coerced to 0.0), which is
+the degradation this repair closes.  `_to_candidate` is now FAIL-CLOSED: a
+row missing/unparseable for any required field is rejected with a tallyable
+reason, never passed.  New supplementary fields consumed (optional):
+sniper_count, top70_sniper_hold_rate, dev_team_hold_rate, cto_flag,
+twitter_create/del_post/rename counts, image/telegram/website dup flags,
+buy/sell tax, history_highest_market_cap.  `token security` / `token holders`
+subcommands verified for per-mint backfill (launch-time-stable vector).
+
 Config is hot-swappable at runtime via REST.  All numeric gates are exposed
 to the dashboard so the user can tune them in real-time.
 """
@@ -215,6 +228,20 @@ class Candidate:
     bot_degen_rate:   float = 0.0
     is_wash_trading:  bool = False
     is_honeypot:      bool = False
+    # Supplementary risk vector (GMGN fields verified 2026-11-16; optional in
+    # responses — neutral defaults when absent).  Feeds dashboard + persistence.
+    sniper_count:      int = 0
+    top70_sniper_hold_rate: float = 0.0
+    dev_team_hold_rate: float = 0.0
+    cto_flag:          bool = False
+    twitter_create_token_count: int = 0
+    twitter_del_post_token_count: int = 0
+    twitter_rename_count: int = 0
+    dup_count:         int = 0   # image/telegram/website duplicate flags (serial-scammer signal)
+    buy_tax:           float = 0.0
+    sell_tax:          float = 0.0
+    is_open_source:    Optional[bool] = None
+    history_highest_market_cap: float = 0.0
     renounced_mint:   bool = False
     renounced_freeze: bool = False
     smart_degen_count: int = 0
@@ -263,6 +290,14 @@ class AutofeedConfig:
     max_rat_trader_rate:    float = DEFAULT_MAX_RAT_TRADER_RATE
     max_entrapment_ratio:   float = DEFAULT_MAX_ENTRAPMENT_RATIO
     max_bot_degen_rate:     float = DEFAULT_MAX_BOT_DEGEN_RATE
+    # Optional extended risk gates (GMGN supplementary fields, probed
+    # 2026-11-16).  None/False = disabled — the fail-closed repair never
+    # silently changes feed behavior; enable deliberately via REST/dashboard.
+    max_dev_team_hold_rate:      Optional[float] = None
+    max_top70_sniper_hold_rate:  Optional[float] = None
+    max_twitter_create_token_count: Optional[int] = None
+    reject_cto_flag:             bool = False
+    max_buy_sell_tax_pct:        Optional[float] = None
     require_renounced_mint:  bool = DEFAULT_REQUIRE_RENOUNCED_MINT
     require_renounced_freeze: bool = DEFAULT_REQUIRE_RENOUNCED_FREEZE
     reject_wash_trading:     bool = DEFAULT_REJECT_WASH_TRADING
@@ -318,6 +353,11 @@ class AutoFeed:
         self._last_tune_at: float = 0.0
         self._last_tune_refresh_at: float = 0.0
         self._tune_history: list[dict] = []
+        # Shape/health telemetry (fail-closed repair 2026-11-16): per-tick
+        # shape report + cumulative totals so GMGN response drift is loud.
+        self._shape_report: dict = {}
+        self._shape_totals: dict = {"raw_rows": 0, "rows_missing_required": 0}
+        self._reject_tally_total: dict = {}
 
     # -- lifecycle ────────────────────────────────────────────────────────────
     def start(self, forward_fn=None, active_count_fn=None):
@@ -706,123 +746,276 @@ class AutoFeed:
 
     # ── Filter (organic / non-bundled) ──────────────────────────────────────
 
-    def _to_candidate(self, raw: dict) -> Optional[Candidate]:
-        """Convert raw gmgn row → Candidate. Returns None if hard-fails any non-server gate."""
+    # Fields every GMGN trending row MUST carry for the organic filter to be
+    # meaningful (probed 2026-11-16, gmgn-cli@1.5.2 with GMGN_API_KEY from the
+    # repo-root .env — all present 5/5).  A row missing/unparseable for any of
+    # these is REJECTED, never passed: under the previous fail-open parsing a
+    # single GMGN shape change silently turned every affected gate into a
+    # no-op (`0 < x > limit` never fires for a field coerced to 0.0).  That
+    # exact regression shipped unnoticed — `insider_rate` was retired upstream
+    # and its gate died silently — which is what this fail-closed repair
+    # closes.
+    REQUIRED_FIELDS = (
+        "market_cap", "liquidity", "holder_count", "smart_degen_count",
+        "swaps", "volume", "exchange",
+        "top_10_holder_rate", "rug_ratio", "bundler_rate",
+        "rat_trader_amount_rate", "entrapment_ratio", "bot_degen_rate",
+        "is_wash_trading", "is_honeypot", "renounced_mint",
+        "renounced_freeze_account", "creation_timestamp",
+    )
+    # `insider_rate` was retired from trending responses (absent in 5/5 probed
+    # rows, 2026-11-16).  Kept as an OPTIONAL gate — enforced only when GMGN
+    # returns the field again.
+    OPTIONAL_RISK_FIELDS = ("insider_rate",)
+
+    def _to_candidate(self, raw: dict,
+                      reject_tally: Optional[dict] = None) -> Optional[Candidate]:
+        """Convert raw gmgn row → Candidate (FAIL-CLOSED).
+
+        Returns None unless the row is verifiably organic: a required field
+        missing/unparseable (`shape_missing` — ABSENT is treated as NOT
+        organic-verified, never as a pass), a risk gate trips, the venue is
+        not a migration exchange, motion gates fail, or a boolean gate trips.
+        `reject_tally` (optional dict) accumulates reject-reason counts for
+        the tick shape report (`_field_missing:<field>` keys carry per-field
+        detail).
+        """
+        def reject(reason: str) -> None:
+            if reject_tally is not None:
+                reject_tally[reason] = reject_tally.get(reason, 0) + 1
+
         mint = (raw.get("address") or raw.get("mint") or raw.get("token_address") or "").strip()
         if not mint or len(mint) < 32 or len(mint) > 44:
+            reject("bad_mint")
             return None
         # NOTE: do NOT lower-case.  Solana addresses are base58 and case-sensitive —
         # lower-casing corrupts the encoding (this was causing "Invalid Solana address"
         # errors when the frontend tried to startlive-trading the auto-fed mint).
         # Compare excluded-set case-insensitively so users can type mints either way.
         if mint.lower() in self._excluded_set():
+            reject("excluded")
             return None
 
-        # Numeric helpers — accept None / 0 / float<string>; coerce safely
-        def f(v) -> float:
-            try: return float(v)
-            except (TypeError, ValueError): return 0.0
-        def i(v) -> int:
-            try: return int(v)
-            except (TypeError, ValueError): return 0
-        def b(v, default=False) -> bool:
-            if v is None: return default
-            if isinstance(v, bool): return v
-            if isinstance(v, str): return v.lower() in ("yes", "true", "1")
-            try: return bool(int(v))
-            except (TypeError, ValueError): return default
+        # ── Shape validation (fail-closed) ──
+        missing = [f for f in self.REQUIRED_FIELDS if raw.get(f) is None]
+        if missing:
+            reject("shape_missing")
+            for f in missing:
+                if reject_tally is not None:
+                    k = f"_field_missing:{f}"
+                    reject_tally[k] = reject_tally.get(k, 0) + 1
+            return None
 
-        mcap   = f(raw.get("market_cap") or raw.get("usd_market_cap"))
-        liq_usd = f(raw.get("liquidity"))
-        holders = i(raw.get("holder_count"))
-        smart   = i(raw.get("smart_degen_count"))
-        renowned = i(raw.get("renowned_count"))
-        swaps   = i(raw.get("swaps"))
-        vol     = f(raw.get("volume"))
+        # Strict readers — absent/unparseable ⇒ reject (never a silent 0.0 pass).
+        def fnum(key: str) -> Optional[float]:
+            try:
+                v = raw.get(key)
+                return None if v is None else float(v)
+            except (TypeError, ValueError):
+                reject(f"shape_missing:{key}")
+                return None
+
+        def inum(key: str) -> Optional[int]:
+            try:
+                v = raw.get(key)
+                return None if v is None else int(v)
+            except (TypeError, ValueError):
+                reject(f"shape_missing:{key}")
+                return None
+
+        def breq(key: str) -> Optional[bool]:
+            v = raw.get(key)
+            if v is None:
+                reject(f"shape_missing:{key}")
+                return None
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, (int, float)):
+                return bool(v)
+            s = str(v).strip().lower()
+            if s in ("yes", "true", "1"):
+                return True
+            if s in ("no", "false", "0"):
+                return False
+            reject(f"shape_missing:{key}")
+            return None
+
+        # Tolerant readers for SUPPLEMENTARY fields — absent/unparseable ⇒
+        # neutral default, never a reject (these gate only when present).
+        def fopt(key: str) -> float:
+            try:
+                v = raw.get(key)
+                return 0.0 if v is None else float(v)
+            except (TypeError, ValueError):
+                return 0.0
+
+        def iopt(key: str) -> int:
+            try:
+                v = raw.get(key)
+                return 0 if v is None else int(v)
+            except (TypeError, ValueError):
+                return 0
+
+        def bopt(key: str) -> bool:
+            v = raw.get(key)
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, (int, float)):
+                return bool(v)
+            if isinstance(v, str):
+                return v.strip().lower() in ("yes", "true", "1")
+            return False
+
+        mcap    = fnum("market_cap")
+        liq     = fnum("liquidity")
+        holders = inum("holder_count")
+        smart   = inum("smart_degen_count")
+        swaps   = inum("swaps")
+        vol     = fnum("volume")
+        top10   = fnum("top_10_holder_rate")
+        rug     = fnum("rug_ratio")
+        bundler = fnum("bundler_rate")
+        rat     = fnum("rat_trader_amount_rate")
+        entrap  = fnum("entrapment_ratio")
+        bot_degen = fnum("bot_degen_rate")
+        created = fnum("creation_timestamp")
+        is_wash  = breq("is_wash_trading")
+        is_honey = breq("is_honeypot")
+        ren_mint = breq("renounced_mint")
+        ren_freeze = breq("renounced_freeze_account")
+        # Optional (retired upstream 2026-11-16): gate applies only when present.
+        insider = fnum("insider_rate")
+
+        required_vals = (mcap, liq, holders, smart, swaps, vol, top10, rug,
+                         bundler, rat, entrap, bot_degen, created,
+                         is_wash, is_honey, ren_mint, ren_freeze)
+        if any(v is None for v in required_vals):
+            return None
         exchange = (raw.get("exchange") or "").strip().lower()
-        launchpad_platform = (raw.get("launchpad_platform") or raw.get("platform") or "").strip()
-        top10   = f(raw.get("top_10_holder_rate"))
-        rug     = f(raw.get("rug_ratio"))
-        bundler = f(raw.get("bundler_rate"))
-        insider = f(raw.get("insider_rate"))
-        rat     = f(raw.get("rat_trader_amount_rate"))
-        entrap  = f(raw.get("entrapment_ratio"))
-        bot_degen = f(raw.get("bot_degen_rate"))
-        is_wash = b(raw.get("is_wash_trading"))
-        is_honey = b(raw.get("is_honeypot"))
-        ren_mint = b(raw.get("renounced_mint"), default=True)
-        ren_freeze = b(raw.get("renounced_freeze_account"), default=True)
 
-        # Hard gates that may bypass server (defense in depth)
+        # ── Risk / motion gates (presence already proven — plain compares) ──
         cf = self.config
         eff = self.effective_gates()   # auto-tuned when enabled & conditions live
         if mcap < eff["min_mcap_usd"] or mcap > cf.max_mcap_usd:
-            return None
-        if liq_usd > 0 and liq_usd < eff["min_liquidity_usd"]:
-            return None
-        if holders > 0 and holders < cf.min_holders:
-            return None
-        if smart > -1 and smart < cf.min_smart_degen_count:
-            return None
-        if 0 < top10 > cf.max_top10_holder_rate: return None
-        if 0 < rug    > cf.max_rug_ratio:        return None
-        if 0 < bundler > cf.max_bundler_rate:    return None
-        if 0 < insider > cf.max_insider_rate:    return None
-        if 0 < rat     > cf.max_rat_trader_rate: return None
-        if 0 < entrap  > cf.max_entrapment_ratio: return None
-        if 0 < bot_degen and bot_degen > cf.max_bot_degen_rate: return None
+            reject("mcap_window"); return None
+        if liq < eff["min_liquidity_usd"]:
+            reject("min_liquidity_usd"); return None
+        if holders < cf.min_holders:
+            reject("min_holders"); return None
+        if smart < cf.min_smart_degen_count:
+            reject("min_smart_degen_count"); return None
+        if top10 > cf.max_top10_holder_rate:
+            reject("max_top10_holder_rate"); return None
+        if rug > cf.max_rug_ratio:
+            reject("max_rug_ratio"); return None
+        if bundler > cf.max_bundler_rate:
+            reject("max_bundler_rate"); return None
+        if insider is not None and insider > cf.max_insider_rate:
+            reject("max_insider_rate"); return None
+        if rat > cf.max_rat_trader_rate:
+            reject("max_rat_trader_rate"); return None
+        if entrap > cf.max_entrapment_ratio:
+            reject("max_entrapment_ratio"); return None
+        if bot_degen > cf.max_bot_degen_rate:
+            reject("max_bot_degen_rate"); return None
 
-        # OP: "only pump.fun migrated coins" — pump.fun-origin tokens that have
-        # actually migrated to an open-market AMM. We verify by checking the
-        # current exchange venue is in the migration allow-list (i.e. NOT still
-        # on pump.fun's bonding curve, which uses exchange="pump").
+        # OP: "only pump.fun migrated coins" — verify the current venue is in
+        # the migration allow-list (NOT still on pump.fun's bonding curve,
+        # which uses exchange="pump").
         if cf.require_migration_exchange:
             allowed = {s.strip().lower() for s in cf.migration_exchanges.split(",") if s.strip()}
             if allowed and exchange not in allowed:
-                return None
+                reject("migration_exchange"); return None
 
         # OP: "coins that got fed should have lots of motion - trending coins" —
-        # Enforce motion locally too (defense in depth; auto-tuned effective gates):
-        if vol > 0 and vol < eff["min_volume_usd"]: return None
-        if swaps > 0 and swaps < eff["min_swaps"]:  return None
+        # motion gates locally too (defense in depth; auto-tuned effective gates).
+        if vol < eff["min_volume_usd"]:
+            reject("min_volume_usd"); return None
+        if swaps < eff["min_swaps"]:
+            reject("min_swaps"); return None
 
         # Boolean gates — wash trading & honeypot are non-negotiable rejections.
-        if cf.reject_wash_trading and is_wash: return None
-        if cf.reject_honeypot and is_honey:   return None
-        if cf.require_renounced_mint and not ren_mint:   return None
-        if cf.require_renounced_freeze and not ren_freeze: return None
+        if cf.reject_wash_trading and is_wash:
+            reject("wash_trading"); return None
+        if cf.reject_honeypot and is_honey:
+            reject("honeypot"); return None
+        if cf.require_renounced_mint and not ren_mint:
+            reject("not_renounced_mint"); return None
+        if cf.require_renounced_freeze and not ren_freeze:
+            reject("not_renounced_freeze"); return None
 
         # Has social — organic validation
         has_social = bool(
-            raw.get("twitter_username") or raw.get("twitter") or
-            raw.get("telegram") or raw.get("website") or
-            raw.get("has_at_least_one_social")
+            raw.get("twitter_username") or raw.get("telegram") or
+            raw.get("website") or raw.get("has_at_least_one_social")
         )
         if cf.require_has_social and not has_social:
-            return None
+            reject("no_social"); return None
+
+        # ── Supplementary risk vector (probed 2026-11-16; optional fields) ──
+        dev_team_hold = fopt("dev_team_hold_rate")
+        top70_sniper  = fopt("top70_sniper_hold_rate")
+        sniper_count  = iopt("sniper_count")
+        cto_flag      = bopt("cto_flag")
+        tw_create     = iopt("twitter_create_token_count")
+        tw_del_post   = iopt("twitter_del_post_token_count")
+        tw_rename     = iopt("twitter_rename_count")
+        dup_count     = (int(bopt("image_dup")) + int(bopt("telegram_dup"))
+                         + int(bopt("website_dup")))
+        buy_tax       = fopt("buy_tax")
+        sell_tax      = fopt("sell_tax")
+        open_source_v = raw.get("is_open_source")
+        open_source   = None if open_source_v is None else bopt("is_open_source")
+        hist_high_mcap = fopt("history_highest_market_cap")
+
+        # Optional extended gates — default OFF (None disables); supplementary
+        # fields are enforced only when the config sets a ceiling.
+        if cf.max_dev_team_hold_rate is not None and dev_team_hold > cf.max_dev_team_hold_rate:
+            reject("max_dev_team_hold_rate"); return None
+        if cf.max_top70_sniper_hold_rate is not None and top70_sniper > cf.max_top70_sniper_hold_rate:
+            reject("max_top70_sniper_hold_rate"); return None
+        if cf.max_twitter_create_token_count is not None and tw_create > cf.max_twitter_create_token_count:
+            reject("max_twitter_create_token_count"); return None
+        if cf.reject_cto_flag and cto_flag:
+            reject("cto_flag"); return None
+        if cf.max_buy_sell_tax_pct is not None and max(buy_tax, sell_tax) > cf.max_buy_sell_tax_pct:
+            reject("max_buy_sell_tax_pct"); return None
 
         return Candidate(
             mint=mint,
-            name = (raw.get("name") or "").strip(),
-            symbol = (raw.get("symbol") or raw.get("ticker") or "").strip(),
-            market_cap=mcap, liquidity=liq_usd, holders=holders,
+            name=(raw.get("name") or "").strip(),
+            symbol=(raw.get("symbol") or raw.get("ticker") or "").strip(),
+            market_cap=mcap, liquidity=liq, holders=holders,
             swaps=swaps, volume=vol,
-            price_change_1h=f(raw.get("price_change_percent1h") or raw.get("price_change_percent")),
-            price_change_5m=f(raw.get("price_change_percent5m")),
-            price_change_1m=f(raw.get("price_change_percent1m")),
+            price_change_1h=fopt("price_change_percent1h") or fopt("price_change_percent"),
+            price_change_5m=fopt("price_change_percent5m"),
+            price_change_1m=fopt("price_change_percent1m"),
             top10_pct=top10, rug_ratio=rug, bundler_rate=bundler,
-            insider_rate=insider, rat_trader_rate=rat, entrapment_ratio=entrap,
+            insider_rate=insider if insider is not None else 0.0,
+            rat_trader_rate=rat, entrapment_ratio=entrap,
             bot_degen_rate=bot_degen, is_wash_trading=is_wash, is_honeypot=is_honey,
             renounced_mint=ren_mint, renounced_freeze=ren_freeze,
-            smart_degen_count=smart, renowned_count=renowned,
+            smart_degen_count=smart,
+            renowned_count=iopt("renowned_count"),
             creator_token_status=raw.get("creator_token_status") or "",
             launchpad_platform=raw.get("launchpad_platform") or "",
             exchange=raw.get("exchange") or "",
-            creation_timestamp=f(raw.get("creation_timestamp")),
-            open_timestamp=f(raw.get("open_timestamp")),
-            twitter=raw.get("twitter_username") or raw.get("twitter") or "",
+            creation_timestamp=created,
+            open_timestamp=fopt("open_timestamp") or created,
+            twitter=raw.get("twitter_username") or "",
             telegram=raw.get("telegram") or "",
             website=raw.get("website") or "",
+            sniper_count=sniper_count,
+            top70_sniper_hold_rate=top70_sniper,
+            dev_team_hold_rate=dev_team_hold,
+            cto_flag=cto_flag,
+            twitter_create_token_count=tw_create,
+            twitter_del_post_token_count=tw_del_post,
+            twitter_rename_count=tw_rename,
+            dup_count=dup_count,
+            buy_tax=buy_tax, sell_tax=sell_tax,
+            is_open_source=open_source,
+            history_highest_market_cap=hist_high_mcap,
         )
 
     def _excluded_set(self) -> set[str]:
@@ -865,12 +1058,20 @@ class AutoFeed:
         rows = await self._fetch_candidates()
         if not rows:
             return
+        await self._process_rows(rows)
 
+    async def _process_rows(self, rows: list[dict]):
+        """Parse + shape-report + dedup + rank + forward one batch of raw rows.
+
+        Split out of `_tick` so tests can drive the full row pipeline (shape
+        telemetry, dedup, ranking) without invoking the CLI.
+        """
         total_parsed = 0
         new_count = 0
         new_cands: list[Candidate] = []
+        reject_tally: dict[str, int] = {}
         for row in rows:
-            cand = self._to_candidate(row)
+            cand = self._to_candidate(row, reject_tally)
             if cand is None:
                 continue
             total_parsed += 1
@@ -884,10 +1085,40 @@ class AutoFeed:
                 continue
             cand.first_seen = time.time()
             self._seen[cand.mint] = cand
+            self.total_seen += 1
             new_count += 1
             new_cands.append(cand)
 
-        logger.info(f"[AutoFeed] Tick: raw={len(rows)} parsed={total_parsed} new={new_count}")
+        # Shape report (fail-closed repair 2026-11-16): track WHY rows were
+        # rejected and whether GMGN's response shape drifted.  A missing-field
+        # row is a hard reject — if >50% of a tick's rows lack required fields
+        # the API shape has drifted and the feed is fail-closed starving.
+        field_missing = {k[len("_field_missing:"):]: v
+                         for k, v in reject_tally.items() if k.startswith("_field_missing:")}
+        reasons = {k: v for k, v in reject_tally.items() if not k.startswith("_field_missing:")}
+        shape = {
+            "ts": time.time(),
+            "raw_rows": len(rows),
+            "rows_rejected": len(rows) - total_parsed,
+            "rows_missing_required": reasons.get("shape_missing", 0),
+            "field_missing_counts": field_missing,
+            "reject_reasons": reasons,
+        }
+        self._shape_report = shape
+        self._shape_totals["raw_rows"] += len(rows)
+        self._shape_totals["rows_missing_required"] += shape["rows_missing_required"]
+        for k, v in reasons.items():
+            self._reject_tally_total[k] = self._reject_tally_total.get(k, 0) + v
+        if rows and shape["rows_missing_required"] / len(rows) > 0.5:
+            logger.warning(
+                f"[AutoFeed] SHAPE DRIFT: {shape['rows_missing_required']}/{len(rows)} rows missing "
+                f"required fields {field_missing} — GMGN response shape changed; "
+                f"feed is fail-closed and starving"
+            )
+        logger.info(
+            f"[AutoFeed] Tick: raw={len(rows)} parsed={total_parsed} new={new_count} "
+            f"rejected={shape['rows_rejected']}"
+        )
 
         if not new_cands:
             return
@@ -965,6 +1196,12 @@ class AutoFeed:
             "max_rat_trader_rate": self.config.max_rat_trader_rate,
             "max_entrapment_ratio": self.config.max_entrapment_ratio,
             "max_bot_degen_rate": self.config.max_bot_degen_rate,
+            # Optional extended risk gates (fail-closed repair 2026-11-16)
+            "max_dev_team_hold_rate": self.config.max_dev_team_hold_rate,
+            "max_top70_sniper_hold_rate": self.config.max_top70_sniper_hold_rate,
+            "max_twitter_create_token_count": self.config.max_twitter_create_token_count,
+            "reject_cto_flag": self.config.reject_cto_flag,
+            "max_buy_sell_tax_pct": self.config.max_buy_sell_tax_pct,
             "require_renounced_mint": self.config.require_renounced_mint,
             "require_renounced_freeze": self.config.require_renounced_freeze,
             "reject_wash_trading": self.config.reject_wash_trading,
@@ -987,4 +1224,8 @@ class AutoFeed:
             "total_fed":  self.total_fed,
             "active_tracked": len(self._seen),
             "recent_candidates": [c.to_dict() for c in list(self._seen.values())[-10:]],
+            # Shape/health telemetry (fail-closed repair 2026-11-16)
+            "last_shape_report": self._shape_report,
+            "shape_totals": dict(self._shape_totals),
+            "reject_tally_total": dict(self._reject_tally_total),
         }
