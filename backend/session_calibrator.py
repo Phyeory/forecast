@@ -42,14 +42,50 @@ from typing import Optional
 
 import numpy as np
 
-import data_store
-
 logger = logging.getLogger(__name__)
 
-# ── DB path ──────────────────────────────────────────────────────────────────
-# Single source of truth: the active recording corpus configured in
-# data_store (unseen_database.db by default, PUMPCHART_PRICE_DB to override).
-_DB_PATH = os.environ.get("PUMPCHART_PRICE_DB") or str(data_store.PRICE_DB)
+# ── DB paths ─────────────────────────────────────────────────────────────────
+# Active recording corpus (live sessions + default mint-history reads) — the
+# same corpus selector data_store exposes to the backtester UI.  It is the
+# "unseen" corpus (live + holdout) by default.
+_DB_PATH = os.environ.get("PUMPCHART_PRICE_DB") or os.path.join(
+    os.path.dirname(__file__), "data", "unseen_database.db")
+# Frozen paper cohort (the original 3,567-tape DB).  Independent of the active
+# corpus so calibration can pool both without collapsing them.
+_ORIGINAL_DB_PATH = os.environ.get("PUMPCHART_ORIGINAL_DB") or os.path.join(
+    os.path.dirname(__file__), "data", "price_data.db")
+
+# ── iter102c: population source ──────────────────────────────────────────────
+# "pool_all" (default) merges BOTH recording corpora into one population:
+#   unseen   — backend/data/unseen_database.db (live/holdout corpus),
+#              relocatable with PUMPCHART_PRICE_DB
+#   original — backend/data/price_data.db (frozen paper cohort),
+#              relocatable with PUMPCHART_ORIGINAL_DB
+# "selected" reproduces the pre-iter102c behaviour byte-exactly (the single
+# db_path passed by the caller, LIMIT n_recs).
+
+# Audit of the last population calibration call (diagnostics / tests).
+_last_population_audit: dict = {}
+
+
+def _corpus_paths() -> dict[str, str]:
+    """Resolve the two recording corpora for a pooled calibration.
+
+    Read at call time so PUMPCHART_PRICE_DB / PUMPCHART_ORIGINAL_DB relocations
+    (and test monkeypatching) are honoured.
+    """
+    unseen = os.environ.get("PUMPCHART_PRICE_DB") or _DB_PATH
+    original = os.environ.get("PUMPCHART_ORIGINAL_DB") or _ORIGINAL_DB_PATH
+    return {"unseen": unseen, "original": original}
+
+
+def _select_corpora(source: str, db_path: str) -> dict[str, str]:
+    """Map a popcal source selector to {corpus_name: db_path}."""
+    if source == "selected":
+        return {"selected": str(db_path)}
+    if source == "pool_all":
+        return _corpus_paths()
+    raise ValueError(f"unknown population source {source!r}")
 
 # ── Number of recent recordings to use as population sample ──────────────────
 N_POPULATION_RECS = 50
@@ -904,26 +940,22 @@ def calibrate_from_mint_history(
 
 # ── Public backtest path (sync) ───────────────────────────────────────────────
 
-def calibrate_from_history(started_at_unix: float, db_path: Optional[str] = None) -> dict:
+def calibrate_from_history(started_at_unix: float) -> dict:
     """Return override dict for a recording starting at `started_at_unix`.
 
-    Reads directly from the recordings DB (default: active corpus) — no
-    network calls.
+    Reads the pooled recording corpora (unseen + original) — no network calls.
 
     Parameters
     ----------
     started_at_unix : float
         The recording's `started_at` Unix timestamp.
-    db_path : str, optional
-        Recordings corpus to calibrate from ("unseen" default; backtests pass
-        the selected dataset's path).
 
     Returns
     -------
     dict
         Engine kwargs overrides (only _ALWAYS_EXPLICIT if population too thin).
     """
-    return calibrate_from_population(db_path or _DB_PATH, float(started_at_unix))
+    return calibrate_from_population(_DB_PATH, float(started_at_unix))
 
 
 # ── iter85: per-coin online estimation ──────────────────────────────────────
