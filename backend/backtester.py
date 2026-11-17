@@ -57,6 +57,8 @@ from data_store import (
     get_holder_flow,
     create_backtest,
     list_recordings,
+    normalize_recordings_db,
+    recordings_db_path,
 )
 from session_calibrator import calibrate_from_history
 
@@ -152,6 +154,11 @@ def run_backtest_batch(
     # --params style knobs.  Default 0.0 = byte-identical.
     exec_offset_pct_buy: float = 0.0,
     exec_offset_pct_sell: float = 0.0,
+    # Dataset selector: "unseen" (live/holdout corpus, default) or
+    # "original" (the frozen 3,567-tape paper cohort).  Applies to the
+    # recording list, tape replay and causal calibration for every window
+    # filter (last night / last 12h / last N days / Run All).
+    recordings_db: str = "unseen",
 ) -> list[dict]:
     """
     Run backtests on ALL completed recordings.
@@ -176,7 +183,8 @@ def run_backtest_batch(
     # Fee is always fixed at 0.0001 SOL priority + 0.0 bribe = 0.0001 SOL/tx.
     priority_fee = 0.0001
     bribe_fee    = 0.0
-    recordings = list_recordings()
+    db_key = normalize_recordings_db(recordings_db)
+    recordings = list_recordings(recordings_db=db_key)
     completed = [r for r in recordings if r.get("status") == "completed"]
 
     if last_night:
@@ -236,6 +244,7 @@ def run_backtest_batch(
         exit_latency_seconds=exit_latency_seconds,
         exec_offset_pct_buy=exec_offset_pct_buy,
         exec_offset_pct_sell=exec_offset_pct_sell,
+        recordings_db=db_key,
     )
 
     # Scheduling only (per-recording computation is identical either way):
@@ -313,6 +322,9 @@ def run_backtest(
     exec_model: str = "instant",
     entry_latency_seconds: float = 0.0,
     exit_latency_seconds: float = 0.0,
+    # Dataset selector (see run_backtest_batch): "unseen" (default) or
+    # "original" (the 3,567-tape paper cohort).
+    recordings_db: str = "unseen",
 ) -> dict:
     """
     Run a full backtest on a saved recording.
@@ -326,16 +338,17 @@ def run_backtest(
     # Fee is always fixed at 0.0001 SOL priority + 0.0 bribe = 0.0001 SOL/tx.
     priority_fee = 0.0001
     bribe_fee    = 0.0
-    recording = get_recording(recording_id)
+    db_key = normalize_recordings_db(recordings_db)
+    recording = get_recording(recording_id, recordings_db=db_key)
     if not recording:
         raise ValueError(f"Recording {recording_id} not found")
 
-    candles = get_recording_candles(recording_id)
+    candles = get_recording_candles(recording_id, recordings_db=db_key)
     if not candles:
         raise ValueError(f"Recording {recording_id} has no candles")
 
     # Load holder-flow events for this recording (dev/insider wallet trades)
-    holder_flow_events = get_holder_flow(recording_id)
+    holder_flow_events = get_holder_flow(recording_id, recordings_db=db_key)
 
     if engine_params is None:
         engine_params = {}
@@ -348,6 +361,7 @@ def run_backtest(
                      float(candles[0]["time"]))
         engine_params, calibration_audit = initialize_calibration_sync(
             str(recording.get("mint") or ""), anchor, engine_params,
+            db_path=str(recordings_db_path(db_key)),
         )
 
     timeframe = recording["timeframe"]
@@ -523,6 +537,7 @@ def run_backtest(
             candle_results=candle_results or [],
             trades=trades,
             batch_id=batch_id,
+            recordings_db=db_key,
         )
 
     # ── Write per-token JSON trade log (only when trades were placed) ────────
@@ -547,6 +562,7 @@ def run_backtest(
         "candle_count":  len(candles),
         "stats":         stats,
         "trade_count":   len(trades),
+        "recordings_db": db_key,
         "calibration": calibration_audit,
         "calibration_updates": getattr(engine, "_percoin_log", []),
     }

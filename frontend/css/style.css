@@ -239,6 +239,7 @@ input, select, button, textarea { accent-color: var(--copper); }
   width: 100%;
 }
 .form-select:focus { border-color: var(--copper-lo); }
+.form-hint { font-family: var(--mono); font-size: 9.5px; color: var(--dim); letter-spacing: .04em; }
 
 .form-actions { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
 

@@ -44,8 +44,16 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# ── DB path ──────────────────────────────────────────────────────────────────
-_DB_PATH = os.path.join(os.path.dirname(__file__), "data", "price_data.db")
+# ── DB paths ─────────────────────────────────────────────────────────────────
+# Active recording corpus (live sessions + default mint-history reads) — the
+# same corpus selector data_store exposes to the backtester UI.  It is the
+# "unseen" corpus (live + holdout) by default.
+_DB_PATH = os.environ.get("PUMPCHART_PRICE_DB") or os.path.join(
+    os.path.dirname(__file__), "data", "unseen_database.db")
+# Frozen paper cohort (the original 3,567-tape DB).  Independent of the active
+# corpus so calibration can pool both without collapsing them.
+_ORIGINAL_DB_PATH = os.environ.get("PUMPCHART_ORIGINAL_DB") or os.path.join(
+    os.path.dirname(__file__), "data", "price_data.db")
 
 # ── iter102c: population source ──────────────────────────────────────────────
 # "pool_all" (default) merges BOTH recording corpora into one population:
@@ -61,10 +69,13 @@ _last_population_audit: dict = {}
 
 
 def _corpus_paths() -> dict[str, str]:
-    """Resolve the two recording corpora for a pooled calibration."""
-    unseen = os.environ.get("PUMPCHART_PRICE_DB") or os.path.join(
-        os.path.dirname(_DB_PATH), "unseen_database.db")
-    original = os.environ.get("PUMPCHART_ORIGINAL_DB") or _DB_PATH
+    """Resolve the two recording corpora for a pooled calibration.
+
+    Read at call time so PUMPCHART_PRICE_DB / PUMPCHART_ORIGINAL_DB relocations
+    (and test monkeypatching) are honoured.
+    """
+    unseen = os.environ.get("PUMPCHART_PRICE_DB") or _DB_PATH
+    original = os.environ.get("PUMPCHART_ORIGINAL_DB") or _ORIGINAL_DB_PATH
     return {"unseen": unseen, "original": original}
 
 

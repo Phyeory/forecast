@@ -404,21 +404,30 @@ async def recorder_status():
 # ── Recordings API ───────────────────────────────────────────────────────────
 
 @app.get("/api/recordings")
-async def list_recordings_endpoint():
-    return JSONResponse(data_store.list_recordings())
+async def list_recordings_endpoint(recordings_db: Optional[str] = Query(default=None)):
+    try:
+        return JSONResponse(data_store.list_recordings(recordings_db=recordings_db))
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
 
 
 @app.get("/api/recordings/{recording_id}")
-async def get_recording_endpoint(recording_id: int):
-    rec = data_store.get_recording(recording_id)
+async def get_recording_endpoint(recording_id: int, recordings_db: Optional[str] = Query(default=None)):
+    try:
+        rec = data_store.get_recording(recording_id, recordings_db=recordings_db)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     if not rec:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(rec)
 
 
 @app.get("/api/recordings/{recording_id}/candles")
-async def get_recording_candles_endpoint(recording_id: int):
-    candles = data_store.get_recording_candles(recording_id)
+async def get_recording_candles_endpoint(recording_id: int, recordings_db: Optional[str] = Query(default=None)):
+    try:
+        candles = data_store.get_recording_candles(recording_id, recordings_db=recordings_db)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     return JSONResponse(candles)
 
 
@@ -511,6 +520,11 @@ async def run_backtest_endpoint(body: dict = Body(...)):
         return JSONResponse({"error": "recording_id is required"}, status_code=400)
     engine_params = body.get("engine_params", {})
     engine_version = int(body.get("engine_version", 1))
+    recordings_db = body.get("recordings_db") or body.get("dataset") or "unseen"
+    try:
+        recordings_db = data_store.normalize_recordings_db(recordings_db)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     try:
         # Run CPU-bound backtest in thread pool to avoid blocking the event loop
         result = await asyncio.to_thread(
@@ -530,6 +544,7 @@ async def run_backtest_endpoint(body: dict = Body(...)):
             exec_model=body.get("exec_model", "instant"),
             entry_latency_seconds=float(body.get("entry_latency_seconds", 0.0)),
             exit_latency_seconds=float(body.get("exit_latency_seconds", 0.0)),
+            recordings_db=recordings_db,
         )
         return JSONResponse(result)
     except ValueError as e:
@@ -560,6 +575,11 @@ async def run_backtest_batch_endpoint(body: dict = Body(default={})):
     last_night = bool(body.get("last_night", False))
     last_12h = bool(body.get("last_12h", False))
     last_days = float(body.get("last_days") or 0)
+    recordings_db = body.get("recordings_db") or body.get("dataset") or "unseen"
+    try:
+        recordings_db = data_store.normalize_recordings_db(recordings_db)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     try:
         results = await asyncio.to_thread(
             run_backtest_batch,
@@ -579,6 +599,7 @@ async def run_backtest_batch_endpoint(body: dict = Body(default={})):
             exec_model=body.get("exec_model", "instant"),
             entry_latency_seconds=float(body.get("entry_latency_seconds", 0.0)),
             exit_latency_seconds=float(body.get("exit_latency_seconds", 0.0)),
+            recordings_db=recordings_db,
         )
         succeeded = [r for r in results if "error" not in r]
         failed = [r for r in results if "error" in r]

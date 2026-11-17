@@ -44,8 +44,11 @@ import time
 import urllib.request
 from typing import Optional
 
+import data_store
+
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
-PRICE_DB_PATH = os.path.join(BACKEND_DIR, "data", "price_data.db")
+# Same active corpus as data_store (unseen_database.db by default).
+PRICE_DB_PATH = os.environ.get("PUMPCHART_PRICE_DB") or str(data_store.PRICE_DB)
 
 # Deploy moment of the effective-basis feed (2026-09-26, set between the
 # newest pre-fix recording and the first post-fix deploy).  Recordings

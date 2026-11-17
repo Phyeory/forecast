@@ -28,6 +28,8 @@ from typing import Optional
 
 import aiohttp
 
+import data_store
+
 logger = logging.getLogger(__name__)
 
 _SOLANA_RPCS = [
@@ -63,7 +65,7 @@ def _within_bounds(rows: list[dict], lower: int, upper: int) -> list[dict]:
     return [r for r in rows if lower <= r["time"] < upper
             and r["time"] == int(r["time"])]
 
-_DB_PATH = os.path.join(os.path.dirname(__file__), "data", "price_data.db")
+_DB_PATH = os.environ.get("PUMPCHART_PRICE_DB") or str(data_store.PRICE_DB)
 
 
 def _bonding_curve_pda(mint: str) -> Optional[str]:

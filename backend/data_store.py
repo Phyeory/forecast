@@ -1,13 +1,19 @@
 """
 Data Store — SQLite persistence for price recordings and backtest results.
 
-Two databases:
-  1. price_data.db   — Raw OHLCV candle recordings
-  2. backtest_data.db — Backtest results (candles + signals + regimes + trades)
+Recording corpora:
+  1. unseen_database.db — live sessions + the unseen holdout window. This is
+     the default corpus for live recording and for every backtest.
+  2. price_data.db      — the frozen 3,567-tape paper cohort (original DB).
+Backtest results always go to backtest_data.db.
+
+Set ``PUMPCHART_PRICE_DB`` / ``PUMPCHART_ORIGINAL_DB`` to relocate either
+corpus (research/rollback escape hatch).
 """
 
 from __future__ import annotations
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -16,8 +22,39 @@ from typing import Optional
 DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
-PRICE_DB = DATA_DIR / "price_data.db"
+# Active recording corpus (live writes + default backtest source).
+# ``PUMPCHART_PRICE_DB`` is the rollback / research escape hatch.
+PRICE_DB = Path(os.environ.get("PUMPCHART_PRICE_DB") or (DATA_DIR / "unseen_database.db"))
+# Frozen paper cohort (the 3,567 original tapes).
+ORIGINAL_DB = Path(os.environ.get("PUMPCHART_ORIGINAL_DB") or (DATA_DIR / "price_data.db"))
 BACKTEST_DB = DATA_DIR / "backtest_data.db"
+
+# Backtest dataset selector.  "unseen" = live/holdout corpus (default),
+# "original" = the paper's 3,567-tape cohort.  Aliases keep older callers
+# (and the dormant recordings_db column, which wrote "main") working.
+_RECORDINGS_DB_ALIASES = {
+    "unseen": "unseen", "new": "unseen", "live": "unseen", "active": "unseen",
+    "original": "original", "main": "original", "paper": "original",
+    "archive": "original", "price_data": "original",
+}
+
+
+def normalize_recordings_db(name: Optional[str]) -> str:
+    """Map a selector/alias to the canonical corpus key."""
+    key = (name or "unseen").strip().lower()
+    if key in ("", "default"):
+        return "unseen"
+    resolved = _RECORDINGS_DB_ALIASES.get(key)
+    if resolved is None:
+        raise ValueError(
+            f"unknown recordings DB {name!r} (use 'unseen' or 'original')")
+    return resolved
+
+
+def recordings_db_path(name: Optional[str] = None) -> Path:
+    """Filesystem path for a recordings corpus selector."""
+    key = normalize_recordings_db(name)
+    return Path(PRICE_DB) if key == "unseen" else Path(ORIGINAL_DB)
 
 
 # ── Price Recording DB ───────────────────────────────────────────────────────
@@ -29,9 +66,13 @@ def _get_price_conn() -> sqlite3.Connection:
     return conn
 
 
-def _get_price_read_conn() -> sqlite3.Connection:
-    """Open a read-only connection for isolated backtest workers."""
-    conn = sqlite3.connect(f"file:{PRICE_DB}?mode=ro", uri=True)
+def _get_price_read_conn(recordings_db: Optional[str] = None) -> sqlite3.Connection:
+    """Open a read-only connection for isolated backtest workers.
+
+    ``recordings_db`` selects the active corpus ("unseen", default) or the
+    frozen paper cohort ("original" / aliases).
+    """
+    conn = sqlite3.connect(f"file:{recordings_db_path(recordings_db)}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -210,9 +251,11 @@ def insert_holder_flow(
     conn.close()
 
 
-def get_holder_flow(recording_id: int, start_time: Optional[int] = None, end_time: Optional[int] = None) -> list[dict]:
+def get_holder_flow(recording_id: int, start_time: Optional[int] = None,
+                    end_time: Optional[int] = None,
+                    recordings_db: Optional[str] = None) -> list[dict]:
     """Fetch holder-flow events for a recording, optionally filtered by time range."""
-    conn = _get_price_read_conn()
+    conn = _get_price_read_conn(recordings_db)
     query = "SELECT * FROM holder_flow WHERE recording_id = ?"
     params: list = [recording_id]
     if start_time is not None:
@@ -227,7 +270,8 @@ def get_holder_flow(recording_id: int, start_time: Optional[int] = None, end_tim
     return [dict(r) for r in rows]
 
 
-def get_holder_flow_since(recording_id: int, after_id: int, limit: int = 500) -> list[dict]:
+def get_holder_flow_since(recording_id: int, after_id: int, limit: int = 500,
+                          recordings_db: Optional[str] = None) -> list[dict]:
     """Fetch holder-flow events with id > after_id (id-cursor incremental read).
 
     Used by the live session's holder-flow pump: the monitor persists every
@@ -236,7 +280,7 @@ def get_holder_flow_since(recording_id: int, after_id: int, limit: int = 500) ->
     delivery source that cannot drop events the way a count-diff over the
     monitor's 60s-trimmed in-memory list can.
     """
-    conn = _get_price_read_conn()
+    conn = _get_price_read_conn(recordings_db)
     rows = conn.execute(
         "SELECT * FROM holder_flow WHERE recording_id = ? AND id > ? ORDER BY id ASC LIMIT ?",
         (recording_id, after_id, limit),
@@ -245,26 +289,29 @@ def get_holder_flow_since(recording_id: int, after_id: int, limit: int = 500) ->
     return [dict(r) for r in rows]
 
 
-def get_holder_flow_for_window(recording_id: int, center_time: int, window_seconds: int) -> list[dict]:
+def get_holder_flow_for_window(recording_id: int, center_time: int, window_seconds: int,
+                               recordings_db: Optional[str] = None) -> list[dict]:
     """Fetch holder-flow events within ±window_seconds of a center time."""
-    return get_holder_flow(recording_id, center_time - window_seconds, center_time + window_seconds)
+    return get_holder_flow(recording_id, center_time - window_seconds,
+                           center_time + window_seconds, recordings_db=recordings_db)
 
 
-def list_recordings() -> list[dict]:
-    conn = _get_price_read_conn()
+def list_recordings(recordings_db: Optional[str] = None) -> list[dict]:
+    conn = _get_price_read_conn(recordings_db)
     rows = conn.execute("SELECT * FROM recordings ORDER BY started_at DESC").fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-def get_recording(recording_id: int) -> Optional[dict]:
-    conn = _get_price_read_conn()
+def get_recording(recording_id: int, recordings_db: Optional[str] = None) -> Optional[dict]:
+    conn = _get_price_read_conn(recordings_db)
     row = conn.execute("SELECT * FROM recordings WHERE id = ?", (recording_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
 
 
-def get_recording_candles(recording_id: int, effective_basis: bool = True) -> list[dict]:
+def get_recording_candles(recording_id: int, effective_basis: bool = True,
+                          recordings_db: Optional[str] = None) -> list[dict]:
     """
     Return one completed candle per time bucket, ordered by time.
 
@@ -284,7 +331,7 @@ def get_recording_candles(recording_id: int, effective_basis: bool = True) -> li
     Pass ``effective_basis=False`` for a byte-exact phantom-basis replay of
     the pre-iter94 era.
     """
-    conn = _get_price_read_conn()
+    conn = _get_price_read_conn(recordings_db)
     rows = conn.execute(
         """
         SELECT time, open, high, low, close, volume,
@@ -448,6 +495,11 @@ def init_backtest_db():
     except sqlite3.OperationalError:
         pass
 
+    try:
+        conn.execute("ALTER TABLE backtests ADD COLUMN recordings_db TEXT DEFAULT 'main';")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
     for col, definition in [
         ("entry_params", "TEXT DEFAULT '{}'"),
         ("exit_params",  "TEXT DEFAULT '{}'"),
@@ -463,14 +515,16 @@ def init_backtest_db():
 
 def create_backtest(recording_id: int, mint: str, token_name: str, token_symbol: str,
                     timeframe: str, engine_params: dict, stats: dict,
-                    candle_results: list[dict], trades: list[dict], batch_id: Optional[str] = None) -> int:
+                    candle_results: list[dict], trades: list[dict],
+                    batch_id: Optional[str] = None,
+                    recordings_db: str = "main") -> int:
     """Save a complete backtest run."""
     conn = _get_backtest_conn()
     cur = conn.execute(
         """INSERT INTO backtests
            (recording_id, mint, token_name, token_symbol, timeframe, engine_params,
-            created_at, total_trades, win_rate, total_pnl, max_drawdown, final_balance, summary_json, batch_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            created_at, total_trades, win_rate, total_pnl, max_drawdown, final_balance, summary_json, batch_id, recordings_db)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             recording_id, mint, token_name, token_symbol, timeframe,
             json.dumps(engine_params), time.time(),
@@ -481,6 +535,7 @@ def create_backtest(recording_id: int, mint: str, token_name: str, token_symbol:
             stats.get("current_balance", 1.0),
             json.dumps(stats),
             batch_id,
+            recordings_db,
         ),
     )
     bt_id = cur.lastrowid

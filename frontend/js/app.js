@@ -343,6 +343,17 @@ let engineParamsV3 = {
    3 = V3 (newborn dump-bottom on the V2 math) */
 let engineVersion = 1;
 
+/* Backtest recordings corpus selector (persisted).  "unseen" = live/holdout
+   DB (default), "original" = the frozen 3,567-tape paper cohort.  Applies to
+   every backtest button and window (last night / 12h / 7d / Run All). */
+let btRecordingsDb = (() => {
+  const v = localStorage.getItem("bt_recordings_db") || "unseen";
+  return v === "original" ? "original" : "unseen";
+})();
+function btDbQuery() {
+  return `recordings_db=${encodeURIComponent(btRecordingsDb)}`;
+}
+
 /* Live-trader engine selection (iter77: primary + multi-engine fleet) —
    independent from the chart engine toggle.  Persisted across page loads.
    PRIMARY (plain click): the engine whose strategy drives the chart.
@@ -1119,12 +1130,30 @@ document.getElementById("viewer-back-btn").addEventListener("click", () => {
 /* ── Backtest ─────────────────────────────────────────────────────────── */
 
 async function loadRecordingsDropdown(selectId = "bt-recording-select") {
-  const list = await apiFetch("/api/recordings");
+  const list = await apiFetch(`/api/recordings?${btDbQuery()}`);
+  const completed = list.filter(r => r.status === "completed");
   const sel = document.getElementById(selectId);
   sel.innerHTML = `<option value="">— Choose a recording —</option>` +
-    list.filter(r => r.status === "completed").map(r =>
+    completed.map(r =>
       `<option value="${r.id}">${r.token_name || r.mint?.slice(0, 8)} ($${r.token_symbol || '?'}) — ${r.timeframe} — ${r.candle_count} candles</option>`
     ).join("");
+  const hint = document.getElementById("bt-db-hint");
+  if (hint) {
+    const label = btRecordingsDb === "original" ? "paper cohort" : "unseen corpus";
+    hint.textContent = `${completed.length.toLocaleString()} completed tapes · ${label}`;
+  }
+}
+
+/* Dataset selector — switching reloads the recording dropdown so every
+   button (single, Run All, Last Night / 12h / 7d) targets that corpus. */
+const btDbSelect = document.getElementById("bt-recordings-db");
+if (btDbSelect) {
+  btDbSelect.value = btRecordingsDb;
+  btDbSelect.addEventListener("change", () => {
+    btRecordingsDb = btDbSelect.value === "original" ? "original" : "unseen";
+    localStorage.setItem("bt_recordings_db", btRecordingsDb);
+    loadRecordingsDropdown();
+  });
 }
 
 /* ── Saved backtests list ────────────────────────────────────────────── */
@@ -1161,11 +1190,15 @@ async function loadBacktestsList() {
     const overallWinRate = totalTrades > 0 ? (winningTrades / totalTrades * 100) : 0;
     const pnlClass = totalPnl >= 0 ? "pos" : "neg";
     const pnlSign = totalPnl >= 0 ? "+" : "";
+    const dsSet = [...new Set(bItems.map(bt => bt.recordings_db || "legacy"))];
+    const dsBadge = dsSet.length > 1 ? "mixed"
+                  : dsSet[0] === "original" ? "paper"
+                  : dsSet[0] === "unseen" ? "unseen" : "legacy";
     html += `
     <div class="backtest-card batch-folder" onclick="toggleBatchFolder('${bId}')" style="border-left: 4px solid #5865f2; cursor: pointer;">
       <div class="bt-card-header">
         <div><span class="bt-card-name">📁 Batch Run</span> <span class="rec-card-symbol">${bItems.length} coins</span></div>
-        <div class="rec-card-badges"><span class="rec-card-badge">Batch</span></div>
+        <div class="rec-card-badges"><span class="rec-card-badge">${dsBadge}</span><span class="rec-card-badge">Batch</span></div>
       </div>
       <div class="bt-card-stats">
         <div class="bt-stat"><span class="bt-stat-label">Total Trades</span><span class="bt-stat-value">${totalTrades}</span></div>
@@ -1187,11 +1220,14 @@ async function loadBacktestsList() {
 function renderSingleBacktestCard(bt) {
   const pnlClass = bt.total_pnl >= 0 ? "pos" : "neg";
   const pnlSign = bt.total_pnl >= 0 ? "+" : "";
+  const dsBadge = bt.recordings_db === "original" ? "paper"
+                : bt.recordings_db === "unseen" ? "unseen"
+                : bt.recordings_db === "main" ? "legacy" : "";
   return `
     <div class="backtest-card" onclick="loadBacktestResult(${bt.id})">
       <div class="bt-card-header">
         <div><span class="bt-card-name">${bt.token_name || bt.mint?.slice(0, 8)}</span> <span class="rec-card-symbol">${bt.token_symbol ? '$' + bt.token_symbol : ''}</span></div>
-        <div class="rec-card-badges"><span class="rec-card-badge">${bt.timeframe}</span></div>
+        <div class="rec-card-badges">${dsBadge ? `<span class="rec-card-badge">${dsBadge}</span>` : ""}<span class="rec-card-badge">${bt.timeframe}</span></div>
       </div>
       <div class="bt-card-stats">
         <div class="bt-stat"><span class="bt-stat-label">Trades</span><span class="bt-stat-value">${bt.total_trades}</span></div>
@@ -1257,6 +1293,7 @@ document.getElementById("bt-run-btn").addEventListener("click", async () => {
         recording_id: parseInt(recId),
         engine_params: getEngineParams(),
         engine_version: engineVersion,
+        recordings_db: btRecordingsDb,
         ...testerConfig
       })
     });
@@ -1270,7 +1307,7 @@ document.getElementById("bt-run-btn").addEventListener("click", async () => {
 });
 
 document.getElementById("bt-run-all-btn").addEventListener("click", async () => {
-  const recordings = await apiFetch("/api/recordings");
+  const recordings = await apiFetch(`/api/recordings?${btDbQuery()}`);
   const completed = recordings.filter(r => r.status === "completed");
   if (!completed.length) return alert("No completed recordings to backtest.");
 
@@ -1296,6 +1333,7 @@ document.getElementById("bt-run-all-btn").addEventListener("click", async () => 
       body: JSON.stringify({
         engine_params: getEngineParams(),
         engine_version: engineVersion,
+        recordings_db: btRecordingsDb,
         ...testerConfig
       }),
     });
@@ -1323,7 +1361,7 @@ document.getElementById("bt-run-last-night-btn").addEventListener("click", async
   const lo = yesterday10_50pm.getTime() / 1000;
   const hi = todayNoon.getTime() / 1000;
 
-  const recordings = await apiFetch("/api/recordings");
+  const recordings = await apiFetch(`/api/recordings?${btDbQuery()}`);
   const lastNight = recordings.filter(r => r.status === "completed" && r.started_at >= lo && r.started_at <= hi);
   if (!lastNight.length) return alert("No completed recordings started last night (10:50 PM prev day – 12 PM today).");
 
@@ -1353,6 +1391,7 @@ document.getElementById("bt-run-last-night-btn").addEventListener("click", async
         engine_version: engineVersion,
         recording_ids: lastNight.map(r => r.id),
         last_night: true,
+        recordings_db: btRecordingsDb,
         ...testerConfig
       }),
     });
@@ -1375,7 +1414,7 @@ document.getElementById("bt-run-last-12h-btn").addEventListener("click", async (
   const hi = Math.floor(Date.now() / 1000);
   const lo = hi - 12 * 60 * 60;
 
-  const recordings = await apiFetch("/api/recordings");
+  const recordings = await apiFetch(`/api/recordings?${btDbQuery()}`);
   const last12h = recordings.filter(r => r.status === "completed" && r.started_at >= lo && r.started_at <= hi);
   if (!last12h.length) return alert("No completed recordings started in the last 12 hours.");
 
@@ -1405,6 +1444,7 @@ document.getElementById("bt-run-last-12h-btn").addEventListener("click", async (
         engine_version: engineVersion,
         recording_ids: last12h.map(r => r.id),
         last_12h: true,
+        recordings_db: btRecordingsDb,
         ...testerConfig
       }),
     });
@@ -1427,7 +1467,7 @@ document.getElementById("bt-run-last-7d-btn").addEventListener("click", async ()
   const hi = Math.floor(Date.now() / 1000);
   const lo = hi - 7 * 24 * 60 * 60;
 
-  const recordings = await apiFetch("/api/recordings");
+  const recordings = await apiFetch(`/api/recordings?${btDbQuery()}`);
   const last7d = recordings.filter(r => r.status === "completed" && r.started_at >= lo && r.started_at <= hi);
   if (!last7d.length) return alert("No completed recordings started in the last 7 days.");
 
@@ -1457,6 +1497,7 @@ document.getElementById("bt-run-last-7d-btn").addEventListener("click", async ()
         engine_version: engineVersion,
         recording_ids: last7d.map(r => r.id),
         last_days: 7,
+        recordings_db: btRecordingsDb,
         ...testerConfig
       }),
     });

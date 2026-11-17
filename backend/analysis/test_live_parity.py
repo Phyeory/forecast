@@ -247,7 +247,9 @@ def test_hf_get_holder_flow_since_lossless():
 
     orig = data_store._get_price_read_conn
 
-    def _tmp_conn():
+    def _tmp_conn(*_args, **_kwargs):
+        # `_get_price_read_conn(recordings_db=None)` — the corpus selector is
+        # irrelevant here because the stub always returns the temp tape.
         c = sqlite3.connect(tmp)
         c.row_factory = sqlite3.Row
         return c

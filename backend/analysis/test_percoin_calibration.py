@@ -21,6 +21,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import data_store
 from session_calibrator import (
     _CLIP,
     estimate_from_session_arrays,
@@ -299,9 +300,7 @@ class TestMintHistoryLayer:
     def test_estimates_bounded_and_deterministic(self):
         from session_calibrator import calibrate_from_mint_history, _CLIP
         import sqlite3 as _s
-        conn = _s.connect("backend/data/price_data.db" if not os.path.exists(
-            os.path.join(os.path.dirname(__file__), "..", "data", "price_data.db"))
-            else os.path.join(os.path.dirname(__file__), "..", "data", "price_data.db"))
+        conn = _s.connect(str(data_store.PRICE_DB))
         mint, last = conn.execute(
             "SELECT mint, MAX(started_at) FROM recordings WHERE status='completed' "
             "GROUP BY mint ORDER BY COUNT(*) DESC LIMIT 1"
@@ -324,7 +323,7 @@ class TestMintHistoryLayer:
         from backtester import run_backtest
         import sqlite3 as _s
         import json as _j
-        db = os.path.join(os.path.dirname(__file__), "..", "data", "price_data.db")
+        db = str(data_store.PRICE_DB)
         conn = _s.connect(db)
         # pick a later recording of a heavily-recorded mint
         row = conn.execute(
