@@ -379,6 +379,11 @@ DEFAULT_CONFIG = {
     # and the live session builder both default to it, so backtest and live
     # calibrate identically.  0.0 = OFF (pre-adoption byte-parity hatch).
     "v2_popcal_enable":          1.0,
+    # iter102c (2026-11): which recordings feed the population estimator.
+    # "pool_all" (default) merges the unseen + original corpora into ONE pool
+    # and picks the newest N recordings across both (ids collide → resolved
+    # per corpus). "selected" = legacy single-corpus sample (byte-parity hatch).
+    "v2_popcal_source":          "pool_all",
 
     # ── iter86: mint-history calibration (user proposal — full token picture) ──
     # BEFORE the population layer, estimate from THIS TOKEN's own prior

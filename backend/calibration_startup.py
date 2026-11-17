@@ -113,6 +113,13 @@ async def initialize_calibration(mint: str, started_at: float, params: dict | No
     tau_scale = float(explicit.get('v2_tau_vr_scale',
                                    DEFAULT_CONFIG['v2_tau_vr_scale']))
 
+    # iter102c: population source selector ("pool_all" default = unseen +
+    # original as one pool; "selected" = legacy single-corpus sample).
+    popcal_source = str(explicit.pop('v2_popcal_source',
+                                     DEFAULT_CONFIG.get('v2_popcal_source',
+                                                        'pool_all')))
+    audit['popcal_source'] = popcal_source
+
     mint_on = bool(explicit.get('v2_mintcal_enable', DEFAULT_CONFIG['v2_mintcal_enable']))
     base = {}
     if mint_on and mint:
@@ -138,7 +145,8 @@ async def initialize_calibration(mint: str, started_at: float, params: dict | No
                 base['_geometry_sourced'] = 1
     if not base:
         base = await asyncio.to_thread(calibrate_from_population, db_path, cutoff,
-                                       tau_vr=tau_vr, tau_scale=tau_scale)
+                                       tau_vr=tau_vr, tau_scale=tau_scale,
+                                       source=popcal_source)
         audit['source'] = 'population' if any(k in base for k in _CLIP) else 'defaults'
         if not _geom_user_explicit and any(k in base for k in GEOMETRY_KEYS):
             base['_geometry_sourced'] = 1

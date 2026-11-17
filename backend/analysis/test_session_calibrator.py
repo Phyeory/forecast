@@ -283,6 +283,9 @@ class TestPopulationToOverrides:
 # ── Synthetic-DB integration ──────────────────────────────────────────────────
 
 class TestCalibrateFromPopulation:
+    # iter102c: the DEFAULT source is now "pool_all" (unseen + original corpora
+    # merged).  These hermetic synthetic-DB tests exercise the single-corpus
+    # estimator, so they pin source="selected" explicitly.
     def _build_db(self, tmpdir, n_recs=12, started_at=2_000_000_000.0):
         rng = np.random.default_rng(31)
         recs = []
@@ -298,7 +301,8 @@ class TestCalibrateFromPopulation:
 
     def test_basic_output_shape(self, tmp_path):
         db, t = self._build_db(str(tmp_path))
-        out = calibrate_from_population(db, t + 10_000.0, n_recs=10)
+        out = calibrate_from_population(db, t + 10_000.0, n_recs=10,
+                                   source="selected")
         assert isinstance(out, dict)
         # Always-explicit knobs present
         for k in _ALWAYS_EXPLICIT:
@@ -311,18 +315,21 @@ class TestCalibrateFromPopulation:
     def test_backtest_safe_window(self, tmp_path):
         """Only recordings with started_at < before_unix are used."""
         db, t = self._build_db(str(tmp_path))
-        out = calibrate_from_population(db, t, n_recs=50)  # nothing before t
+        out = calibrate_from_population(db, t, n_recs=50,
+                                   source="selected")  # nothing before t
         # Falls back to defaults-only → just _ALWAYS_EXPLICIT
         assert out == _ALWAYS_EXPLICIT
 
     def test_insufficient_recs_fallback(self, tmp_path):
         db, t = self._build_db(str(tmp_path), n_recs=5)
-        out = calibrate_from_population(db, t + 10_000.0, n_recs=50)
+        out = calibrate_from_population(db, t + 10_000.0, n_recs=50,
+                                   source="selected")
         assert out == _ALWAYS_EXPLICIT
 
     def test_all_values_finite_and_in_bounds(self, tmp_path):
         db, t = self._build_db(str(tmp_path))
-        out = calibrate_from_population(db, t + 10_000.0, n_recs=10)
+        out = calibrate_from_population(db, t + 10_000.0, n_recs=10,
+                                   source="selected")
         for k, (lo, hi) in _CLIP.items():
             if k in out:
                 v = out[k]
@@ -331,8 +338,10 @@ class TestCalibrateFromPopulation:
 
     def test_deterministic(self, tmp_path):
         db, t = self._build_db(str(tmp_path))
-        a = calibrate_from_population(db, t + 10_000.0, n_recs=10)
-        b = calibrate_from_population(db, t + 10_000.0, n_recs=10)
+        a = calibrate_from_population(db, t + 10_000.0, n_recs=10,
+                                   source="selected")
+        b = calibrate_from_population(db, t + 10_000.0, n_recs=10,
+                                   source="selected")
         assert a == b
 
 
@@ -343,7 +352,8 @@ class TestEngineIntegration:
         """A calibrated dict must actually change the V2 engine's config."""
         from engine_factory import create_engine
         db, t = self._build_db_with_stats(str(tmp_path))
-        out = calibrate_from_population(db, t + 10_000.0, n_recs=10)
+        out = calibrate_from_population(db, t + 10_000.0, n_recs=10,
+                                   source="selected")
         sde = {k: v for k, v in out.items() if k in _CLIP}
         if not sde:
             pytest.skip("synthetic population produced no SDE keys")
@@ -369,14 +379,16 @@ class TestEngineIntegration:
         """Even if population stats could imply different delay knobs, the
         _ALWAYS_EXPLICIT values must win (iter83 hardened production stack)."""
         db, t = self._build_db_with_stats(str(tmp_path))
-        out = calibrate_from_population(db, t + 10_000.0, n_recs=10)
+        out = calibrate_from_population(db, t + 10_000.0, n_recs=10,
+                                   source="selected")
         for k, v in _ALWAYS_EXPLICIT.items():
             assert out[k] == v
 
     def test_stability_floors(self, tmp_path):
         """The UKF-stability floors (DEFAULT/2 on process noise) must hold."""
         db, t = self._build_db_with_stats(str(tmp_path))
-        out = calibrate_from_population(db, t + 10_000.0, n_recs=10)
+        out = calibrate_from_population(db, t + 10_000.0, n_recs=10,
+                                   source="selected")
         assert out.get("sigma_h", DEFAULT_CONFIG["sigma_h"]) >= 0.10
         assert out.get("sigma_ell", DEFAULT_CONFIG["sigma_ell"]) >= 0.05
         assert out.get("sigma_mu", DEFAULT_CONFIG["sigma_mu"]) >= 0.05

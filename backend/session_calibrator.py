@@ -21,7 +21,8 @@ _ALWAYS_EXPLICIT (no SDE changes, production stack byte-parity) on any error.
 
 Architecture invariants
 -----------------------
-1. Pure function of price_data.db candle history; no network calls.
+1. Pure function of recording-corpus candle history (price_data.db + the
+   unseen corpus, pooled by default); no network calls.
 2. Backtest-safe: uses only recordings with started_at < before_unix.
 3. Fallback on any DB error / insufficient data → _ALWAYS_EXPLICIT only.
 4. The 5 delay/gate knobs (_ALWAYS_EXPLICIT) are always included to prevent
@@ -45,6 +46,35 @@ logger = logging.getLogger(__name__)
 
 # ── DB path ──────────────────────────────────────────────────────────────────
 _DB_PATH = os.path.join(os.path.dirname(__file__), "data", "price_data.db")
+
+# ── iter102c: population source ──────────────────────────────────────────────
+# "pool_all" (default) merges BOTH recording corpora into one population:
+#   unseen   — backend/data/unseen_database.db (live/holdout corpus),
+#              relocatable with PUMPCHART_PRICE_DB
+#   original — backend/data/price_data.db (frozen paper cohort),
+#              relocatable with PUMPCHART_ORIGINAL_DB
+# "selected" reproduces the pre-iter102c behaviour byte-exactly (the single
+# db_path passed by the caller, LIMIT n_recs).
+
+# Audit of the last population calibration call (diagnostics / tests).
+_last_population_audit: dict = {}
+
+
+def _corpus_paths() -> dict[str, str]:
+    """Resolve the two recording corpora for a pooled calibration."""
+    unseen = os.environ.get("PUMPCHART_PRICE_DB") or os.path.join(
+        os.path.dirname(_DB_PATH), "unseen_database.db")
+    original = os.environ.get("PUMPCHART_ORIGINAL_DB") or _DB_PATH
+    return {"unseen": unseen, "original": original}
+
+
+def _select_corpora(source: str, db_path: str) -> dict[str, str]:
+    """Map a popcal source selector to {corpus_name: db_path}."""
+    if source == "selected":
+        return {"selected": str(db_path)}
+    if source == "pool_all":
+        return _corpus_paths()
+    raise ValueError(f"unknown population source {source!r}")
 
 # ── Number of recent recordings to use as population sample ──────────────────
 N_POPULATION_RECS = 50
@@ -585,27 +615,92 @@ def estimate_geometry_from_candles(
 
 # ── Core calibration function ─────────────────────────────────────────────────
 
+def _fetch_candidate_recordings(
+    corpora: dict[str, str], before_unix: float, n_recs: int,
+) -> list[dict]:
+    """Newest n_recs completed recordings across every corpus (merged pool).
+
+    Recording ids are NOT unique across corpora, so each candidate carries
+    the corpus it came from; candles are later read from that same DB.
+    """
+    candidates: list[dict] = []
+    for corpus, path in corpora.items():
+        if not path or not os.path.exists(path):
+            logger.info("[SessionCalibrator] corpus %s missing at %s — skipped",
+                        corpus, path)
+            continue
+        conn = sqlite3.connect(path, timeout=10.0)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                _REC_QUERY, (before_unix, before_unix, n_recs)
+            ).fetchall()
+        finally:
+            conn.close()
+        for r in rows:
+            candidates.append({
+                "corpus": corpus,
+                "id": r["id"],
+                "started_at": float(r["started_at"]),
+                "duration_s": max(
+                    float(r["stopped_at"] or 0) - float(r["started_at"]), 0.0
+                ),
+            })
+    # Deterministic merge: newest first, corpus/id as tie-breaks (ids collide).
+    candidates.sort(key=lambda c: (-c["started_at"], c["corpus"], c["id"]))
+    return candidates[:n_recs]
+
+
+def _fetch_pool_candles(
+    corpora: dict[str, str], recs: list[dict], before_unix: float,
+) -> list[tuple[str, sqlite3.Row]]:
+    """Fetch candles for the pooled recordings, per owning corpus."""
+    by_corpus: dict[str, list[int]] = {}
+    for c in recs:
+        by_corpus.setdefault(c["corpus"], []).append(c["id"])
+
+    out: list[tuple[str, sqlite3.Row]] = []
+    for corpus, ids in by_corpus.items():
+        conn = sqlite3.connect(corpora[corpus], timeout=10.0)
+        try:
+            placeholders = ",".join("?" * len(ids))
+            rows = conn.execute(
+                _CANDLE_QUERY.format(placeholders=placeholders),
+                [*ids, before_unix],
+            ).fetchall()
+        finally:
+            conn.close()
+        out.extend((corpus, row) for row in rows)
+    return out
+
+
 def calibrate_from_population(
     db_path: str,
     before_unix: float,
     n_recs: int = N_POPULATION_RECS,
     tau_vr: bool = False,
     tau_scale: float = TAU_VR_SCALE,
+    source: str = "pool_all",
 ) -> dict:
     """Estimate SDE coefficients from recent recording population.
 
     Parameters
     ----------
     db_path : str
-        Path to price_data.db.
+        Path to a recording DB. Only used when ``source='selected'``;
+        ``pool_all`` reads the two corpora resolved by ``_corpus_paths()``.
     before_unix : float
         Only use recordings that started before this timestamp (backtest-safe).
     n_recs : int
-        Number of recent recordings to include in the population sample.
+        Number of recent recordings to include in the population sample
+        (applied to the merged pool, not per corpus).
     tau_vr : bool
         iter90d: use the variance-ratio horizon for tau_max (default legacy).
     tau_scale : float
         iter90d: H* → tau_max mapping scale.
+    source : str
+        iter102c: "pool_all" (default) = unseen + original as ONE population;
+        "selected" = legacy single-corpus sample (byte-exact revert).
 
     Returns
     -------
@@ -613,55 +708,50 @@ def calibrate_from_population(
         Engine kwargs overrides merged with _ALWAYS_EXPLICIT.
         Returns _ALWAYS_EXPLICIT only on any error or thin population.
     """
+    global _last_population_audit
+    source = str(source or "pool_all")
+    _last_population_audit = {
+        "source": source, "n_recordings": 0, "per_corpus": {},
+    }
     try:
         before_unix = math.floor(float(before_unix))
-        conn = sqlite3.connect(db_path, timeout=10.0)
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
+        corpora = _select_corpora(source, db_path)
+        _last_population_audit["per_corpus"] = {k: 0 for k in corpora}
 
-        # 1. Fetch last N recordings before the session start
-        rows = cur.execute(_REC_QUERY, (before_unix, before_unix, n_recs)).fetchall()
-        if len(rows) < MIN_RECS_REQUIRED:
+        # 1. Fetch the newest N recordings before the session start, across
+        #    every corpus in the pool (one merged window, not N per corpus).
+        pool = _fetch_candidate_recordings(corpora, before_unix, n_recs)
+        if len(pool) < MIN_RECS_REQUIRED:
             logger.info(
-                f"[SessionCalibrator] only {len(rows)} recordings before {before_unix:.0f},"
+                f"[SessionCalibrator] only {len(pool)} recordings before {before_unix:.0f},"
                 f" need {MIN_RECS_REQUIRED} — using defaults"
             )
-            conn.close()
             return dict(_ALWAYS_EXPLICIT)
 
-        rec_ids   = [r["id"] for r in rows]
-        durations = {
-            r["id"]: max(float(r["stopped_at"] or 0) - float(r["started_at"]), 0)
-            for r in rows
-        }
+        durations = {(c["corpus"], c["id"]): c["duration_s"] for c in pool}
 
-        # 2. Fetch all candles for those recordings in one query
-        placeholders = ",".join("?" * len(rec_ids))
-        candle_rows = cur.execute(
-            _CANDLE_QUERY.format(placeholders=placeholders),
-            [*rec_ids, before_unix],
-        ).fetchall()
-        conn.close()
-
+        # 2. Fetch all candles for those recordings (per owning corpus)
+        candle_rows = _fetch_pool_candles(corpora, pool, before_unix)
         if not candle_rows:
             logger.info("[SessionCalibrator] no candle data — using defaults")
             return dict(_ALWAYS_EXPLICIT)
 
-        # 3. Group candles by recording_id
-        by_rec: dict[int, list] = {}
-        for row in candle_rows:
-            rid = row[0]
-            by_rec.setdefault(rid, []).append(row)
+        # 3. Group candles by (corpus, recording_id) — ids collide across DBs
+        by_rec: dict[tuple[str, int], list] = {}
+        for corpus, row in candle_rows:
+            by_rec.setdefault((corpus, row[0]), []).append(row)
 
         # 4. Compute per-recording statistics
         rec_stats: list[dict] = []
         geom_arms: list[float] = []
-        for rid, crows in by_rec.items():
+        for (corpus, rid), crows in by_rec.items():
             arr = np.array(crows, dtype=float)
-            dur = durations.get(rid, 0.0)
+            dur = durations.get((corpus, rid), 0.0)
             stats = _compute_rec_stats(arr, dur)
             if stats is not None:
                 rec_stats.append(stats)
+                _last_population_audit["per_corpus"][corpus] = (
+                    _last_population_audit["per_corpus"].get(corpus, 0) + 1)
             # iter90: per-recording harvest-geometry estimate (amplitude
             # percentiles are robust on thin tapes where the SDE
             # autocorrelation estimators saturate).
@@ -671,6 +761,8 @@ def calibrate_from_population(
                 geom = {}
             if "gain_retrace_arm_pct" in geom:
                 geom_arms.append(geom["gain_retrace_arm_pct"])
+
+        _last_population_audit["n_recordings"] = len(rec_stats)
 
         if len(rec_stats) < MIN_RECS_REQUIRED:
             logger.info(
@@ -694,6 +786,7 @@ def calibrate_from_population(
 
         logger.info(
             f"[SessionCalibrator] calibrated from {len(rec_stats)} recordings "
+            f"[{source}: {_last_population_audit['per_corpus']}] "
             f"(before {before_unix:.0f}): "
             + ", ".join(f"{k}={v:.4g}" for k, v in sorted(overrides.items()))
         )
@@ -839,7 +932,7 @@ def calibrate_from_mint_history(
 def calibrate_from_history(started_at_unix: float) -> dict:
     """Return override dict for a recording starting at `started_at_unix`.
 
-    Reads directly from price_data.db — no network calls.
+    Reads the pooled recording corpora (unseen + original) — no network calls.
 
     Parameters
     ----------
