@@ -32,9 +32,13 @@ import data_store
 
 logger = logging.getLogger(__name__)
 
+# Read endpoints for the history scan.  ankr's public host is NOT here: it
+# answers HTTP 403 ("API key is not allowed to access blockchain") on every
+# call, and because the pool is round-robin that single dead leg failed every
+# paginated scan (see _rpc_call failover).  mainnet-beta is rate-limited but
+# kept as the redundancy leg — same ordering live_trader.SOLANA_RPCS uses.
 _SOLANA_RPCS = [
     "https://solana-rpc.publicnode.com",
-    "https://rpc.ankr.com/solana",
     "https://api.mainnet-beta.solana.com",
 ]
 
@@ -48,6 +52,13 @@ _MAX_SIGNATURE_PAGES = 32  # independent budget for walking past newer history
 _DEFAULT_LOOKBACK_SECONDS = 6000.0
 _FETCH_CONCURRENCY = 4    # parallel getTransaction calls across endpoints
 _TX_TIMEOUT = 8.0
+# Public RPCs retain roughly two days of transaction bodies (getTransaction
+# starts answering null past it, while getSignaturesForAddress keeps the sigs).
+# A cutoff older than this can only ever return pruned transactions, so the
+# scan is skipped instead of burning the whole 90 s budget per recording —
+# measured 2026-11-18: 72/72 historical slices (1-30 days old) came back with
+# zero usable swaps, at up to 90 s each.
+_RETENTION_SECONDS = 2 * 24 * 3600.0
 
 
 def _history_bounds(before_unix: Optional[float],
@@ -181,27 +192,56 @@ class _EndpointPool:
         self._last[ep] = time.time()
 
 
+class _RPCFailed:
+    """Sentinel: every endpoint in the pool failed this call.
+
+    Distinct from ``None``, which is a SUCCESSFUL call whose JSON-RPC result
+    is null (e.g. getTransaction for a pruned signature).  Conflating the two
+    made a single bad endpoint indistinguishable from provider pruning.
+    """
+    __slots__ = ()
+
+
+_RPC_FAILED = _RPCFailed()
+
+
 async def _rpc_call(session: aiohttp.ClientSession, pool: _EndpointPool,
-                    method: str, params: list) -> Optional[dict]:
-    ep, wait = pool.next()
-    if wait > 0:
-        await asyncio.sleep(wait)
+                    method: str, params: list):
+    """POST one JSON-RPC method, failing over across the endpoint pool.
+
+    Every endpoint is tried at most once per call; the first usable answer
+    wins.  Returns ``_RPC_FAILED`` only when ALL of them fail (transport
+    error, HTTP status, or JSON-RPC error object).
+
+    Why this matters (Sep-18 regression, fixed 2026-11-18): the historical
+    walk below needs a page 2 for any token younger than the lookback, and a
+    round-robin pool put that second page on a permanently-403ing host.  One
+    dead leg therefore dropped every scan as "incomplete" — zero chain
+    candles persisted from 2026-09-16 until this fix, in live and backtest
+    alike.
+    """
     payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-    try:
-        async with session.post(ep, json=payload,
-                                timeout=aiohttp.ClientTimeout(total=_TX_TIMEOUT)) as r:
+    for _ in range(max(1, len(pool.endpoints))):
+        ep, wait = pool.next()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        try:
+            async with session.post(
+                    ep, json=payload,
+                    timeout=aiohttp.ClientTimeout(total=_TX_TIMEOUT)) as r:
+                pool.mark(ep)
+                if r.status == 429:
+                    await asyncio.sleep(1.0)
+                    continue
+                r.raise_for_status()
+                data = await r.json(content_type=None)
+                if "error" in data:
+                    continue
+                return data.get("result")
+        except Exception:
             pool.mark(ep)
-            if r.status == 429:
-                await asyncio.sleep(1.0)
-                return None
-            r.raise_for_status()
-            data = await r.json(content_type=None)
-            if "error" in data:
-                return None
-            return data.get("result")
-    except Exception:
-        pool.mark(ep)
-        return None
+            continue
+    return _RPC_FAILED
 
 
 def _parse_swap_tx(tx: dict, curve_pda: str) -> Optional[dict]:
@@ -335,11 +375,18 @@ async def _fetch_account_history(session: aiohttp.ClientSession,
     present-day volume cannot crowd out the historical window.
 
     Returns (trades, complete).  ``complete`` is False whenever the window's
-    coverage could not be PROVEN — page/time budget tripped, more in-window
-    transactions than ``max_sigs``, an entry with unknown blockTime, a
-    repeated cursor, or a page call failing mid-walk.  Callers then treat the
-    account as "no data this run" rather than persisting an ambiguous partial
-    window. Failed calls (None) differ from successful empty pages ([]).
+    coverage could not be PROVEN — page/time budget tripped, an entry with
+    unknown blockTime, a repeated cursor, or a page call failing mid-walk.
+    Callers then treat the account as "no data this run" rather than
+    persisting an ambiguous partial window. Failed calls (None) differ from
+    successful empty pages ([]).
+
+    A busy account yields more in-window signatures than ``max_sigs``.  The
+    walk is newest-first, so collection STOPS at the cap and keeps the newest
+    ``max_sigs`` — the exact slice the calibration consumes (most recent
+    <= ``MAX_MINT_CANDLES`` seconds before the cutoff).  Discarding the whole
+    account instead (pre-fix) made the layer yield nothing for every actively
+    traded token: a fresh pump.fun mint prints ~3,400 sigs in 8 minutes.
     Provider pruning can make an exhausted-looking walk incomplete; that
     cannot be detected from these responses.
     """
@@ -350,6 +397,7 @@ async def _fetch_account_history(session: aiohttp.ClientSession,
     seen: set[str] = set()
     cursors: set[str] = set()
     complete = False
+    truncated = False
     before_sig: Optional[str] = None
     pages = 0
 
@@ -370,7 +418,9 @@ async def _fetch_account_history(session: aiohttp.ClientSession,
             query["before"] = before_sig
         page = await call("getSignaturesForAddress", [account, query])
         if not isinstance(page, list):
-            break  # None is a failure, not an empty successful page.
+            # Timeout (None) or an all-endpoints failure (_RPC_FAILED) is a
+            # failure, not an empty successful page.
+            break
         if not page:
             complete = True  # provider exhausted (pruning remains possible)
             break
@@ -381,10 +431,14 @@ async def _fetch_account_history(session: aiohttp.ClientSession,
             if bt is None or not sig:
                 return [], False  # unknown time could hide an in-window swap
             if sig not in seen and s.get("err") is None and lower <= bt < upper_eff:
+                if len(sigs) >= max_sigs:
+                    truncated = True  # keep the newest max_sigs, stop walking
+                    break
                 sigs.append(sig)
-                if len(sigs) > max_sigs:
-                    return [], False
             seen.add(sig)
+        if truncated:
+            complete = True
+            break
         if page[-1]["blockTime"] < lower:
             complete = True
             break
@@ -401,32 +455,48 @@ async def _fetch_account_history(session: aiohttp.ClientSession,
 
     sem = asyncio.Semaphore(_FETCH_CONCURRENCY)
     results: list[Optional[dict]] = [None] * len(sigs)
-    budget_exhausted = False
+    missing = 0
 
     async def grab(i: int, sig: str):
-        nonlocal budget_exhausted
+        nonlocal missing
         async with sem:
             if time.time() - t0 > timeout_s:
-                budget_exhausted = True
+                missing += 1
                 return
             res = await call(
                 "getTransaction",
                 [sig, {"encoding": "jsonParsed",
-                       "maxSupportedTransactionVersion": 0,
+                       # pump.fun swaps are version-1 txs now; a 0 ceiling makes
+                       # the RPC reject them (-32015 "Transaction version (1)
+                       # is not supported") and the scan fail closed.  1 is a
+                       # MAXIMUM, so v0 transactions still parse identically.
+                       "maxSupportedTransactionVersion": 1,
                        "commitment": "finalized"}],
             )
-            if not res or res.get("blockTime") is None:
-                budget_exhausted = True
+            if res is _RPC_FAILED or not res or res.get("blockTime") is None:
+                missing += 1
                 return
             if lower <= res["blockTime"] < upper_eff:
                 results[i] = parse_fn(res)
 
     await asyncio.gather(*(grab(i, s) for i, s in enumerate(sigs)))
-    if budget_exhausted:
-        return [], False
+    # Public endpoints serve ~3-8 getTransaction/s, so a busy account can hit
+    # the wall-clock budget before all of `sigs` is read, and a few reads may
+    # be pruned.  Keep the trades we actually parsed (missing seconds are
+    # never filled — the same contract the DB already documents) instead of
+    # discarding the whole account: dropping everything on one failed read is
+    # what kept this layer at zero candles.  Only a surface with NO usable
+    # trade is reported as a failure.
+    if missing:
+        logger.info("[MintChain] %s: %d/%d transactions unfetched (budget or "
+                    "pruning) — keeping %d parsed trades",
+                    label, missing, len(sigs),
+                    sum(1 for r in results if r))
     # RPC signatures are newest-first; reverse before stable candle sorting
     # so within-second open/close follow provider order, not HTTP completion.
     trades = [t for t in reversed(results) if t]
+    if sigs and not trades:
+        return [], False  # nothing usable — do not claim this surface
     # Trades carry raw blockTime; keep only complete, in-window seconds.
     return _within_bounds(trades, lower, upper_eff), True
 
@@ -468,50 +538,66 @@ async def fetch_mint_history(mint: str, max_sigs: int = _MAX_SIGS,
 
     try:
         async with aiohttp.ClientSession() as session:
-            trades: list[dict] = []
-
-            # 1. bonding-curve history (pre-graduation)
-            curve_trades, curve_complete = await _fetch_account_history(
-                session, rpc_pool, curve_pda,
-                lambda res: _parse_swap_tx(res, curve_pda),
-                max_sigs, t0, timeout_s, "curve", before_unix, lookback_seconds,
-            )
-            if curve_complete:
-                trades += curve_trades
-            else:
-                logger.warning(
-                    f"[MintChain] {mint[:8]}… curve scan incomplete "
-                    f"(budget/time) — dropping surface"
-                )
-
-            # 2. PumpSwap pool history (post-graduation) — resolved via
-            #    DexScreener (the repo's proven lookup); WSOL-quoted only.
-            #    DexScreener returns the CURRENT pair snapshot; a pool it
-            #    no longer lists can't be scanned this run — acceptable
-            #    under the documented coverage caveats.
+            # Resolve the PumpSwap pool FIRST (one cheap DexScreener call):
+            # on a graduated token the pool is where the trades are, and
+            # resolving it after the curve scan burned the budget meant it
+            # was never even attempted ("pool resolution failed: " with an
+            # empty message = the remaining-budget check).
+            pair = None
             try:
                 from pumpfun_client import get_ds_pair_by_mint
-                remaining = timeout_s - (time.time() - t0)
-                if remaining <= 0:
-                    raise asyncio.TimeoutError
                 pair = await asyncio.wait_for(
-                    get_ds_pair_by_mint(session, mint), remaining)
-                if (pair and pair.get("pairAddress")
+                    get_ds_pair_by_mint(session, mint),
+                    max(1.0, min(10.0, timeout_s * 0.1)))
+                if not (pair and pair.get("pairAddress")
                         and pair.get("quoteToken", {}).get("address") == _WSOL_MINT):
-                    pool_trades, pool_complete = await _fetch_account_history(
-                        session, rpc_pool, pair["pairAddress"],
-                        lambda res: _parse_pool_swap_tx(res, mint),
-                        max_sigs, t0, timeout_s, "pool", before_unix, lookback_seconds,
-                    )
-                    if pool_complete:
-                        trades += pool_trades
-                    else:
-                        logger.warning(
-                            f"[MintChain] {mint[:8]}… pool scan incomplete "
-                            f"(budget/time) — dropping surface"
-                        )
+                    if pair and pair.get("pairAddress"):
+                        quote = (pair.get("quoteToken") or {}).get("symbol", "?")
+                        logger.info(f"[MintChain] {mint[:8]}… pool skipped: "
+                                    f"{quote}-quoted pair (WSOL only)")
+                    pair = None
             except Exception as e:
-                logger.info(f"[MintChain] pool resolution failed for {mint[:8]}…: {e}")
+                logger.info(f"[MintChain] pool resolution failed for "
+                            f"{mint[:8]}…: {type(e).__name__}")
+
+            # Both surfaces run CONCURRENTLY against the shared budget.  They
+            # are disjoint in time (curve = pre-graduation, pool = post), and
+            # serialising them let whichever ran first consume the whole
+            # wall-clock allowance — the second surface then contributed
+            # nothing on exactly the tokens that needed it.
+            async def surface(account: str, parse, label: str):
+                try:
+                    return await _fetch_account_history(
+                        session, rpc_pool, account, parse,
+                        max_sigs, t0, timeout_s, label,
+                        before_unix, lookback_seconds,
+                    )
+                except Exception as e:
+                    logger.warning(f"[MintChain] {label} scan error for "
+                                   f"{mint[:8]}…: {type(e).__name__}: {e}")
+                    return [], False
+
+            tasks = [surface(curve_pda,
+                             lambda res: _parse_swap_tx(res, curve_pda),
+                             "curve")]
+            if pair:
+                # DexScreener returns the CURRENT pair snapshot; a pool it no
+                # longer lists can't be scanned — documented coverage caveat.
+                tasks.append(surface(pair["pairAddress"],
+                                     lambda res: _parse_pool_swap_tx(res, mint),
+                                     "pool"))
+
+            trades: list[dict] = []
+            for label, (surface_trades, ok) in zip(
+                    ["curve"] + (["pool"] if pair else []),
+                    await asyncio.gather(*tasks)):
+                if ok:
+                    trades += surface_trades
+                else:
+                    logger.warning(
+                        f"[MintChain] {mint[:8]}… {label} scan incomplete "
+                        f"(budget/time) — dropping surface"
+                    )
 
         candles = _within_bounds(_candles_from_trades(trades), lower, upper)
         logger.info(f"[MintChain] {mint[:8]}… fetched → {len(trades)} swaps → "
@@ -541,6 +627,11 @@ async def fetch_and_persist(mint: str, max_sigs: int = _MAX_SIGS,
     """
     lower, upper = _history_bounds(before_unix, lookback_seconds)
     if lower >= upper:
+        return 0
+    if upper < time.time() - _RETENTION_SECONDS:
+        logger.info(f"[MintChain] {mint[:8]}… cutoff is "
+                    f"{(time.time() - upper) / 86400:.1f}d old — past provider "
+                    f"retention, skipping chain fetch")
         return 0
     candles = await fetch_mint_history(mint, max_sigs=max_sigs,
                                        timeout_s=timeout_s,

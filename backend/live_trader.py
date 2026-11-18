@@ -1687,7 +1687,7 @@ class LiveTrader:
             "method": "getTransaction",
             "params": [
                 sig,
-                {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0},
+                {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 1},
             ],
         }
         try:
@@ -2815,7 +2815,10 @@ class LiveTrader:
             "params": [
                 sig,
                 {"encoding": "jsonParsed",
-                 "maxSupportedTransactionVersion": 0,
+                 # 1 is a MAXIMUM: v0 txs still parse, and pump.fun's version-1
+                 # swaps stop being rejected with -32015 (which surfaced as
+                 # "Balance unreadable and TX parse empty" on live fills).
+                 "maxSupportedTransactionVersion": 1,
                  "commitment": "confirmed"},
             ],
         }
