@@ -126,8 +126,15 @@ class TestComputeRecStats:
         )
         stats = _compute_rec_stats(candles, 300.0)
         assert stats is not None
-        # phi_series = 0/1e-9 → 0 everywhere → sigma_phi from diff = 0 → fine
-        assert stats["sigma_phi"] == 0.0
+        # No buy/sell split ⇒ phi ≡ 0 for every candle ⇒ the flow layer is
+        # UNOBSERVABLE (not "instantaneously mean-reverting").  Iterating this
+        # as 0.0 yielded alpha = -ln(1e-6)/10 = 1.3816 (the maximum) and
+        # sigma_phi = 0.0, which poisoned the population medians on any corpus
+        # where a large share of tapes came off the vault-diff feed
+        # (unseen 2026-11: 37.7% of tapes).
+        for key in ("alpha", "sigma_phi", "kappa_mu", "beta"):
+            assert stats[key] is None
+        assert all(math.isfinite(v) for v in stats.values() if v is not None)
 
     def test_zero_pool_sol_excludes_liquidity(self):
         closes = 100.0 * np.exp(np.cumsum(np.random.default_rng(2).normal(0, 0.02, 300)))

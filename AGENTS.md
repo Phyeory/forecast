@@ -136,6 +136,17 @@ graph TD
 - **`signal_capture.py` / `autofeed.py` / `newpairs*.py` / `process_watchdog.py`** — live
   signal capture (`data/live_logs/<session>/signals.jsonl`), server-side session auto-open,
   newborn recorder (separate DB, default OFF), orphan protection.
+- **`organic_gate.py`** — per-wallet bundle/inorganic evidence for AutoFeed (iter105,
+  2026-11-18). One `token_top_holders` call per candidate → pure-function rules over the
+  holder rows (supply share, launch-window buys, common funder+time clusters, pre-launch
+  wallet cohorts, GMGN bundler/sniper tags, dust/matched-lot/one-terminal tells) plus
+  deployer/social row checks. **Fail-closed**: no holder table ⇒ candidate not fed.
+  `_to_candidate`'s aggregate gates (bundler_rate / bot_degen / entrapment …) remain the
+  cheap first pass but are no longer the decision. Modes: `organic_gate_mode`
+  enforce|shadow|off (`/api/autofeed/config`). Every verdict → `feed_data.db::
+  autofeed_decisions` (audit trail of tokens removed and why; `GET /api/autofeed/decisions`);
+  a blocked candidate never reaches the WS push or the session-spawn path
+  (`main._autofeed_forward` re-checks the cached verdict). 429/timeout ⇒ deferred and retried (≤3×), never fed unverified.
 - **`analysis/`** — paired_diff, aggregate_results, test suite, per-iteration artifacts.
 - **`frontend/`** — vanilla JS + LightweightCharts; `app.js::engineParamsV2` mirrors all knobs.
   Session/trader cards + portfolio show **Model PnL vs Wallet Δ** side by side, labelled
@@ -211,7 +222,9 @@ post-iter72 ~full.
 - `test_live_parity.py` (parity gate), `test_exit_delay_hold_reset.py`,
   `test_signal_capture.py`, `test_client_fd_leak.py`,
   `test_pool_virtual_reserves.py` (iter94 effective-basis gate),
-  `test_display_truth.py` (iter95 wallet-Δ gate), `test_first_buy_rent_preflight.py`.
+  `test_display_truth.py` (iter95 wallet-Δ gate), `test_first_buy_rent_preflight.py`,
+  `test_autofeed_gates.py` + `test_organic_gate.py` (iter105 feed quality: fail-closed
+  row gates, per-wallet bundle evidence, gate→forward wiring; no network).
   Standard run = command block above. Rot note (verified 2026-09-27 on pristine tree):
   8 failures in `test_live_chain_parity.py` + `test_real_entry_basis.py` target the
   stashed iter92/93 `buy_wallet_delta_sol` API (never merged) — see iter94/95 in

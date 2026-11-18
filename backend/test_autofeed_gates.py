@@ -257,3 +257,126 @@ def test_snapshot_exposes_shape_fields():
     assert "shape_totals" in snap
     assert "reject_tally_total" in snap
     assert "max_dev_team_hold_rate" in snap
+
+
+# ── organic evidence gate wiring (2026-11-18) ───────────────────────────────
+# The gate runs in the FORWARD phase: a candidate must be verified before the
+# frontend / server-side spawn can open a session for it.
+
+import organic_gate  # noqa: E402
+
+
+class _StubGate:
+    """Deterministic stand-in for OrganicGate (no network)."""
+
+    def __init__(self, verdict, api_key="test"):
+        self._verdict = verdict
+        self.api_key = api_key
+        self.calls = 0
+
+    def set_config(self, _partial):
+        return []
+
+    async def verify(self, cand, row=None):
+        self.calls += 1
+        v = self._verdict
+        v.mint, v.symbol = cand.mint, cand.symbol
+        return v
+
+    def verdict_for(self, mint):
+        return self._verdict
+
+    def snapshot(self):
+        return {"mode": self._verdict.mode}
+
+
+def _feed_with_gate(verdict, mode="enforce"):
+    feed = make_feed(organic_gate_mode=mode)
+    feed.gate = _StubGate(verdict)
+    fed: list[str] = []
+
+    async def forward(cand):
+        fed.append(cand.mint)
+
+    feed._forward_fn = forward
+    feed._persist_decision = lambda cand, res: None      # keep tests off-disk
+    return feed, fed
+
+
+def _rows(n=3, **over):
+    return [_row(address="Mint" + "q" * 30 + str(i), **over) for i in range(n)]
+
+
+def test_gate_reject_prevents_forward():
+    v = organic_gate.GateResult(passed=False, reasons=["single_holder_concentration"])
+    feed, fed = _feed_with_gate(v)
+    asyncio.run(feed._process_rows(_rows(1)))
+    assert fed == []
+    assert feed.total_gate_rejected == 1
+
+
+def test_gate_pass_forwards_and_tags_reason():
+    v = organic_gate.GateResult(passed=True)
+    feed, fed = _feed_with_gate(v)
+    asyncio.run(feed._process_rows(_rows(1)))
+    assert len(fed) == 1
+    cand = next(iter(feed._seen.values()))
+    assert cand.reason == "organic_verified"
+
+
+def test_gate_unverified_defers_and_retries_later():
+    v = organic_gate.GateResult(passed=False, error="rate_limited",
+                                reasons=["unverified_rate_limited"])
+    feed, fed = _feed_with_gate(v)
+    asyncio.run(feed._process_rows(_rows(1)))
+    assert fed == []                       # never fed while unverifiable
+    assert feed.total_gate_deferred == 1
+    assert feed._seen == {}                # dropped from dedup so a later tick retries
+
+
+def test_gate_unverified_gives_up_after_three_retries():
+    v = organic_gate.GateResult(passed=False, error="timeout",
+                                reasons=["unverified_timeout"])
+    feed, fed = _feed_with_gate(v)
+    mint = _rows(1)[0]["address"]
+    for _ in range(4):
+        asyncio.run(feed._process_rows([_row(address=mint)]))
+    assert feed._retry_counts[mint] == 4
+    assert mint in feed._seen              # stops retrying, stays tracked
+    assert fed == []
+
+
+def test_shadow_mode_records_but_forwards():
+    v = organic_gate.GateResult(passed=False, reasons=["top10_concentration"],
+                                mode="shadow")
+    feed, fed = _feed_with_gate(v, mode="shadow")
+    asyncio.run(feed._process_rows(_rows(1)))
+    assert len(fed) == 1                   # shadow never blocks a session
+    assert feed.total_gate_rejected == 0
+
+
+def test_gate_off_skips_verification():
+    feed = make_feed(organic_gate_mode="off")
+    feed.gate = _StubGate(organic_gate.GateResult(passed=False,
+                                                 reasons=["top10_concentration"]))
+    fed: list[str] = []
+
+    async def forward(cand):
+        fed.append(cand.mint)
+
+    async def _noop(_partial):
+        return []
+
+    feed._forward_fn = forward
+    feed.gate.set_config = _noop
+    asyncio.run(feed._process_rows(_rows(1)))
+    assert len(fed) == 1
+    assert feed.gate.calls == 0
+
+
+def test_snapshot_exposes_gate_telemetry():
+    feed = make_feed()
+    snap = feed.snapshot()
+    assert snap["organic_gate_mode"] == "enforce"
+    assert "organic_gate" in snap
+    assert snap["gate_rejected"] == 0 and snap["gate_deferred"] == 0

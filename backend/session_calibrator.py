@@ -261,6 +261,17 @@ def _compute_rec_stats(candles: np.ndarray, duration_s: float) -> Optional[dict]
     # ── kappa_mu: order-flow → drift coupling ─────────────────────────────────
     # Estimate as cov(Δr, Δφ) / var(Δφ), the regression coeff.
     # φ = normalized buy-sell imbalance
+    # ── phi observation: is the buy/sell split actually present? ─────────────
+    # Tapes recorded off the vault-diff feed carry buy_volume = sell_volume = 0
+    # on every candle.  phi is then identically 0, `_safe_lag1_autocorr` returns
+    # 0.0 for a constant series, and the estimators below turn that silence into
+    # the MOST EXTREME values: alpha = -ln(1e-6)/10 = 1.3816 (max reversion),
+    # sigma_phi = 0 (perfect certainty), kappa_mu = 0.05 (8x the true coupling).
+    # A missing column means "unobservable", never "instantaneously
+    # mean-reverting", so drop the flow keys and let _aggregate_population
+    # exclude this recording from those medians instead of fabricating one.
+    flow_observed = bool((buy_vol > 0).any() or (sell_vol > 0).any())
+
     tot_vol = np.maximum(volumes, 1e-9)
     phi_series = (buy_vol - sell_vol) / tot_vol
     if len(phi_series) >= 4:
@@ -417,6 +428,10 @@ def _compute_rec_stats(candles: np.ndarray, duration_s: float) -> Optional[dict]
         "sigma_h":   sigma_h_est,
         "duration_s": duration_s,
     }
+    if not flow_observed:
+        # No buy/sell column on this tape — the flow layer is unobservable.
+        for _k in ("kappa_mu", "sigma_phi", "alpha", "beta"):
+            stats[_k] = None
     # iter90d: VR decision-horizon statistic (cheap; the OVERRIDES application
     # is gated by the caller's tau_vr flag — OFF keeps the legacy formula).
     tau_vr = _tau_vr_from_closes(closes)
@@ -475,6 +490,10 @@ def _population_to_overrides(pop: dict, tau_vr: bool = False,
     legacy lambda_mu inversion (which saturates at its floor on every tape).
     """
     overrides: dict = {}
+    # Unobservable statistics are carried as None (e.g. flow keys on a tape that
+    # has no buy/sell column) — drop them so the coefficient falls back to
+    # DEFAULT_CONFIG instead of raising on a None comparison.
+    pop = {k: v for k, v in pop.items() if v is not None}
 
     def clip(key: str, val: float) -> float:
         lo, hi = _CLIP[key]
@@ -896,8 +915,14 @@ def calibrate_from_mint_history(
     # Keep only the rolling tail (most recent physics), then build the
     # (N, 9) candle array the estimator expects (rec-id column unused here).
     rows = rows[-MAX_MINT_CANDLES:]
+    # Duration drives lambda_0 = 1/duration (KDE decay).  Use the number of
+    # OBSERVED seconds (1 s candles), not the wall-clock span: a token's own
+    # history can be spread over days (span/len ~ 6.7x at the median, p90 span
+    # ~9 days), and span-based duration would floor lambda_0 at 1.157e-05.
+    # iter86 used len(rows); 38c07b9 swapped it for the span at the same time
+    # it capped history to 6000 s — the two only agreed while the cap existed.
     arr = np.array([[0.0] + list(r[1:]) for r in rows], dtype=float)
-    duration_s = float(rows[-1][0] - rows[0][0] + 1)
+    duration_s = float(len(rows))
 
     try:
         stats = _compute_rec_stats(arr, duration_s)

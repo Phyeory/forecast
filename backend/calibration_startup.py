@@ -9,10 +9,29 @@ from session_calibrator import (
     calibrate_from_population,
 )
 
+# Default reach of the mint-history (primary) calibration read.  See
+# calibration_window() for why this is not 6000 s.
+DEFAULT_CALIBRATION_LOOKBACK_SECONDS = 604800.0   # 7 days
+
 
 def calibration_window(started_at: float, params: dict) -> tuple[float, float]:
+    """Return (cutoff, lookback) for the mint-history layer.
+
+    The mint layer is the PRIMARY calibration source (the token calibrating on
+    its own price action); the 50-newest population is the fallback.  The
+    lookback bounds how far back that own-history read may reach.
+
+    38c07b9 (2026-09-18) capped this to 6000 s while fixing the causality
+    guards.  Nothing about causality requires it — the token's own PAST can
+    never leak — and the cap silently starved the layer: of the original-DB
+    tapes that have >=120 candles of their own history (28.5%, the coverage
+    iter86 measured when it delivered WR 63.8 -> 76.8%), only 38% survived the
+    100-minute window.  Default restored to 7 days; the chain-fetch path stays
+    bounded by its own max_sigs/timeout, and the RPC only retains ~2 days.
+    """
     lag = float(params.get('v2_calibration_history_lag_seconds', 0.0))
-    lookback = float(params.get('v2_calibration_history_seconds', 6000.0))
+    lookback = float(params.get('v2_calibration_history_seconds',
+                                DEFAULT_CALIBRATION_LOOKBACK_SECONDS))
     if not math.isfinite(started_at) or started_at <= 0:
         raise ValueError('calibration start must be a positive timestamp')
     if not math.isfinite(lag) or lag < 0 or not math.isfinite(lookback) or lookback <= 0:

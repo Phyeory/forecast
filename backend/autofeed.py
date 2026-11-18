@@ -52,11 +52,13 @@ import asyncio
 import json
 import logging
 import os
+import sqlite3
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional, Callable, Awaitable, Iterable
 
+import organic_gate
 import rate_limiter as rl
 
 logger = logging.getLogger("autofeed")
@@ -169,18 +171,24 @@ DEFAULT_MIN_VOLUME_USD            = 25_000.0
 # Trending activity gate — require minimum swaps in the interval for real motion.
 DEFAULT_MIN_SWAPS                 = 900
 DEFAULT_ORDER_BY                  = "volume"     # rank by motion (highest traded volume first)
-DEFAULT_MAX_TOP10_HOLDER_RATE     = 0.50         # GMGN skip-tier (0-1)
-DEFAULT_MAX_RUG_RATIO            = 0.30         # GMGN skip-tier (0-1)
-DEFAULT_MAX_BUNDLER_RATE         = 0.30         # bundle-bot trading ratio (0-1) [OP: "non-bundled"]
-DEFAULT_MAX_INSIDER_RATE          = 0.50         # insider / sneak trading volume ratio (0-1)
-DEFAULT_MAX_RAT_TRADER_RATE       = 0.50
-DEFAULT_MAX_ENTRAPMENT_RATIO      = 0.50
+# Aggregate risk gates (GMGN's own numbers).  Tightened 2026-11-18 to the
+# values experienced trench traders actually use: the old 0.50/0.80 ceilings
+# admitted tokens whose volume was overwhelmingly bot/insider driven, which is
+# the "inorganic" class this feed is supposed to exclude.  These remain the
+# CHEAP first pass; the per-wallet evidence gate (`organic_gate.py`) is what
+# decides on supply ownership.
+DEFAULT_MAX_TOP10_HOLDER_RATE     = 0.40         # GMGN skip-tier (0-1)
+DEFAULT_MAX_RUG_RATIO            = 0.28         # GMGN skip-tier (0-1)
+DEFAULT_MAX_BUNDLER_RATE         = 0.18         # bundle-bot trading ratio (0-1) [OP: "non-bundled"]
+DEFAULT_MAX_INSIDER_RATE          = 0.40         # insider / sneak trading volume ratio (0-1)
+DEFAULT_MAX_RAT_TRADER_RATE       = 0.30
+DEFAULT_MAX_ENTRAPMENT_RATIO      = 0.35
 # Organic-only booleans: ALL must be False / renounced.
 DEFAULT_REQUIRE_RENOUNCED_MINT        = True
 DEFAULT_REQUIRE_RENOUNCED_FREEZE      = True
 DEFAULT_REJECT_WASH_TRADING           = True
 DEFAULT_REJECT_HONEYPOT               = True
-DEFAULT_MAX_BOT_DEGEN_RATE        = 0.80
+DEFAULT_MAX_BOT_DEGEN_RATE        = 0.45
 DEFAULT_REQUIRE_HAS_SOCIAL        = False        # too strict on Pump.fun — many clean tokens lack social
 DEFAULT_MAX_CREATED_AGE           = ""           # no age cap by default (PumpSwap tokens can be days old)
 # OP: only pump.fun migrated coins. gmgn-cli's `--platform` filters by the
@@ -255,6 +263,10 @@ class Candidate:
     telegram:              str = ""
     website:               str = ""
     reason:                str = "gmgn_organic"
+    # Organic evidence gate verdict (2026-11-18) — set on the way out so the
+    # dashboard can show WHY a candidate was admitted, not just that it was.
+    gate_summary:          str = ""
+    gate_metrics:          dict = field(default_factory=dict)
     first_seen:            float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
@@ -283,6 +295,48 @@ class AutofeedConfig:
     order_by:               str = DEFAULT_ORDER_BY               # server-side ranking key
     require_migration_exchange: bool = DEFAULT_REQUIRE_MIGRATION_EXCHANGE
     migration_exchanges:    str = DEFAULT_MIGRATION_EXCHANGES    # comma-separated exchange allow-list
+    # ── Per-wallet organic evidence gate (organic_gate.py, 2026-11-18) ──
+    # One GMGN holder-table request per candidate; FAIL-CLOSED (a candidate
+    # whose holder table cannot be fetched is not forwarded).
+    #   enforce — reject unless the wallet evidence is clean (default)
+    #   shadow  — compute + record verdict, still forward (tuning / rollout)
+    #   off     — aggregate gates only (pre-2026-11-18 behaviour)
+    organic_gate_mode:            str = "enforce"
+    organic_enabled:              bool = True
+    organic_max_single_holder_pct: float = 0.10
+    organic_max_top10_holder_pct:  float = 0.35
+    organic_max_dev_hold_pct:      float = 0.03
+    organic_max_dev_team_hold_pct: float = 0.08
+    organic_max_top70_sniper_hold_pct: float = 0.08
+    organic_launch_window_seconds: float = 120.0
+    organic_max_launch_bundle_pct: float = 0.20
+    organic_max_launch_single_pct: float = 0.05
+    organic_max_funder_cluster_n:  int = 4
+    organic_funding_window_hours:  float = 24.0
+    organic_max_funder_cluster_pct: float = 0.12
+    organic_fresh_wallet_days:     float = 3.0
+    organic_max_created_cohort_n:  int = 4
+    organic_max_created_cohort_pct: float = 0.10
+    organic_max_fresh_tag_pct:     float = 0.35
+    organic_max_bundler_tag_pct:   float = 0.25
+    organic_max_sniper_holder_pct: float = 0.30
+    organic_min_median_top10_sol:  float = 0.02
+    organic_max_matched_lot_pairs: int = 6
+    organic_max_terminal_dominance: int = 9
+    organic_max_creator_created_count: int = 3
+    # Optional (None = off): GMGN's copycat counts also fire on the *original*
+    # of a copied meme, so these only gate when a threshold is set explicitly.
+    organic_max_twitter_create_token_count: Optional[int] = None
+    organic_max_image_dup:         Optional[int] = None
+    organic_max_website_dup:       Optional[int] = None
+    organic_max_ath_drawdown_pct:  float = 0.75
+    organic_reject_dev_holding:    bool = True
+    organic_reject_unburned_lp:    bool = True
+    organic_reject_cto:            bool = False
+    organic_soft_reject_score:     int = 3
+    organic_holder_rows:           int = 100
+    organic_cache_seconds:         float = 900.0
+    organic_max_fetch_per_tick:    int = 6
     max_top10_holder_rate:  float = DEFAULT_MAX_TOP10_HOLDER_RATE
     max_rug_ratio:          float = DEFAULT_MAX_RUG_RATIO
     max_bundler_rate:       float = DEFAULT_MAX_BUNDLER_RATE
@@ -358,6 +412,24 @@ class AutoFeed:
         self._shape_report: dict = {}
         self._shape_totals: dict = {"raw_rows": 0, "rows_missing_required": 0}
         self._reject_tally_total: dict = {}
+        # Per-wallet organic evidence gate (2026-11-18).  Built here so tests
+        # can inject a fake via `feed.gate = ...`; api_key is read live so a
+        # `.env` loaded after construction still works.
+        self.gate = organic_gate.OrganicGate(
+            organic_gate.build_config(self.config),
+            api_key=os.environ.get("GMGN_API_KEY", ""),
+        )
+        # Deferred candidates (holder table temporarily unverifiable: 429,
+        # timeout) are retried on later ticks instead of being lost for the
+        # rest of the polling session.
+        self._retry_counts: dict[str, int] = {}
+        # Raw GMGN rows for accepted candidates — the organic gate's row-level
+        # checks (deployer / social hygiene) read them; pruned in _process_rows.
+        self._raw_by_mint: dict[str, dict] = {}
+        self.total_gate_rejected: int = 0
+        self.total_gate_deferred: int = 0
+        self._decision_db: Optional[sqlite3.Connection] = None
+        self._decision_db_failed: bool = False
 
     # -- lifecycle ────────────────────────────────────────────────────────────
     def start(self, forward_fn=None, active_count_fn=None):
@@ -371,6 +443,13 @@ class AutoFeed:
             return False
 
         self._stop_evt.clear()
+        mode = str(self.config.organic_gate_mode or "enforce").lower()
+        if mode == "enforce" and self.config.organic_enabled and not self.gate.api_key:
+            logger.warning(
+                "[AutoFeed] organic gate is ON but GMGN_API_KEY is not in the "
+                "environment — every candidate will be rejected as unverifiable "
+                "(fail-closed). Fix the key or set organic_gate_mode=off."
+            )
         self._task = asyncio.ensure_future(self._loop())
         logger.info(
             f"[AutoFeed] Started  interval={self.config.interval} "
@@ -391,6 +470,12 @@ class AutoFeed:
             except Exception:
                 pass
         self._task = None
+        if self._decision_db is not None:
+            try:
+                self._decision_db.close()
+            except Exception:
+                pass
+            self._decision_db = None
         logger.info("[AutoFeed] Stopped")
 
     def is_running(self) -> bool:
@@ -405,6 +490,10 @@ class AutoFeed:
                 if old != v:
                     setattr(self.config, k, v)
                     changed.append(k)
+        # Push any organic-gate knobs straight through so a dashboard edit takes
+        # effect on the next poll (no restart, no stale threshold).
+        if any(k.startswith("organic_") for k in changed) or "enabled" in changed:
+            self.gate.set_config(organic_gate.build_config(self.config).__dict__)
         return changed
 
     # ── Market-condition auto-tune ──────────────────────────────────────────
@@ -1085,6 +1174,7 @@ class AutoFeed:
                 continue
             cand.first_seen = time.time()
             self._seen[cand.mint] = cand
+            self._raw_by_mint[cand.mint] = row
             self.total_seen += 1
             new_count += 1
             new_cands.append(cand)
@@ -1147,6 +1237,30 @@ class AutoFeed:
                 break
             if self._forward_fn is None:
                 continue
+
+            # ── Per-wallet organic evidence gate (2026-11-18) ──
+            # Runs BEFORE the forward/auto-spawn so a bundled or unverifiable
+            # launch never opens a session in the first place (the previous
+            # behaviour was to feed first and let the tape get quarantined
+            # later — those sessions had already traded).
+            verdict = await self._verify_candidate(cand)
+            if verdict.error:
+                self.total_gate_deferred += 1
+                n = self._retry_counts.get(cand.mint, 0) + 1
+                self._retry_counts[cand.mint] = n
+                if n <= 3 and self._retryable(verdict.error):
+                    # Retry on a later tick instead of losing the candidate
+                    # for the whole session (e.g. a 429 ban window).
+                    self._seen.pop(cand.mint, None)
+                continue
+            if not verdict.passed and verdict.mode == "enforce":
+                self.total_gate_rejected += 1
+                logger.info(
+                    f"[AutoFeed] GATE BLOCK ${cand.symbol} mint={cand.mint[:8]}… "
+                    f"reasons={verdict.reasons[:5]}"
+                )
+                continue
+
             try:
                 await self._forward_fn(cand)
                 self.total_fed += 1
@@ -1155,7 +1269,8 @@ class AutoFeed:
                     f"[AutoFeed] FED  ${cand.symbol}  mint={cand.mint[:8]}… "
                     f"mcap=${cand.market_cap:.0f} liq=${cand.liquidity:.0f} "
                     f"smart={cand.smart_degen_count} rug={cand.rug_ratio:.2f} "
-                    f"bundler={cand.bundler_rate:.2f} insider={cand.insider_rate:.2f}"
+                    f"bundler={cand.bundler_rate:.2f} insider={cand.insider_rate:.2f} "
+                    f"gate={verdict.summary(3)}"
                 )
                 active += 1
             except Exception as e:
@@ -1164,6 +1279,124 @@ class AutoFeed:
         # Drop stale tracked candidates from `_seen` cache
         if len(self._seen) > 200:
             self._seen = {k: v for k, v in self._seen.items() if v.age_minutes < 60}
+        if len(self._retry_counts) > 300:
+            self._retry_counts = dict(list(self._retry_counts.items())[-150:])
+        if len(self._raw_by_mint) > 300:
+            self._raw_by_mint = dict(list(self._raw_by_mint.items())[-150:])
+
+    # ── Organic evidence gate (per-wallet) ───────────────────────────────────
+
+    @staticmethod
+    def _retryable(err: str) -> bool:
+        """Fetch failures that a later tick can plausibly resolve."""
+        return (err in ("rate_limited", "timeout", "fetch_budget_exhausted",
+                        "empty_holders")
+                or err.startswith("network_")
+                or err.startswith("http_5"))
+
+    async def _verify_candidate(self, cand: Candidate) -> organic_gate.GateResult:
+        """Run the per-wallet organic gate on one candidate + record the verdict.
+
+        Fail-closed by contract: a fetch failure returns a verdict with
+        `error` set, which the caller treats as not-feedable.  In `shadow` mode
+        the verdict is still recorded but never blocks.
+        """
+        mode = str(self.config.organic_gate_mode or "enforce").lower()
+        if mode not in ("enforce", "shadow", "off"):
+            # An unknown mode must never silently disable the block: fail safe.
+            logger.warning(f"[AutoFeed] unknown organic_gate_mode={mode!r} — using 'enforce'")
+            mode = "enforce"
+        if mode == "off" or not self.config.organic_enabled:
+            res = organic_gate.GateResult(passed=True, mode="off", mint=cand.mint,
+                                          symbol=cand.symbol)
+            cand.reason = "organic_gate_off"
+            return res
+
+        # Keep the gate's own config in sync with the hot-swappable settings.
+        self.gate.set_config(organic_gate.build_config(self.config).__dict__)
+        if not self.gate.api_key:
+            self.gate.api_key = os.environ.get("GMGN_API_KEY", "")
+
+        try:
+            res = await self.gate.verify(cand, self._raw_by_mint.get(cand.mint))
+        except Exception as e:                     # never let the gate kill a tick
+            logger.error(f"[AutoFeed] organic gate error: {e}", exc_info=True)
+            res = organic_gate.GateResult(
+                passed=False, mode=mode, mint=cand.mint, symbol=cand.symbol,
+                error=f"gate_exception_{type(e).__name__}",
+                reasons=["unverified_gate_exception"],
+            )
+
+        cand.reason = ("organic_verified" if (res.passed and not res.error)
+                       else (f"organic_unverified:{res.error}" if res.error
+                             else "organic_gate_reject:" + ",".join(res.reasons[:4])))
+        if res.passed and not res.error:
+            m = res.metrics or {}
+            cand.gate_summary = (
+                f"single {100 * (m.get('max_single_pct') or 0):.1f}% · "
+                f"top10 {100 * (m.get('top10_pct') or 0):.0f}% · "
+                f"launch {100 * (m.get('launch_bundle_pct') or 0):.1f}% · "
+                f"bundler {100 * (m.get('bundler_tag_pct') or 0):.1f}%"
+            )
+            cand.gate_metrics = {
+                k: m.get(k) for k in
+                ("max_single_pct", "top10_pct", "launch_bundle_pct",
+                 "bundler_tag_pct", "fresh_tag_pct", "funder_cluster_n",
+                 "created_cohort_n", "median_top10_sol")
+            }
+        self._persist_decision(cand, res)
+        return res
+
+    # ── Decision journal ─────────────────────────────────────────────────────
+
+    def _decision_conn(self) -> Optional[sqlite3.Connection]:
+        """Lazy sqlite handle for the decision journal (fail-soft)."""
+        if self._decision_db is not None or self._decision_db_failed:
+            return self._decision_db
+        try:
+            db = Path(__file__).resolve().parent / "data" / "feed_data.db"
+            db.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(str(db), timeout=10.0)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS autofeed_decisions (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts          REAL NOT NULL,
+                    mint        TEXT NOT NULL,
+                    symbol      TEXT DEFAULT '',
+                    verdict     TEXT NOT NULL,      -- pass | reject | unverified
+                    mode        TEXT DEFAULT '',
+                    reasons     TEXT DEFAULT '',
+                    metrics_json TEXT DEFAULT '{}',
+                    error       TEXT DEFAULT ''
+                )""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_afd_ts "
+                         "ON autofeed_decisions(ts)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_afd_mint "
+                         "ON autofeed_decisions(mint)")
+            conn.commit()
+            self._decision_db = conn
+        except Exception as e:
+            logger.warning(f"[AutoFeed] decision journal unavailable: {e}")
+            self._decision_db_failed = True
+        return self._decision_db
+
+    def _persist_decision(self, cand: Candidate, res: organic_gate.GateResult) -> None:
+        """Append one gate verdict so every removed token stays auditable."""
+        conn = self._decision_conn()
+        if conn is None:
+            return
+        verdict = "unverified" if res.error else ("pass" if res.passed else "reject")
+        try:
+            conn.execute(
+                "INSERT INTO autofeed_decisions "
+                "(ts, mint, symbol, verdict, mode, reasons, metrics_json, error) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (time.time(), cand.mint, cand.symbol, verdict, res.mode,
+                 ",".join(res.reasons), json.dumps(res.metrics), res.error),
+            )
+            conn.commit()
+        except Exception as e:
+            logger.debug(f"[AutoFeed] decision journal write failed: {e}")
 
     # ── Snapshot (REST/WS UI) ────────────────────────────────────────────────
 
@@ -1228,4 +1461,9 @@ class AutoFeed:
             "last_shape_report": self._shape_report,
             "shape_totals": dict(self._shape_totals),
             "reject_tally_total": dict(self._reject_tally_total),
+            # Per-wallet organic evidence gate (2026-11-18)
+            "organic_gate_mode": self.config.organic_gate_mode,
+            "organic_gate": self.gate.snapshot(),
+            "gate_rejected": self.total_gate_rejected,
+            "gate_deferred": self.total_gate_deferred,
         }

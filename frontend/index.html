@@ -455,6 +455,20 @@
             <div class="af-tune-gates" id="af-tune-gates">—</div>
           </div>
 
+          <!-- Per-wallet organic evidence gate (bundle detection) -->
+          <div class="af-tune" id="af-gate-strip">
+            <div class="af-tune-head">
+              <span class="af-tune-label">🛡 Organic Gate</span>
+              <select id="af-gate-mode" class="form-input" style="max-width:140px;padding:2px 6px;font-size:11px">
+                <option value="enforce">Enforce</option>
+                <option value="shadow">Shadow</option>
+                <option value="off">Off</option>
+              </select>
+            </div>
+            <div class="af-tune-conds" id="af-gate-stats">— no candidates verified yet —</div>
+            <div class="af-tune-gates" id="af-gate-last">wallet-level bundle evidence · fail-closed</div>
+          </div>
+
           <!-- Settings -->
           <div class="af-settings" id="af-settings" style="display:none">
             <h4 class="af-subhead">Discovery Filters</h4>

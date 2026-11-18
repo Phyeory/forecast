@@ -32,6 +32,47 @@ Authoritative: `backend/strategy_engineV2.py::DEFAULT_CONFIG` (+ `app.js::engine
 
 ---
 
+## Feed quality — per-wallet organic gate (iter105, 2026-11-18)
+
+Problem: the AutoFeed admitted "inorganic" launches. `_to_candidate` gated on GMGN's
+*aggregate* numbers (bundler_rate / rug_ratio / bot_degen …); those are vendor scores the
+launch tools are built to game, and iter102 already showed the strict bundler cohort had no
+selection effect (Δ −0.005 SOL, p=0.96). Live probe 2026-11-18 confirmed it directly: of 9
+candidates passing the aggregate gates, GMGN reported `bundler_rate` 0.00–0.30 while the
+holder table showed launch-window wallets (first buy ≤120 s after creation) holding 3–52% of
+supply and single wallets 3–19%.
+
+Mechanism finalized: `backend/organic_gate.py` — one `token_top_holders` call per candidate,
+then pure-function evidence rules over the per-wallet rows (`amount_percentage`,
+`native_balance`, `created_at`, `start_holding_at`, `native_transfer.{from_address,timestamp}`,
+`maker_token_tags`, `tags`). Rules = the manual checklist experienced traders actually run
+(Setuh "Memecoin Blueprint Day 2: Bundles" — distribution, identical lot sizes, SOL balances,
+common funder + funding time, single-terminal dominance, fresh-wallet cohorts; Day 3 —
+pre-launch whale wallets, relaunch/OG check; r/CryptoTrenching — dust-balanced top holders,
+staircase re-bundle chart; r/solana — JITO bundle = liquidity tx + dev buys, supply diluted
+across wallets so the top-holder number looks clean). Fail-closed: no holder table ⇒ not fed.
+
+| Rule | Default | Basis |
+|---|---|---|
+| single non-LP holder | ≤10% | Setuh's 4% is a curve-era rule; post-migration 50–60% of supply is the LP, and a literal 4–5% cap blocked 9/9 live candidates |
+| top-10 ex-LP | ≤35% | bundled-float bound |
+| launch-window (≤120 s) supply | ≤20%, single ≤5% | the bundle itself |
+| funder cluster (n≥4 in 24 h) | ≤12% | "all funded from the same place at the same time" |
+| pre-launch-created wallets (≤3 d) | ≤10% / ≥4 wallets | fresh-wallet cohort |
+| GMGN bundler-tagged supply | ≤25% | current, not traded, share |
+| dev_hold_rate / dev-team / sniper hold | ≤3% / ≤8% / ≤8% | quantified only; `creator_hold` status is a *soft* tell (19/100 rows, median mcap 50× the closed cohort) |
+| stacked soft tells (dust wallets, matched lots, one terminal, fresh share) | reject at 3 | "the stack is what matters" |
+
+Live re-measure after calibration: 2/8 aggregate-passing candidates admitted; the 6 blocks
+were 13–19% single holders, 21–37% launch bundles, 26% bundler-held, or 43% top-10. Every
+verdict is journalled to `feed_data.db::autofeed_decisions` and a blocked candidate never
+reaches the WS push or the session-spawn path (`main._autofeed_forward` re-checks the cached
+verdict), so a rejected token cannot open a session that trades first and gets quarantined
+later. Aggregate defaults were tightened alongside (bundler 0.30→0.18, bot_degen 0.80→0.45,
+entrapment 0.50→0.35, rat 0.50→0.30, top10 0.50→0.40, rug 0.30→0.28).
+
+---
+
 ## Era 0 — Legacy volume-free dataset (iters 01–15, DELETED 2026-07-27)
 
 Recorder bug (`sol_amount=0` → KDE uniform, φ≡0); wiped after iter15 fix.

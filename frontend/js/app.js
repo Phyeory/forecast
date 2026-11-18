@@ -255,7 +255,7 @@ let engineParamsV2 = {
   v2_percoin_cal_min_candles: 120,  // full candles before the first recalibration
   v2_percoin_cal_interval_seconds: 100.0,
   v2_percoin_cal_blend:       1.0,
-  v2_calibration_history_seconds: 6000.0,
+  v2_calibration_history_seconds: 604800.0,
   v2_calibration_history_lag_seconds: 0.0,
   v2_percoin_cal_window:      600,  // rolling tape length (full candles) used per estimation
   v2_percoin_requires_mintcal: 1.0, // ADOPTED default 1.0 = ON (iter86c): per-coin refinement fires ONLY on mint-history sessions — on thin-mint/popcal tapes the online estimates are noise (true full-DB evidence)
@@ -2619,6 +2619,9 @@ const afTuneWrap = $("af-tune");
 const afTuneToggle = $("af-tune-toggle");
 const afTuneConds = $("af-tune-conds");
 const afTuneGates = $("af-tune-gates");
+const afGateStats = $("af-gate-stats");
+const afGateLast = $("af-gate-last");
+const afGateMode = $("af-gate-mode");
 
 let afWS = null;
 let afConfigCache = null;
@@ -2709,6 +2712,9 @@ function afHandleStatus(snap) {
 
   // Auto-tune strip
   afRenderTune(snap);
+
+  // Organic evidence gate (bundle detection) strip
+  afRenderGate(snap);
 
   // Recent candidates → render
   afRenderCandidates(snap.recent_candidates || []);
@@ -2824,6 +2830,7 @@ function afRenderRowHTML(c) {
           RenMint ${fmtBool(c.renounced_mint, false)} ·
           RenFrz ${fmtBool(c.renounced_freeze, false)}
         </div>
+        ${c.gate_summary ? `<div class="af-sub" style="color:var(--green,#26a69a)">🛡 ${c.gate_summary}</div>` : ``}
         <button class="btn btn-xs btn-primary" style="margin-top:4px"
           onclick="afManualStart('${c.mint}')">⚡ Start</button>
       </div>
@@ -2836,6 +2843,74 @@ function afManualStart(mint) {
   startLiveTrader(mint);
 }
 window.afManualStart = afManualStart;
+
+/* ── Organic evidence gate strip ───────────────────────────────────── */
+const AF_GATE_REASON_LABEL = {
+  single_holder_concentration: "one wallet holds too much",
+  top10_concentration: "top-10 own too much",
+  launch_wallet_concentration: "pre-launch whale",
+  launch_bundle_supply: "bundle bought at launch",
+  funder_cluster: "wallets funded together",
+  prelaunch_wallet_cohort: "fresh wallets pre-launch",
+  bundler_tagged_supply: "bundler-tagged supply",
+  sniper_tagged_supply: "sniper-tagged supply",
+  dev_still_holding: "dev still holds",
+  dev_hold_rate: "dev hold rate high",
+  dev_team_hold: "dev team holds",
+  sniper_hold_rate: "snipers hold",
+  lp_not_burned: "LP not burned",
+  serial_creator: "serial launcher",
+  twitter_token_spam: "token-spam account",
+  image_reuse: "reused logo",
+  website_reuse: "reused website",
+  round_tripped: "already dumped from ATH",
+  cto_flag: "community takeover",
+  fresh_wallet_share: "fresh-wallet share",
+  dust_top_holders: "dormant top wallets",
+  matched_lot_sizes: "identical lot sizes",
+  terminal_dominance: "same terminal wallets",
+  flagged_wallets: "flagged wallets",
+  stacked_risk_signals: "stacked risk signals",
+};
+
+function afGateReason(r) {
+  return AF_GATE_REASON_LABEL[r] || String(r).replace(/_/g, " ");
+}
+
+function afRenderGate(snap) {
+  const g = snap.organic_gate || {};
+  if (afGateMode && g.mode && document.activeElement !== afGateMode) {
+    afGateMode.value = g.mode;
+  }
+  if (afGateStats) {
+    const checked = g.checked || 0;
+    afGateStats.textContent = checked
+      ? `${g.passed || 0} pass · ${g.rejected || 0} blocked · ${g.unverified || 0} unverified (${checked} checked)`
+      : "— no candidates verified yet —";
+  }
+  if (afGateLast) {
+    const last = g.last_reject;
+    if (last && last.reasons && last.reasons.length) {
+      const why = last.reasons.slice(0, 3).map(afGateReason).join(" + ");
+      afGateLast.textContent = `last block: $${last.symbol || "?"} — ${why}`;
+    } else {
+      afGateLast.textContent = "wallet-level bundle evidence · fail-closed";
+    }
+  }
+}
+
+if (afGateMode) {
+  afGateMode.addEventListener("change", async () => {
+    try {
+      await apiFetch("/api/autofeed/config", {
+        method: "POST",
+        body: JSON.stringify({ organic_gate_mode: afGateMode.value }),
+      });
+    } catch (e) {
+      console.error("[AutoFeed] organic gate mode change failed", e);
+    }
+  });
+}
 
 /* ── Auto-Tune strip ────────────────────────────────────────────────── */
 function afRenderTune(snap) {

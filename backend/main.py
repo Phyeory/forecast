@@ -2481,6 +2481,20 @@ async def _autofeed_forward(cand: Candidate):
     """Called by AutoFeed for each accepted candidate.
     Broadcasts to /ws/autofeed clients and auto-starts live trader server-side if
     private key is configured."""
+    # Second, independent block (organic evidence gate, 2026-11-18): AutoFeed
+    # already refuses to forward a bundled / unverifiable candidate, but a
+    # session must never open for one even if that path changes.  Checked
+    # BEFORE the WS push so the browser cannot startLiveTrader() on it either.
+    # `GateResult.blocked` is False in shadow/off mode, so this never
+    # interferes with tuning runs.
+    verdict = _autofeed.gate.verdict_for(cand.mint)
+    if verdict is not None and verdict.blocked:
+        logger.warning(
+            f"[AutoFeed] SESSION BLOCKED by organic gate for ${cand.symbol} "
+            f"({cand.mint[:8]}…) — {verdict.summary(5)}"
+        )
+        return
+
     payload = {
         "type": "autofeed_candidate",
         "candidate": cand.to_dict(),
@@ -2550,6 +2564,44 @@ async def autofeed_status():
     pk = getattr(app.state, "lt_private_key", "") or _load_backend_private_key()
     snap["wallet_connected"] = bool(pk) or getattr(app.state, "lt_wallet_connected", False)
     return JSONResponse(snap)
+
+
+@app.get("/api/autofeed/decisions")
+async def autofeed_decisions(limit: int = 100, verdict: Optional[str] = None):
+    """Recent organic-gate verdicts (audit trail of admitted / removed tokens).
+
+    `verdict` filters to `pass` | `reject` | `unverified`.
+    """
+    import sqlite3
+    from pathlib import Path as _Path
+    db = _Path(__file__).resolve().parent / "data" / "feed_data.db"
+    if not db.exists():
+        return JSONResponse({"decisions": [], "count": 0})
+    limit = max(1, min(int(limit), 500))
+    q = ("SELECT ts, mint, symbol, verdict, mode, reasons, metrics_json, error "
+         "FROM autofeed_decisions")
+    params: list = []
+    if verdict:
+        q += " WHERE verdict = ?"
+        params.append(verdict)
+    q += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5.0)
+        rows = conn.execute(q, params).fetchall()
+        conn.close()
+    except sqlite3.Error as e:
+        return JSONResponse({"decisions": [], "count": 0, "error": str(e)})
+    out = []
+    for ts, mint, symbol, vd, mode, reasons, metrics_json, err in rows:
+        try:
+            metrics = json.loads(metrics_json or "{}")
+        except Exception:
+            metrics = {}
+        out.append({"ts": ts, "mint": mint, "symbol": symbol, "verdict": vd,
+                    "mode": mode, "reasons": [r for r in (reasons or "").split(",") if r],
+                    "metrics": metrics, "error": err})
+    return JSONResponse({"decisions": out, "count": len(out)})
 
 
 @app.post("/api/autofeed/config")
