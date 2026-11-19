@@ -125,6 +125,15 @@ def init_price_db():
 
         CREATE INDEX IF NOT EXISTS idx_holder_flow_rec_time ON holder_flow(recording_id, time);
         CREATE INDEX IF NOT EXISTS idx_holder_flow_wallet ON holder_flow(wallet);
+
+        CREATE TABLE IF NOT EXISTS recording_calibration (
+            recording_id      INTEGER PRIMARY KEY,
+            cache_key         TEXT NOT NULL,
+            initial_overrides TEXT NOT NULL,
+            audit             TEXT NOT NULL,
+            created_at        REAL NOT NULL,
+            FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+        );
     """)
     # Migrate existing databases that were created before buy/sell volume columns
     for col in ("buy_volume", "sell_volume", "pool_sol", "market_cap_usd"):
@@ -165,6 +174,73 @@ def create_recording(mint: str, timeframe: str, token_name: str = "", token_symb
     conn.commit()
     conn.close()
     return rec_id
+
+
+def save_recording_calibration(
+    db_path: str,
+    recording_id: int,
+    cache_key: str,
+    initial_overrides: dict,
+    audit: dict,
+):
+    """Persist the raw tick-0 calibration used by a live recording.
+
+    Only the calibration-layer output is stored, not the caller's explicit
+    engine parameters.  Backtests can therefore reproduce the live starting
+    point while still applying sweep/non-calibration knobs normally.
+    """
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS recording_calibration (
+                recording_id      INTEGER PRIMARY KEY,
+                cache_key         TEXT NOT NULL,
+                initial_overrides TEXT NOT NULL,
+                audit             TEXT NOT NULL,
+                created_at        REAL NOT NULL,
+                FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+            )
+        """)
+        conn.execute(
+            """INSERT OR REPLACE INTO recording_calibration
+               (recording_id, cache_key, initial_overrides, audit, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (int(recording_id), str(cache_key),
+             json.dumps(initial_overrides, sort_keys=True, allow_nan=False),
+             json.dumps(audit, sort_keys=True, allow_nan=False), time.time()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def load_recording_calibration(
+    db_path: str, recording_id: int, cache_key: str,
+) -> Optional[dict]:
+    """Return a live recording's cached initial calibration, if compatible."""
+    if not os.path.exists(db_path):
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                """SELECT initial_overrides, audit FROM recording_calibration
+                   WHERE recording_id=? AND cache_key=?""",
+                (int(recording_id), str(cache_key)),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        initial_overrides = json.loads(row[0])
+        audit = json.loads(row[1])
+        if not isinstance(initial_overrides, dict) or not isinstance(audit, dict):
+            return None
+        return {"initial_overrides": initial_overrides, "audit": audit}
+    except (sqlite3.Error, TypeError, ValueError):
+        # Older/cold corpora have no cache table.  Corrupt or unreadable cache
+        # entries fall back to the deterministic causal calibrator.
+        return None
 
 
 def stop_recording(recording_id: int):
@@ -369,6 +445,7 @@ def get_recording_candles(recording_id: int, effective_basis: bool = True,
 def delete_recording(recording_id: int):
     conn = _get_price_conn()
     conn.execute("DELETE FROM candles WHERE recording_id = ?", (recording_id,))
+    conn.execute("DELETE FROM recording_calibration WHERE recording_id = ?", (recording_id,))
     conn.execute("DELETE FROM recordings WHERE id = ?", (recording_id,))
     conn.commit()
     conn.close()

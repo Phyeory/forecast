@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import math
 
 from session_calibrator import (
@@ -12,6 +14,27 @@ from session_calibrator import (
 # Default reach of the mint-history (primary) calibration read.  See
 # calibration_window() for why this is not 6000 s.
 DEFAULT_CALIBRATION_LOOKBACK_SECONDS = 604800.0   # 7 days
+# Bump when the initial-calibration semantics change; old live snapshots must
+# remain replayable rather than being silently reinterpreted by a new stack.
+CALIBRATION_CACHE_VERSION = 1
+
+
+def _initial_cache_key(
+    mint: str, cutoff: float, lookback: float, tau_vr: bool,
+    tau_scale: float, popcal_source: str, mint_on: bool,
+) -> str:
+    """Identify the history/query inputs that determine a live snapshot."""
+    payload = json.dumps({
+        "version": CALIBRATION_CACHE_VERSION,
+        "mint": mint,
+        "cutoff": cutoff,
+        "lookback": lookback,
+        "tau_vr": bool(tau_vr),
+        "tau_scale": float(tau_scale),
+        "popcal_source": popcal_source,
+        "mint_on": bool(mint_on),
+    }, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def calibration_window(started_at: float, params: dict) -> tuple[float, float]:
@@ -103,7 +126,9 @@ def strip_stale_sde_echo(params: dict) -> tuple[dict, dict]:
 
 
 async def initialize_calibration(mint: str, started_at: float, params: dict | None = None,
-                                 db_path: str = _DB_PATH) -> tuple[dict, dict]:
+                                 db_path: str = _DB_PATH,
+                                 recording_id: int | None = None,
+                                 allow_chain_fetch: bool = True) -> tuple[dict, dict]:
     from strategy_engineV2 import DEFAULT_CONFIG
 
     explicit = dict(params or {})
@@ -140,35 +165,63 @@ async def initialize_calibration(mint: str, started_at: float, params: dict | No
     audit['popcal_source'] = popcal_source
 
     mint_on = bool(explicit.get('v2_mintcal_enable', DEFAULT_CONFIG['v2_mintcal_enable']))
-    base = {}
-    if mint_on and mint:
-        base = await asyncio.to_thread(calibrate_from_mint_history, mint, cutoff,
-                                       db_path, lookback, tau_vr, tau_scale)
-        chain_on = bool(explicit.get('v2_chain_fetch_enable', DEFAULT_CONFIG['v2_chain_fetch_enable']))
-        if not base and chain_on:
-            from mint_chain_history import fetch_and_persist
-            audit['chain_attempted'] = True
-            try:
-                audit['chain_inserted'] = await asyncio.wait_for(
-                    fetch_and_persist(mint, db_path=db_path, before_unix=cutoff,
-                                      lookback_seconds=lookback), timeout=95.0)
-                base = await asyncio.to_thread(calibrate_from_mint_history, mint, cutoff,
-                                               db_path, lookback, tau_vr, tau_scale)
-            except Exception as exc:
-                audit['chain_error'] = type(exc).__name__
-        if base:
-            audit['source'] = 'mint_history'
-            if not any(key in explicit for key in _CLIP):
-                base['_calibration_sourced'] = 1
-            if not _geom_user_explicit:
-                base['_geometry_sourced'] = 1
-    if not base:
-        base = await asyncio.to_thread(calibrate_from_population, db_path, cutoff,
-                                       tau_vr=tau_vr, tau_scale=tau_scale,
-                                       source=popcal_source)
-        audit['source'] = 'population' if any(k in base for k in _CLIP) else 'defaults'
-        if not _geom_user_explicit and any(k in base for k in GEOMETRY_KEYS):
+    cache_key = _initial_cache_key(
+        mint, cutoff, lookback, tau_vr, tau_scale, popcal_source, mint_on)
+    audit['cache_key'] = cache_key
+    base = None
+    if recording_id is not None:
+        from data_store import load_recording_calibration
+        cached = await asyncio.to_thread(
+            load_recording_calibration, db_path, int(recording_id), cache_key)
+        if cached is not None:
+            base = dict(cached['initial_overrides'])
+            audit = dict(cached['audit'])
+            audit['cache_key'] = cache_key
+            audit['cache_hit'] = 'live_recording'
+
+    if base is None:
+        base = {}
+        if mint_on and mint:
+            base = await asyncio.to_thread(calibrate_from_mint_history, mint, cutoff,
+                                           db_path, lookback, tau_vr, tau_scale)
+            chain_on = bool(explicit.get(
+                'v2_chain_fetch_enable', DEFAULT_CONFIG['v2_chain_fetch_enable']))
+            # Live may enrich an unseen mint on demand.  Ordinary sync
+            # backtests must remain deterministic and offline; an explicit
+            # v2_chain_fetch_enable=1 remains the research/opt-in escape hatch.
+            chain_on = chain_on and (
+                allow_chain_fetch or 'v2_chain_fetch_enable' in explicit)
+            if not base and chain_on:
+                from mint_chain_history import fetch_and_persist
+                audit['chain_attempted'] = True
+                try:
+                    audit['chain_inserted'] = await asyncio.wait_for(
+                        fetch_and_persist(mint, db_path=db_path, before_unix=cutoff,
+                                          lookback_seconds=lookback), timeout=95.0)
+                    base = await asyncio.to_thread(
+                        calibrate_from_mint_history, mint, cutoff,
+                        db_path, lookback, tau_vr, tau_scale)
+                except Exception as exc:
+                    audit['chain_error'] = type(exc).__name__
+            if base:
+                audit['source'] = 'mint_history'
+        if not base:
+            base = await asyncio.to_thread(calibrate_from_population, db_path, cutoff,
+                                           tau_vr=tau_vr, tau_scale=tau_scale,
+                                           source=popcal_source)
+            audit['source'] = 'population' if any(k in base for k in _CLIP) else 'defaults'
+
+    # Persist only this raw layer output at live.  Sourcing sentinels and the
+    # caller's explicit parameters are deliberately re-derived on every load,
+    # so a cached live start stays compatible with surgical backtest sweeps.
+    audit['calibration_overrides'] = dict(base)
+    if audit['source'] == 'mint_history':
+        if not any(key in explicit for key in _CLIP):
+            base['_calibration_sourced'] = 1
+        if not _geom_user_explicit:
             base['_geometry_sourced'] = 1
+    elif not _geom_user_explicit and any(k in base for k in GEOMETRY_KEYS):
+        base['_geometry_sourced'] = 1
 
     if not harvest_on:
         # Master switch OFF: the session's initial arm stays the production
@@ -187,5 +240,8 @@ async def initialize_calibration(mint: str, started_at: float, params: dict | No
 
 
 def initialize_calibration_sync(mint: str, started_at: float, params: dict | None = None,
-                                db_path: str = _DB_PATH) -> tuple[dict, dict]:
-    return asyncio.run(initialize_calibration(mint, started_at, params, db_path))
+                                db_path: str = _DB_PATH,
+                                recording_id: int | None = None) -> tuple[dict, dict]:
+    return asyncio.run(initialize_calibration(
+        mint, started_at, params, db_path, recording_id=recording_id,
+        allow_chain_fetch=False))

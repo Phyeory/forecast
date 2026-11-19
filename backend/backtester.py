@@ -361,7 +361,7 @@ def run_backtest(
                      float(candles[0]["time"]))
         engine_params, calibration_audit = initialize_calibration_sync(
             str(recording.get("mint") or ""), anchor, engine_params,
-            db_path=str(recordings_db_path(db_key)),
+            db_path=str(recordings_db_path(db_key)), recording_id=recording_id,
         )
 
     timeframe = recording["timeframe"]

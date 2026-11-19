@@ -38,6 +38,7 @@ import math
 import os
 import sqlite3
 import time
+from collections import OrderedDict
 from typing import Optional
 
 import numpy as np
@@ -66,6 +67,58 @@ _ORIGINAL_DB_PATH = os.environ.get("PUMPCHART_ORIGINAL_DB") or os.path.join(
 
 # Audit of the last population calibration call (diagnostics / tests).
 _last_population_audit: dict = {}
+
+# Completed-recording statistics are the expensive unit of population
+# calibration.  Consecutive session windows share 49/50 recordings, so cache
+# those units rather than memoizing the whole id set (which changes whenever
+# one new recording arrives).  Process-local and bounded: batch workers stay
+# deterministic, and each worker needs only slightly more than one 50-rec
+# window to become warm.
+_POPULATION_REC_CACHE_MAX = 512
+_population_rec_cache: "OrderedDict[tuple, tuple[Optional[dict], Optional[float]]]" = OrderedDict()
+
+
+def _population_rec_cache_get(key: tuple) -> Optional[tuple]:
+    cached = _population_rec_cache.get(key)
+    if cached is None:
+        return None
+    _population_rec_cache.move_to_end(key)
+    stats, geom_arm = cached
+    return (dict(stats) if stats is not None else None), geom_arm
+
+
+def _population_rec_cache_put(
+    key: tuple, stats: Optional[dict], geom_arm: Optional[float],
+) -> None:
+    _population_rec_cache[key] = (dict(stats) if stats is not None else None, geom_arm)
+    _population_rec_cache.move_to_end(key)
+    while len(_population_rec_cache) > _POPULATION_REC_CACHE_MAX:
+        _population_rec_cache.popitem(last=False)
+
+
+def _db_content_version(path: str) -> tuple:
+    """Detect candle backfills/corrections, including writes still in WAL."""
+    versions = []
+    for filename in (path, path + "-wal"):
+        try:
+            stat = os.stat(filename)
+            versions.append((stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            versions.append(None)
+    return tuple(versions)
+
+
+def _population_rec_cache_key(corpus_path: str, rec: dict) -> tuple:
+    # stopped_at handles finalization changes; file versions prevent a
+    # completed tape's backfilled/corrected candles from leaving stale stats.
+    # Estimator globals are included for test/research configurations that
+    # deliberately change geometry or the VR ladder in a warm process.
+    return (
+        os.path.realpath(corpus_path), _db_content_version(corpus_path),
+        int(rec["id"]), float(rec["stopped_at"]),
+        tuple(TAU_VR_LADDER), int(GEOM_RUNUP_WINDOW_S), int(GEOM_MIN_CANDLES),
+        float(GEOM_ARM_SCALE), tuple(float(v) for v in GEOM_ARM_BOUNDS),
+    )
 
 
 def _corpus_paths() -> dict[str, str]:
@@ -672,6 +725,7 @@ def _fetch_candidate_recordings(
                 "corpus": corpus,
                 "id": r["id"],
                 "started_at": float(r["started_at"]),
+                "stopped_at": float(r["stopped_at"]),
                 "duration_s": max(
                     float(r["stopped_at"] or 0) - float(r["started_at"]), 0.0
                 ),
@@ -758,39 +812,66 @@ def calibrate_from_population(
             )
             return dict(_ALWAYS_EXPLICIT)
 
-        durations = {(c["corpus"], c["id"]): c["duration_s"] for c in pool}
+        # 2. Reuse statistics for completed recordings already in this
+        # worker's rolling cache.  Only cache misses need their candles read.
+        entries: dict[tuple, tuple] = {}
+        pending: list[dict] = []
+        for rec in pool:
+            key = _population_rec_cache_key(corpora[rec["corpus"]], rec)
+            cached = _population_rec_cache_get(key)
+            if cached is None:
+                pending.append(rec)
+            else:
+                entries[key] = cached
 
-        # 2. Fetch all candles for those recordings (per owning corpus)
-        candle_rows = _fetch_pool_candles(corpora, pool, before_unix)
-        if not candle_rows:
+        candle_rows = (
+            _fetch_pool_candles(corpora, pending, before_unix) if pending else [])
+        if pending and not candle_rows and not entries:
             logger.info("[SessionCalibrator] no candle data — using defaults")
             return dict(_ALWAYS_EXPLICIT)
 
-        # 3. Group candles by (corpus, recording_id) — ids collide across DBs
+        # 3. Group newly-read candles by (corpus, recording_id) — ids collide
+        # across DBs.  Cache thin/empty rows too; repeatedly rescanning those
+        # is just as wasteful and their negative result is stable once closed.
         by_rec: dict[tuple[str, int], list] = {}
         for corpus, row in candle_rows:
             by_rec.setdefault((corpus, row[0]), []).append(row)
 
-        # 4. Compute per-recording statistics
+        for rec in pending:
+            corpus, rid = rec["corpus"], rec["id"]
+            key = _population_rec_cache_key(corpora[corpus], rec)
+            crows = by_rec.get((corpus, rid), [])
+            stats = None
+            geom_arm = None
+            if crows:
+                arr = np.array(crows, dtype=float)
+                stats = _compute_rec_stats(arr, rec["duration_s"])
+                # iter90: per-recording harvest-geometry estimate (amplitude
+                # percentiles are robust on thin tapes where the SDE
+                # autocorrelation estimators saturate).
+                try:
+                    geom = estimate_geometry_from_candles(arr[:, 4], arr[:, 2])
+                except Exception:
+                    geom = {}
+                geom_arm = geom.get("gain_retrace_arm_pct")
+            _population_rec_cache_put(key, stats, geom_arm)
+            entries[key] = (
+                dict(stats) if stats is not None else None), geom_arm
+
+        # 4. Aggregate in population-window order.  Median aggregation makes
+        # this byte-identical to the former all-rows cold computation.
         rec_stats: list[dict] = []
         geom_arms: list[float] = []
-        for (corpus, rid), crows in by_rec.items():
-            arr = np.array(crows, dtype=float)
-            dur = durations.get((corpus, rid), 0.0)
-            stats = _compute_rec_stats(arr, dur)
+        for rec in pool:
+            key = _population_rec_cache_key(corpora[rec["corpus"]], rec)
+            stats, geom_arm = entries[key]
             if stats is not None:
                 rec_stats.append(stats)
+                corpus = rec["corpus"]
                 _last_population_audit["per_corpus"][corpus] = (
                     _last_population_audit["per_corpus"].get(corpus, 0) + 1)
-            # iter90: per-recording harvest-geometry estimate (amplitude
-            # percentiles are robust on thin tapes where the SDE
-            # autocorrelation estimators saturate).
-            try:
-                geom = estimate_geometry_from_candles(arr[:, 4], arr[:, 2])
-            except Exception:
-                geom = {}
-            if "gain_retrace_arm_pct" in geom:
-                geom_arms.append(geom["gain_retrace_arm_pct"])
+            if geom_arm is not None:
+                geom_arms.append(geom_arm)
 
         _last_population_audit["n_recordings"] = len(rec_stats)
 

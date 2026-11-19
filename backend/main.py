@@ -2449,6 +2449,23 @@ async def _get_or_create_live_session(
             started_at=calibration_started_at,
         )
         session.calibration_audit = calibration_audit
+        if ((engine_version == 2 or 2 in fleet_versions)
+                and calibration_audit.get("cache_key")):
+            try:
+                # The recording id is allocated after tick-0 calibration so a
+                # failed session launch does not leave an empty recording.
+                # Persist only the raw layer output; backtests re-apply their
+                # own explicit knobs when replaying this exact live start.
+                data_store.save_recording_calibration(
+                    str(data_store.recordings_db_path("unseen")), session.rec_id,
+                    calibration_audit["cache_key"],
+                    calibration_audit["calibration_overrides"], calibration_audit,
+                )
+            except Exception as exc:
+                # A cache-write failure must never block trading; the
+                # backtester falls back to deterministic causal calibration.
+                logger.warning("[Calibration] could not cache recording %s: %r",
+                               session.rec_id, exc)
         logger.info(f"[LIVE] Auto-recording candles → recording {session.rec_id}")
         live_trader.set_session_meta(
             recording_id=session.rec_id, token_name=token_name,
