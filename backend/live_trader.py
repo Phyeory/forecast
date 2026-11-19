@@ -970,6 +970,9 @@ class LiveTrader:
         # the same broken conditions must not become an implicit retry.
         self._buy_failed_until: float = 0.0
         self._buy_fail_block_announced: bool = False
+        # One loud warning if the wallet cannot fund even one buy; otherwise
+        # every signal becomes a silent buy_rejected + buy_failed pair.
+        self._zero_balance_warned: bool = False
 
         # ── Actual-SOL-received accounting ─────────────────────────────────
         # SOL balance captured when the buy confirmed (post-buy baseline).  A
@@ -1180,6 +1183,13 @@ class LiveTrader:
                     # display.  current_balance is the model-basis
                     # evolution and is seeded from the same first read.
                     self.stats.wallet_balance = sol
+                    if sol <= 0.0 and not self._zero_balance_warned:
+                        self._zero_balance_warned = True
+                        logger.warning(
+                            f"[SESSION] Wallet {self.wallet_pubkey[:8]}… has 0 SOL — "
+                            f"every {self.buy_size_sol} SOL buy will fail with "
+                            f"insufficient_sol. Fund the wallet to trade."
+                        )
                     if self.stats.starting_balance <= 0.0:
                         self.stats.starting_balance = sol
                         self.stats.current_balance = sol
