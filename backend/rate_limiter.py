@@ -23,44 +23,89 @@ logger = logging.getLogger(__name__)
 # ── GMGN shared ban state ────────────────────────────────────────────────────
 
 _gmgn_banned_until: float = 0.0
+# Bans for a key other than the shared `GMGN_API_KEY` (e.g. a dedicated
+# `GMGN_API_KEY_AUTOFEED`).  The default "shared" slot keeps the historical
+# module-level single state so existing callers/tests are unchanged; extra
+# slots let a dedicated autofeed key have its OWN quota window instead of
+# inheriting holder_flow's 429 ban.
+_gmgn_banned_until_by_slot: dict[str, float] = {}
 _ggn_ban_logged: bool = False
+_ggn_ban_logged_slots: set[str] = set()
 
 
-def note_gmgn_429(reset_unix: float | None, source: str = "") -> float:
+def note_gmgn_429(reset_unix: float | None, source: str = "",
+                  slot: str = "shared") -> float:
     """Record a GMGN rate-limit ban.  Returns the new ban-unix timestamp.
 
     ``reset_unix`` should be a UTC unix timestamp.  If None or in the past,
     a conservative fallback is used so callers don't immediately re-hammer.
+    ``slot`` separates independent keys: the default "shared" slot is the
+    historical `GMGN_API_KEY` state; a dedicated autofeed key should use its
+    own slot so a holder_flow ban does not block it (and vice versa).
     """
     global _gmgn_banned_until, _ggn_ban_logged
     now = time.time()
-    if reset_unix and reset_unix > now:
-        _gmgn_banned_until = max(_gmgn_banned_until, reset_unix)
+    until = reset_unix if (reset_unix and reset_unix > now) else now + 30.0
+    if not slot or slot == "shared":
+        _gmgn_banned_until = max(_gmgn_banned_until, until)
+        current = _gmgn_banned_until
+        logged = _ggn_ban_logged
     else:
-        _gmgn_banned_until = max(_gmgn_banned_until, now + 30.0)
-    if not _ggn_ban_logged:
-        wait = max(0.0, _gmgn_banned_until - now)
+        current = max(_gmgn_banned_until_by_slot.get(slot, 0.0), until)
+        _gmgn_banned_until_by_slot[slot] = current
+        logged = slot in _ggn_ban_logged_slots
+    if not logged:
+        wait = max(0.0, current - now)
         logger.warning(
-            f"[RateLimit] GMGN rate-limited ({source}) — backing off {wait:.0f}s "
-            f"(further ban logs suppressed until reset)"
+            f"[RateLimit] GMGN rate-limited ({source}, slot={slot or 'shared'}) "
+            f"— backing off {wait:.0f}s (further ban logs suppressed until reset)"
         )
-        _ggn_ban_logged = True
-    return _gmgn_banned_until
+        if not slot or slot == "shared":
+            _ggn_ban_logged = True
+        else:
+            _ggn_ban_logged_slots.add(slot)
+    return current
 
 
-def gmgn_banned() -> bool:
-    """True if we're currently inside a GMGN rate-limit ban window."""
+def gmgn_banned(slot: str = "shared") -> bool:
+    """True if the given key slot is inside a GMGN rate-limit ban window."""
     global _ggn_ban_logged
-    if time.time() < _gmgn_banned_until:
+    if not slot or slot == "shared":
+        if time.time() < _gmgn_banned_until:
+            return True
+        if _ggn_ban_logged:
+            _ggn_ban_logged = False
+        return False
+    if time.time() < _gmgn_banned_until_by_slot.get(slot, 0.0):
         return True
-    if _ggn_ban_logged:
-        _ggn_ban_logged = False
+    _ggn_ban_logged_slots.discard(slot)
     return False
 
 
-def gmgn_ban_remaining() -> float:
-    """Seconds remaining in the current GMGN ban (0 if not banned)."""
-    return max(0.0, _gmgn_banned_until - time.time())
+def gmgn_ban_remaining(slot: str = "shared") -> float:
+    """Seconds remaining in the given GMGN slot's ban (0 if not banned)."""
+    until = (_gmgn_banned_until if not slot or slot == "shared"
+             else _gmgn_banned_until_by_slot.get(slot, 0.0))
+    return max(0.0, until - time.time())
+
+
+# ── GMGN autofeed slot reservation ──────────────────────────────────────────
+# The shared key is 5 req/min.  holder_flow polls every 15 s (4/min) and the
+# autofeed trending CLI uses 1/min, leaving zero for the organic gate's
+# holder-table call.  When the gate must use the shared key, AutoFeed reserves
+# one slot and holder_flow stretches its poll to 20 s (3/min): 3 + 1 + 1 = 5.
+# With a dedicated GMGN_API_KEY_AUTOFEED the flag stays False and holder_flow
+# keeps its 15 s production cadence.
+_gmgn_gate_slot_reserved: bool = False
+
+
+def reserve_gmgn_gate_slot(reserved: bool) -> None:
+    global _gmgn_gate_slot_reserved
+    _gmgn_gate_slot_reserved = bool(reserved)
+
+
+def gmgn_gate_slot_reserved() -> bool:
+    return _gmgn_gate_slot_reserved
 
 
 def parse_gmgn_reset_time(message: str) -> float | None:

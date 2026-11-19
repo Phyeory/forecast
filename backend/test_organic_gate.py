@@ -105,13 +105,23 @@ def test_pool_row_is_excluded_from_concentration():
 
 # ── Setuh check 1: distribution ─────────────────────────────────────────────
 
-def test_single_holder_above_threshold_rejects():
+def test_single_holder_above_soft_is_stacked_tell():
+    """One 9% whale is a risk tell, not proof of a bundle (2026-11-19)."""
     rows = clean_table()
     rows[3]["amount_percentage"] = 0.09
     res = ev(rows, max_single_holder_pct=0.05)
+    assert res.passed
+    assert "single_holder_concentration" in res.soft
+    assert res.score == 1
+    assert res.metrics["max_single_pct"] == 0.09
+
+
+def test_single_holder_above_hard_rejects():
+    rows = clean_table()
+    rows[3]["amount_percentage"] = 0.21
+    res = ev(rows)
     assert not res.passed
     assert "single_holder_concentration" in res.critical
-    assert res.metrics["max_single_pct"] == 0.09
 
 
 def test_top10_concentration_rejects():
@@ -137,12 +147,47 @@ def test_launch_window_bundle_rejects():
     assert res.metrics["launch_rows"] == 8
 
 
-def test_single_launch_wallet_rejects():
+def test_single_launch_wallet_is_soft():
     rows = clean_table()
     rows[0]["amount_percentage"] = 0.045
     rows[0]["start_holding_at"] = int(CREATED + 1)
     res = ev(rows, max_launch_single_pct=0.03)
+    assert res.passed
+    assert "launch_wallet_concentration" in res.soft
+    assert res.score == 1
+
+
+def test_single_launch_wallet_above_hard_rejects():
+    rows = clean_table()
+    rows[0]["amount_percentage"] = 0.21
+    rows[0]["start_holding_at"] = int(CREATED + 1)
+    res = ev(rows, max_single_holder_hard_pct=0.50,
+             max_launch_single_hard_pct=0.20)
+    assert not res.passed
     assert "launch_wallet_concentration" in res.critical
+
+
+def test_single_wallet_scored_once_when_same_entity():
+    """BUCKME: 15.35% holder and 15.72% launch wallet are one wallet."""
+    rows = clean_table()
+    rows[0]["amount_percentage"] = 0.12
+    rows[0]["start_holding_at"] = int(CREATED + 1)
+    res = ev(rows)
+    assert res.passed
+    assert res.score == 1
+    assert "single_holder_concentration" in res.soft
+    assert "launch_wallet_concentration" in res.soft
+
+
+def test_two_distinct_single_wallets_score_twice():
+    rows = clean_table()
+    rows[0]["amount_percentage"] = 0.11
+    rows[0]["start_holding_at"] = int(CREATED + 1)
+    rows[1]["amount_percentage"] = 0.12
+    rows[1]["start_holding_at"] = int(CREATED + 7200)   # not a launch buy
+    res = ev(rows)
+    assert res.passed
+    assert res.score == 2
 
 
 def test_late_buys_are_not_launch_supply():
@@ -439,7 +484,7 @@ def test_verify_passes_and_caches():
 
 def test_verify_rejects_on_evidence():
     rows = clean_table(20, each=0.003)
-    rows[0]["amount_percentage"] = 0.12
+    rows[0]["amount_percentage"] = 0.21
     g = FakeGate(rows=rows)
     r = asyncio.run(g.verify(_Cand()))
     assert not r.passed and "single_holder_concentration" in r.reasons
@@ -458,7 +503,7 @@ def test_verify_fetch_error_is_fail_closed():
 
 def test_shadow_mode_records_but_does_not_block():
     rows = clean_table(20, each=0.003)
-    rows[0]["amount_percentage"] = 0.12
+    rows[0]["amount_percentage"] = 0.21
     g = FakeGate(rows=rows, mode="shadow")
     r = asyncio.run(g.verify(_Cand()))
     assert not r.passed
@@ -490,14 +535,53 @@ def test_rate_limited_is_deferred_not_scored():
         organic_gate.rl._gmgn_banned_until = 0.0
 
 
+def test_shared_key_gate_caps_one_fetch_per_minute():
+    """Shared key: AutoFeed reserves exactly 1 req/min for the gate."""
+    g = FakeGate(rows=clean_table())
+    g.key_slot = "shared"
+    r1 = asyncio.run(g.verify(_Cand(mint="Mint" + "a" * 40)))
+    r2 = asyncio.run(g.verify(_Cand(mint="Mint" + "b" * 40)))
+    assert r1.passed
+    assert r2.error == "fetch_budget_exhausted"
+    assert g.calls == 1
+
+
+def test_gate_slot_reservation_flag():
+    rl = organic_gate.rl
+    try:
+        rl.reserve_gmgn_gate_slot(True)
+        assert rl.gmgn_gate_slot_reserved()
+    finally:
+        rl.reserve_gmgn_gate_slot(False)
+    assert not rl.gmgn_gate_slot_reserved()
+
+
+def test_dedicated_key_slot_has_independent_ban():
+    """A dedicated autofeed key must not inherit holder_flow's shared ban."""
+    rl = organic_gate.rl
+    rl._gmgn_banned_until = 0.0
+    rl._gmgn_banned_until_by_slot.clear()
+    try:
+        rl.note_gmgn_429(time.time() + 30, source="test", slot="shared")
+        assert rl.gmgn_banned("shared")
+        assert not rl.gmgn_banned("autofeed")
+        rl.note_gmgn_429(time.time() + 30, source="test", slot="autofeed")
+        assert rl.gmgn_banned("autofeed")
+    finally:
+        rl._gmgn_banned_until = 0.0
+        rl._gmgn_banned_until_by_slot.clear()
+
+
 def test_build_config_maps_flat_attributes():
     class CF:
         organic_gate_mode = "shadow"
         organic_max_single_holder_pct = 0.07
+        organic_max_single_holder_hard_pct = 0.18
         organic_max_fetch_per_tick = 3
 
     gc = organic_gate.build_config(CF())
     assert gc.mode == "shadow"
     assert gc.max_single_holder_pct == 0.07
+    assert gc.max_single_holder_hard_pct == 0.18
     assert gc.max_fetch_per_tick == 3
     assert gc.max_top10_holder_pct == GateConfig().max_top10_holder_pct

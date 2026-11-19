@@ -147,6 +147,14 @@ graph TD
   autofeed_decisions` (audit trail of tokens removed and why; `GET /api/autofeed/decisions`);
   a blocked candidate never reaches the WS push or the session-spawn path
   (`main._autofeed_forward` re-checks the cached verdict). 429/timeout ⇒ deferred and retried (≤3×), never fed unverified.
+  **Single-wallet band (2026-11-19)**: `max_single_holder_pct` 10% and
+  `max_launch_single_pct` 5% are SOFT (stacked score), hard ceilings 20% each;
+  same-wallet single+launch evidence counts once. `top10` 35%, launch bundle 20%,
+  funder/cohort/bundler-tag remain hard. **Quota**: shared `GMGN_API_KEY` is 5 req/min.
+  Without a dedicated key AutoFeed reserves 1/min and holder_flow stretches
+  15 s→20 s (3/min) + trending 1/min; with `GMGN_API_KEY_AUTOFEED` the gate
+  gets its own slot (cap 4/min) and holder_flow keeps 15 s. Sharing without the
+  reservation starves the gate (`unverified_rate_limited`).
 - **`analysis/`** — paired_diff, aggregate_results, test suite, per-iteration artifacts.
 - **`frontend/`** — vanilla JS + LightweightCharts; `app.js::engineParamsV2` mirrors all knobs.
   Session/trader cards + portfolio show **Model PnL vs Wallet Δ** side by side, labelled

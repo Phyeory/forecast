@@ -54,9 +54,9 @@ across wallets so the top-holder number looks clean). Fail-closed: no holder tab
 
 | Rule | Default | Basis |
 |---|---|---|
-| single non-LP holder | ≤10% | Setuh's 4% is a curve-era rule; post-migration 50–60% of supply is the LP, and a literal 4–5% cap blocked 9/9 live candidates |
-| top-10 ex-LP | ≤35% | bundled-float bound |
-| launch-window (≤120 s) supply | ≤20%, single ≤5% | the bundle itself |
+| single non-LP holder | 10% soft, 20% hard | Setuh's 4% is a curve-era rule; post-migration 50–60% of supply is the LP, and a literal 4–5% cap blocked 9/9 live candidates. 2026-11-19: one 12–16% early whale is a risk tell, not a bundle |
+| top-10 ex-LP | ≤35% (hard) | bundled-float bound |
+| launch-window (≤120 s) supply | bundle ≤20% hard; single 5% soft, 20% hard | the bundle itself; one launch wallet is not proof of coordination |
 | funder cluster (n≥4 in 24 h) | ≤12% | "all funded from the same place at the same time" |
 | pre-launch-created wallets (≤3 d) | ≤10% / ≥4 wallets | fresh-wallet cohort |
 | GMGN bundler-tagged supply | ≤25% | current, not traded, share |
@@ -70,6 +70,21 @@ reaches the WS push or the session-spawn path (`main._autofeed_forward` re-check
 verdict), so a rejected token cannot open a session that trades first and gets quarantined
 later. Aggregate defaults were tightened alongside (bundler 0.30→0.18, bot_degen 0.80→0.45,
 entrapment 0.50→0.35, rat 0.50→0.30, top10 0.50→0.40, rug 0.30→0.28).
+
+**2026-11-19 recalibration (single-wallet band).** Live replay of the 36 aggregate-passing
+candidates: 22/36 passed the holder-table rules; 9 failed only because one wallet held
+12–18%. The one gate-REJECT the engine repeatedly signalled (BUCKME) was a single 15.7%
+launch-window wallet, top-10 31.6%, bundle 15.7% — no coordinated group — and the engine
+fired 7 buy signals as it ran +174% from the first signal to the 05:06 peak. Meanwhile the
+gate-PASS cohort (FLAMINGO/MAGACITY/Mabel) signalled and bled −79/−86/−89%. Single-wallet
+concentration is therefore a SOFT tell (stacked score) with a 20% hard ceiling; launch
+bundle >20%, top-10 >35%, funder/cohort/bundler-tag stay hard. Same-wallet single +
+launch evidence is counted once. Also: 122/122 production decisions were
+`unverified_rate_limited` — the shared GMGN key is 5 req/min, holder_flow uses 4 and the
+trending CLI 1, leaving zero for the holder-table call. A dedicated
+`GMGN_API_KEY_AUTOFEED` gets its own rate-limit slot (gate cap 4/min); on the shared key
+the gate reserves 1/min and holder_flow stretches 15 s→20 s (3/min) so the budget is
+3 + 1 + 1 = 5.
 
 ---
 

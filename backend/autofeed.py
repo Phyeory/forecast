@@ -92,6 +92,22 @@ def Path_exists_env_gmgn() -> bool:
                 return True  # file present at least
     return False
 
+
+def _gmgn_gate_credentials() -> tuple[str, str]:
+    """(api_key, rate-limit slot) for the organic gate.
+
+    A dedicated `GMGN_API_KEY_AUTOFEED` gets its own 5 req/min window and its
+    own ban state.  Without one the gate falls back to the shared key — which
+    holder_flow (4/min) + the trending CLI (1/min) already saturate, so the
+    holder-table request will 429.  Returning the same key under the "shared"
+    slot also prevents a same-key user from bypassing a shared ban.
+    """
+    shared = (os.environ.get("GMGN_API_KEY") or "").strip()
+    dedicated = (os.environ.get("GMGN_API_KEY_AUTOFEED") or "").strip()
+    if dedicated and dedicated != shared:
+        return dedicated, "autofeed"
+    return shared, "shared"
+
 # ── gmgn-cli invocation ─────────────────────────────────────────────────────
 
 # Pin to a known-good version. `npx -y` auto-installs at this version.
@@ -303,14 +319,16 @@ class AutofeedConfig:
     #   off     — aggregate gates only (pre-2026-11-18 behaviour)
     organic_gate_mode:            str = "enforce"
     organic_enabled:              bool = True
-    organic_max_single_holder_pct: float = 0.10
+    organic_max_single_holder_pct: float = 0.10      # soft stacked tell
+    organic_max_single_holder_hard_pct: float = 0.20  # hard ceiling
     organic_max_top10_holder_pct:  float = 0.35
     organic_max_dev_hold_pct:      float = 0.03
     organic_max_dev_team_hold_pct: float = 0.08
     organic_max_top70_sniper_hold_pct: float = 0.08
     organic_launch_window_seconds: float = 120.0
     organic_max_launch_bundle_pct: float = 0.20
-    organic_max_launch_single_pct: float = 0.05
+    organic_max_launch_single_pct: float = 0.05      # soft stacked tell
+    organic_max_launch_single_hard_pct: float = 0.20  # hard ceiling
     organic_max_funder_cluster_n:  int = 4
     organic_funding_window_hours:  float = 24.0
     organic_max_funder_cluster_pct: float = 0.12
@@ -415,9 +433,11 @@ class AutoFeed:
         # Per-wallet organic evidence gate (2026-11-18).  Built here so tests
         # can inject a fake via `feed.gate = ...`; api_key is read live so a
         # `.env` loaded after construction still works.
+        gate_key, gate_slot = _gmgn_gate_credentials()
         self.gate = organic_gate.OrganicGate(
             organic_gate.build_config(self.config),
-            api_key=os.environ.get("GMGN_API_KEY", ""),
+            api_key=gate_key,
+            key_slot=gate_slot,
         )
         # Deferred candidates (holder table temporarily unverifiable: 429,
         # timeout) are retried on later ticks instead of being lost for the
@@ -444,12 +464,25 @@ class AutoFeed:
 
         self._stop_evt.clear()
         mode = str(self.config.organic_gate_mode or "enforce").lower()
+        rl.reserve_gmgn_gate_slot(
+            mode == "enforce" and self.config.organic_enabled
+            and self.gate.key_slot == "shared"
+        )
         if mode == "enforce" and self.config.organic_enabled and not self.gate.api_key:
             logger.warning(
-                "[AutoFeed] organic gate is ON but GMGN_API_KEY is not in the "
+                "[AutoFeed] organic gate is ON but no GMGN key is in the "
                 "environment — every candidate will be rejected as unverifiable "
                 "(fail-closed). Fix the key or set organic_gate_mode=off."
             )
+        elif mode == "enforce" and self.gate.key_slot == "shared":
+            logger.warning(
+                "[AutoFeed] organic gate is using the SHARED GMGN key: holder_flow "
+                "stretches to 20 s (3 req/min) to reserve 1 req/min for the gate; "
+                "trending uses the 5th. Set GMGN_API_KEY_AUTOFEED to keep 15 s "
+                "holder-flow cadence and 4 req/min gate headroom."
+            )
+        elif mode == "enforce":
+            logger.info(f"[AutoFeed] organic gate key slot={self.gate.key_slot}")
         self._task = asyncio.ensure_future(self._loop())
         logger.info(
             f"[AutoFeed] Started  interval={self.config.interval} "
@@ -461,6 +494,7 @@ class AutoFeed:
         return True
 
     async def stop(self):
+        rl.reserve_gmgn_gate_slot(False)
         self._stop_evt.set()
         if self._task and not self._task.done():
             try:
@@ -494,6 +528,11 @@ class AutoFeed:
         # effect on the next poll (no restart, no stale threshold).
         if any(k.startswith("organic_") for k in changed) or "enabled" in changed:
             self.gate.set_config(organic_gate.build_config(self.config).__dict__)
+            mode = str(self.config.organic_gate_mode or "enforce").lower()
+            rl.reserve_gmgn_gate_slot(
+                mode == "enforce" and self.config.organic_enabled
+                and self.gate.key_slot == "shared"
+            )
         return changed
 
     # ── Market-condition auto-tune ──────────────────────────────────────────
@@ -1314,8 +1353,10 @@ class AutoFeed:
 
         # Keep the gate's own config in sync with the hot-swappable settings.
         self.gate.set_config(organic_gate.build_config(self.config).__dict__)
-        if not self.gate.api_key:
-            self.gate.api_key = os.environ.get("GMGN_API_KEY", "")
+        key, slot = _gmgn_gate_credentials()
+        self.gate.api_key = key
+        self.gate.key_slot = slot
+        rl.reserve_gmgn_gate_slot(mode == "enforce" and slot == "shared")
 
         try:
             res = await self.gate.verify(cand, self._raw_by_mint.get(cand.mint))
@@ -1463,6 +1504,7 @@ class AutoFeed:
             "reject_tally_total": dict(self._reject_tally_total),
             # Per-wallet organic evidence gate (2026-11-18)
             "organic_gate_mode": self.config.organic_gate_mode,
+            "organic_gate_key_slot": self.gate.key_slot,
             "organic_gate": self.gate.snapshot(),
             "gate_rejected": self.total_gate_rejected,
             "gate_deferred": self.total_gate_deferred,

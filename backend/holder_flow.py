@@ -146,6 +146,12 @@ def _extract_holder_list(data) -> Optional[list]:
 # discovery freshness, and 5 s was starving it.
 _POLL_INTERVAL = 15.0
 
+# When AutoFeed's organic gate shares the same GMGN key, reserve one request/
+# minute for its holder-table fetch.  20 s = 3/min; plus trending (1/min) and
+# the gate (1/min) fits the key's 5/min ceiling.  A dedicated
+# GMGN_API_KEY_AUTOFEED leaves this flag False, so the 15 s cadence stays.
+_POLL_INTERVAL_GATE_RESERVE = 20.0
+
 # Poll interval while nothing is watched — no session can consume the events,
 # so idle polling would only burn API quota.
 _POLL_INTERVAL_IDLE = 30.0
@@ -935,6 +941,8 @@ class HolderFlowMonitor:
             except Exception as e:
                 logger.debug(f"[HolderFlow] Poll error: {e}")
             interval = _POLL_INTERVAL if self._watched else _POLL_INTERVAL_IDLE
+            if self._watched and rl.gmgn_gate_slot_reserved():
+                interval = max(interval, _POLL_INTERVAL_GATE_RESERVE)
             try:
                 await asyncio.wait_for(self._watch_signal.wait(), timeout=interval)
             except asyncio.TimeoutError:

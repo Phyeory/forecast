@@ -126,9 +126,18 @@ class GateConfig:
     # supply sits in the LP and the tradable float is correspondingly small, so
     # a literal 4-5% cap rejects essentially the whole post-graduation market
     # (measured 2026-11-18: 9/9 live candidates blocked, mostly on a 3-5% early
-    # wallet).  10% is the same "one entity can nuke the chart" bound applied
-    # to the post-migration float; everything above that is a hard reject.
+    # wallet).
+    #
+    # A single large wallet is a *risk tell*, not proof of a bundle: one early
+    # buyer can hold 12-16% without any coordinated wallet group.  Measured
+    # 2026-11-19: the only gate-REJECT the engine repeatedly signalled (BUCKME)
+    # was one 15.7% launch-window wallet with top-10 at 31.6% and no other
+    # critical — a clean table with one whale, not a bundle.  Rejecting that
+    # class starved the feed of the volatility the engine trades.  So 10% is a
+    # SOFT tell (adds to the stacked score); 20% remains the hard ceiling where
+    # one entity can nuke the float.
     max_single_holder_pct: float = 0.10
+    max_single_holder_hard_pct: float = 0.20
     max_top10_holder_pct: float = 0.35    # top-10 (ex LP) above 35% ⇒ bundled float
     max_dev_hold_pct: float = 0.03        # creator still holding >3% ⇒ exit liquidity
     # Pool / float sanity: a "pool" that holds nearly the whole supply leaves no
@@ -142,7 +151,8 @@ class GateConfig:
     # ── launch-window buying (the bundle itself) ──
     launch_window_seconds: float = 120.0  # "bought in the first 2 minutes"
     max_launch_bundle_pct: float = 0.20   # launch-window wallets still hold ≥20%
-    max_launch_single_pct: float = 0.05   # one launch-window wallet ≥5%
+    max_launch_single_pct: float = 0.05   # one launch-window wallet ≥5% (soft)
+    max_launch_single_hard_pct: float = 0.20  # one launch wallet ≥20% (hard)
 
     # ── wallet cohorts (Setuh check 3/4, fresh wallets) ──
     max_funder_cluster_n: int = 4         # wallets funded from one source…
@@ -185,7 +195,9 @@ class GateConfig:
     holder_rows: int = 100
     fetch_timeout: float = 20.0
     cache_seconds: float = 900.0          # per-mint holder-table cache
-    max_fetch_per_tick: int = 6           # protects the shared GMGN key quota
+    # The GMGN key allows 5 requests/minute.  A dedicated autofeed key gets
+    # the whole budget; cap the gate at 4/min so it never self-bans.
+    max_fetch_per_tick: int = 4           # protects the GMGN key quota
     fetch_wait_budget: float = 25.0       # max seconds to wait out a 429 mid-tick
 
 
@@ -361,7 +373,14 @@ def evaluate(
             if s and s <= launch_cut:
                 launch_rows.append(r)
     launch_pct = sum(_num(r.get("amount_percentage"), 0.0) or 0.0 for r in launch_rows)
-    launch_single = max((_num(r.get("amount_percentage"), 0.0) or 0.0 for r in launch_rows), default=0.0)
+    launch_max = (max(launch_rows,
+                      key=lambda r: _num(r.get("amount_percentage"), 0.0) or 0.0)
+                  if launch_rows else None)
+    launch_single = (_num(launch_max.get("amount_percentage"), 0.0) or 0.0
+                     if launch_max else 0.0)
+    launch_single_addr = (launch_max.get("address") or "") if launch_max else ""
+    single_is_launch = bool(max_single_addr and launch_single_addr
+                            and max_single_addr == launch_single_addr)
 
     # ── wallet cohorts ──
     funder_n, funder_pct, funder_addr = _funder_group(holders, cfg.funding_window_hours * 3600.0)
@@ -410,6 +429,8 @@ def evaluate(
         "launch_rows": len(launch_rows),
         "launch_bundle_pct": round(launch_pct, 4),
         "launch_single_pct": round(launch_single, 4),
+        "launch_single_addr": launch_single_addr[:12],
+        "single_is_launch": single_is_launch,
         "funder_cluster_n": funder_n,
         "funder_cluster_pct": round(funder_pct, 4),
         "funder": funder_addr[:12],
@@ -428,10 +449,10 @@ def evaluate(
     }
     res.metrics = metrics
 
-    def fail(rule: str, severity: str = CRITICAL) -> None:
+    def fail(rule: str, severity: str = CRITICAL, count: bool = True) -> None:
         res.reasons.append(rule)
         (res.critical if severity == CRITICAL else res.soft).append(rule)
-        if severity == SOFT:
+        if severity == SOFT and count:
             res.score += 1
 
     # ── hard, structural failures ──
@@ -439,12 +460,21 @@ def evaluate(
         fail("supply_in_pool")
     if pool_pct > 0 and mcap_row > 0 and float_usd < cfg.min_float_usd:
         fail("thin_float")
-    if max_single > cfg.max_single_holder_pct:
+    if max_single > cfg.max_single_holder_hard_pct:
         fail("single_holder_concentration")
+    elif max_single > cfg.max_single_holder_pct:
+        fail("single_holder_concentration", SOFT)
     if top10_pct > cfg.max_top10_holder_pct:
         fail("top10_concentration")
-    if launch_single > cfg.max_launch_single_pct:
+    if launch_single > cfg.max_launch_single_hard_pct:
         fail("launch_wallet_concentration")
+    elif launch_single > cfg.max_launch_single_pct:
+        # One wallet can trigger both the single-holder and launch-wallet
+        # tells.  Count the evidence once, not twice: BUCKME's 15.35% holder
+        # and 15.72% launch wallet are the same entity.
+        fail("launch_wallet_concentration", SOFT,
+             count=not (single_is_launch
+                        and "single_holder_concentration" in res.soft))
     if launch_pct > cfg.max_launch_bundle_pct:
         fail("launch_bundle_supply")
     if funder_n >= cfg.max_funder_cluster_n and funder_pct > cfg.max_funder_cluster_pct:
@@ -528,9 +558,14 @@ def evaluate(
 class OrganicGate:
     """Async verifier with a per-mint cache and shared rate-limit awareness."""
 
-    def __init__(self, config: Optional[GateConfig] = None, api_key: str = ""):
+    def __init__(self, config: Optional[GateConfig] = None, api_key: str = "",
+                 key_slot: str = "shared"):
         self.config = config or GateConfig()
         self.api_key = api_key or ""
+        # "shared" = GMGN_API_KEY (shares holder_flow's 5/min quota and ban
+        # state); "autofeed" = dedicated GMGN_API_KEY_AUTOFEED with its own
+        # independent window.
+        self.key_slot = key_slot or "shared"
         self._cache: dict[str, tuple[float, GateResult]] = {}
         self._tick_calls = 0
         self._tick_started = 0.0
@@ -571,9 +606,13 @@ class OrganicGate:
             "last_reject": self.last_reject,
             "last_result": self.last_result,
             "cached_mints": len(self._cache),
+            "key_slot": self.key_slot,
             "thresholds": {
                 "max_single_holder_pct": self.config.max_single_holder_pct,
+                "max_single_holder_hard_pct": self.config.max_single_holder_hard_pct,
                 "max_top10_holder_pct": self.config.max_top10_holder_pct,
+                "max_launch_single_pct": self.config.max_launch_single_pct,
+                "max_launch_single_hard_pct": self.config.max_launch_single_hard_pct,
                 "max_launch_bundle_pct": self.config.max_launch_bundle_pct,
                 "launch_window_seconds": self.config.launch_window_seconds,
                 "max_funder_cluster_pct": self.config.max_funder_cluster_pct,
@@ -602,21 +641,25 @@ class OrganicGate:
         now = time.time()
         if now - self._tick_started > 60.0:
             self._tick_started, self._tick_calls = now, 0
-        if self._tick_calls >= cfg.max_fetch_per_tick:
+        # Shared key: AutoFeed reserves exactly 1 req/min (holder_flow 3 +
+        # trending 1 + gate 1 = the key's 5/min).  A dedicated key gets the
+        # full configured cap (4/min).
+        fetch_cap = cfg.max_fetch_per_tick if self.key_slot != "shared" else 1
+        if self._tick_calls >= fetch_cap:
             return self._record(GateResult(
                 passed=False, mode=cfg.mode, mint=mint, symbol=symbol,
                 error="fetch_budget_exhausted", reasons=["unverified_budget"]))
 
-        if rl.gmgn_banned():
+        if rl.gmgn_banned(self.key_slot):
             # Shared key: a ban at this point is a holder_flow-driven 429, not
             # our own.  Wait it out inside the tick when it is short enough —
             # deferring instead would starve the feed while the quota resets.
-            remaining = rl.gmgn_ban_remaining() or 15.0
+            remaining = rl.gmgn_ban_remaining(self.key_slot) or 15.0
             if 0 < remaining <= cfg.fetch_wait_budget:
                 logger.info(f"[OrganicGate] GMGN ban — waiting {remaining:.0f}s to "
                             f"verify ${symbol or '?'}")
                 await asyncio.sleep(remaining + 0.75)
-            if rl.gmgn_banned():
+            if rl.gmgn_banned(self.key_slot):
                 return self._record(GateResult(
                     passed=False, mode=cfg.mode, mint=mint, symbol=symbol,
                     error="rate_limited", reasons=["unverified_rate_limited"]))
@@ -624,12 +667,14 @@ class OrganicGate:
         self._tick_calls += 1
         created = _num(getattr(cand, "creation_timestamp", 0.0), 0.0) or 0.0
         rows, err = await self._fetch_holders(mint)
-        if err == "rate_limited" and cfg.fetch_wait_budget > 0:
-            # The GMGN key is shared with holder_flow's polling, so a 429 is
-            # routine rather than exceptional.  Waiting out the (short) ban
-            # window inside the tick is far better than starving the feed:
-            # the poll loop has nothing else to do until this tick returns.
-            wait = min(rl.gmgn_ban_remaining() or 15.0, cfg.fetch_wait_budget)
+        if (err == "rate_limited" and cfg.fetch_wait_budget > 0
+                and self.key_slot != "shared"):
+            # Dedicated key: a 429 is routine rather than exceptional.  Waiting
+            # out the (short) ban window inside the tick is far better than
+            # starving the feed.  On the shared key the gate has a single
+            # reserved slot, so retrying would steal holder_flow's budget.
+            wait = min(rl.gmgn_ban_remaining(self.key_slot) or 15.0,
+                       cfg.fetch_wait_budget)
             if wait > 0:
                 logger.info(f"[OrganicGate] rate-limited — waiting {wait:.0f}s to verify "
                             f"${symbol or '?'}")
@@ -697,7 +742,9 @@ class OrganicGate:
                                     params=params, headers=headers) as resp:
                     if resp.status == 429:
                         body = await resp.text()
-                        rl.note_gmgn_429(rl.parse_gmgn_reset_time(body), source="organic_gate")
+                        rl.note_gmgn_429(rl.parse_gmgn_reset_time(body),
+                                         source="organic_gate",
+                                         slot=self.key_slot)
                         return None, "rate_limited"
                     if resp.status != 200:
                         return None, f"http_{resp.status}"
