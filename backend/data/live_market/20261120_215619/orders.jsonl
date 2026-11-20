@@ -1,0 +1,2 @@
+{"t": 1795211786.7472565, "ts": "2026-11-20T21:56:26Z", "event": "order_status", "symbol": "ADBE", "order_id": "c4326984-9fae-4780-80e8-8830f8403d70", "status": "accepted", "filled_qty": 0.0, "avg_price": 221.705, "reason": "state_sync"}
+{"t": 1795211786.825182, "ts": "2026-11-20T21:56:26Z", "event": "order_status", "symbol": "MSTR", "order_id": "5cf7d331-832f-45b4-ac77-a7adcb4b64fd", "status": "accepted", "filled_qty": 0.0, "avg_price": 86.13, "reason": "state_sync"}
