@@ -2733,25 +2733,26 @@ function afFeedToLiveTrader(cand) {
     console.warn("[AutoFeed] Received candidate but wallet not connected — skipping feed:", cand.mint);
     return;
   }
-  // Don't double-start: skip if this mint is already an active trader
+  // Don't double-surface: skip if this mint is already an active trader
   if (ltActiveTraders[cand.mint]) {
     console.log("[AutoFeed] Skipping feed — already trading:", cand.mint);
     return;
   }
+  // The BACKEND owns session creation for autofeed candidates: it holds the
+  // key and it is the only place that can honour "Max Concurrent Feeds" and
+  // the calibration gate.  Opening a creating /ws/live from the browser here
+  // made every fed candidate spawn its own creation request outside that cap
+  // — a 19-candidate tick produced 19 concurrent chain calibrations, the
+  // public RPC answered 429 (including the shared price WebSocket), every
+  // session starved and was torn down by the no-motion stop, and the UI saw
+  // the sockets drop (2026-11-24 00:27).  Attach only; the backend pushes
+  // `session_started` when the session actually exists.
   try {
-    if (_privateKey) {
-      console.info(`[AutoFeed] Feeding ${cand.mint} (${cand.symbol || "?"}) mcap=$${Math.round(cand.market_cap || 0)} into live trader…`);
-      startLiveTrader(cand.mint);
-    } else {
-      // Backend holds the key and auto-started the session server-side —
-      // attach a viewer card instead of aborting (the old code required the
-      // browser key here, so server-side sessions stayed invisible).
-      console.info(`[AutoFeed] No browser key — surfacing server-side session for ${cand.mint} (${cand.symbol || "?"})`);
-      refreshLiveSessions();
-      setTimeout(refreshLiveSessions, 2000);
-    }
+    console.info(`[AutoFeed] Surfacing server-side session for ${cand.mint} (${cand.symbol || "?"})…`);
+    refreshLiveSessions();
+    setTimeout(refreshLiveSessions, 5000);
   } catch (e) {
-    console.error("[AutoFeed] Failed to start live trader for", cand.mint, e);
+    console.error("[AutoFeed] Failed to surface live session for", cand.mint, e);
   }
 }
 

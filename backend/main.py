@@ -913,6 +913,37 @@ async def chart_ws(
 # (POST /api/live/stop, the ⏹ Stop button) or a safety stop fires.
 _active_live_traders: dict[str, "_LiveSession"] = {}   # keyed by token mint
 _live_session_lock = asyncio.Lock()
+# One in-flight creation task per mint.  Autofeed's server-side spawn and the
+# browser's own /ws/live connect race on every fed token; both must wait on
+# the SAME creation (which includes the slow tick-0 chain calibration)
+# instead of running it twice.
+_session_create_inflight: dict[str, asyncio.Task] = {}
+# ── Global gate on tick-0 calibration ──────────────────────────────────────
+# ONE calibration is a chain walk of up to ~1000 getTransaction calls against
+# PUBLIC Solana RPCs.  The autofeed nominates up to `max_concurrent_feed`
+# candidates per tick and the dashboard opens a /ws/live socket per candidate,
+# so session creation arrives in bursts: running a calibration per burst
+# member in parallel flood-limited the provider into HTTP 429 — INCLUDING the
+# shared price WebSocket hub (SOLANA_RPC_WS) — after which every session
+# starved of ticks and was killed by the 120 s no-motion stop ("tokens get fed
+# and the websocket gets disconnected", 2026-11-24 00:27).  Two concurrent
+# calibration keeps the request rate inside what publicnode/mainnet-beta
+# sustain (no paid RPC endpoint is configured; 2 concurrent walks already
+# tripped their cooldowns).  Creation (fleet build, registration) stays
+# parallel, so a queue of candidates still starts promptly once calibrated.
+_CALIBRATION_CONCURRENCY = 1
+_calibration_sem: Optional[asyncio.Semaphore] = None
+_calibration_sem_loop = None
+
+
+def _calibration_gate() -> asyncio.Semaphore:
+    """Loop-bound semaphore (rebuilt per event loop, e.g. under pytest)."""
+    global _calibration_sem, _calibration_sem_loop
+    loop = asyncio.get_running_loop()
+    if _calibration_sem is None or _calibration_sem_loop is not loop:
+        _calibration_sem = asyncio.Semaphore(_CALIBRATION_CONCURRENCY)
+        _calibration_sem_loop = loop
+    return _calibration_sem
 
 # Persistent session stats and trade events for the current server run
 _completed_live_sessions: list[dict] = []
@@ -2268,196 +2299,311 @@ async def _get_or_create_live_session(
     ``buy_size`` has NO default: creating a session without an explicit,
     user-supplied size (> 0, sourced from the dashboard input field) is
     refused — a hard-coded size must never be traded.
+
+    Concurrency contract (2026-11-23): mint resolution and tick-0 calibration
+    are SLOW (calibration can fetch on-chain history for tens of seconds), so
+    neither may run under ``_live_session_lock`` — that serialized every
+    session start and blocked the /ws/live handshake and the autofeed poll
+    loop.  Resolution runs pre-lock, calibration runs pre-lock, and concurrent
+    callers for the SAME mint share ONE creation task (autofeed server spawn
+    races the browser's own connect on every fed token).
     """
-    async with _live_session_lock:
-        session = _active_live_traders.get(real_mint)
-        if session is not None and not session.cancelled.is_set():
-            return session, False
+    session = _active_live_traders.get(real_mint)
+    if session is not None and not session.cancelled.is_set():
+        return session, False
 
-        # ── Attach-only guard — never spawn a new session at defaults ─────
-        # Re-attaching viewers (page reload, tab sleep, /api/live/status
-        # re-probe) never pass a private key.  Without this guard, the
-        # stored-key fallback below silently CREATED a new session at
-        # endpoint defaults whenever the intended session had ended between
-        # the status probe and this connect — the "live trades always enter
-        # a hard-coded size" bug.  Creating a session therefore requires an
-        # explicit key from the caller; a bare attach can only ever attach.
-        if not private_key:
-            return None, False
+    # ── Attach-only guard — never spawn a new session at defaults ─────
+    # Re-attaching viewers (page reload, tab sleep, /api/live/status
+    # re-probe) never pass a private key.  Without this guard, the
+    # stored-key fallback below silently CREATED a new session at
+    # endpoint defaults whenever the intended session had ended between
+    # the status probe and this connect — the "live trades always enter
+    # a hard-coded size" bug.  Creating a session therefore requires an
+    # explicit key from the caller; a bare attach can only ever attach.
+    if not private_key:
+        return None, False
 
-        # Buy size must come from the dashboard input field (pushed through
-        # the WS query param or the /api/live/buy_size store for autofeed).
-        # No fallback default exists or ever may exist here.
-        if buy_size is None or buy_size <= 0:
-            logger.warning(
-                f"[LIVE] Refusing to create session for {real_mint[:8]}… — "
-                f"no valid buy_size supplied from the dashboard input field"
-            )
-            return None, False
+    # Buy size must come from the dashboard input field (pushed through
+    # the WS query param or the /api/live/buy_size store for autofeed).
+    # No fallback default exists or ever may exist here.
+    if buy_size is None or buy_size <= 0:
+        logger.warning(
+            f"[LIVE] Refusing to create session for {real_mint[:8]}… — "
+            f"no valid buy_size supplied from the dashboard input field"
+        )
+        return None, False
 
-        # Fallback to server-side stored private key if none passed in call
-        key_str = private_key or getattr(app.state, "lt_private_key", "") or _load_backend_private_key()
-        if not key_str:
-            return None, False
+    # Fallback to server-side stored private key if none passed in call
+    key_str = private_key or getattr(app.state, "lt_private_key", "") or _load_backend_private_key()
+    if not key_str:
+        return None, False
 
+    try:
+        keypair = keypair_from_private_key(key_str)
+    except Exception as e:
+        logger.warning(f"[LIVE] Invalid private key for session creation: {e}")
+        return None, False
+
+    # Keep server-side memory synced with working key
+    app.state.lt_private_key = key_str
+    app.state.lt_wallet_connected = True
+
+    # ── Resolve BEFORE the lock (bounded by _resolve_sem, up to 20 s) ────
+    # Keyed on the resolved mint so an autofeed pair address and the browser's
+    # mint address dedupe to the same in-flight creation.
+    if token_info is None or not token_name:
         try:
-            keypair = keypair_from_private_key(key_str)
-        except Exception as e:
-            logger.warning(f"[LIVE] Invalid private key for session creation: {e}")
-            return None, False
+            async with _resolve_sem:
+                real_mint, fetched_info = await asyncio.wait_for(
+                    resolve_input(real_mint), timeout=20.0
+                )
+                token_info = token_info or fetched_info
+        except Exception:
+            pass
 
-        # Keep server-side memory synced with working key
-        app.state.lt_private_key = key_str
-        app.state.lt_wallet_connected = True
+    token_name = token_name or (token_info or {}).get("name", "")
+    token_symbol = token_symbol or (token_info or {}).get("symbol", "")
 
-        if token_info is None or not token_name:
-            try:
-                async with _resolve_sem:
-                    real_mint, fetched_info = await asyncio.wait_for(
-                        resolve_input(real_mint), timeout=20.0
-                    )
-                    token_info = token_info or fetched_info
-            except Exception:
-                pass
+    session = _active_live_traders.get(real_mint)
+    if session is not None and not session.cancelled.is_set():
+        return session, False
 
-        token_name = token_name or (token_info or {}).get("name", "")
-        token_symbol = token_symbol or (token_info or {}).get("symbol", "")
+    # ── One creator per mint ─────────────────────────────────────────────
+    # The creation task is NOT cancelled when the requesting socket goes away
+    # (shield): a browser that closes mid-calibration must not abort the
+    # autofeed's server-side spawn, and vice versa.
+    inflight = _session_create_inflight.get(real_mint)
+    if inflight is not None:
+        return await asyncio.shield(inflight)
 
-        # ── iter77 multi-engine fleet construction ─────────────────────────
-        # `engine_versions` (comma-separated or list from the dashboard) runs
-        # N engines together on this token: one LiveTrader per engine, all
-        # sharing the wallet/stream/recording, each sized buy_size/N so the
-        # TOTAL notional matches the dashboard field.  Duplicates collapse;
-        # an empty/invalid list falls back to the single `engine_version`.
-        fleet_versions = []
-        if engine_versions:
-            if isinstance(engine_versions, str):
-                fleet_versions = [
-                    int(v) for v in engine_versions.split(",")
-                    if str(v).strip().isdigit()
-                ]
-            else:
-                fleet_versions = [
-                    int(v) for v in engine_versions
-                    if str(v).strip().isdigit()
-                ]
-        seen = set()
-        fleet_versions = [v for v in fleet_versions
-                          if not (v in seen or seen.add(v))]
-        # Only KNOWN engine versions may join the fleet (1/2/3/4/6) — an
-        # unknown digit must fail session creation loudly at the factory,
-        # not produce a confusing ValueError inside the runner.
-        fleet_versions = [v for v in fleet_versions if v in (1, 2, 3, 4, 6)]
-        # The primary engine must appear exactly ONCE — strip it from the
-        # fleet list (a duplicate primary would create two same-version
-        # traders on split capital).
-        fleet_versions = [v for v in fleet_versions if v != engine_version]
-        n_engines = 1 + len(fleet_versions)
+    # ── Concurrency cap (dashboard "Max Concurrent Feeds") ───────────────
+    # The autofeed already stops FEEDING at the cap, but the dashboard's own
+    # per-candidate /ws/live connect carries the key and would create a
+    # session regardless — that is how a 19-candidate tick produced 19 live
+    # sessions at once.  Refuse creation past the cap (attaching to a running
+    # session is always allowed; it returned above).
+    cap = int(getattr(_autofeed.config, "max_concurrent_feed", 0) or 0)
+    if cap > 0 and _autofeed_active_count() >= cap:
+        logger.warning(
+            f"[LIVE] Refusing new session for {real_mint[:8]}… — at capacity "
+            f"({_autofeed_active_count()}/{cap} active+starting). "
+            f"Raise 'Max Concurrent Feeds' or stop a session."
+        )
+        return None, False
 
-        from calibration_startup import (
-            initialize_calibration, strip_stale_sde_echo)
-        from live_session_logger import _code_commit, _code_dirty
-        calibration_started_at = time.time()
-        primary_kwargs = dict(engine_params or {})
-        calibration_audit = {}
-        if engine_version == 2 or 2 in fleet_versions:
-            # ── iter101 CALIBRATION PARITY: stale-echo strip (live-only) ────
-            # See strip_stale_sde_echo (calibration_startup.py): the
-            # dashboard mirror echoes the previous session's calibrated SDE
-            # coefficients into the launch payload; left in place they win
-            # the calibration merge and the session fights the last tape
-            # with stale physics (Sep-29 divergence, 8/13 coefficients).
-            # Production backtests calibrate from `{}` — live now does too.
-            # Policy knobs (delays, gates, gain_retrace_arm_pct) untouched.
-            _primary_kwargs, _stripped = strip_stale_sde_echo(primary_kwargs)
+    inflight = asyncio.ensure_future(_create_live_session(
+        keypair=keypair,
+        real_mint=real_mint,
+        buy_size=buy_size,
+        slippage_bps=slippage_bps,
+        skip_sim=skip_sim,
+        engine_params=engine_params,
+        engine_version=engine_version,
+        engine_versions=engine_versions,
+        timeframe=timeframe,
+        token_name=token_name,
+        token_symbol=token_symbol,
+        token_info=token_info,
+    ))
+    _session_create_inflight[real_mint] = inflight
+
+    def _finish(t: asyncio.Task, _mint: str = real_mint) -> None:
+        _session_create_inflight.pop(_mint, None)
+        if not t.cancelled():
+            exc = t.exception()  # consume; logged at the raise site
+            if exc is not None:
+                logger.error(
+                    f"[LIVE] Session creation failed for {_mint[:8]}…: {exc}",
+                    exc_info=exc,
+                )
+    inflight.add_done_callback(_finish)
+
+    try:
+        return await asyncio.shield(inflight)
+    except asyncio.CancelledError:
+        # This caller disappeared; creation continues for the other waiters.
+        raise
+    except Exception:
+        logger.exception(f"[LIVE] Session creation error for {real_mint[:8]}…")
+        return None, False
+
+
+async def _create_live_session(
+    *,
+    keypair,
+    real_mint: str,
+    buy_size: float,
+    slippage_bps: int,
+    skip_sim: bool,
+    engine_params: Optional[dict],
+    engine_version: int,
+    engine_versions,
+    timeframe: str,
+    token_name: str,
+    token_symbol: str,
+    token_info: Optional[dict],
+) -> tuple[Optional["_LiveSession"], bool]:
+    """Slow half of session creation: fleet setup → calibration → register.
+
+    Only the final registration touches ``_live_session_lock``; the tick-0
+    calibration (the 20–60 s on-chain fetch) runs outside it so sessions on
+    different mints start in parallel.
+    """
+    # Last-moment race re-check (a sibling creation may have registered).
+    session = _active_live_traders.get(real_mint)
+    if session is not None and not session.cancelled.is_set():
+        return session, False
+
+    # ── iter77 multi-engine fleet construction ─────────────────────────
+    # `engine_versions` (comma-separated or list from the dashboard) runs
+    # N engines together on this token: one LiveTrader per engine, all
+    # sharing the wallet/stream/recording, each sized buy_size/N so the
+    # TOTAL notional matches the dashboard field.  Duplicates collapse;
+    # an empty/invalid list falls back to the single `engine_version`.
+    fleet_versions = []
+    if engine_versions:
+        if isinstance(engine_versions, str):
+            fleet_versions = [
+                int(v) for v in engine_versions.split(",")
+                if str(v).strip().isdigit()
+            ]
+        else:
+            fleet_versions = [
+                int(v) for v in engine_versions
+                if str(v).strip().isdigit()
+            ]
+    seen = set()
+    fleet_versions = [v for v in fleet_versions
+                      if not (v in seen or seen.add(v))]
+    # Only KNOWN engine versions may join the fleet (1/2/3/4/6) — an
+    # unknown digit must fail session creation loudly at the factory,
+    # not produce a confusing ValueError inside the runner.
+    fleet_versions = [v for v in fleet_versions if v in (1, 2, 3, 4, 6)]
+    # The primary engine must appear exactly ONCE — strip it from the
+    # fleet list (a duplicate primary would create two same-version
+    # traders on split capital).
+    fleet_versions = [v for v in fleet_versions if v != engine_version]
+    n_engines = 1 + len(fleet_versions)
+
+    from calibration_startup import (
+        initialize_calibration, strip_stale_sde_echo)
+    from live_session_logger import _code_commit, _code_dirty
+    calibration_started_at = time.time()
+    primary_kwargs = dict(engine_params or {})
+    calibration_audit = {}
+    if engine_version == 2 or 2 in fleet_versions:
+        # ── iter101 CALIBRATION PARITY: stale-echo strip (live-only) ────
+        # See strip_stale_sde_echo (calibration_startup.py): the
+        # dashboard mirror echoes the previous session's calibrated SDE
+        # coefficients into the launch payload; left in place they win
+        # the calibration merge and the session fights the last tape
+        # with stale physics (Sep-29 divergence, 8/13 coefficients).
+        # Production backtests calibrate from `{}` — live now does too.
+        # Policy knobs (delays, gates, gain_retrace_arm_pct) untouched.
+        _primary_kwargs, _stripped = strip_stale_sde_echo(primary_kwargs)
+        # persist_result=True: this is the LIVE resolution — the raw
+        # layer output is snapshotted into calibration_init_cache under
+        # the same anchor the auto-recording stores as started_at, so a
+        # later replay of this tape starts from identical physics even
+        # after the RPC has pruned the chain history.
+        # The gate bounds how many chain walks hit the public RPCs at once
+        # (see _calibration_gate) — the fetch is the expensive, rate-limited
+        # part; everything around it stays concurrent.
+        async with _calibration_gate():
             primary_kwargs, calibration_audit = await initialize_calibration(
                 str(real_mint), calibration_started_at, _primary_kwargs,
+                persist_result=True,
             )
-            if _stripped:
-                calibration_audit['stripped_stale_echo'] = _stripped
-                logger.warning(
-                    "[Calibration] %s stripped %d stale mirror SDE echo(s) "
-                    "before calibration: %s", real_mint[:8],
-                    len(_stripped),
-                    {k: round(v, 6) if isinstance(v, float) else v
-                     for k, v in _stripped.items()})
-        logger.info("[Calibration] %s %s", real_mint[:8], calibration_audit)
-        # ── iter101 DEPLOY GUARD: stale-code visibility at session open ────
-        # The journal already stamps code_commit/code_dirty into
-        # session_open; this makes a stale/dirty process LOUD at open time
-        # instead of silent (INU Sep-29: a session on dirty pre-iter94 code
-        # traded on the raw-vault price basis).  Deliberately does NOT
-        # block — the operator decides; the journal records the truth.
-        _open_commit, _open_dirty = _code_commit(), _code_dirty()
-        if _open_dirty or _open_commit in ("", "unknown"):
+        if _stripped:
+            calibration_audit['stripped_stale_echo'] = _stripped
             logger.warning(
-                "[DEPLOY GUARD] %s session opening with %s CODE "
-                "(commit=%s, dirty=%s) — live-vs-BT parity not guaranteed; "
-                "restart main.py at HEAD and hard-refresh after every deploy.",
-                real_mint[:8],
-                "DIRTY" if _open_dirty else "UNKNOWN-COMMIT",
-                _open_commit, _open_dirty)
-        live_trader = LiveTrader(
+                "[Calibration] %s stripped %d stale mirror SDE echo(s) "
+                "before calibration: %s", real_mint[:8],
+                len(_stripped),
+                {k: round(v, 6) if isinstance(v, float) else v
+                 for k, v in _stripped.items()})
+    logger.info("[Calibration] %s %s", real_mint[:8], calibration_audit)
+    # ── iter101 DEPLOY GUARD: stale-code visibility at session open ────
+    # The journal already stamps code_commit/code_dirty into
+    # session_open; this makes a stale/dirty process LOUD at open time
+    # instead of silent (INU Sep-29: a session on dirty pre-iter94 code
+    # traded on the raw-vault price basis).  Deliberately does NOT
+    # block — the operator decides; the journal records the truth.
+    _open_commit, _open_dirty = _code_commit(), _code_dirty()
+    if _open_dirty or _open_commit in ("", "unknown"):
+        logger.warning(
+            "[DEPLOY GUARD] %s session opening with %s CODE "
+            "(commit=%s, dirty=%s) — live-vs-BT parity not guaranteed; "
+            "restart main.py at HEAD and hard-refresh after every deploy.",
+            real_mint[:8],
+            "DIRTY" if _open_dirty else "UNKNOWN-COMMIT",
+            _open_commit, _open_dirty)
+    live_trader = LiveTrader(
+        token_mint=real_mint,
+        keypair=keypair,
+        buy_size_sol=buy_size / n_engines,
+        slippage_bps=slippage_bps,
+        priority_fee_lamports=100_000,
+        engine_kwargs=primary_kwargs,
+        skip_simulation=skip_sim,
+        engine_version=engine_version,
+        # User policy (2026-08-26): terminate motionless coins to free
+        # hardware.  Fires ONLY while fully idle (no position / pending
+        # signal / swap), so teardown never needs an emergency sell; the
+        # auto-recording is finalised by the normal session teardown.
+        no_motion_stop_seconds=120.0,
+        calibration_audit=calibration_audit,
+    )
+    extra_traders: list[LiveTrader] = []
+    for ev in fleet_versions:
+        extra_traders.append(LiveTrader(
             token_mint=real_mint,
             keypair=keypair,
             buy_size_sol=buy_size / n_engines,
             slippage_bps=slippage_bps,
             priority_fee_lamports=100_000,
-            engine_kwargs=primary_kwargs,
+            engine_kwargs=dict(primary_kwargs),   # fresh dict per engine
             skip_simulation=skip_sim,
-            engine_version=engine_version,
-            # User policy (2026-08-26): terminate motionless coins to free
-            # hardware.  Fires ONLY while fully idle (no position / pending
-            # signal / swap), so teardown never needs an emergency sell; the
-            # auto-recording is finalised by the normal session teardown.
+            engine_version=ev,
             no_motion_stop_seconds=120.0,
             calibration_audit=calibration_audit,
-        )
-        extra_traders: list[LiveTrader] = []
-        for ev in fleet_versions:
-            extra_traders.append(LiveTrader(
-                token_mint=real_mint,
-                keypair=keypair,
-                buy_size_sol=buy_size / n_engines,
-                slippage_bps=slippage_bps,
-                priority_fee_lamports=100_000,
-                engine_kwargs=dict(primary_kwargs),   # fresh dict per engine
-                skip_simulation=skip_sim,
-                engine_version=ev,
-                no_motion_stop_seconds=120.0,
-                calibration_audit=calibration_audit,
-            ))
-        live_trader.start_watchdog()
-        for _tr in extra_traders:
-            _tr.start_watchdog()
+        ))
+    live_trader.start_watchdog()
+    for _tr in extra_traders:
+        _tr.start_watchdog()
 
-        all_versions = [engine_version] + fleet_versions
-        session = _LiveSession(
-            real_mint=real_mint,
-            token_name=token_name,
-            token_symbol=token_symbol,
-            timeframe=timeframe,
-            trader=live_trader,
-            token_info=token_info,
-            engine_version=engine_version,
-            extra_traders=extra_traders,
-            engine_versions=all_versions,
-        )
+    all_versions = [engine_version] + fleet_versions
+    session = _LiveSession(
+        real_mint=real_mint,
+        token_name=token_name,
+        token_symbol=token_symbol,
+        timeframe=timeframe,
+        trader=live_trader,
+        token_info=token_info,
+        engine_version=engine_version,
+        extra_traders=extra_traders,
+        engine_versions=all_versions,
+    )
 
-        session.rec_id = data_store.create_recording(
-            real_mint, timeframe, token_name, token_symbol,
-            started_at=calibration_started_at,
-        )
-        session.calibration_audit = calibration_audit
-        logger.info(f"[LIVE] Auto-recording candles → recording {session.rec_id}")
-        live_trader.set_session_meta(
-            recording_id=session.rec_id, token_name=token_name,
-            token_symbol=token_symbol, timeframe=timeframe,
-        )
+    session.rec_id = data_store.create_recording(
+        real_mint, timeframe, token_name, token_symbol,
+        started_at=calibration_started_at,
+    )
+    session.calibration_audit = calibration_audit
+    logger.info(f"[LIVE] Auto-recording candles → recording {session.rec_id}")
+    live_trader.set_session_meta(
+        recording_id=session.rec_id, token_name=token_name,
+        token_symbol=token_symbol, timeframe=timeframe,
+    )
 
+    # ── register atomically (fast; never held across calibration) ─────
+    async with _live_session_lock:
+        existing = _active_live_traders.get(real_mint)
+        if existing is not None and not existing.cancelled.is_set():
+            return existing, False
         _active_live_traders[real_mint] = session
-        session.task = asyncio.create_task(session.run())
-        return session, True
+    session.task = asyncio.create_task(session.run())
+    return session, True
 
 
 # ── AutoFeed state & manager ───────────────────────────────────────────────
@@ -2470,17 +2616,39 @@ async def _get_or_create_live_session(
 _autofeed: AutoFeed = AutoFeed(AutofeedConfig())
 # Per-WS client queue of pending candidates to push
 _autofeed_clients: set[asyncio.Queue] = set()
+# Server-side spawns run as detached tasks: the poll loop must never block on
+# a /ws/live handshake or a 20–60 s tick-0 calibration.
+_autofeed_spawn_tasks: set[asyncio.Task] = set()
+_autofeed_pending_spawns: int = 0
+# Cap concurrent BACKGROUND session creations.  A tick can nominate many
+# candidates; each spawn runs a chain calibration (~600–1000 getTransaction
+# calls), so an unthrottled burst would rate-limit the public RPCs into
+# cooldowns and starve every scan.  Interactive (browser) starts bypass this.
+_AUTOFEED_SPAWN_CONCURRENCY = 2
+_autofeed_spawn_sem: Optional[asyncio.Semaphore] = None
+_autofeed_spawn_sem_loop = None
+
+
+def _autofeed_spawn_gate() -> asyncio.Semaphore:
+    """Loop-bound semaphore (rebuilt per event loop, e.g. under pytest)."""
+    global _autofeed_spawn_sem, _autofeed_spawn_sem_loop
+    loop = asyncio.get_running_loop()
+    if _autofeed_spawn_sem is None or _autofeed_spawn_sem_loop is not loop:
+        _autofeed_spawn_sem = asyncio.Semaphore(_AUTOFEED_SPAWN_CONCURRENCY)
+        _autofeed_spawn_sem_loop = loop
+    return _autofeed_spawn_sem
 
 
 def _autofeed_active_count() -> int:
-    """Number of currently-active live traders (used for backpressure)."""
-    return len(_active_live_traders)
+    """Live traders + spawns still calibrating (used for backpressure)."""
+    return len(_active_live_traders) + _autofeed_pending_spawns
 
 
 async def _autofeed_forward(cand: Candidate):
     """Called by AutoFeed for each accepted candidate.
     Broadcasts to /ws/autofeed clients and auto-starts live trader server-side if
     private key is configured."""
+    global _autofeed_pending_spawns
     payload = {
         "type": "autofeed_candidate",
         "candidate": cand.to_dict(),
@@ -2509,37 +2677,54 @@ async def _autofeed_forward(cand: Candidate):
             "(POST /api/live/buy_size) — skipping server-side session spawn"
         )
     if pk and af_buy_size is not None:
-        try:
+        _autofeed_pending_spawns += 1
+        task = asyncio.create_task(
+            _spawn_autofeed_session(cand, pk, af_buy_size))
+        _autofeed_spawn_tasks.add(task)
+        task.add_done_callback(_autofeed_spawn_tasks.discard)
+
+
+async def _spawn_autofeed_session(cand: Candidate, pk: str, buy_size: float):
+    """Create the server-side session for one fed candidate (background task)."""
+    global _autofeed_pending_spawns
+    try:
+        async with _autofeed_spawn_gate():
             session, created = await _get_or_create_live_session(
                 real_mint=cand.mint,
                 private_key=pk,
-                buy_size=af_buy_size,
+                buy_size=buy_size,
                 token_name=cand.name or "",
                 token_symbol=cand.symbol or "",
                 timeframe="1s",
             )
-            if created:
-                logger.info(f"[AutoFeed] Auto-started server-side session for ${cand.symbol} ({cand.mint[:8]}…)")
-                # Tell connected dashboards a session now exists so they can
-                # attach a viewer card WITHOUT needing the browser private key.
-                # Without this push the UI only discovered sessions by polling
-                # /api/live/status (page load / tab switch / WS close), so
-                # autofeed sessions stayed invisible while recording candles.
-                for q in list(_autofeed_clients):
-                    try:
-                        q.put_nowait({
-                            "type": "session_started",
-                            "mint": session.real_mint,
-                            "token_name": session.token_name,
-                            "token_symbol": session.token_symbol,
-                            "timeframe": session.timeframe,
-                            "engine_version": session.engine_version,
-                            "timestamp": time.time(),
-                        })
-                    except asyncio.QueueFull:
-                        pass
-        except Exception as e:
-            logger.error(f"[AutoFeed] Error auto-starting session for {cand.mint[:8]}…: {e}")
+        if not created and session is None:
+            logger.warning(
+                f"[AutoFeed] {cand.symbol} ({cand.mint[:8]}…) not started — "
+                f"at capacity or refused (see [LIVE] warning above)")
+        if created:
+            logger.info(f"[AutoFeed] Auto-started server-side session for ${cand.symbol} ({cand.mint[:8]}…)")
+            # Tell connected dashboards a session now exists so they can
+            # attach a viewer card WITHOUT needing the browser private key.
+            # Without this push the UI only discovered sessions by polling
+            # /api/live/status (page load / tab switch / WS close), so
+            # autofeed sessions stayed invisible while recording candles.
+            for q in list(_autofeed_clients):
+                try:
+                    q.put_nowait({
+                        "type": "session_started",
+                        "mint": session.real_mint,
+                        "token_name": session.token_name,
+                        "token_symbol": session.token_symbol,
+                        "timeframe": session.timeframe,
+                        "engine_version": session.engine_version,
+                        "timestamp": time.time(),
+                    })
+                except asyncio.QueueFull:
+                    pass
+    except Exception as e:
+        logger.error(f"[AutoFeed] Error auto-starting session for {cand.mint[:8]}…: {e}")
+    finally:
+        _autofeed_pending_spawns = max(0, _autofeed_pending_spawns - 1)
 
 
 @app.get("/api/autofeed/status")
@@ -3143,6 +3328,17 @@ async def live_trading_ws(
         await websocket.close(code=4000, reason="Unknown timeframe")
         return
 
+    # ── Accept BEFORE any slow work ────────────────────────────────────────
+    # Session creation resolves the mint (≤20 s) and runs tick-0 calibration
+    # (20–60 s on a chain fetch).  Awaiting that before accept() left the
+    # browser in CONNECTING past its 25 s connect timer, which closed the
+    # socket — and the onclose probe then found no session yet and tore the
+    # card down ("tokens get fed and the websocket disconnects").  The
+    # handshake must complete immediately; the client shows "warming up"
+    # until session_info arrives.
+    await websocket.accept()
+    logger.info(f"[LIVE] WS open  input={mint[:8]}…  tf={timeframe}")
+
     # Resolve the mint first so we can find an existing session regardless of
     # whether the caller passed a mint / pair address / symbol.
     # Fast path: re-attach to an existing session by its exact registry key
@@ -3176,31 +3372,56 @@ async def live_trading_ws(
     except Exception:
         engine_params = {}
 
-    session, created = await _get_or_create_live_session(
-        real_mint=real_mint,
-        private_key=private_key,
-        buy_size=buy_size,
-        slippage_bps=slippage_bps,
-        skip_sim=skip_sim,
-        engine_params=engine_params,
-        engine_version=engine_version,
-        engine_versions=engine_versions,
-        timeframe=timeframe,
-        token_info=token_info,
-    )
+    # Names resolved above are passed through so the builder does not run a
+    # SECOND resolve_input round-trip (belt-and-braces: the pre-lock resolve
+    # already bounded the handshake delay; this bounds time-to-session_info).
+    try:
+        session, created = await _get_or_create_live_session(
+            real_mint=real_mint,
+            private_key=private_key,
+            buy_size=buy_size,
+            slippage_bps=slippage_bps,
+            skip_sim=skip_sim,
+            engine_params=engine_params,
+            engine_version=engine_version,
+            engine_versions=engine_versions,
+            timeframe=timeframe,
+            token_name=(token_info or {}).get("name", "") or "",
+            token_symbol=(token_info or {}).get("symbol", "") or "",
+            token_info=token_info,
+        )
+    except Exception:
+        # The socket is already accepted; a failed creation must close it with
+        # a server-error code rather than leaving the viewer parked forever.
+        logger.exception(f"[LIVE] Session creation failed for {real_mint[:8]}…")
+        try:
+            await websocket.close(code=1011, reason="Session creation failed")
+        except Exception:
+            pass
+        return
 
     if session is None:
-        # Creation was refused: no key (attach-only guard) or no valid
-        # buy_size from the dashboard input field.  There is no default.
-        await websocket.close(
-            code=4001,
-            reason="Session requires a private key and a valid buy_size "
-                   "from the dashboard input field",
-        )
+        # Creation was refused.  Distinguish the two causes: a missing
+        # key/size is a configuration error, while capacity is the normal
+        # outcome when autofeed already holds 'Max Concurrent Feeds' sessions.
+        cap = int(getattr(_autofeed.config, "max_concurrent_feed", 0) or 0)
+        if cap > 0 and _autofeed_active_count() >= cap:
+            await websocket.close(
+                code=1013,
+                reason=f"At capacity: {cap} live session(s) already running "
+                       f"— raise 'Max Concurrent Feeds' to start more",
+            )
+        else:
+            # No key (attach-only guard) or no valid buy_size from the
+            # dashboard input field.  There is no default.
+            await websocket.close(
+                code=4001,
+                reason="Session requires a private key and a valid buy_size "
+                       "from the dashboard input field",
+            )
         return
 
     # ── Attach as a viewer ─────────────────────────────────────────────────
-    await websocket.accept()
     logger.info(
         f"[LIVE] {'Start' if created else 'Attach'} viewer  mint={real_mint[:8]}…  "
         f"wallet={session.wallet()[:8]}…  tf={session.timeframe}  "

@@ -47,6 +47,7 @@ from typing import Optional
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import os
 import json
+import logging
 import re
 import datetime
 
@@ -62,8 +63,9 @@ from data_store import (
 )
 from session_calibrator import calibrate_from_history
 
-
 import multiprocessing
+
+logger = logging.getLogger(__name__)
 
 from process_watchdog import guard_parent
 
@@ -362,6 +364,15 @@ def run_backtest(
         engine_params, calibration_audit = initialize_calibration_sync(
             str(recording.get("mint") or ""), anchor, engine_params,
             db_path=str(recordings_db_path(db_key)),
+        )
+        # Replay start = the live session's tick-0 snapshot when one exists;
+        # otherwise the deterministic offline ladder (DB mint history →
+        # population → defaults).  No chain fetch on replay by default.
+        logger.info(
+            "[Calibration] rec=%s mint=%s source=%s cache_hit=%s",
+            recording_id, str(recording.get("mint") or "")[:8],
+            calibration_audit.get("source"),
+            bool(calibration_audit.get("cache_hit")),
         )
 
     timeframe = recording["timeframe"]

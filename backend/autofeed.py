@@ -199,7 +199,13 @@ DEFAULT_MIGRATION_EXCHANGES         = "pump_amm,meteora_dlmm,meteora_damm_v2,met
 # post-graduation on the open market).
 DEFAULT_PLATFORMS                 = "Pump.fun"
 DEFAULT_INTERVAL                  = "1h"
-DEFAULT_MAX_CONCURRENT_FEED         = 100
+# Bounded by the tick-0 calibration budget: every live session needs a
+# pre-session chain walk against the PUBLIC Solana RPCs (~30-60 s each, one
+# at a time).  30+ concurrent feeds (the old default) produced a calibration
+# storm that rate-limited the provider into HTTP 429 — including the shared
+# price WebSocket — and every session then died of the 120 s no-motion stop
+# (2026-11-24).  Raise this only with a paid RPC endpoint.
+DEFAULT_MAX_CONCURRENT_FEED         = 6
 DEFAULT_COOLDOWN_AFTER_FEED_MINUTES = 1.0
 DEFAULT_EXCLUDE_MINTS              = ""   # comma-separated manual exclusion
 
@@ -1142,6 +1148,7 @@ class AutoFeed:
         # volume desc → swaps desc → smart_degen_count desc → rug asc (organic tiebreak)
         new_cands.sort(key=lambda c: (-c.volume, -c.swaps, -c.smart_degen_count, c.rug_ratio))
 
+        fed_mints: set[str] = set()
         for cand in new_cands:
             if active >= self.config.max_concurrent_feed:
                 break
@@ -1149,6 +1156,7 @@ class AutoFeed:
                 continue
             try:
                 await self._forward_fn(cand)
+                fed_mints.add(cand.mint)
                 self.total_fed += 1
                 self._last_fed_at = time.time()
                 logger.info(
@@ -1160,6 +1168,14 @@ class AutoFeed:
                 active += 1
             except Exception as e:
                 logger.warning(f"[AutoFeed] forward_fn error: {e}")
+
+        # Candidates that the concurrency cap kept out of this tick stay
+        # ELIGIBLE (parsing marks them seen before the feed loop, which used to
+        # drop them forever): release them so the next tick can feed the best
+        # of them as sessions finish and capacity frees up.
+        for cand in new_cands:
+            if cand.mint not in fed_mints:
+                self._seen.pop(cand.mint, None)
 
         # Drop stale tracked candidates from `_seen` cache
         if len(self._seen) > 200:

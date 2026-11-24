@@ -509,7 +509,14 @@ class TestPopcalAdoption:
         import inspect
         import main
         import backtester
-        assert 'await initialize_calibration(' in inspect.getsource(main._get_or_create_live_session)
+        # 2026-11-23: live creation split — _get_or_create_live_session does
+        # the fast guards/resolution/dedupe; the slow calibrate+register half
+        # lives in _create_live_session (calibration must not run under the
+        # session lock / before the WS handshake).  The knob contract spans
+        # both: the builder MUST still resolve calibration on the live path.
+        live_src = (inspect.getsource(main._get_or_create_live_session)
+                    + inspect.getsource(main._create_live_session))
+        assert 'await initialize_calibration(' in live_src
         assert 'initialize_calibration_sync(' in inspect.getsource(backtester.run_backtest)
 
     def test_calibrator_output_matches_adopted_cell(self):

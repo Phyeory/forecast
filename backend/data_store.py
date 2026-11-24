@@ -13,11 +13,14 @@ corpus (research/rollback escape hatch).
 
 from __future__ import annotations
 import json
+import logging
 import os
 import sqlite3
 import time
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
@@ -151,6 +154,92 @@ def init_price_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_holder_flow_wallet ON holder_flow(wallet)")
     conn.commit()
     conn.close()
+
+
+# ── Tick-0 calibration snapshot cache ────────────────────────────────────────
+# Live sessions write the raw initial-calibration layer output they actually
+# ran with; replay callers read it so a backtest of that tape starts from the
+# identical parameter set.  The on-chain fetch that produced it cannot be
+# replayed later (public RPCs prune history after ~2 days), so the snapshot is
+# the only faithful record of the live start.
+_CALIBRATION_INIT_CACHE_DDL = """
+CREATE TABLE IF NOT EXISTS calibration_init_cache (
+    cache_key  TEXT PRIMARY KEY,
+    mint       TEXT NOT NULL,
+    cutoff     REAL NOT NULL,
+    source     TEXT NOT NULL,
+    overrides  TEXT NOT NULL,
+    audit      TEXT NOT NULL,
+    created_at REAL NOT NULL
+)
+"""
+
+# Snapshots are PERMANENT: no TTL, no pruning.  They are the only surviving
+# record of a live session's tick-0 physics (the chain window is pruned by the
+# RPC within days), so a replay must still find them months later.  Delete
+# rows manually (`DELETE FROM calibration_init_cache WHERE ...`) if ever
+# needed — the table is the user's, the code never removes rows.
+
+
+def save_calibration_init_cache(db_path, cache_key: str, mint: str,
+                                cutoff: float, source: str,
+                                overrides: dict, audit: dict) -> bool:
+    """Persist one initial-calibration snapshot.  Never raises.
+
+    ``overrides`` must be the RAW layer output (no `_calibration_sourced` /
+    `_geometry_sourced` sentinels) — callers re-derive those per call.
+    """
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=10.0)
+        try:
+            conn.execute(_CALIBRATION_INIT_CACHE_DDL)
+            conn.execute(
+                "INSERT OR REPLACE INTO calibration_init_cache "
+                "(cache_key, mint, cutoff, source, overrides, audit, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (str(cache_key), str(mint or ""), float(cutoff), str(source),
+                 json.dumps(overrides, sort_keys=True, default=float),
+                 json.dumps(audit, sort_keys=True, default=str),
+                 time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return True
+    except Exception as exc:
+        logger.warning("[CalibrationCache] save failed for %s: %s",
+                       str(mint or "")[:8], exc)
+        return False
+
+
+def load_calibration_init_cache(db_path, cache_key: str) -> Optional[dict]:
+    """Read one snapshot.  Returns None on a missing DB/table/row.  Never raises."""
+    try:
+        # Read-only: replay workers must never write (or WAL-create) the DB.
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10.0)
+        try:
+            row = conn.execute(
+                "SELECT mint, cutoff, source, overrides, audit, created_at "
+                "FROM calibration_init_cache WHERE cache_key = ?",
+                (str(cache_key),),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return None
+    if not row:
+        return None
+    try:
+        return {
+            "mint": row[0],
+            "cutoff": float(row[1]),
+            "source": str(row[2]),
+            "overrides": json.loads(row[3] or "{}"),
+            "audit": json.loads(row[4] or "{}"),
+            "created_at": float(row[5]),
+        }
+    except Exception:
+        return None
 
 
 def create_recording(mint: str, timeframe: str, token_name: str = "", token_symbol: str = "",

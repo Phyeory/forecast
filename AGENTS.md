@@ -84,6 +84,27 @@ graph TD
   stream, auto-recording, 1 s holder-flow pump + immediate exit dispatch, multi-engine fleet
   registry) survive tab closure. Backend restart does NOT auto-resume autofeed. `live_status`
   / portfolio aggregate cash/fees/rent/wallet-Δ alongside model PnL (iter95, GLM-FIX).
+  **Session-creation concurrency contract (2026-11-23/24):** `/ws/live` accepts the socket
+  BEFORE creating the session (ticks are 20–60 s since chain calibration became real; the
+  browser's 25 s connect timer otherwise closes it and the onclose probe tears the card
+  down). `_get_or_create_live_session` = guards + mint resolve + per-mint dedupe
+  (`_session_create_inflight`, shielded task — autofeed spawn and the browser connect share
+  ONE creation) + `max_concurrent_feed` cap (code 1013 when full); `_create_live_session` =
+  fleet + calibration OUTSIDE `_live_session_lock`, then atomic register. Autofeed spawns
+  are detached tasks with a pending-spawn count in `_autofeed_active_count()` — never await
+  session creation inside the poll loop.
+  **Calibration is serialized (`_calibration_gate`, 1) and autofeed caps at 6 sessions** —
+  this is a HARD RPC limit, not a style choice. One tick nominates ~19 trending tokens; a
+  burst of parallel tick-0 chain walks (each ~15-20 `getTransaction`/s against the PUBLIC
+  RPCs) rate-limited the provider **by IP incl. the shared price WebSocket**
+  (`SOLANA_RPC_WS` = api.mainnet-beta) → every session got zero ticks → the 120 s no-motion
+  stop ended them → the dashboard saw "tokens get fed and the WebSocket disconnects"
+  (2026-11-24 00:27). The dashboard must therefore NOT create sessions per candidate: the
+  backend spawn is authoritative and `afFeedToLiveTrader` only attaches
+  (`session_started` push). Chain walks also prefer the first endpoint
+  (publicnode) and only spill to mainnet-beta while it is cooling, keep their **newest
+  gap-free prefix** on budget exhaustion (never discard 40 s of work), and are bounded to
+  700 sigs / 40 s so a launch is not stuck behind a 1000-tx walk.
 - **`pumpfun_client.py`** — mint/pool resolution + streaming (PumpPortal WS, pump.fun REST,
   RPC `accountSubscribe` vault-diff, DexScreener), `Semaphore(8)`. FD-leak fix (4731969):
   `stop()` force-closes the aiohttp session — do not remove. Hub resolves per-mint
@@ -199,6 +220,26 @@ post-iter72 ~full.
   where the OLD book's candle-open anchor measurement was inflated — god-candle
   harvesting is honestly profitable on the current stack+g16 (confirm +10.66).
   SPIKE_GUARD @8 gates the FILL premium (execution timing), never the entry class.
+- **Tick-0 calibration parity (2026-11-23)** — live resolves the session start from the
+  token's own PRE-session tape: DB mint history → on-chain fetch (`mint_chain_history.py`)
+  → population → defaults. The chain leg was silently dead (129/138 live sessions recorded
+  `chain_inserted=0`): a 403ing `rpc.ankr.com/solana` leg poisoned every scan, v1
+  transactions were rejected at `maxSupportedTransactionVersion: 0`, and PumpSwap candles
+  were parsed from mint-keyed balances (taker ATAs) instead of the **pool-owned** vaults —
+  ~4000× wrong prices. Now: failover + per-endpoint cooldowns, v1 tx support, pool-owned
+  vault parse on the executable `(quote_vault+V)/base_vault` basis (pool_sol = raw quote
+  vault), `max_sigs` truncates the newest window instead of dropping the account, and
+  cutoffs older than `_RETENTION_SECONDS` (2 d) skip the fetch.
+  Live snapshots the RAW layer output into `calibration_init_cache` (`main.py` passes
+  `persist_result=True`; anchor = the auto-recording's `started_at`). Rows are
+  PERMANENT (no TTL/pruning — delete manually with SQL); the chain window is gone
+  within days, so the snapshot is the only long-term record of that start. Replay
+  (`initialize_calibration_sync`, default `persist_result=False`) reads that snapshot by
+  `_init_cache_key` = mint|cutoff|lookback|tau_vr|tau_scale|popcal_source|mintcal and does
+  NOT chain-fetch; a miss (old recordings) runs the same deterministic offline ladder.
+  Sentinels/harvest switch are re-derived per call, never stored. Gate:
+  `analysis/test_calibration_init_cache.py`, `analysis/test_mint_chain_history_window.py`.
+  Per-coin online recalibration policy is unchanged (`v2_percoin_requires_mintcal`).
 - **Traps**: 10× notional + restart-reset counters break live-vs-BT headlines (use iter67
   journal method); `v2_results` JSONs are survivor-conditioned; pool workers freeze code at
   spawn; thin tapes need random-sample probes; subset burns can't reconstruct engine-native
