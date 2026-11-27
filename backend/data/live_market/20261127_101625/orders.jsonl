@@ -1,0 +1,3 @@
+{"t": 1795774603.1551354, "ts": "2026-11-27T10:16:43Z", "event": "order_status", "symbol": "ADBE", "order_id": "50aac369-5e5b-4012-8bb7-daef5ce99356", "status": "filled", "filled_qty": 1.0, "avg_price": 232.49, "reason": "state_sync"}
+{"t": 1795774603.2738054, "ts": "2026-11-27T10:16:43Z", "event": "order_status", "symbol": "DE", "order_id": "cbc7078d-2950-42d2-bd94-ccbffae6d58b", "status": "new", "filled_qty": 0.0, "avg_price": 641.79, "reason": "signal_1795582800"}
+{"t": 1795774603.6971924, "ts": "2026-11-27T10:16:43Z", "event": "order_status", "symbol": "MSTR", "order_id": "dc4fe079-5d11-4433-b96d-52ed6b6cbee6", "status": "new", "filled_qty": 0.0, "avg_price": 80.09, "reason": "state_sync"}
