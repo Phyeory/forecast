@@ -469,8 +469,8 @@
               </div>
               <div class="form-group">
                 <label class="form-label">MCap Grad Discount (0–1)</label>
-                <input id="af-tune-discount" type="number" class="form-input" value="0.5" step="0.05"
-                  min="0" max="1" title="min_mcap floor = graduation mcap × this discount (graduation ≈ 410.7 × SOL/USD)" />
+                <input id="af-tune-discount" type="number" class="form-input" value="1.0" step="0.05"
+                  min="0" max="1" title="Frontier floor = graduation mcap × this discount (graduation ≈ 410.7 × SOL/USD). The user MCap value is only an absolute floor." />
               </div>
               <div class="form-group">
                 <label class="form-label">Trending Interval</label>
@@ -483,8 +483,9 @@
                 </select>
               </div>
               <div class="form-group">
-                <label class="form-label">Min MCap ($)</label>
-                <input id="af-min-mcap" type="number" class="form-input" value="30000" step="1000" min="0" />
+                <label class="form-label">Min MCap ($) — absolute floor</label>
+                <input id="af-min-mcap" type="number" class="form-input" value="10000" step="1000" min="0"
+                  title="Lower bound only. The live floor is the SOL-anchored graduation mcap (~$30k at SOL=$72)." />
               </div>
               <div class="form-group">
                 <label class="form-label">Max MCap ($)</label>
@@ -528,7 +529,7 @@
               </div>
               <div class="form-group">
                 <label class="form-label">Max Top10 Holdings</label>
-                <input id="af-max-top10" type="number" class="form-input" value="0.5" step="0.05" min="0" max="1" />
+                <input id="af-max-top10" type="number" class="form-input" value="0.4" step="0.05" min="0" max="1" />
               </div>
               <div class="form-group">
                 <label class="form-label">Max Rug Ratio</label>
@@ -562,7 +563,37 @@
               </div>
               <div class="form-group">
                 <label class="form-label">Max Concurrent Feeds</label>
-                <input id="af-max-concurrent" type="number" class="form-input" value="6" step="1" min="1" max="100" />
+                <input id="af-max-concurrent" type="number" class="form-input" value="20" step="1" min="1" max="100" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Feeds / Tick</label>
+                <input id="af-feeds-per-tick" type="number" class="form-input" value="4" step="1" min="1" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Candidate TTL (s)</label>
+                <input id="af-feed-ttl" type="number" class="form-input" value="300" step="30" min="0"
+                  title="A candidate that cannot start within this window is dropped (the pump it was selected for is over)." />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Min Migration Age (min)</label>
+                <input id="af-min-age-min" type="number" class="form-input" value="2" step="1" min="0" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Max Migration Age (min)</label>
+                <input id="af-max-age-min" type="number" class="form-input" value="0" step="30" min="0" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Max 1h Pump (%)</label>
+                <input id="af-max-1h-pump" type="number" class="form-input" value="300" step="10" min="0"
+                  title="Don't chase a token already up this much in the trending interval." />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Max Dev Hold (supply)</label>
+                <input id="af-max-dev-hold" type="number" class="form-input" value="0.03" step="0.01" min="0" max="1" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Max Top70 Sniper Hold</label>
+                <input id="af-max-sniper-hold" type="number" class="form-input" value="0.15" step="0.01" min="0" max="1" />
               </div>
               <div class="form-group">
                 <label class="form-label">Feed Cooldown (min)</label>
@@ -583,6 +614,13 @@
               <label><input type="checkbox" id="af-rej-honeypot" checked /> Reject Honeypot</label>
               <label><input type="checkbox" id="af-req-social" /> Require Social</label>
               <label><input type="checkbox" id="af-req-migration" checked /> Require Migration Exchange</label>
+            </div>
+
+            <h4 class="af-subhead">Organic Holder Screen (Setuh / Padre-style)</h4>
+            <div class="af-gates">
+              <label><input type="checkbox" id="af-screen-enabled" checked /> Holder forensics ON</label>
+              <label><input type="checkbox" id="af-screen-enforce-hard" checked /> Enforce bundle rules</label>
+              <label><input type="checkbox" id="af-screen-enforce-score" /> Enforce risk score (shadow otherwise)</label>
             </div>
 
             <div class="af-actions">
@@ -610,7 +648,16 @@
               <div class="af-stat-label">Last Poll</div>
               <div class="af-stat-value" id="af-stat-lastpoll">—</div>
             </div>
+            <div>
+              <div class="af-stat-label">Starting</div>
+              <div class="af-stat-value" id="af-stat-pending">0</div>
+            </div>
+            <div>
+              <div class="af-stat-label">Screen Rejects</div>
+              <div class="af-stat-value" id="af-stat-screen-rejects">0</div>
+            </div>
           </div>
+          <div id="af-screen-summary" class="af-preview" style="margin-top:6px;"></div>
 
           <!-- Recent candidates feed -->
           <h4 class="af-subhead">Recent Candidates</h4>
@@ -915,7 +962,7 @@
       setTimeout(check, 1000);
     })();
   </script>
-  <script src="/static/js/app.js?v=142"></script>
+  <script src="/static/js/app.js?v=143"></script>
 </body>
 
 </html>

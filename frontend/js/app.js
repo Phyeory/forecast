@@ -2612,6 +2612,9 @@ const afStatSeen = $("af-stat-seen");
 const afStatFed = $("af-stat-fed");
 const afStatTracked = $("af-stat-tracked");
 const afStatLastPoll = $("af-stat-lastpoll");
+const afStatPending = $("af-stat-pending");
+const afStatScreenRejects = $("af-stat-screen-rejects");
+const afScreenSummary = $("af-screen-summary");
 const afSaveConfigBtn = $("af-save-config");
 const afTestPollBtn = $("af-test-poll");
 const afPreview = $("af-preview");
@@ -2701,6 +2704,27 @@ function afHandleStatus(snap) {
   afStatSeen.textContent = snap.total_seen || 0;
   afStatFed.textContent = snap.total_fed || 0;
   afStatTracked.textContent = snap.active_tracked || 0;
+  if (afStatPending) {
+    afStatPending.textContent = `${snap.pending_spawns || 0}/${snap.spawn_queue_limit || 0}`;
+  }
+  if (afStatScreenRejects) {
+    afStatScreenRejects.textContent = snap.total_rejected_screen || 0;
+  }
+  if (afScreenSummary) {
+    const sc = snap.organic_screen || {};
+    const vt = sc.verdict_tally || {};
+    const rt = sc.reason_tally || {};
+    const topReasons = Object.entries(rt)
+      .sort((a, b) => b[1] - a[1]).slice(0, 4)
+      .map(([k, v]) => `${k}:${v}`).join("  ");
+    afScreenSummary.textContent =
+      `Screen pass=${vt.pass || 0} reject=${vt.reject || 0} unavailable=${vt.unavailable || 0}` +
+      ` · fed-not-started=${snap.total_fed_not_started || 0}` +
+      ` · stale-dropped=${(snap.total_dropped_stale || 0) + (snap.spawn_dropped_stale || 0)}` +
+      ` · spawn-failed=${snap.spawn_failed || 0}` +
+      (snap.grad_mcap_usd ? ` · grad-mcap=$${Math.round(snap.grad_mcap_usd / 1000)}k` : "") +
+      (topReasons ? ` · ${topReasons}` : "");
+  }
   if (snap.last_poll_at && snap.last_poll_at > 0) {
     afStatLastPoll.textContent = new Date(snap.last_poll_at * 1000).toLocaleTimeString();
   } else {
@@ -2929,6 +2953,16 @@ const AF_FIELD_MAP = [
   ["af-max-age", "max_created_age", "str"],
   ["af-platforms", "platforms", "str"],
   ["af-max-concurrent", "max_concurrent_feed", "int"],
+  ["af-feeds-per-tick", "max_feeds_per_tick", "int"],
+  ["af-feed-ttl", "feed_candidate_ttl_seconds", "float"],
+  ["af-min-age-min", "min_migrated_age_minutes", "float"],
+  ["af-max-age-min", "max_migrated_age_minutes", "float"],
+  ["af-max-1h-pump", "max_price_change_1h_pct", "float"],
+  ["af-max-dev-hold", "max_dev_team_hold_rate", "float"],
+  ["af-max-sniper-hold", "max_top70_sniper_hold_rate", "float"],
+  ["af-screen-enabled", "organic_screen_enabled", "bool"],
+  ["af-screen-enforce-hard", "organic_screen_enforce_hard", "bool"],
+  ["af-screen-enforce-score", "organic_screen_enforce_score", "bool"],
   ["af-cooldown", "cooldown_after_feed_minutes", "float"],
   ["af-exclude", "exclude_mints", "str"],
   ["af-req-renounced-mint", "require_renounced_mint", "bool"],

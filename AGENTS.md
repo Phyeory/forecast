@@ -93,18 +93,55 @@ graph TD
   fleet + calibration OUTSIDE `_live_session_lock`, then atomic register. Autofeed spawns
   are detached tasks with a pending-spawn count in `_autofeed_active_count()` — never await
   session creation inside the poll loop.
-  **Calibration is serialized (`_calibration_gate`, 1) and autofeed caps at 6 sessions** —
-  this is a HARD RPC limit, not a style choice. One tick nominates ~19 trending tokens; a
-  burst of parallel tick-0 chain walks (each ~15-20 `getTransaction`/s against the PUBLIC
-  RPCs) rate-limited the provider **by IP incl. the shared price WebSocket**
-  (`SOLANA_RPC_WS` = api.mainnet-beta) → every session got zero ticks → the 120 s no-motion
-  stop ended them → the dashboard saw "tokens get fed and the WebSocket disconnects"
-  (2026-11-24 00:27). The dashboard must therefore NOT create sessions per candidate: the
-  backend spawn is authoritative and `afFeedToLiveTrader` only attaches
-  (`session_started` push). Chain walks also prefer the first endpoint
-  (publicnode) and only spill to mainnet-beta while it is cooling, keep their **newest
-  gap-free prefix** on budget exhaustion (never discard 40 s of work), and are bounded to
-  700 sigs / 40 s so a launch is not stuck behind a 1000-tx walk.
+  **Calibration is serialized (`_calibration_gate`, 1); the autofeed cap is 20 sessions**
+  (`max_concurrent_feed`, 2026-11-27). The Nov-24 RPC storm was 19 PARALLEL chain walks —
+  impossible now that walks are serialized — while each session's steady-state cost is two
+  shared-WS vault subscriptions (`_SharedSolanaWSHub`), so 20 ≈ 40 subscriptions. The prior
+  cap of 6 was over-correction: with a ~39 min median session it limited the feed to ~3/h
+  (18-22 recordings/night vs 113-114 on Nov 15-16). `_spawn_slot_available` fixes a second
+  bug: a spawn must not be refused by its OWN `_autofeed_pending_spawns` reservation (that
+  silently burned fed candidates: 26 fed vs 7 recordings). A calibration-queue depth of
+  4 (`_AUTOFEED_MAX_PENDING_SPAWNS`) and a 180 s candidate TTL keep the queue from feeding
+  stale pumps. One tick nominates ~19 trending tokens; the dashboard must therefore NOT
+  create sessions per candidate: the backend spawn is authoritative and
+  `afFeedToLiveTrader` only attaches (`session_started` push). Chain walks also prefer the
+  first endpoint (publicnode) and only spill to mainnet-beta while it is cooling, keep their
+  **newest gap-free prefix** on budget exhaustion (never discard 40 s of work), and are
+  bounded to 700 sigs / 40 s so a launch is not stuck behind a 1000-tx walk.
+- **`organic_screen.py` / `tape_integrity.py`** — autofeed quality gates (2026-11-27).
+  Tier-1 holder forensics implement Setuh's bundle checks from one `token holders` call
+  (top1 ≤4%, top10 ≤25%, identical holdings, shared funders/bursts, similar SOL balances,
+  launch-window co-buys, fresh wallets, dev/flagged supply); Tier-2 is our own RPC reader
+  (`getTokenLargestAccounts` + `getMultipleAccounts` + `getSignaturesForAddress`), used
+  GMGN holder rows are only a raw-data FALLBACK (free public RPCs now 429/403 all
+  indexed reads — `getTokenLargestAccounts` is paywalled on publicnode/ankr and
+  per-method throttled on mainnet-beta; `getSignaturesForAddress`/`getTransaction`
+  still work and are what the Setuh inputs need). Every GMGN INDICATION is wiped and
+  recomputed from the chain (`augment_rows_from_chain`: first-buy = token-account
+  oldest sig, fresh wallet = birth <7 d, funding parent = oldest-signature
+  getTransaction) — user directive 2026-11-28: no GMGN indicator may reach a verdict.
+  Verdicts persist to `feed_data.db::organic_profiles` (`feed_store.py`). The GMGN
+  trend-row INDICATOR gates are RETIRED (config None; CLI sends market-shape +
+  renounced/frozen only; ranking is freshness-first). Unimplemented Setuh checks:
+  bubble-map multi-hop clusters, co-trade overlap, same-terminal (need an indexer or
+  terminal attribution). Candidates that miss the per-tick holder budget stay in
+  `_pending_screen` (a rotating trending list must not lose them).
+  `tape_integrity.py` holds the iter103 rules and feeds the live post-feed tripwire
+  (60 s × 15 min; stops a session on rug/bot fingerprints; it never deletes the
+  recording). The MCap floor tracks the SOL-anchored graduation mcap
+  (`GRAD_MCAP_USD_PER_SOL × SOL × 1.0`; user value is an absolute floor only) — at SOL
+  $72 the old static $20k sat 32% below the $29.5k graduation level and fed
+  post-graduation bleeders. **GMGN budget (user directive 2026-11-28): holder_flow's
+  GMGN poll is DISABLED by default** (`PUMPCHART_HF_GMGN_POLL=1` re-enables). Its
+  15 s smartmoney poll + 4-call/3.5 s registry bursts were the dominant per-IP quota
+  consumer and — via the shared `rate_limiter` ban state — banned the autofeed's
+  discovery poll and holder screen too (40 bans in 50 min on 2026-11-27). The HF gates
+  are OFF (iter62) and the iter66 on-chain watcher is the primary event source, so the
+  poll was pure enrichment; only the autofeed (trending 1/min + holder screen 1/tick)
+  now consumes GMGN. Holder-screen calls carry a 5 s floor and a threshold-aware
+  10-min cache (a cached verdict is a miss when the screen params changed). Hard
+  limits: top1 5% / top10 30% / dev 3% (Setuh's 4% is the score's full-weight point;
+  4.2% is measurement noise, not a bundle).
 - **`pumpfun_client.py`** — mint/pool resolution + streaming (PumpPortal WS, pump.fun REST,
   RPC `accountSubscribe` vault-diff, DexScreener), `Semaphore(8)`. FD-leak fix (4731969):
   `stop()` force-closes the aiohttp session — do not remove. Hub resolves per-mint

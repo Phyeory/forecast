@@ -49,6 +49,16 @@ _GMGN_HOST = "https://openapi.gmgn.ai"
 # Wallet tags we care about (dev/insider cohorts)
 _TRACKED_TAGS = ("dev", "sniper", "bundler", "rat_trader")
 
+# ── GMGN poll DISABLED by default (user directive 2026-11-28) ──────────────
+# The GMGN smartmoney poll + wallet-registry fetches were the dominant
+# consumer of the per-IP GMGN quota (4 polls/min + 4-call registry bursts),
+# and `rate_limiter` couples every consumer to one ban state — so holder_flow
+# overuse banned the autofeed's discovery poll and holder screen too
+# (40 bans in 50 min on 2026-11-27).  The HF gates are OFF (iter62 policy)
+# and the iter66 on-chain watcher is the primary event source, so this poll
+# is pure enrichment.  Re-enable with PUMPCHART_HF_GMGN_POLL=1.
+GMGN_POLL_ENABLED = os.environ.get("PUMPCHART_HF_GMGN_POLL", "0") == "1"
+
 # iter38: map GMGN's assorted maker-tag spellings onto our tracked set, and
 # recognise additional insider-ish labels.  Anything not matched stays "".
 _TAG_SYNONYMS = {
@@ -135,23 +145,29 @@ def _extract_holder_list(data) -> Optional[list]:
 # from a slow nominal interval, and the monitor is a process-wide singleton
 # so this is one request per interval regardless of session count.
 #
-# Rate-limit reality check (2026-11-16): at 5.0 s the keyed GMGN poll burns
-# the shared per-key quota so aggressively that the autofeed's discovery CLI
-# spent 9 of its first 9 minutes inside 429 bans (one successful tick, then
-# a permanent ban cycle — `rate_limiter` couples both consumers to one ban
-# state).  15.0 s is the deliberate ca89f98 production setting, re-asserted
-# by test_iter67_holder_flow_latency (≤15): the on-chain watcher is the
-# primary event source and the HF gates are OFF (iter62 policy), so the poll
-# no longer gates delivery latency — but its cadence DOES gate the autofeed's
-# discovery freshness, and 5 s was starving it.
+# Rate-limit reality check (2026-11-27): 15 s (4 polls/min) plus the holder
+# screen (2/min) plus trending (1/min) plus the registry rotation tripped
+# GMGN's ban every 2-3 min; `rate_limiter` couples every consumer, so each
+# ban also skipped the autofeed discovery poll and the new holder screen.
+# The DEFAULT stays 15 s (single-consumer deployments), but the autofeed
+# raises the live monitor to 60 s while it runs via set_poll_interval():
+# HF gates are OFF (iter62) and the on-chain watcher is the primary event
+# source, so the GMGN poll is enrichment/telemetry under contention.
 _POLL_INTERVAL = 15.0
 
 # Poll interval while nothing is watched — no session can consume the events,
 # so idle polling would only burn API quota.
-_POLL_INTERVAL_IDLE = 30.0
+_POLL_INTERVAL_IDLE = 120.0
 
-# How often to refresh the per-token wallet registry (seconds)
-_REGISTRY_REFRESH_INTERVAL = 60.0
+# How often to refresh the per-token wallet registry (seconds).
+# 2026-11-27: was 60 s with a 3.5 s inter-call pause, i.e. a 4-call burst
+# every minute against /v1/market/token_top_holders.  That burst tripped
+# GMGN's "repeated rate limit violations" ban every 2-3 min; because
+# `rate_limiter` couples all GMGN consumers, the ban then skipped the
+# autofeed's discovery poll AND the new holder screen — the feed starved.
+# The registry is enrichment-only (HF gates OFF, iter62), so it now refreshes
+# an order of magnitude slower.
+_REGISTRY_REFRESH_INTERVAL = 1800.0
 
 # Minimum sell amount (USD) to consider significant
 _MIN_SELL_USD = 100.0
@@ -389,8 +405,19 @@ class HolderFlowMonitor:
         # oldest one in the current window — used to detect that the global
         # rolling window turned over between polls (⇒ events lost, not late).
         self._feed_newest_ts: int = 0
+        # Effective poll cadence (defaults; the autofeed raises them while it
+        # shares the GMGN budget — see set_poll_interval).
+        self.poll_interval: float = _POLL_INTERVAL
+        self.poll_interval_idle: float = _POLL_INTERVAL_IDLE
 
     # ── Public API ────────────────────────────────────────────────────────
+
+    def set_poll_interval(self, active_s: float,
+                          idle_s: Optional[float] = None) -> None:
+        """Override the GMGN poll cadence (autofeed budget arbitration)."""
+        self.poll_interval = max(1.0, float(active_s))
+        if idle_s is not None:
+            self.poll_interval_idle = max(self.poll_interval, float(idle_s))
 
     async def start(self):
         """Start the background polling loop (idempotent, refcounted)."""
@@ -406,9 +433,16 @@ class HolderFlowMonitor:
             timeout=aiohttp.ClientTimeout(total=12.0),
             headers={"User-Agent": "pump-chart/holder-flow"},
         )
+        if not GMGN_POLL_ENABLED:
+            # On-chain dev-sell watchers (per-mint tasks) still run; only the
+            # GMGN-consuming loops are skipped.
+            logger.info(
+                "[HolderFlow] GMGN poll DISABLED (PUMPCHART_HF_GMGN_POLL unset) — "
+                "on-chain watcher only; the autofeed owns the GMGN budget")
+            return
         self._poll_task = asyncio.create_task(self._poll_loop())
         self._registry_task = asyncio.create_task(self._registry_loop())
-        logger.info("[HolderFlow] Monitor started")
+        logger.info("[HolderFlow] Monitor started (GMGN poll enabled)")
 
     async def stop(self):
         """Stop the background polling loop when the last user disconnects."""
@@ -934,7 +968,8 @@ class HolderFlowMonitor:
                 break
             except Exception as e:
                 logger.debug(f"[HolderFlow] Poll error: {e}")
-            interval = _POLL_INTERVAL if self._watched else _POLL_INTERVAL_IDLE
+            interval = (self.poll_interval if self._watched
+                        else self.poll_interval_idle)
             try:
                 await asyncio.wait_for(self._watch_signal.wait(), timeout=interval)
             except asyncio.TimeoutError:
@@ -1103,7 +1138,9 @@ class HolderFlowMonitor:
 
                 if target_mint and target_mint in self._watched:
                     await self._refresh_wallet_registry(target_mint)
-                    await asyncio.sleep(3.5)
+                    # GMGN's own limit is ~1 request / 30 s (see
+                    # _refresh_wallet_registry).  Pace at that, never burst.
+                    await asyncio.sleep(60.0)
                 else:
                     await asyncio.sleep(1.0)
 

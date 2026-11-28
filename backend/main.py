@@ -195,6 +195,11 @@ async def token_info_endpoint(mint: str):
 # ── Active recorder state ────────────────────────────────────────────────────
 
 _active_recorders: dict[int, dict] = {}
+# Live-session recordings (created by _create_live_session).  The stale
+# scanner must never finalize these: a fresh recording legitimately has zero
+# candles for its first seconds, and live sessions keep writing until their
+# own teardown finalizes them (2026-11-27 Split rec-77 race).
+_active_live_recording_ids: set[int] = set()
 
 # ── Recording API ────────────────────────────────────────────────────────────
 
@@ -451,7 +456,13 @@ async def finish_stale_recordings(stale_seconds: int = 60):
             continue
         rid = r.get("id")
         # Do not auto-finish recordings that have an active recorder task
-        if rid in _active_recorders:
+        # (manual recorder OR a live session — the latter writes candles but
+        # is not in `_active_recorders`).
+        if rid in _active_recorders or rid in _active_live_recording_ids:
+            continue
+        # Grace period: a just-created recording has no candles yet by design.
+        started = float(r.get("started_at") or 0.0)
+        if started and now - started < max(30.0, float(stale_seconds)):
             continue
         try:
             candles = data_store.get_recording_candles(rid)
@@ -480,6 +491,18 @@ async def _stale_scanner_loop(interval_seconds: int = 60, stale_seconds: int = 6
         await asyncio.sleep(interval_seconds)
 
 
+async def _feed_outcome_reaper_loop():
+    """Join fed events to their finished recordings every 10 min (feed-gate
+    calibration evidence; causal 30-min tape-health metrics)."""
+    while True:
+        try:
+            import feed_store
+            await asyncio.to_thread(feed_store.run_outcome_reaper)
+        except Exception as e:
+            logger.debug(f"[FeedStore] outcome reaper loop: {e}")
+        await asyncio.sleep(600.0)
+
+
 @app.on_event("startup")
 async def start_stale_scanner():
     # Run once at startup to catch any stale DB rows from previous crashes
@@ -489,6 +512,7 @@ async def start_stale_scanner():
         logger.exception("initial stale finish failed")
     # Start background task to run periodically
     app.state._stale_scanner_task = asyncio.create_task(_stale_scanner_loop())
+    app.state._feed_outcome_task = asyncio.create_task(_feed_outcome_reaper_loop())
 
 
 @app.on_event("shutdown")
@@ -496,6 +520,9 @@ async def stop_stale_scanner():
     t = getattr(app.state, "_stale_scanner_task", None)
     if t:
         t.cancel()
+    ft = getattr(app.state, "_feed_outcome_task", None)
+    if ft:
+        ft.cancel()
 
 
 @app.delete("/api/recordings/{recording_id}")
@@ -1490,6 +1517,7 @@ class _LiveSession:
 
             # Finalize the auto-recording so it's available for backtesting
             data_store.stop_recording(rec_id)
+            _active_live_recording_ids.discard(rec_id)
             logger.info(f"[LIVE] Finalized recording {rec_id}")
 
             # Wake up any remaining viewers so their UIs reflect the end
@@ -2277,6 +2305,59 @@ async def live_stop_all():
     return JSONResponse({"status": "all_stopped", "count": n})
 
 
+# ── Post-feed tape-integrity tripwire (2026-11-27) ─────────────────────────
+# A pre-feed holder screen cannot see a bundle that starts dumping after the
+# session opens.  The iter103 tape rules are the backstop: every 60 s for the
+# first SESSION minutes, score the recording's own candles and stop the
+# session on a physical-manipulation fingerprint (pool destroyed, activity
+# padding, fixed-size bot, mechanical ladder).  The recording is left on disk
+# — quarantine stays a manual, reversible analysis step.
+_TRIPWIRE_TASKS: set[asyncio.Task] = set()
+TRIPWIRE_WINDOW_S = 15 * 60.0
+TRIPWIRE_INTERVAL_S = 60.0
+
+
+async def _tape_tripwire(session, recording_id: int) -> None:
+    try:
+        import tape_integrity
+    except Exception as e:                      # pragma: no cover - import guard
+        logger.debug(f"[Tripwire] tape_integrity unavailable: {e}")
+        return
+    started = time.time()
+    while not session.cancelled.is_set() and time.time() - started < TRIPWIRE_WINDOW_S:
+        await asyncio.sleep(TRIPWIRE_INTERVAL_S)
+        if session.cancelled.is_set():
+            return
+        try:
+            candles = data_store.get_recording_candles(recording_id)
+            if len(candles) < 100:
+                continue
+            feats = tape_integrity.features_from_dicts(candles)
+            reasons = tape_integrity.classify(feats)
+        except Exception as e:
+            logger.debug(f"[Tripwire] {session.real_mint[:8]}… score error: {e}")
+            continue
+        kill = [r for r in reasons if r in tape_integrity.LIVE_KILL_REASONS]
+        if not kill:
+            continue
+        logger.warning(
+            f"[Tripwire] {session.token_symbol or session.real_mint[:8]}… "
+            f"stopping session — tape integrity {kill} "
+            f"(n={feats.get('n')} dd60={feats.get('dd60')} "
+            f"ladder={feats.get('ladder_eq')})")
+        try:
+            import feed_store
+            feed_store.record_event(
+                session.real_mint, "tripwire", "stopped",
+                reason=",".join(kill), symbol=session.token_symbol or "",
+                vector={"reasons": reasons, "features": feats,
+                        "recording_id": recording_id})
+        except Exception:
+            pass
+        session.stop("tape_integrity:" + ",".join(kill))
+        return
+
+
 async def _get_or_create_live_session(
     *,
     real_mint: str,
@@ -2291,6 +2372,7 @@ async def _get_or_create_live_session(
     token_name: str = "",
     token_symbol: str = "",
     token_info: Optional[dict] = None,
+    reserved_spawn: bool = False,
 ) -> tuple[Optional["_LiveSession"], bool]:
     """Get an existing server-side live session or create a new one.
 
@@ -2382,11 +2464,21 @@ async def _get_or_create_live_session(
     # session regardless — that is how a 19-candidate tick produced 19 live
     # sessions at once.  Refuse creation past the cap (attaching to a running
     # session is always allowed; it returned above).
+    #
+    # 2026-11-27 off-by-one fix: the autofeed increments
+    # `_autofeed_pending_spawns` BEFORE creating this task, so this spawn was
+    # already part of `_autofeed_active_count()`.  At the cap every spawn was
+    # refused by its OWN reservation (live evidence: 26 fed vs 7 recordings),
+    # and the candidate was burned (kept in `_seen`, never retried).
+    # `reserved_spawn=True` subtracts this task's own reservation.
     cap = int(getattr(_autofeed.config, "max_concurrent_feed", 0) or 0)
-    if cap > 0 and _autofeed_active_count() >= cap:
+    if not _spawn_slot_available(
+            cap, len(_active_live_traders), _autofeed_pending_spawns,
+            already_reserved=reserved_spawn):
         logger.warning(
             f"[LIVE] Refusing new session for {real_mint[:8]}… — at capacity "
-            f"({_autofeed_active_count()}/{cap} active+starting). "
+            f"({len(_active_live_traders)} active + "
+            f"{_autofeed_pending_spawns} starting / {cap}). "
             f"Raise 'Max Concurrent Feeds' or stop a session."
         )
         return None, False
@@ -2590,6 +2682,7 @@ async def _create_live_session(
         started_at=calibration_started_at,
     )
     session.calibration_audit = calibration_audit
+    _active_live_recording_ids.add(session.rec_id)
     logger.info(f"[LIVE] Auto-recording candles → recording {session.rec_id}")
     live_trader.set_session_meta(
         recording_id=session.rec_id, token_name=token_name,
@@ -2603,6 +2696,11 @@ async def _create_live_session(
             return existing, False
         _active_live_traders[real_mint] = session
     session.task = asyncio.create_task(session.run())
+    # Post-feed safety net: kill sessions whose own tape shows a rug/bot
+    # fingerprint (does not affect clean recordings).
+    _tw = asyncio.create_task(_tape_tripwire(session, session.rec_id))
+    _TRIPWIRE_TASKS.add(_tw)
+    _tw.add_done_callback(_TRIPWIRE_TASKS.discard)
     return session, True
 
 
@@ -2625,8 +2723,18 @@ _autofeed_pending_spawns: int = 0
 # calls), so an unthrottled burst would rate-limit the public RPCs into
 # cooldowns and starve every scan.  Interactive (browser) starts bypass this.
 _AUTOFEED_SPAWN_CONCURRENCY = 2
+# Calibration is serialized at ONE chain walk (~30-60 s each).  Feeding faster
+# than that merely builds a stale queue: candidates whose pump is over by the
+# time a calibration slot opens.  Refuse new spawns past this depth (the
+# autofeed releases them and retries on a later tick).
+_AUTOFEED_MAX_PENDING_SPAWNS = 4
 _autofeed_spawn_sem: Optional[asyncio.Semaphore] = None
 _autofeed_spawn_sem_loop = None
+# Diagnostics (2026-11-27): spawns that were refused/stale/failed must be
+# visible — the old path silently burned fed candidates.
+_autofeed_spawn_dropped_stale: int = 0
+_autofeed_spawn_failed: int = 0
+_autofeed_sessions_started: int = 0
 
 
 def _autofeed_spawn_gate() -> asyncio.Semaphore:
@@ -2644,10 +2752,28 @@ def _autofeed_active_count() -> int:
     return len(_active_live_traders) + _autofeed_pending_spawns
 
 
-async def _autofeed_forward(cand: Candidate):
+def _spawn_slot_available(cap: int, n_active: int, n_pending: int,
+                          already_reserved: bool = False) -> bool:
+    """Pure capacity check for session creation (unit-tested).
+
+    `already_reserved` is True when the caller is itself one of the pending
+    spawns (the autofeed increments the counter before creating the task).
+    Counting it again made the spawn refuse its own reservation at the cap.
+    """
+    if cap <= 0:
+        return True
+    pending = max(0, n_pending - 1) if already_reserved else n_pending
+    return n_active + pending < cap
+
+
+async def _autofeed_forward(cand: Candidate) -> bool:
     """Called by AutoFeed for each accepted candidate.
-    Broadcasts to /ws/autofeed clients and auto-starts live trader server-side if
-    private key is configured."""
+
+    Broadcasts to /ws/autofeed clients and auto-starts a live trader
+    server-side if a private key is configured.  Returns True only when a
+    session spawn was actually ENQUEUED — the feed must not count a refused
+    or skipped candidate as fed (2026-11-27 accounting fix).
+    """
     global _autofeed_pending_spawns
     payload = {
         "type": "autofeed_candidate",
@@ -2671,24 +2797,51 @@ async def _autofeed_forward(cand: Candidate):
     # /ws/live/{mint} carrying the field value in the query string.
     pk = getattr(app.state, "lt_private_key", "") or _load_backend_private_key()
     af_buy_size = _get_live_buy_size()
-    if pk and af_buy_size is None:
+    if not pk:
+        logger.warning(
+            "[AutoFeed] No backend private key — skipping server-side spawn "
+            "(dashboard is attach-only for fed candidates)")
+        return False
+    if af_buy_size is None:
         logger.warning(
             "[AutoFeed] No buy size pushed from the dashboard input field "
             "(POST /api/live/buy_size) — skipping server-side session spawn"
         )
-    if pk and af_buy_size is not None:
-        _autofeed_pending_spawns += 1
-        task = asyncio.create_task(
-            _spawn_autofeed_session(cand, pk, af_buy_size))
-        _autofeed_spawn_tasks.add(task)
-        task.add_done_callback(_autofeed_spawn_tasks.discard)
+        return False
+    # Calibration-queue backpressure: serialized walks cannot drain a deep
+    # queue, and a candidate that waits through it is stale by definition.
+    if _autofeed_pending_spawns >= _AUTOFEED_MAX_PENDING_SPAWNS:
+        logger.info(
+            f"[AutoFeed] Spawn queue full "
+            f"({_autofeed_pending_spawns}/{_AUTOFEED_MAX_PENDING_SPAWNS}) — "
+            f"${cand.symbol} released for a later tick")
+        return False
+    _autofeed_pending_spawns += 1
+    task = asyncio.create_task(
+        _spawn_autofeed_session(cand, pk, af_buy_size))
+    _autofeed_spawn_tasks.add(task)
+    task.add_done_callback(_autofeed_spawn_tasks.discard)
+    return True
 
 
 async def _spawn_autofeed_session(cand: Candidate, pk: str, buy_size: float):
     """Create the server-side session for one fed candidate (background task)."""
-    global _autofeed_pending_spawns
+    global _autofeed_pending_spawns, _autofeed_sessions_started
+    global _autofeed_spawn_dropped_stale, _autofeed_spawn_failed
     try:
         async with _autofeed_spawn_gate():
+            # Deadline check AFTER the gate wait: the candidate may have sat
+            # behind earlier calibrations.  Starting it now would chase a pump
+            # that is already over.
+            ttl = float(getattr(_autofeed.config, "feed_candidate_ttl_seconds", 0.0) or 0.0)
+            discovered = float(getattr(cand, "first_discovered", 0.0) or 0.0)
+            waited = time.time() - discovered if discovered else 0.0
+            if ttl > 0 and waited > ttl:
+                _autofeed_spawn_dropped_stale += 1
+                logger.info(
+                    f"[AutoFeed] Dropping stale spawn ${cand.symbol} "
+                    f"({cand.mint[:8]}…) — waited {waited:.0f}s > {ttl:.0f}s")
+                return
             session, created = await _get_or_create_live_session(
                 real_mint=cand.mint,
                 private_key=pk,
@@ -2696,12 +2849,15 @@ async def _spawn_autofeed_session(cand: Candidate, pk: str, buy_size: float):
                 token_name=cand.name or "",
                 token_symbol=cand.symbol or "",
                 timeframe="1s",
+                reserved_spawn=True,
             )
         if not created and session is None:
+            _autofeed_spawn_failed += 1
             logger.warning(
                 f"[AutoFeed] {cand.symbol} ({cand.mint[:8]}…) not started — "
                 f"at capacity or refused (see [LIVE] warning above)")
         if created:
+            _autofeed_sessions_started += 1
             logger.info(f"[AutoFeed] Auto-started server-side session for ${cand.symbol} ({cand.mint[:8]}…)")
             # Tell connected dashboards a session now exists so they can
             # attach a viewer card WITHOUT needing the browser private key.
@@ -2731,6 +2887,12 @@ async def _spawn_autofeed_session(cand: Candidate, pk: str, buy_size: float):
 async def autofeed_status():
     snap = _autofeed.snapshot()
     snap["clients_connected"] = len(_autofeed_clients)
+    # Spawn/calibration telemetry (2026-11-27): fed vs actually started.
+    snap["pending_spawns"] = _autofeed_pending_spawns
+    snap["spawn_queue_limit"] = _AUTOFEED_MAX_PENDING_SPAWNS
+    snap["spawn_dropped_stale"] = _autofeed_spawn_dropped_stale
+    snap["spawn_failed"] = _autofeed_spawn_failed
+    snap["sessions_started"] = _autofeed_sessions_started
     # Wallet-gate exposed for the frontend toggle state
     pk = getattr(app.state, "lt_private_key", "") or _load_backend_private_key()
     snap["wallet_connected"] = bool(pk) or getattr(app.state, "lt_wallet_connected", False)
@@ -2761,6 +2923,14 @@ async def autofeed_start(body: dict = Body(default={})):
         _autofeed.set_config({k: v for k, v in body.items() if k != "enabled"})
     _autofeed.config.enabled = True
     _autofeed.start(forward_fn=_autofeed_forward, active_count_fn=_autofeed_active_count)
+    # GMGN budget arbitration: the autofeed (trending + holder screen) shares
+    # one per-IP quota with holder_flow.  While the feed runs, its 15 s
+    # smartmoney poll is enrichment-only (HF gates OFF) — slow it down so the
+    # discovery poll and the screen are not banned (2026-11-27).
+    try:
+        get_shared_monitor().set_poll_interval(60.0, 120.0)
+    except Exception:
+        pass
     return JSONResponse({"status": "started", "snapshot": _autofeed.snapshot()})
 
 
@@ -2768,6 +2938,10 @@ async def autofeed_start(body: dict = Body(default={})):
 async def autofeed_stop():
     _autofeed.config.enabled = False
     await _autofeed.stop()
+    try:
+        get_shared_monitor().set_poll_interval(15.0, 30.0)
+    except Exception:
+        pass
     return JSONResponse({"status": "stopped", "snapshot": _autofeed.snapshot()})
 
 

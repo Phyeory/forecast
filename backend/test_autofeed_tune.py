@@ -43,23 +43,31 @@ def test_compute_solid_conditions():
     # venue neutral, momentum flat → motion scale 1.0 → user gates unchanged
     assert g["min_volume_usd"] == 25_000.0
     assert g["min_swaps"] == 900
-    # SOL=$168 → grad mcap 410.7×168 = $68,997 → ×0.5 discount = $34.5k > $20k floor
-    assert g["min_mcap_usd"] == max(20_000.0, 410.7 * 168.0 * 0.5)
+    # SOL=$168 → grad mcap 410.7×168 = $68,997 → ×1.0 frontier = $69.0k
+    # (the user value is an absolute floor only)
+    assert g["min_mcap_usd"] == max(AutofeedConfig().min_mcap_usd,
+                                    410.7 * 168.0 * 1.0)
 
 
 def test_compute_low_sol_raises_mcap_floor():
     cf = AutofeedConfig()          # min_mcap_usd default 20k
     cond = {"sol_usd": 103.0, "sol_chg_24h_pct": 0.0, "venue_ratio": 1.0}
     g = AutoFeed._compute_tuned_gates(cond, cf, now=time.time())
-    assert g["min_mcap_usd"] == 410.7 * 103.0 * 0.5          # ≈ $21.2k
+    assert g["min_mcap_usd"] == 410.7 * 103.0 * 1.0          # ≈ $42.3k
     # And at high SOL the floor rises with it
     cond["sol_usd"] = 240.0
     g2 = AutoFeed._compute_tuned_gates(cond, cf, now=time.time())
-    assert g2["min_mcap_usd"] == 410.7 * 240.0 * 0.5          # ≈ $49.3k
-    # User's own stricter floor still wins
+    assert g2["min_mcap_usd"] == 410.7 * 240.0 * 1.0          # ≈ $98.6k
+    # The user value is only an ABSOLUTE FLOOR — the frontier target wins
+    # whenever it is higher (the 2026-11-27 fix: a static $20k must not pull
+    # the floor 32% below a $29.5k graduation mcap).
     cf.min_mcap_usd = 60_000.0
     g3 = AutoFeed._compute_tuned_gates(cond, cf, now=time.time())
-    assert g3["min_mcap_usd"] == 60_000.0
+    assert g3["min_mcap_usd"] == 410.7 * 240.0 * 1.0
+    # ... and it does bind when the market's graduation mcap is lower
+    cf.min_mcap_usd = 120_000.0
+    g4 = AutoFeed._compute_tuned_gates(cond, cf, now=time.time())
+    assert g4["min_mcap_usd"] == 120_000.0
 
 
 def test_compute_cold_venue_loosens_motion():
@@ -110,7 +118,7 @@ def test_compute_partial_conditions():
     assert g["min_mcap_usd"] == cf.min_mcap_usd
     # sol_usd present, venue_ratio missing → mcap re-anchored, motion untouched
     g2 = AutoFeed._compute_tuned_gates({"sol_usd": 200.0}, cf, now=time.time())
-    assert g2["min_mcap_usd"] == 410.7 * 200.0 * 0.5
+    assert g2["min_mcap_usd"] == 410.7 * 200.0 * 1.0
     assert g2["min_volume_usd"] == cf.min_volume_usd
     # completely empty dict → all user gates
     g3 = AutoFeed._compute_tuned_gates({}, cf, now=time.time())
@@ -144,7 +152,7 @@ def test_effective_gates_fresh_applies_tune():
         "fetched_at": time.time(),
     }
     g = feed.effective_gates()
-    assert g["min_mcap_usd"] == 410.7 * 240.0 * 0.5
+    assert g["min_mcap_usd"] == 410.7 * 240.0 * 1.0
     # scale = clamp(1.5 × (1 + 0.3×clamp(5/10)) , 0.5, 1.5) = 1.5
     assert g["min_swaps"] == 1350
     assert g["min_volume_usd"] == 25_000.0 * 1.5
@@ -169,7 +177,7 @@ def test_build_cli_args_uses_effective_gates():
     joined = " ".join(args)
     assert "--min-marketcap" in args
     i = args.index("--min-marketcap")
-    assert args[i + 1] == str(int(410.7 * 240.0 * 0.5))
+    assert args[i + 1] == str(int(410.7 * 240.0 * 1.0))
     j = args.index("--min-volume")
     assert args[j + 1] == "25000"
     # user-owned levers pass through untouched
@@ -192,14 +200,15 @@ def test_build_cli_args_disabled_matches_user_gates():
 def _row(**over):
     base = {
         "address": "Mint" + "x" * 32,
-        "market_cap": 30_000.0, "liquidity": 6_000.0, "holder_count": 60,
+        "market_cap": 200_000.0, "liquidity": 6_000.0, "holder_count": 60,
         "smart_degen_count": 1, "swaps": 1_000, "volume": 30_000.0,
         "exchange": "pump_amm", "top_10_holder_rate": 0.3, "rug_ratio": 0.1,
         "bundler_rate": 0.1, "insider_rate": 0.1, "rat_trader_amount_rate": 0.1,
         "entrapment_ratio": 0.1, "bot_degen_rate": 0.2,
         "is_wash_trading": False, "is_honeypot": False,
         "renounced_mint": True, "renounced_freeze_account": True,
-        "creation_timestamp": 1794834523,
+        "creation_timestamp": int(time.time()) - 600,
+        "open_timestamp": int(time.time()) - 600,
     }
     base.update(over)
     return base
@@ -207,10 +216,11 @@ def _row(**over):
 
 def test_to_candidate_applies_tuned_mcap_floor():
     feed = make_feed()
-    # SOL=$300 → tuned floor ≈ $61.6k; a $40k token passes user floor but fails tuned
+    # SOL=$300 → frontier floor ≈ $123.2k; a $40k token passes the user floor
+    # but fails the tuned graduation floor.
     feed._market_conditions = {"sol_usd": 300.0, "fetched_at": time.time()}
     assert feed._to_candidate(_row(market_cap=40_000.0)) is None
-    cand = feed._to_candidate(_row(market_cap=70_000.0))
+    cand = feed._to_candidate(_row(market_cap=130_000.0))
     assert isinstance(cand, Candidate)
     # Same feed, auto-tune off → $40k passes again (escape hatch)
     feed.config.auto_tune_enabled = False
@@ -332,12 +342,12 @@ def test_refresh_populates_state_and_history(monkeypatch):
     snap = feed.snapshot()
     assert snap["auto_tune_enabled"] is True
     assert snap["market_conditions"]["sol_usd"] == 150.0
-    assert snap["effective_gates"]["min_mcap_usd"] == 410.7 * 150.0 * 0.5
+    assert snap["effective_gates"]["min_mcap_usd"] == 410.7 * 150.0 * 1.0
     assert len(snap["tune_history"]) == 1
     # tune_now returns the refresh payload
     out = asyncio.run(feed.tune_now())
     assert out["refreshed"] is True
-    assert out["effective_gates"]["min_mcap_usd"] == 410.7 * 150.0 * 0.5
+    assert out["effective_gates"]["min_mcap_usd"] == 410.7 * 150.0 * 1.0
     assert len(feed._tune_history) == 2
 
 
